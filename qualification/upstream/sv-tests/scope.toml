@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+
+# sv-tests is a general language-tool suite, not a synthesis suite. This
+# manifest is the reviewed positive ASIC frontend contract. Directory entries
+# include every positive test in that directory; upstream negative tests are
+# audited but are not positive synthesis requirements.
+
+[[feature]]
+category = "numeric literals"
+directory = "generic/number"
+
+[[feature]]
+category = "type declarations"
+directory = "generic/typedef"
+
+[[feature]]
+category = "packed aggregate declarations"
+directory = "generic/struct"
+
+[[feature]]
+category = "packed aggregate declarations"
+directory = "generic/union"
+
+[[feature]]
+category = "lexical and preprocessing"
+paths = [
+  "chapter-5/5.12-attributes-module.sv",
+  "chapter-5/5.12-attributes-variable.sv",
+  "chapter-5/5.4--coments.sv",
+  "chapter-5/5.6--identifiers.sv",
+  "chapter-5/5.6.1--escaped-identifiers.sv",
+  "chapter-5/5.6.1--nonescaped-access.sv",
+  "chapter-5/5.6.4--compiler-directives-begin-keywords.sv",
+  "chapter-5/5.6.4--compiler-directives-celldefine.sv",
+  "chapter-5/5.6.4--compiler-directives-debug-line.sv",
+  "chapter-5/5.6.4--compiler-directives-default-nettype.sv",
+  "chapter-5/5.6.4--compiler-directives-define.sv",
+  "chapter-5/5.6.4--compiler-directives-include.sv",
+  "chapter-5/5.6.4--compiler-directives-pragma.sv",
+  "chapter-5/5.6.4--compiler-directives-resetall.sv",
+  "chapter-5/5.6.4--compiler-directives-timescale.sv",
+  "chapter-5/5.7.1--integers-token.sv",
+]
+
+[[feature]]
+category = "declarations and types"
+paths = [
+  "chapter-6/6.10--implicit_continuous_assignment.sv",
+  "chapter-6/6.10--implicit_port.sv",
+  "chapter-6/6.10--implicit_port_connection.sv",
+  "chapter-6/6.18--typedef.sv",
+  "chapter-6/6.19--enum_anon.sv",
+  "chapter-6/6.19--enum_xx.sv",
+  "chapter-6/6.19.1--enum_typedef.sv",
+  "chapter-6/6.19.2--enum_sequence.sv",
+  "chapter-6/6.19.2--enum_sequence_range.sv",
+  "chapter-6/6.20.2--parameter.sv",
+  "chapter-6/6.20.2--parameter_aggregate.sv",
+  "chapter-6/6.20.2--parameter_dep.sv",
+  "chapter-6/6.20.2--parameter_port_list.sv",
+  "chapter-6/6.20.2--parameter_range.sv",
+  "chapter-6/6.20.2--parameter_real.sv",
+  "chapter-6/6.20.4--localparam.sv",
+  "chapter-6/6.20.4--localparam_int.sv",
+  "chapter-6/6.20.4--localparam_logic.sv",
+  "chapter-6/6.20.4--localparam_string.sv",
+  "chapter-6/6.20.4--localparam_unsigned_int.sv",
+  "chapter-6/6.20.5--specparam.sv",
+  "chapter-6/6.23--localparam_type_decl.sv",
+  "chapter-6/6.5--variable_assignment.sv",
+  "chapter-6/6.6.7--nettype.sv",
+  "chapter-6/6.9.1--logic_vector.sv",
+]
+
+[[feature]]
+category = "static arrays and memories"
+paths = [
+  "chapter-7/arrays/multidimensional/basic.sv",
+  "chapter-7/arrays/multidimensional/multi.sv",
+  "chapter-7/arrays/packed/basic.sv",
+  "chapter-7/arrays/unpacked/basic.sv",
+  "chapter-7/memories/basic.sv",
+]
+
+[[feature]]
+category = "event expressions"
+paths = [
+  "chapter-9/9.4.2.1--event_comma_op.sv",
+  "chapter-9/9.4.2.1--event_or_op.sv",
+  "chapter-9/9.4.2.2--event_implicit.sv",
+]
+
+[[feature]]
+category = "continuous assignments"
+paths = [
+  "chapter-10/10.3.1--net-decl-assignment.sv",
+  "chapter-10/10.3.2--cont-assignment.sv",
+]
+
+[[feature]]
+category = "design units"
+paths = [
+  "chapter-23/23.2--macromodule-definition.sv",
+  "chapter-23/23.2--module-definition.sv",
+  "chapter-26/26.2--package-decl.sv",
+]

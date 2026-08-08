@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: Bug report
+description: Report a reproducible Opto defect
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include proprietary RTL, PDK data, tool logs, or license configuration. Report security issues privately as described in SECURITY.md."
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include a redistributable input and the exact command.
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Opto revision
+      description: Commit hash or version.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, rustc version, and any OPTO_* behavior controls.
+    validations:
+      required: true

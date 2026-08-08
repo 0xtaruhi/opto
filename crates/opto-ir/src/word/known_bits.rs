@@ -1,0 +1,1091 @@
+// SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! Conservative bit facts for word-level values.
+
+use super::{
+    BinaryOp, CastKind, OpKind, PortDirection, SignalId, UnaryOp, ValueId, ValueKind, WordModule,
+};
+use crate::{BitVal, ConstBits};
+use opto_core::PackedRows;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Proven Boolean state of one word bit.
+pub enum KnownBit {
+    /// Proven zero.
+    Zero,
+    /// Proven one.
+    One,
+    /// Not statically known.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Fixed-size packed known-bit fact suitable for content-addressed caches.
+///
+/// Values wider than 128 bits deliberately do not have this representation.
+pub struct KnownBits128 {
+    width: u8,
+    zeros: u128,
+    ones: u128,
+}
+
+impl KnownBits128 {
+    /// Builds a packed fact from least-significant-bit-first states.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`super::WordError`] when the width is zero or exceeds 128 bits.
+    pub fn from_bits(bits: impl IntoIterator<Item = KnownBit>) -> Result<Self, super::WordError> {
+        let mut width = 0u8;
+        let mut zeros = 0u128;
+        let mut ones = 0u128;
+        for bit in bits {
+            if u32::from(width) == u128::BITS {
+                return Err(super::WordError::new(
+                    "packed known-bit width must be between 1 and 128 bits",
+                ));
+            }
+            let mask = 1u128 << width;
+            match bit {
+                KnownBit::Zero => zeros |= mask,
+                KnownBit::One => ones |= mask,
+                KnownBit::Unknown => {}
+            }
+            width += 1;
+        }
+        if width == 0 {
+            return Err(super::WordError::new(
+                "packed known-bit width must be between 1 and 128 bits",
+            ));
+        }
+        Ok(Self { width, zeros, ones })
+    }
+
+    #[must_use]
+    /// Returns the represented value width.
+    pub fn width(self) -> u32 {
+        u32::from(self.width)
+    }
+
+    #[must_use]
+    /// Returns the proven state of one bit.
+    pub fn bit(self, index: u32) -> KnownBit {
+        if index >= self.width() || index >= u128::BITS {
+            return KnownBit::Unknown;
+        }
+        let mask = 1u128 << index;
+        if self.zeros & mask != 0 {
+            KnownBit::Zero
+        } else if self.ones & mask != 0 {
+            KnownBit::One
+        } else {
+            KnownBit::Unknown
+        }
+    }
+
+    #[must_use]
+    /// Returns a constant when every bit is known.
+    pub fn constant(self) -> Option<ConstBits> {
+        known_constant(self.width(), |index| self.bit(index))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FactWord {
+    zeros: u64,
+    ones: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FactRange {
+    start: Option<usize>,
+    width: u32,
+}
+
+impl FactRange {
+    const fn unknown(width: u32) -> Self {
+        Self { start: None, width }
+    }
+
+    fn word(self, arena: &[FactWord], index: usize) -> FactWord {
+        self.start
+            .and_then(|start| arena.get(start + index))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn bit(self, arena: &[FactWord], index: u32) -> KnownBit {
+        if index >= self.width {
+            return KnownBit::Unknown;
+        }
+        let word = self.word(arena, index as usize / u64::BITS as usize);
+        let mask = 1u64 << (index % u64::BITS);
+        if word.zeros & mask != 0 {
+            KnownBit::Zero
+        } else if word.ones & mask != 0 {
+            KnownBit::One
+        } else {
+            KnownBit::Unknown
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum FactState {
+    #[default]
+    Uncomputed,
+    Computing,
+    Computed(FactRange),
+}
+
+#[derive(Debug)]
+struct SignalDrivers {
+    connects: PackedRows<usize>,
+}
+
+impl SignalDrivers {
+    fn build(module: &WordModule) -> Self {
+        Self {
+            connects: PackedRows::try_from_entries(
+                module.signals().len(),
+                module
+                    .connects()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, connect)| (connect.target.signal.index(), index)),
+            )
+            .expect("validated Word IR fits the packed-row capacity"),
+        }
+    }
+
+    fn for_signal(&self, signal: SignalId) -> &[usize] {
+        self.connects.get(signal.index()).unwrap_or_default()
+    }
+}
+
+/// Memoized whole-module known-bit analysis.
+///
+/// Facts are retained in one packed word arena. Signal reads follow static,
+/// single-driver connections; external, dynamic, multiply-driven, cyclic, and
+/// state-holding values remain conservative.
+#[derive(Debug)]
+pub struct KnownBitsAnalysis {
+    values: Vec<FactState>,
+    signals: Vec<FactState>,
+    arena: Vec<FactWord>,
+    drivers: SignalDrivers,
+    external_signals: Box<[bool]>,
+}
+
+impl KnownBitsAnalysis {
+    #[must_use]
+    /// Creates an empty memoization state for `module`.
+    pub fn new(module: &WordModule) -> Self {
+        let mut external_signals = vec![false; module.signals().len()];
+        for port in module.ports() {
+            if matches!(port.direction, PortDirection::Input | PortDirection::Inout) {
+                external_signals[port.signal.index()] = true;
+            }
+        }
+        Self {
+            values: vec![FactState::Uncomputed; module.values().len()],
+            signals: vec![FactState::Uncomputed; module.signals().len()],
+            arena: Vec::new(),
+            drivers: SignalDrivers::build(module),
+            external_signals: external_signals.into_boxed_slice(),
+        }
+    }
+
+    /// Returns the proven state of `value[index]`.
+    pub fn bit(&mut self, module: &WordModule, value: ValueId, index: u32) -> KnownBit {
+        derive_value(module, value, self)
+            .map_or(KnownBit::Unknown, |facts| facts.bit(&self.arena, index))
+    }
+
+    /// Returns a two-state constant when every bit of `value` is proven.
+    pub fn constant(&mut self, module: &WordModule, value: ValueId) -> Option<ConstBits> {
+        let facts = derive_value(module, value, self)?;
+        known_constant(facts.width, |index| facts.bit(&self.arena, index))
+    }
+
+    /// Returns the smallest low-bit prefix containing every bit below `limit`
+    /// that is not proven zero.
+    pub fn active_width(&mut self, module: &WordModule, value: ValueId, limit: u32) -> u32 {
+        let Some(facts) = derive_value(module, value, self) else {
+            return limit;
+        };
+        let mut width = limit.min(facts.width);
+        while width > 0 && facts.bit(&self.arena, width - 1) == KnownBit::Zero {
+            width -= 1;
+        }
+        width
+    }
+
+    /// Derives a compact complete fact for values up to 128 bits.
+    pub fn packed128(&mut self, module: &WordModule, value: ValueId) -> Option<KnownBits128> {
+        let facts = derive_value(module, value, self)?;
+        if facts.width > u128::BITS {
+            return None;
+        }
+        let width = u8::try_from(facts.width).ok()?;
+        let low = facts.word(&self.arena, 0);
+        let high = facts.word(&self.arena, 1);
+        let zeros = u128::from(low.zeros) | (u128::from(high.zeros) << u64::BITS);
+        let ones = u128::from(low.ones) | (u128::from(high.ones) << u64::BITS);
+        Some(KnownBits128 { width, zeros, ones })
+    }
+}
+
+fn known_constant(width: u32, mut bit: impl FnMut(u32) -> KnownBit) -> Option<ConstBits> {
+    let bits = (0..width)
+        .rev()
+        .map(|index| match bit(index) {
+            KnownBit::Zero => Some(BitVal::Zero),
+            KnownBit::One => Some(BitVal::One),
+            KnownBit::Unknown => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    ConstBits::from_bits(bits).ok()
+}
+
+fn derive_value(
+    module: &WordModule,
+    id: ValueId,
+    analysis: &mut KnownBitsAnalysis,
+) -> Option<FactRange> {
+    let width = module.value(id)?.ty.width();
+    match analysis.values.get(id.index()).copied()? {
+        FactState::Computed(facts) => return Some(facts),
+        FactState::Computing => return Some(FactRange::unknown(width)),
+        FactState::Uncomputed => {}
+    }
+    analysis.values[id.index()] = FactState::Computing;
+    let value = module.value(id)?;
+    let facts = match &value.kind {
+        ValueKind::Signal(reference) => {
+            let signal = derive_signal(module, reference.signal, analysis)?;
+            slice_facts(signal, reference.lsb, reference.width(), analysis)
+        }
+        ValueKind::Constant(bits) => store_bits(
+            bits.as_slice().iter().rev().map(|bit| match bit {
+                BitVal::Zero => KnownBit::Zero,
+                BitVal::One => KnownBit::One,
+                BitVal::X | BitVal::Z => KnownBit::Unknown,
+            }),
+            bits.width(),
+            &mut analysis.arena,
+        ),
+        ValueKind::Operation(operation) => {
+            let operation = module.operation(*operation)?;
+            derive_operation(module, &operation.kind, value.ty, analysis)
+        }
+    };
+    analysis.values[id.index()] = FactState::Computed(facts);
+    Some(facts)
+}
+
+fn derive_signal(
+    module: &WordModule,
+    signal: SignalId,
+    analysis: &mut KnownBitsAnalysis,
+) -> Option<FactRange> {
+    let width = module.signal(signal)?.ty.width();
+    match analysis.signals.get(signal.index()).copied()? {
+        FactState::Computed(facts) => return Some(facts),
+        FactState::Computing => return Some(FactRange::unknown(width)),
+        FactState::Uncomputed => {}
+    }
+    analysis.signals[signal.index()] = FactState::Computing;
+    let connect_indices = analysis.drivers.for_signal(signal).to_vec();
+    let external = analysis.external_signals[signal.index()];
+    let facts = if external
+        || connect_indices.is_empty()
+        || connect_indices.iter().any(|&index| {
+            module
+                .connects()
+                .get(index)
+                .is_some_and(|connect| connect.target.dynamic.is_some())
+        }) {
+        FactRange::unknown(width)
+    } else {
+        let words = word_count(width);
+        let mut assigned = vec![0u64; words];
+        let mut bits = vec![FactWord::default(); words];
+        for index in connect_indices {
+            let connect = module.connects().get(index)?;
+            let source = derive_value(module, connect.value, analysis)?;
+            let target_width = connect
+                .target
+                .range
+                .map_or(width, super::model::BitRange::width);
+            for offset in 0..target_width {
+                let target = match connect.target.range {
+                    Some(range) if range.msb >= range.lsb => range.lsb.checked_add(offset)?,
+                    Some(range) => range.lsb.checked_sub(offset)?,
+                    None => offset,
+                };
+                let word = target as usize / u64::BITS as usize;
+                let mask = 1u64 << (target % u64::BITS);
+                if assigned[word] & mask == 0 {
+                    assigned[word] |= mask;
+                    set_bit(&mut bits, target, source.bit(&analysis.arena, offset));
+                } else {
+                    set_bit(&mut bits, target, KnownBit::Unknown);
+                }
+            }
+        }
+        store_words(bits, width, &mut analysis.arena)
+    };
+    analysis.signals[signal.index()] = FactState::Computed(facts);
+    Some(facts)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive operation transfer table is kept adjacent for auditability"
+)]
+fn derive_operation(
+    module: &WordModule,
+    operation: &OpKind,
+    result_ty: super::WordType,
+    analysis: &mut KnownBitsAnalysis,
+) -> FactRange {
+    let width = result_ty.width();
+    match operation {
+        OpKind::Unary { op, arg } => {
+            let input = value_facts(module, *arg, analysis);
+            match op {
+                UnaryOp::BitNot => store_generated(analysis, width, |arena, index| {
+                    invert(input.bit(arena, index))
+                }),
+                UnaryOp::LogicalNot => store_scalar(
+                    invert(logical_value(input, &analysis.arena)),
+                    &mut analysis.arena,
+                ),
+                UnaryOp::ReductionAnd => {
+                    store_scalar(reduction_and(input, &analysis.arena), &mut analysis.arena)
+                }
+                UnaryOp::ReductionOr => {
+                    store_scalar(logical_value(input, &analysis.arena), &mut analysis.arena)
+                }
+                UnaryOp::ReductionXor => {
+                    store_scalar(reduction_xor(input, &analysis.arena), &mut analysis.arena)
+                }
+            }
+        }
+        OpKind::Binary { op, left, right } => {
+            let left = value_facts(module, *left, analysis);
+            let right = value_facts(module, *right, analysis);
+            derive_binary(*op, left, right, result_ty, analysis)
+        }
+        OpKind::Mux {
+            cond,
+            then_value,
+            else_value,
+        } => {
+            let cond = value_facts(module, *cond, analysis);
+            let then_value = value_facts(module, *then_value, analysis);
+            let else_value = value_facts(module, *else_value, analysis);
+            match logical_value(cond, &analysis.arena) {
+                KnownBit::One => copy_facts(then_value, analysis),
+                KnownBit::Zero => copy_facts(else_value, analysis),
+                KnownBit::Unknown => store_generated(analysis, width, |arena, index| {
+                    merge_equal(then_value.bit(arena, index), else_value.bit(arena, index))
+                }),
+            }
+        }
+        OpKind::Concat { parts } => {
+            let inputs = parts
+                .iter()
+                .rev()
+                .map(|&part| value_facts(module, part, analysis))
+                .collect::<Vec<_>>();
+            let bits = {
+                let arena = &analysis.arena;
+                inputs
+                    .iter()
+                    .flat_map(|facts| (0..facts.width).map(|index| facts.bit(arena, index)))
+                    .collect::<Vec<_>>()
+            };
+            store_bits(bits, width, &mut analysis.arena)
+        }
+        OpKind::Extract { value, lsb, width } => {
+            let input = value_facts(module, *value, analysis);
+            slice_facts(input, *lsb, width.get(), analysis)
+        }
+        OpKind::DynamicExtract {
+            value,
+            offset,
+            width,
+        } => {
+            let input = value_facts(module, *value, analysis);
+            let offset = value_facts(module, *offset, analysis);
+            known_usize(offset, &analysis.arena)
+                .and_then(|offset| u32::try_from(offset).ok())
+                .filter(|offset| offset.saturating_add(width.get()) <= input.width)
+                .map_or(FactRange::unknown(width.get()), |offset| {
+                    slice_facts(input, offset, width.get(), analysis)
+                })
+        }
+        OpKind::DynamicInsert {
+            value,
+            offset,
+            replacement,
+        } => {
+            let input = value_facts(module, *value, analysis);
+            let offset = value_facts(module, *offset, analysis);
+            let replacement = value_facts(module, *replacement, analysis);
+            let Some(offset) = known_usize(offset, &analysis.arena)
+                .and_then(|offset| u32::try_from(offset).ok())
+                .filter(|offset| offset.saturating_add(replacement.width) <= width)
+            else {
+                return FactRange::unknown(width);
+            };
+            store_generated(analysis, width, |arena, index| {
+                if (offset..offset + replacement.width).contains(&index) {
+                    replacement.bit(arena, index - offset)
+                } else {
+                    input.bit(arena, index)
+                }
+            })
+        }
+        OpKind::Cast {
+            kind,
+            value,
+            target,
+        } => {
+            let input = value_facts(module, *value, analysis);
+            store_generated(analysis, target.width(), |arena, index| {
+                if index < input.width {
+                    input.bit(arena, index)
+                } else {
+                    match kind {
+                        CastKind::ZeroExtend => KnownBit::Zero,
+                        CastKind::SignExtend => input.bit(arena, input.width.saturating_sub(1)),
+                        CastKind::Truncate => KnownBit::Unknown,
+                    }
+                }
+            })
+        }
+        OpKind::Register(_) | OpKind::Latch(_) => FactRange::unknown(width),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive binary transfer table shares carry, comparison, and shift semantics"
+)]
+fn derive_binary(
+    op: BinaryOp,
+    left: FactRange,
+    right: FactRange,
+    result_ty: super::WordType,
+    analysis: &mut KnownBitsAnalysis,
+) -> FactRange {
+    let width = result_ty.width();
+    match op {
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+            store_generated(analysis, width, |arena, index| {
+                bitwise(op, left.bit(arena, index), right.bit(arena, index))
+            })
+        }
+        BinaryOp::Add | BinaryOp::Sub => {
+            let subtract = op == BinaryOp::Sub;
+            let mut carry = if subtract {
+                KnownBit::One
+            } else {
+                KnownBit::Zero
+            };
+            let bits = (0..width)
+                .map(|index| {
+                    let a = left.bit(&analysis.arena, index);
+                    let mut b = right.bit(&analysis.arena, index);
+                    if subtract {
+                        b = invert(b);
+                    }
+                    let (sum, next) = full_adder(a, b, carry);
+                    carry = next;
+                    sum
+                })
+                .collect::<Vec<_>>();
+            store_bits(bits, width, &mut analysis.arena)
+        }
+        BinaryOp::Mul => {
+            if is_zero(left, &analysis.arena) || is_zero(right, &analysis.arena) {
+                return store_bits(
+                    std::iter::repeat_n(KnownBit::Zero, width as usize),
+                    width,
+                    &mut analysis.arena,
+                );
+            }
+            if is_one(left, &analysis.arena) && right.width == width {
+                return copy_facts(right, analysis);
+            }
+            if is_one(right, &analysis.arena) && left.width == width {
+                return copy_facts(left, analysis);
+            }
+            let zeros = trailing_zeros(left, &analysis.arena)
+                .saturating_add(trailing_zeros(right, &analysis.arena))
+                .min(width);
+            store_bits(
+                (0..width).map(|index| {
+                    if index < zeros {
+                        KnownBit::Zero
+                    } else {
+                        KnownBit::Unknown
+                    }
+                }),
+                width,
+                &mut analysis.arena,
+            )
+        }
+        BinaryOp::LogicalAnd | BinaryOp::LogicalOr => store_scalar(
+            logical_binary(
+                op,
+                logical_value(left, &analysis.arena),
+                logical_value(right, &analysis.arena),
+            ),
+            &mut analysis.arena,
+        ),
+        BinaryOp::Eq | BinaryOp::Ne => {
+            let equal = equality(left, right, &analysis.arena);
+            store_scalar(
+                if op == BinaryOp::Eq {
+                    equal
+                } else {
+                    invert(equal)
+                },
+                &mut analysis.arena,
+            )
+        }
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Ashr => {
+            let Some(shift) = known_usize(right, &analysis.arena) else {
+                return FactRange::unknown(width);
+            };
+            store_generated(analysis, width, |arena, index| match op {
+                BinaryOp::Shl if usize::try_from(index).expect("u32 fits usize") < shift => {
+                    KnownBit::Zero
+                }
+                BinaryOp::Shl => left.bit(
+                    arena,
+                    index - u32::try_from(shift).expect("a shift below index fits u32"),
+                ),
+                BinaryOp::Shr
+                    if usize::try_from(index)
+                        .expect("u32 fits usize")
+                        .saturating_add(shift)
+                        >= usize::try_from(left.width).expect("u32 fits usize") =>
+                {
+                    KnownBit::Zero
+                }
+                BinaryOp::Ashr
+                    if usize::try_from(index)
+                        .expect("u32 fits usize")
+                        .saturating_add(shift)
+                        >= usize::try_from(left.width).expect("u32 fits usize") =>
+                {
+                    if result_ty.is_signed() {
+                        left.bit(arena, left.width.saturating_sub(1))
+                    } else {
+                        KnownBit::Zero
+                    }
+                }
+                BinaryOp::Shr | BinaryOp::Ashr => left.bit(
+                    arena,
+                    index + u32::try_from(shift).expect("an in-range shift fits u32"),
+                ),
+                _ => KnownBit::Unknown,
+            })
+        }
+        BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge => FactRange::unknown(width),
+    }
+}
+
+fn value_facts(module: &WordModule, value: ValueId, analysis: &mut KnownBitsAnalysis) -> FactRange {
+    derive_value(module, value, analysis).unwrap_or_else(|| {
+        FactRange::unknown(module.value(value).map_or(0, |stored| stored.ty.width()))
+    })
+}
+
+fn slice_facts(
+    input: FactRange,
+    lsb: u32,
+    width: u32,
+    analysis: &mut KnownBitsAnalysis,
+) -> FactRange {
+    if lsb == 0 && width == input.width {
+        return input;
+    }
+    store_generated(analysis, width, |arena, index| {
+        input.bit(arena, lsb + index)
+    })
+}
+
+fn copy_facts(input: FactRange, analysis: &mut KnownBitsAnalysis) -> FactRange {
+    store_generated(analysis, input.width, |arena, index| {
+        input.bit(arena, index)
+    })
+}
+
+fn store_scalar(bit: KnownBit, arena: &mut Vec<FactWord>) -> FactRange {
+    store_bits([bit], 1, arena)
+}
+
+fn store_bits(
+    bits: impl IntoIterator<Item = KnownBit>,
+    width: u32,
+    arena: &mut Vec<FactWord>,
+) -> FactRange {
+    let mut words = vec![FactWord::default(); word_count(width)];
+    for (index, bit) in bits
+        .into_iter()
+        .take(usize::try_from(width).expect("u32 fits usize"))
+        .enumerate()
+    {
+        set_bit(
+            &mut words,
+            u32::try_from(index).expect("enumeration is bounded by width"),
+            bit,
+        );
+    }
+    store_words(words, width, arena)
+}
+
+fn store_generated(
+    analysis: &mut KnownBitsAnalysis,
+    width: u32,
+    mut bit: impl FnMut(&[FactWord], u32) -> KnownBit,
+) -> FactRange {
+    let mut words = vec![FactWord::default(); word_count(width)];
+    {
+        let arena = &analysis.arena;
+        for index in 0..width {
+            set_bit(&mut words, index, bit(arena, index));
+        }
+    }
+    store_words(words, width, &mut analysis.arena)
+}
+
+fn store_words(mut words: Vec<FactWord>, width: u32, arena: &mut Vec<FactWord>) -> FactRange {
+    if let Some(last) = words.last_mut() {
+        let tail = width % u64::BITS;
+        if tail != 0 {
+            let mask = (1u64 << tail) - 1;
+            last.zeros &= mask;
+            last.ones &= mask;
+        }
+    }
+    if words.iter().all(|word| word.zeros == 0 && word.ones == 0) {
+        return FactRange::unknown(width);
+    }
+    let start = arena.len();
+    arena.extend(words);
+    FactRange {
+        start: Some(start),
+        width,
+    }
+}
+
+fn word_count(width: u32) -> usize {
+    width.div_ceil(u64::BITS) as usize
+}
+
+fn set_bit(words: &mut [FactWord], index: u32, bit: KnownBit) {
+    let Some(word) = words.get_mut(index as usize / u64::BITS as usize) else {
+        return;
+    };
+    let mask = 1u64 << (index % u64::BITS);
+    word.zeros &= !mask;
+    word.ones &= !mask;
+    match bit {
+        KnownBit::Zero => word.zeros |= mask,
+        KnownBit::One => word.ones |= mask,
+        KnownBit::Unknown => {}
+    }
+}
+
+fn invert(bit: KnownBit) -> KnownBit {
+    match bit {
+        KnownBit::Zero => KnownBit::One,
+        KnownBit::One => KnownBit::Zero,
+        KnownBit::Unknown => KnownBit::Unknown,
+    }
+}
+
+fn merge_equal(left: KnownBit, right: KnownBit) -> KnownBit {
+    if left == right {
+        left
+    } else {
+        KnownBit::Unknown
+    }
+}
+
+fn bitwise(op: BinaryOp, left: KnownBit, right: KnownBit) -> KnownBit {
+    match op {
+        BinaryOp::BitAnd => match (left, right) {
+            (KnownBit::Zero, _) | (_, KnownBit::Zero) => KnownBit::Zero,
+            (KnownBit::One, KnownBit::One) => KnownBit::One,
+            _ => KnownBit::Unknown,
+        },
+        BinaryOp::BitOr => match (left, right) {
+            (KnownBit::One, _) | (_, KnownBit::One) => KnownBit::One,
+            (KnownBit::Zero, KnownBit::Zero) => KnownBit::Zero,
+            _ => KnownBit::Unknown,
+        },
+        BinaryOp::BitXor => match (left, right) {
+            (KnownBit::Zero, KnownBit::Zero) | (KnownBit::One, KnownBit::One) => KnownBit::Zero,
+            (KnownBit::Zero, KnownBit::One) | (KnownBit::One, KnownBit::Zero) => KnownBit::One,
+            _ => KnownBit::Unknown,
+        },
+        _ => KnownBit::Unknown,
+    }
+}
+
+fn logical_value(input: FactRange, arena: &[FactWord]) -> KnownBit {
+    let mut all_zero = true;
+    for index in 0..input.width {
+        match input.bit(arena, index) {
+            KnownBit::One => return KnownBit::One,
+            KnownBit::Unknown => all_zero = false,
+            KnownBit::Zero => {}
+        }
+    }
+    if all_zero {
+        KnownBit::Zero
+    } else {
+        KnownBit::Unknown
+    }
+}
+
+fn reduction_and(input: FactRange, arena: &[FactWord]) -> KnownBit {
+    let mut all_one = true;
+    for index in 0..input.width {
+        match input.bit(arena, index) {
+            KnownBit::Zero => return KnownBit::Zero,
+            KnownBit::Unknown => all_one = false,
+            KnownBit::One => {}
+        }
+    }
+    if all_one {
+        KnownBit::One
+    } else {
+        KnownBit::Unknown
+    }
+}
+
+fn reduction_xor(input: FactRange, arena: &[FactWord]) -> KnownBit {
+    let mut parity = false;
+    for index in 0..input.width {
+        match input.bit(arena, index) {
+            KnownBit::Zero => {}
+            KnownBit::One => parity = !parity,
+            KnownBit::Unknown => return KnownBit::Unknown,
+        }
+    }
+    if parity {
+        KnownBit::One
+    } else {
+        KnownBit::Zero
+    }
+}
+
+fn logical_binary(op: BinaryOp, left: KnownBit, right: KnownBit) -> KnownBit {
+    match op {
+        BinaryOp::LogicalAnd => bitwise(BinaryOp::BitAnd, left, right),
+        BinaryOp::LogicalOr => bitwise(BinaryOp::BitOr, left, right),
+        _ => KnownBit::Unknown,
+    }
+}
+
+fn equality(left: FactRange, right: FactRange, arena: &[FactWord]) -> KnownBit {
+    let mut complete = true;
+    for index in 0..left.width.max(right.width) {
+        let left = left.bit(arena, index);
+        let right = right.bit(arena, index);
+        if matches!(
+            (left, right),
+            (KnownBit::Zero, KnownBit::One) | (KnownBit::One, KnownBit::Zero)
+        ) {
+            return KnownBit::Zero;
+        }
+        complete &= left != KnownBit::Unknown && right != KnownBit::Unknown;
+    }
+    if complete {
+        KnownBit::One
+    } else {
+        KnownBit::Unknown
+    }
+}
+
+fn full_adder(left: KnownBit, right: KnownBit, carry: KnownBit) -> (KnownBit, KnownBit) {
+    let mut sum = MergedBool::Unset;
+    let mut next = MergedBool::Unset;
+    for left in possibilities(left) {
+        for right in possibilities(right) {
+            for carry in possibilities(carry) {
+                let value = u8::from(*left) + u8::from(*right) + u8::from(*carry);
+                sum = merge_bool(sum, value & 1 != 0);
+                next = merge_bool(next, value >= 2);
+            }
+        }
+    }
+    (known_bool(sum), known_bool(next))
+}
+
+fn possibilities(bit: KnownBit) -> &'static [bool] {
+    match bit {
+        KnownBit::Zero => &[false],
+        KnownBit::One => &[true],
+        KnownBit::Unknown => &[false, true],
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MergedBool {
+    Unset,
+    Known(bool),
+    Unknown,
+}
+
+fn merge_bool(current: MergedBool, value: bool) -> MergedBool {
+    match current {
+        MergedBool::Unset => MergedBool::Known(value),
+        MergedBool::Known(current) if current == value => MergedBool::Known(value),
+        MergedBool::Known(_) | MergedBool::Unknown => MergedBool::Unknown,
+    }
+}
+
+fn known_bool(value: MergedBool) -> KnownBit {
+    match value {
+        MergedBool::Known(false) => KnownBit::Zero,
+        MergedBool::Known(true) => KnownBit::One,
+        MergedBool::Unset | MergedBool::Unknown => KnownBit::Unknown,
+    }
+}
+
+fn trailing_zeros(input: FactRange, arena: &[FactWord]) -> u32 {
+    (0..input.width)
+        .take_while(|&index| input.bit(arena, index) == KnownBit::Zero)
+        .count()
+        .try_into()
+        .expect("the count is bounded by a u32 signal width")
+}
+
+fn is_zero(input: FactRange, arena: &[FactWord]) -> bool {
+    trailing_zeros(input, arena) == input.width
+}
+
+fn is_one(input: FactRange, arena: &[FactWord]) -> bool {
+    input.width > 0
+        && input.bit(arena, 0) == KnownBit::One
+        && (1..input.width).all(|index| input.bit(arena, index) == KnownBit::Zero)
+}
+
+fn known_usize(input: FactRange, arena: &[FactWord]) -> Option<usize> {
+    let mut value = 0usize;
+    for index in 0..input.width {
+        match input.bit(arena, index) {
+            KnownBit::Zero => {}
+            KnownBit::One if index < usize::BITS => value |= 1usize << index,
+            KnownBit::One | KnownBit::Unknown => return None,
+        }
+    }
+    Some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::word::{BitRange, LValue, LogicStateKind, SourceSpan, WordType};
+
+    fn ty(width: u32) -> WordType {
+        WordType::new(width, false, LogicStateKind::FourState).unwrap()
+    }
+
+    #[test]
+    fn proves_partial_bitwise_and_shift_facts() {
+        let mut module = WordModule::new("facts");
+        let input = module
+            .add_port("a", PortDirection::Input, ty(8), SourceSpan::default())
+            .unwrap();
+        let input = module
+            .read_signal(module.port(input).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let mask = module
+            .constant(
+                ConstBits::from_bin_str("11110000").unwrap(),
+                ty(8),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let masked = module
+            .binary(BinaryOp::BitAnd, input, mask, SourceSpan::default())
+            .unwrap();
+        let shift = module
+            .constant(
+                ConstBits::from_bin_str("00000011").unwrap(),
+                ty(8),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let shifted = module
+            .binary(BinaryOp::Shl, masked, shift, SourceSpan::default())
+            .unwrap();
+
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(facts.bit(&module, shifted, 7), KnownBit::Unknown);
+    }
+
+    #[test]
+    fn follows_static_vector_connections() {
+        let mut module = WordModule::new("signals");
+        let signal = module
+            .add_wire("value", ty(4), SourceSpan::default())
+            .unwrap();
+        let constant = module
+            .constant(
+                ConstBits::from_bin_str("1010").unwrap(),
+                ty(4),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(LValue::signal(signal), constant, SourceSpan::default())
+            .unwrap();
+        let slice = module
+            .read_signal_slice(signal, 1, 2, SourceSpan::default())
+            .unwrap();
+
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(
+            facts.constant(&module, slice),
+            Some(ConstBits::from_bin_str("01").unwrap())
+        );
+    }
+
+    #[test]
+    fn keeps_mux_common_bits() {
+        let mut module = WordModule::new("operators");
+        let cond = module
+            .add_port("cond", PortDirection::Input, ty(1), SourceSpan::default())
+            .unwrap();
+        let cond = module
+            .read_signal(module.port(cond).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let left = module
+            .constant(
+                ConstBits::from_bin_str("1010").unwrap(),
+                ty(4),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let right = module
+            .constant(
+                ConstBits::from_bin_str("1110").unwrap(),
+                ty(4),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let selected = module
+            .mux(cond, left, right, SourceSpan::default())
+            .unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(facts.bit(&module, selected, 0), KnownBit::Zero);
+        assert_eq!(facts.bit(&module, selected, 1), KnownBit::One);
+        assert_eq!(facts.bit(&module, selected, 2), KnownBit::Unknown);
+        assert_eq!(facts.bit(&module, selected, 3), KnownBit::One);
+    }
+
+    #[test]
+    fn treats_multiple_drivers_as_unknown() {
+        let mut module = WordModule::new("multiple");
+        let signal = module
+            .add_wire("value", ty(1), SourceSpan::default())
+            .unwrap();
+        for text in ["0", "1"] {
+            let value = module
+                .constant(
+                    ConstBits::from_bin_str(text).unwrap(),
+                    ty(1),
+                    SourceSpan::default(),
+                )
+                .unwrap();
+            module
+                .connect(
+                    LValue::signal(signal).with_range(BitRange { msb: 0, lsb: 0 }),
+                    value,
+                    SourceSpan::default(),
+                )
+                .unwrap();
+        }
+        let value = module.read_signal(signal, SourceSpan::default()).unwrap();
+
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(facts.bit(&module, value, 0), KnownBit::Unknown);
+    }
+
+    #[test]
+    fn preserves_unknown_signed_extension_through_multiply_identity() {
+        let mut module = WordModule::new("signed_width");
+        let narrow = WordType::new(4, true, LogicStateKind::FourState).unwrap();
+        let wide = WordType::new(8, true, LogicStateKind::FourState).unwrap();
+        let input = module
+            .add_port("a", PortDirection::Input, narrow, SourceSpan::default())
+            .unwrap();
+        let input = module
+            .read_signal(module.port(input).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let one = module
+            .constant(
+                ConstBits::from_bin_str("00000001").unwrap(),
+                wide,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let product = module
+            .binary(BinaryOp::Mul, one, input, SourceSpan::default())
+            .unwrap();
+
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(facts.active_width(&module, product, 8), 8);
+    }
+
+    #[test]
+    fn packed_fact_rejects_values_wider_than_its_storage() {
+        let mut module = WordModule::new("wide_facts");
+        let at_limit = module
+            .constant(
+                ConstBits::from_bin_str(&"1".repeat(u128::BITS as usize)).unwrap(),
+                ty(u128::BITS),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let over_limit = module
+            .constant(
+                ConstBits::from_bin_str(&"1".repeat(u128::BITS as usize + 1)).unwrap(),
+                ty(u128::BITS + 1),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        let packed = facts
+            .packed128(&module, at_limit)
+            .expect("128-bit facts fit the compact representation");
+        assert_eq!(packed.width(), u128::BITS);
+        assert_eq!(packed.bit(u128::BITS - 1), KnownBit::One);
+        assert_eq!(facts.packed128(&module, over_limit), None);
+        assert_eq!(facts.bit(&module, over_limit, u128::BITS), KnownBit::One);
+    }
+}

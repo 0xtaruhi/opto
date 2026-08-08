@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opto.dev/schema/reference-qor-result-v1.json",
+  "title": "External synthesis reference result",
+  "description": "Tool-neutral interchange format for reference measurements produced outside the public repository.",
+  "_comment": "SPDX-FileCopyrightText: 2026 Zhengyi Zhang; SPDX-License-Identifier: GPL-3.0-only",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "tool", "case", "scenario", "inputs", "metrics", "equivalence"],
+  "properties": {
+    "format": { "const": 1 },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "case": { "type": "string", "minLength": 1 },
+    "scenario": { "enum": ["area_unconstrained", "timing_constrained"] },
+    "inputs": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["area", "cells", "cell_histogram", "wall_seconds", "cpu_seconds", "peak_rss_kib"],
+      "properties": {
+        "area": { "type": "number", "minimum": 0 },
+        "cells": { "type": "integer", "minimum": 0 },
+        "cell_histogram": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "type": "integer", "minimum": 1 }
+        },
+        "wall_seconds": { "type": "number", "minimum": 0 },
+        "cpu_seconds": { "type": "number", "minimum": 0 },
+        "peak_rss_kib": { "type": "integer", "minimum": 0 },
+        "clock_period": { "type": "number", "exclusiveMinimum": 0 },
+        "critical_delay": { "type": "number", "minimum": 0 },
+        "worst_slack": { "type": "number" },
+        "total_negative_slack": { "type": "number", "maximum": 0 },
+        "violating_paths": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "required": ["clock_period"] },
+              { "required": ["critical_delay"] },
+              { "required": ["worst_slack"] },
+              { "required": ["total_negative_slack"] },
+              { "required": ["violating_paths"] }
+            ]
+          },
+          "then": { "required": ["clock_period", "critical_delay", "worst_slack", "total_negative_slack", "violating_paths"] }
+        }
+      ]
+    },
+    "equivalence": { "enum": ["pass", "fail", "not_run"] },
+    "notes": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "scenario": { "const": "timing_constrained" } },
+        "required": ["scenario"]
+      },
+      "then": {
+        "properties": {
+          "metrics": {
+            "required": ["clock_period", "critical_delay", "worst_slack", "total_negative_slack", "violating_paths"]
+          }
+        }
+      }
+    }
+  ]
+}

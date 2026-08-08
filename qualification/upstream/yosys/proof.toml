@@ -1,0 +1,222 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+
+[[defer]]
+path = "simple/asgn_binop.sv"
+design = "test_div"
+category = "undefined-input-domain"
+reason = "The unrestricted input space includes division by zero, whose four-state result is undefined; a constrained nonzero-divisor proof is required."
+
+[[defer]]
+path = "simple/asgn_binop.sv"
+design = "test_mod"
+category = "undefined-input-domain"
+reason = "The unrestricted input space includes modulo by zero, whose four-state result is undefined; a constrained nonzero-divisor proof is required."
+
+[[defer]]
+path = "simple/operators.v"
+design = "optest"
+category = "reference-solver-unsupported"
+reason = "The Yosys SAT backend cannot import the dynamic $pow reference cell, so this module needs output partitioning or another formal backend."
+
+[[defer]]
+path = "simple/partsel.v"
+design = "partsel_test004"
+category = "undefined-input-domain"
+reason = "The unrestricted selector includes negative and out-of-range values; a range-constrained proof is required for the defined language domain."
+
+[[defer]]
+path = "simple/partsel.v"
+design = "partsel_test008"
+category = "undefined-input-domain"
+reason = "The unrestricted indexed selectors include out-of-range values; a range-constrained proof is required for the defined language domain."
+
+[[defer_group]]
+path = "memories/amber23_sram_byte_en.v"
+designs = ["generic_sram_byte_en"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/firrtl_938.v"
+designs = ["top"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/implicit_en.v"
+designs = ["test"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/issue00710.v"
+designs = ["top"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/no_implicit_en.v"
+designs = ["test"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/read_two_mux.v"
+designs = ["top"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/shared_ports.v"
+designs = ["test"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/simple_sram_byte_en.v"
+designs = ["generic_sram_byte_en"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/trans_addr_enable.v"
+designs = ["top"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/trans_sdp.v"
+designs = ["top"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/trans_sp.v"
+designs = ["top"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/wide_read_async.v"
+designs = ["test"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/wide_read_sync.v"
+designs = ["test"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/wide_read_trans.v"
+designs = ["test"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/wide_thru_priority.v"
+designs = ["test"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "memories/wide_write.v"
+designs = ["test"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/arrays01.v"
+designs = ["uut_arrays01"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/arrays02.sv"
+designs = ["uut_arrays02"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/attrib04_net_var.v"
+designs = ["attrib04_foo"]
+category = "state-correspondence"
+reason = "The source register state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/defvalue.sv"
+designs = ["defvalue_top"]
+category = "state-correspondence"
+reason = "The source register state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/fsm.v"
+designs = ["fsm_test"]
+category = "state-correspondence"
+reason = "The source FSM state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/forloops.v"
+designs = ["forloops02"]
+category = "procedural-shared-state"
+reason = "The design reads a procedure-local loop variable from separate processes, leaving a synthesis-order-dependent shared value that needs a dedicated semantic contract."
+
+[[defer_group]]
+path = "simple/mem2reg.v"
+designs = ["mem2reg_test1"]
+category = "undefined-input-domain"
+reason = "The two-bit addresses include value three while the unpacked array contains only indices zero through two; a range-constrained proof is required."
+
+[[defer_group]]
+path = "simple/mem2reg.v"
+designs = ["mem2reg_test2"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/mem_arst.v"
+designs = ["MyMem"]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/memory.v"
+designs = [
+  "memtest01",
+  "memtest02",
+  "memtest03",
+  "memtest04",
+  "memtest05",
+  "memtest06_async",
+  "memtest06_sync",
+  "memtest07",
+  "memtest08",
+  "memtest09",
+  "memtest11",
+  "memtest12",
+  "memtest13",
+]
+category = "state-correspondence"
+reason = "The source memory state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/process.v"
+designs = ["uut"]
+category = "state-correspondence"
+reason = "The source register state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/sincos.v"
+designs = ["d"]
+category = "state-correspondence"
+reason = "The source table and register state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."
+
+[[defer_group]]
+path = "simple/subbytes.v"
+designs = ["subbytes_00"]
+category = "state-correspondence"
+reason = "The source latch/register state and flattened gate state require an explicit correspondence relation that unrestricted induction cannot infer."

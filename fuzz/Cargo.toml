@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "opto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+opto = { path = "../crates/opto" }
+opto-formats = { path = "../crates/opto-formats" }
+opto-library = { path = "../crates/opto-library" }
+opto-session = { path = "../crates/opto-session" }
+
+[[bin]]
+name = "liberty"
+path = "fuzz_targets/liberty.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spef"
+path = "fuzz_targets/spef.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sdc"
+path = "fuzz_targets/sdc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checkpoint"
+path = "fuzz_targets/checkpoint.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[lints.rust]
+warnings = "deny"
+missing_docs = "deny"
+unsafe_code = "deny"
+unused_must_use = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+
+[lints.rustdoc]
+all = { level = "deny", priority = -1 }
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+bare_urls = "deny"

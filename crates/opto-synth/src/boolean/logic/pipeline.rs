@@ -1,0 +1,476 @@
+// SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! Static AXM pass scheduling and graph-choice composition.
+
+use super::network::{LogicGraph, LogicNode, LogicNodeId};
+use super::rewrite::{RewriteIncremental, remap_literal};
+use hashbrown::HashMap;
+use opto_runtime::ExecutionContext;
+
+pub(super) struct LogicPipelineOutcome {
+    pub(super) network: LogicGraph,
+    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) alternatives: Box<[LogicAlternative]>,
+}
+
+pub(super) struct LogicAlternative {
+    pub(super) pass: &'static str,
+    pub(super) roots: Box<[LogicNodeId]>,
+}
+
+struct ChoiceProposal {
+    pass: &'static str,
+    network: LogicGraph,
+    roots: Box<[LogicNodeId]>,
+}
+
+pub(super) struct TransformProduct {
+    pub(super) network: LogicGraph,
+    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) analyses: TransformAnalyses,
+}
+
+#[derive(Default)]
+pub(super) struct TransformAnalyses {
+    pub(super) rewrite: Option<super::rewrite::CutReuse>,
+}
+
+/// Owns the only destructive AXM implementation while passes are converging.
+/// Every applied transform is composed back to the original node space here.
+pub(super) struct TransformState {
+    pub(super) network: LogicGraph,
+    pub(super) roots: Box<[LogicNodeId]>,
+    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) analyses: TransformAnalyses,
+}
+
+impl TransformState {
+    pub(super) fn start(
+        source_roots: &[LogicNodeId],
+        outcome: TransformProduct,
+    ) -> Result<Self, crate::SynthError> {
+        let roots = map_roots(&outcome.remap, source_roots)?;
+        Ok(Self {
+            network: outcome.network,
+            roots,
+            remap: outcome.remap,
+            analyses: outcome.analyses,
+        })
+    }
+
+    pub(super) fn apply(&mut self, outcome: TransformProduct) -> Result<(), crate::SynthError> {
+        self.roots = map_roots(&outcome.remap, &self.roots)?;
+        self.remap = compose_remaps(&self.remap, &outcome.remap);
+        self.network = outcome.network;
+        self.analyses = outcome.analyses;
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> TransformProduct {
+        TransformProduct {
+            network: self.network,
+            remap: self.remap,
+            analyses: self.analyses,
+        }
+    }
+}
+
+pub(super) fn optimize(
+    source: LogicGraph,
+    roots: &[LogicNodeId],
+    requirements: &[Option<f64>],
+    enabled: bool,
+    diagnostics: crate::SynthesisDiagnostics,
+    runtime: &ExecutionContext,
+    incremental: Option<RewriteIncremental<'_>>,
+) -> Result<LogicPipelineOutcome, crate::SynthError> {
+    if roots.len() != requirements.len() {
+        return Err(crate::SynthError::invariant(
+            "AXM pipeline requirements do not align with roots",
+        ));
+    }
+    if !enabled {
+        return finish(identity(source), roots, Vec::new());
+    }
+    let functional = small_support_choice(&source, roots, requirements, diagnostics, runtime)?;
+    let baseline = optimize_baseline(
+        &source,
+        roots,
+        requirements,
+        diagnostics,
+        runtime,
+        incremental,
+    )?;
+    let baseline_roots = map_roots(&baseline.remap, roots)?;
+    let control = functional.is_none().then(|| {
+        super::control::build_control_choice(&source, roots, &baseline.network, &baseline_roots)
+    });
+    let alternatives = functional
+        .into_iter()
+        .chain(control.flatten().map(|choice| ChoiceProposal {
+            pass: "control_decomposition",
+            network: choice.network,
+            roots: choice.roots,
+        }))
+        .collect();
+    finish(baseline, roots, alternatives)
+}
+
+fn small_support_choice(
+    source: &LogicGraph,
+    roots: &[LogicNodeId],
+    requirements: &[Option<f64>],
+    diagnostics: crate::SynthesisDiagnostics,
+    runtime: &ExecutionContext,
+) -> Result<Option<ChoiceProposal>, crate::SynthError> {
+    let factoring_started = std::time::Instant::now();
+    let Some(subject) = super::pla::build_multi_output(source, roots, runtime)? else {
+        return Ok(None);
+    };
+    crate::api::diagnostics::trace!(
+        crate::api::diagnostics::SynthTrace::timing(diagnostics),
+        "logic.multi_output.factor",
+        "nodes={} cover={:?} factoring={:?} resubstitution={:?} checks={} plans={} wall={:?}",
+        subject.network.node_count(),
+        subject.profile.cover,
+        subject.profile.factoring,
+        subject.profile.resubstitution,
+        subject.profile.relation_checks,
+        subject.profile.plan_queries,
+        factoring_started.elapsed()
+    );
+    let normalization_started = std::time::Instant::now();
+    let normalized = optimize_factored(
+        &subject.network,
+        &subject.roots,
+        requirements,
+        diagnostics,
+        runtime,
+    )?;
+    crate::api::diagnostics::trace!(
+        crate::api::diagnostics::SynthTrace::timing(diagnostics),
+        "logic.multi_output.normalize",
+        "nodes={} wall={:?}",
+        normalized.network.node_count(),
+        normalization_started.elapsed()
+    );
+    let normalized_roots = map_roots(&normalized.remap, &subject.roots)?;
+    Ok(Some(ChoiceProposal {
+        pass: "multi_output_factoring",
+        network: normalized.network,
+        roots: normalized_roots,
+    }))
+}
+
+pub(super) fn optimize_baseline(
+    network: &LogicGraph,
+    roots: &[LogicNodeId],
+    requirements: &[Option<f64>],
+    diagnostics: crate::SynthesisDiagnostics,
+    runtime: &ExecutionContext,
+    incremental: Option<RewriteIncremental<'_>>,
+) -> Result<TransformProduct, crate::SynthError> {
+    if let Some(incremental) = incremental {
+        optimize_with(
+            network,
+            roots,
+            requirements,
+            diagnostics,
+            runtime,
+            incremental,
+            super::rewrite::resynthesize,
+        )
+    } else {
+        let cache = super::rewrite::RewriteRecipeCache::default();
+        let metrics = crate::incremental::IncrementalRunMetrics::default();
+        optimize_with(
+            network,
+            roots,
+            requirements,
+            diagnostics,
+            runtime,
+            RewriteIncremental::new(&cache, &metrics),
+            super::rewrite::resynthesize,
+        )
+    }
+}
+
+fn optimize_factored(
+    network: &LogicGraph,
+    roots: &[LogicNodeId],
+    requirements: &[Option<f64>],
+    diagnostics: crate::SynthesisDiagnostics,
+    runtime: &ExecutionContext,
+) -> Result<TransformProduct, crate::SynthError> {
+    let cache = super::rewrite::RewriteRecipeCache::default();
+    let metrics = crate::incremental::IncrementalRunMetrics::default();
+    optimize_with(
+        network,
+        roots,
+        requirements,
+        diagnostics,
+        runtime,
+        RewriteIncremental::new(&cache, &metrics),
+        super::rewrite::normalize,
+    )
+}
+
+type RewriteStage = fn(
+    &mut TransformState,
+    &[Option<f64>],
+    crate::SynthesisDiagnostics,
+    &ExecutionContext,
+    RewriteIncremental<'_>,
+) -> Result<(), crate::SynthError>;
+
+fn optimize_with(
+    network: &LogicGraph,
+    roots: &[LogicNodeId],
+    requirements: &[Option<f64>],
+    diagnostics: crate::SynthesisDiagnostics,
+    runtime: &ExecutionContext,
+    incremental: RewriteIncremental<'_>,
+    rewrite: RewriteStage,
+) -> Result<TransformProduct, crate::SynthError> {
+    if roots.len() != requirements.len() {
+        return Err(crate::SynthError::invariant(
+            "AXM pass requirements do not align with roots",
+        ));
+    }
+    let mut state = TransformState::start(roots, super::selector::restructure(network, roots))?;
+    rewrite(&mut state, requirements, diagnostics, runtime, incremental)?;
+    state.network.freeze();
+    state.analyses = TransformAnalyses::default();
+
+    let started = std::time::Instant::now();
+    let balanced = super::balance::balance(&state.network, &state.roots);
+    let balanced_roots = map_roots(&balanced.remap, &state.roots)?;
+    let accepted = super::rewrite::timing_profile(&balanced.network, &balanced_roots, requirements)
+        < super::rewrite::timing_profile(&state.network, &state.roots, requirements);
+    if accepted {
+        state.apply(balanced)?;
+    }
+    crate::api::diagnostics::trace!(
+        crate::api::diagnostics::SynthTrace::timing(diagnostics),
+        "logic.balance",
+        "accepted={accepted} wall={:?}",
+        started.elapsed()
+    );
+    Ok(state.finish())
+}
+
+fn finish(
+    baseline: TransformProduct,
+    source_roots: &[LogicNodeId],
+    alternatives: Vec<ChoiceProposal>,
+) -> Result<LogicPipelineOutcome, crate::SynthError> {
+    if alternatives.is_empty() {
+        map_roots(&baseline.remap, source_roots)?;
+        return Ok(LogicPipelineOutcome {
+            network: baseline.network,
+            remap: baseline.remap,
+            alternatives: Box::new([]),
+        });
+    }
+
+    let mut network = LogicGraph::new();
+    let mut variables = HashMap::new();
+    let baseline_remap = copy_graph(&baseline.network, None, &mut network, &mut variables)?;
+    let remap = compose_remaps(&baseline.remap, &baseline_remap);
+    map_roots(&remap, source_roots)?;
+
+    let mut installed = Vec::with_capacity(alternatives.len());
+    for alternative in alternatives {
+        let live = live_nodes(&alternative.network, &alternative.roots);
+        let alternative_remap = copy_graph(
+            &alternative.network,
+            Some(&live),
+            &mut network,
+            &mut variables,
+        )?;
+        installed.push(LogicAlternative {
+            pass: alternative.pass,
+            roots: map_roots(&alternative_remap, &alternative.roots)?,
+        });
+    }
+    network.freeze();
+    Ok(LogicPipelineOutcome {
+        network,
+        remap,
+        alternatives: installed.into_boxed_slice(),
+    })
+}
+
+fn identity(network: LogicGraph) -> TransformProduct {
+    let remap = (0..network.node_count())
+        .map(|index| Some(LogicNodeId::from_index(index)))
+        .collect();
+    TransformProduct {
+        network,
+        remap,
+        analyses: TransformAnalyses::default(),
+    }
+}
+
+pub(super) fn map_roots(
+    remap: &[Option<LogicNodeId>],
+    roots: &[LogicNodeId],
+) -> Result<Box<[LogicNodeId]>, crate::SynthError> {
+    roots
+        .iter()
+        .map(|&root| {
+            remap_literal(remap, root)
+                .ok_or_else(|| crate::SynthError::invariant("AXM pass omitted an active root"))
+        })
+        .collect()
+}
+
+pub(super) fn compose_remaps(
+    first: &[Option<LogicNodeId>],
+    second: &[Option<LogicNodeId>],
+) -> Box<[Option<LogicNodeId>]> {
+    first
+        .iter()
+        .map(|&literal| literal.and_then(|literal| remap_literal(second, literal)))
+        .collect()
+}
+
+fn live_nodes(network: &LogicGraph, roots: &[LogicNodeId]) -> Box<[bool]> {
+    let mut live = vec![false; network.node_count()];
+    let mut pending = roots.iter().map(|root| root.positive()).collect::<Vec<_>>();
+    while let Some(node) = pending.pop() {
+        if std::mem::replace(&mut live[node.index()], true) {
+            continue;
+        }
+        pending.extend(network.node(node).fanins().map(LogicNodeId::positive));
+    }
+    live.into_boxed_slice()
+}
+
+fn copy_graph(
+    source: &LogicGraph,
+    live: Option<&[bool]>,
+    target: &mut LogicGraph,
+    variables: &mut HashMap<u32, LogicNodeId>,
+) -> Result<Box<[Option<LogicNodeId>]>, crate::SynthError> {
+    let mut remap = vec![None; source.node_count()];
+    for index in 0..source.node_count() {
+        if live.is_some_and(|live| !live[index]) {
+            continue;
+        }
+        let node = LogicNodeId::from_index(index);
+        let mapped = match source.node(node) {
+            LogicNode::Const(value) => LogicGraph::constant(value),
+            LogicNode::Var(origin) => *variables.entry(origin).or_insert_with(|| {
+                target
+                    .variable(origin as usize)
+                    .expect("AXM input stays within compact capacity")
+            }),
+            LogicNode::And(left, right) => target.and(
+                mapped_literal(&remap, left)?,
+                mapped_literal(&remap, right)?,
+            ),
+            LogicNode::Xor(left, right) => target.xor(
+                mapped_literal(&remap, left)?,
+                mapped_literal(&remap, right)?,
+            ),
+            LogicNode::Mux {
+                cond,
+                then_value,
+                else_value,
+            } => target.mux(
+                mapped_literal(&remap, cond)?,
+                mapped_literal(&remap, then_value)?,
+                mapped_literal(&remap, else_value)?,
+            ),
+        };
+        remap[index] = Some(mapped);
+    }
+    Ok(remap.into_boxed_slice())
+}
+
+fn mapped_literal(
+    remap: &[Option<LogicNodeId>],
+    literal: LogicNodeId,
+) -> Result<LogicNodeId, crate::SynthError> {
+    remap_literal(remap, literal).ok_or_else(|| {
+        crate::SynthError::invariant("AXM graph is not topological within its active cone")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph(
+        gate: fn(&mut LogicGraph, LogicNodeId, LogicNodeId) -> LogicNodeId,
+    ) -> (LogicGraph, LogicNodeId) {
+        let mut network = LogicGraph::new();
+        let left = network.variable(0).unwrap();
+        let right = network.variable(1).unwrap();
+        let root = gate(&mut network, left, right);
+        network.freeze();
+        (network, root)
+    }
+
+    #[test]
+    fn installs_multiple_choices_once_and_structurally_shares_them() {
+        let (baseline, baseline_root) = graph(LogicGraph::and);
+        let (first, first_root) = graph(LogicGraph::xor);
+        let (second, second_root) = graph(LogicGraph::xor);
+        let outcome = finish(
+            identity(baseline),
+            &[baseline_root],
+            vec![
+                ChoiceProposal {
+                    pass: "first",
+                    network: first,
+                    roots: Box::new([first_root]),
+                },
+                ChoiceProposal {
+                    pass: "second",
+                    network: second,
+                    roots: Box::new([second_root]),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.alternatives.len(), 2);
+        assert_eq!(outcome.alternatives[0].roots, outcome.alternatives[1].roots);
+        assert!(remap_literal(&outcome.remap, baseline_root).is_some());
+    }
+
+    #[test]
+    fn small_support_installs_one_equivalent_mapper_choice() {
+        let mut network = LogicGraph::new();
+        let a = network.variable(0).unwrap();
+        let b = network.variable(1).unwrap();
+        let c = network.variable(2).unwrap();
+        let shared = network.and(a, b);
+        let roots = [network.xor(shared, c), network.and(shared, c.inverted())];
+        network.freeze();
+        let expected = roots.map(|root| network.truth_table(root, 3));
+
+        let outcome = optimize(
+            network,
+            &roots,
+            &[None, None],
+            true,
+            crate::SynthesisDiagnostics::default(),
+            crate::test_runtime(),
+            None,
+        )
+        .unwrap();
+        let actual_roots = map_roots(&outcome.remap, &roots).unwrap();
+
+        assert_eq!(outcome.alternatives.len(), 1);
+        for (&actual, expected) in actual_roots.iter().zip(expected) {
+            assert_eq!(outcome.network.truth_table(actual, 3), expected);
+        }
+        for (&actual, expected) in outcome.alternatives[0].roots.iter().zip(expected) {
+            assert_eq!(outcome.network.truth_table(actual, 3), expected);
+        }
+    }
+}

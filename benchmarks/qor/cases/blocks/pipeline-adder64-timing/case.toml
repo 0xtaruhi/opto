@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "block-pipeline-adder64-timing"
+kind = "qor"
+class = "block"
+scenario = "timing_constrained"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth_high"
+library_key = "sky130_hd"
+sequential = true
+report_timing = true
+clock_period = 2.0
+constraints = ["create_clock -name clk -period 2.0 [get_ports clk]"]
+expected_area = 28578.659200
+area_tolerance = 0.001
+expected_worst_slack = -4.703762
+worst_slack_tolerance = 0.005

@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "opto-session"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3.workspace = true
+thiserror.workspace = true
+opto-db.workspace = true
+opto-archive.workspace = true
+opto-core.workspace = true
+opto-formats.workspace = true
+opto-hdl.workspace = true
+opto-ir.workspace = true
+opto-library.workspace = true
+opto-power.workspace = true
+opto-runtime.workspace = true
+serde.workspace = true
+opto-synth.workspace = true
+opto-timing.workspace = true

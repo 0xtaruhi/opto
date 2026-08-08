@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "kernel-const-div32"
+kind = "qor"
+class = "kernel"
+scenario = "area_unconstrained"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library_key = "sky130_hd"
+expected_area = 13009.977600
+area_tolerance = 0.001

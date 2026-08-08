@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "upstream-cva6-core"
+kind = "upstream"
+category = "core"
+source_root = "cva6"
+revision = "ed2efa51744387f510bfa4dcec29eb2e1f5697cf"
+manifest = "manifest.tsv"
+configs = "configs.tsv"
+script = "flow.tcl"
+root_environment = "CVA6_ROOT"
+manifest_environment = "CVA6_MANIFEST"
+report_environment = "CVA6_CHECK_REPORT"
+config_environment = "CVA6_CONFIG_FILE"

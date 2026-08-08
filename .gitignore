@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+# Rust build output
+/target/
+**/target/
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/coverage/
+!/.cargo/
+!/.cargo/config.toml
+__pycache__/
+*.py[cod]
+
+# Local editor and operating-system state
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+/.idea/
+/.vscode/
+
+# Local environment and developer-only material
+.env
+.env.*
+!.env.example
+/docs/internal/
+/docs/roadmap.md
+/docs/big-refactor-execution-plan.md
+/private/
+/tests/private/
+/benchmarks/private/
+/.external/
+
+# Proprietary reference-tool regression assets belong outside the public tree.
+/tests/dc_compat/
+/benchmarks/dc_*/
+/.synopsys_dc.setup
+**/.synopsys_dc.setup
+/.synopsys_pt.setup
+**/.synopsys_pt.setup
+/benchmarks/pt_*/
+/qualification/pt_compat/
+
+# PDK and EDA artifacts must never be committed. Public benchmarks fetch and
+# verify their open inputs into ignored working directories.
+*.db
+*.db.gz
+*.ddc
+*.gds
+*.gds.gz
+*.gdsii
+*.lef
+*.lef.gz
+*.lib
+*.lib.gz
+!/qualification/libraries/*.lib
+!/benchmarks/qor/libraries/*.lib
+*.ndm
+*.nlib
+*.oas
+*.oasis
+*.spef
+*.spf
+*.svf
+*.tf
+*.itf
+*.rpt
+*.log
+*.wlf
+*.vcd
+*.fsdb
+*.saif
+*.sdf
+*.tar
+*.tar.gz
+*.tgz
+*.sdc.tmp
+command.log
+default.svf
+
+# Benchmark output directories
+benchmarks/**/output/
+benchmarks/**/outputs/
+benchmarks/**/result/
+benchmarks/**/results/
+
+/refs/
+/temp/

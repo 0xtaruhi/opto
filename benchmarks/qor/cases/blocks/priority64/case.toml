@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "block-priority64"
+kind = "qor"
+class = "block"
+scenario = "area_unconstrained"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library_key = "sky130_hd"
+expected_area = 675.648000
+area_tolerance = 0.001
+expected_cells = 119
+cell_count_tolerance = 0.05

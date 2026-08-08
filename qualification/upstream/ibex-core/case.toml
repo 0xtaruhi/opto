@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "upstream-ibex-core"
+kind = "upstream"
+category = "core"
+source_root = "ibex"
+revision = "c6edaa4060b1a3cd27fda928058db4f0ee3d24bd"
+manifest = "manifest.tsv"
+script = "flow.tcl"
+root_environment = "IBEX_ROOT"
+manifest_environment = "IBEX_MANIFEST"
+report_environment = "IBEX_CHECK_REPORT"
+
+[assertions]
+min_ports = 100
+min_nets = 1000

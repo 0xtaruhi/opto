@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 2
+source_url = "https://github.com/chipsalliance/sv-tests.git"
+revision = "2913f075dcd10e4d64b7d912fe7d4675dd0a1e29"
+license = "ISC"
+license_sha256 = "47862ece873b4d3c93aeebcfd0913447a174ea924dd68320fb0119e5e23b9235"
+upstream_cases = 1027
+required_cases = 137
+passing_cases = 137
+required_sha256 = "15afc88ce7dd549f015354326115017d7a4489e877c275f21ee7dbc73dd3540f"

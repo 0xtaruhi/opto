@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "extended-dot4x8"
+kind = "qor"
+class = "extended"
+scenario = "timing_constrained"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../../../qualification/libraries/opto_test.lib"
+report_timing = true
+clock_period = 60.0
+constraints = [
+  "set ab [concat [get_ports a] [get_ports b]]",
+  "set cd [concat [get_ports c] [get_ports d]]",
+  "set ef [concat [get_ports e] [get_ports f]]",
+  "set gh [concat [get_ports g] [get_ports h]]",
+  "set input_ports [concat [concat $ab $cd] [concat $ef $gh]]",
+  "set_input_transition 0.1 $input_ports",
+  "set_load 0.05 [get_ports result]",
+  "set_max_delay 60.0 -from $input_ports -to [get_ports result]",
+]
+expected_area = 2574.5
+area_tolerance = 0.0
+expected_cells = 1371
+cell_count_tolerance = 0.0
+expected_worst_slack = 29.0
+worst_slack_tolerance = 0.0
+expected_total_negative_slack = 0.0
+total_negative_slack_tolerance = 0.0
+maximum_violating_paths = 0
+maximum_wall_seconds = 300.0
+maximum_cpu_seconds = 600.0
+maximum_peak_rss_kib = 524288
+
+[expected_cell_histogram]
+AND2_X1 = 47
+INV_X1 = 76
+MUX2_X1 = 412
+NAND2_X1 = 199
+NOR2_X1 = 143
+OR2_X1 = 35
+XNOR2_X1 = 57
+XOR2_X1 = 402

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 2
+source_url = "https://github.com/YosysHQ/yosys.git"
+revision = "a0fbe6e13311d4909938c63eeb28b6c730467e6c"
+license = "ISC"
+license_sha256 = "6998b5724d4cb3f459d1c12b6bd0cdbfa9c949ef14d0fb6d7d97d97404e5b5f3"
+upstream_hdl_cases = 549
+eligible_cases = 136
+required_cases = 115
+required_conforming_cases = 115
+excluded_cases = 21
+known_gap_cases = 0
+required_conforming_sha256 = "15064110da32559ed3f67b9bb124db3d07adea6e76359b1e72cb89739c1bb3fc"
+synthesized_designs = 210
+synthesized_designs_sha256 = "be585b47c5258644d7676a282de59cf2dfc4c6afac7f9cc6534a54b937e574fe"
+observable_designs = 172
+observable_designs_sha256 = "dad4bbdc0840e0720b7d634dcdc67c3b2fd4a4e3fa07a8ce009f6d89bf229573"
+proof_targets = 126
+proved_designs = 126
+proof_targets_sha256 = "9848b958326ce3773350cce0174e1fc1c47c6c941ff736fd27a4ab32b624f546"
+deferred_proofs = 46
+deferred_proofs_sha256 = "e2a85ac6353fd01fd6fcb000edf07e37c62839615e49885a78cf3f84029a42d2"

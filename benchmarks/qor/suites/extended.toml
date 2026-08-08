@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+name = "qor-extended"
+cases = [
+  "benchmarks/qor/cases/extended/sum4x16/case.toml",
+  "benchmarks/qor/cases/extended/mac8x8/case.toml",
+  "benchmarks/qor/cases/extended/dot4x8/case.toml",
+  "benchmarks/qor/cases/extended/address-generator32/case.toml",
+]

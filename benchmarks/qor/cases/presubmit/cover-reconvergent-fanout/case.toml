@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "presubmit-cover-reconvergent-fanout"
+kind = "qor"
+class = "presubmit"
+scenario = "area_unconstrained"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/cover_test.lib"
+equivalence = true
+expected_area = 160.0
+area_tolerance = 0.0
+expected_cells = 256
+cell_count_tolerance = 0.0
+maximum_wall_seconds = 60.0
+maximum_cpu_seconds = 120.0
+maximum_peak_rss_kib = 524288
+
+[expected_cell_histogram]
+AND3_X1 = 192
+INV_X1 = 64

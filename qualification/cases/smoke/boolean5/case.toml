@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "smoke-boolean5"
+kind = "regression"
+category = "smoke"
+language = "verilog"
+top = "top"
+sources = ["top.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 6
+min_nets = 1
+min_cells = 1

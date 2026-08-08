@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+name = "real-medium-gate"
+description = "Measured, currently executable subset of the pinned real RTL corpus"
+threads = 8
+maximum_parallel_cases = 8
+library_sha256 = "ec0e1067a35c8bf20b11e58d1e8ac53326067e4dac84a125cc1b917a3518d0d9"
+
+[guard]
+minimum_cases = 14
+minimum_timing_cases = 3
+minimum_baseline_cells = 256
+maximum_area_geomean_ratio = 1.00
+maximum_area_case_ratio = 1.05
+maximum_delay_geomean_ratio = 1.00
+maximum_delay_case_ratio = 1.05
+
+[[sources]]
+id = "epfl"
+url = "https://github.com/lsils/benchmarks/archive/0060e156826e733d69bf5b3322d1bdd0d03a1f9a.tar.gz"
+sha256 = "55d92e23bd423999f68c1af8b9679d26c6fa6709a30211aa6750badc87f4003e"
+revision = "0060e156826e733d69bf5b3322d1bdd0d03a1f9a"
+license = "MIT"
+citation = "https://www.epfl.ch/labs/lsi/page-102566-en-html/benchmarks/"
+
+[[sources]]
+id = "iwls2005"
+url = "https://iwls.org/iwls2005/IWLS_2005_benchmarks_V_1.0.tgz"
+sha256 = "f45955b87a255abd009f5bab081c658e90e7ee0b71c270d8a4948390a3033b51"
+revision = "IWLS_2005_benchmarks_V_1.0"
+license = "Per-design notices distributed with the IWLS archive"
+citation = "https://iwls.org/iwls2005/benchmarks.html"
+
+[[cases]]
+id = "epfl-bar"
+source = "epfl"
+rtl = ["arithmetic/bar.v"]
+top = "top"
+category = "datapath"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-max"
+source = "epfl"
+rtl = ["arithmetic/max.v"]
+top = "top"
+category = "datapath"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-sin"
+source = "epfl"
+rtl = ["arithmetic/sin.v"]
+top = "top"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-arbiter"
+source = "epfl"
+rtl = ["random_control/arbiter.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-cavlc"
+source = "epfl"
+rtl = ["random_control/cavlc.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-i2c"
+source = "epfl"
+rtl = ["random_control/i2c.v"]
+top = "i2c"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-priority"
+source = "epfl"
+rtl = ["random_control/priority.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-voter"
+source = "epfl"
+rtl = ["random_control/voter.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "opencores-fpu-mul"
+source = "iwls2005"
+rtl = ["opencores/rtl/fpu/primitives.v"]
+top = "mul_r2"
+category = "arithmetic"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-tv80-mcode"
+source = "iwls2005"
+rtl = ["opencores/rtl/tv80/tv80_mcode.v"]
+top = "tv80_mcode"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "opencores-dma-arbiter"
+source = "iwls2005"
+rtl = ["opencores/rtl/wb_dma/wb_dma_ch_arb.v"]
+top = "wb_dma_ch_arb"
+category = "control"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-vga-color"
+source = "iwls2005"
+rtl = ["opencores/rtl/vga_lcd/vga_colproc.v"]
+top = "vga_colproc"
+category = "datapath"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-aes-sbox"
+source = "iwls2005"
+rtl = ["opencores/rtl/aes_core/aes_sbox.v"]
+top = "aes_sbox"
+category = "datapath"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "opencores-aes-inverse-sbox"
+source = "iwls2005"
+rtl = ["opencores/rtl/aes_core/aes_inv_sbox.v"]
+top = "aes_inv_sbox"
+category = "datapath"
+scenario = "area_unconstrained"

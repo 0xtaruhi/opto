@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "opto-power"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+opto-core.workspace = true
+opto-runtime.workspace = true
+opto-library.workspace = true
+opto-timing.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+opto-db.workspace = true

@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[submodule "third_party/slang"]
+	path = third_party/slang
+	url = https://github.com/MikePopoloski/slang.git
+[submodule "third_party/fmt"]
+	path = third_party/fmt
+	url = https://github.com/fmtlib/fmt.git

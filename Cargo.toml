@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[workspace]
+members = [
+    "crates/opto",
+    "crates/opto-archive",
+    "crates/opto-command-macros",
+    "crates/opto-core",
+    "crates/opto-db",
+    "crates/opto-formats",
+    "crates/opto-hdl",
+    "crates/opto-ir",
+    "crates/opto-library",
+    "crates/opto-power",
+    "crates/opto-runtime",
+    "crates/opto-session",
+    "crates/opto-slang-sys",
+    "crates/opto-synth",
+    "crates/opto-tcl-sys",
+    "crates/opto-timing",
+    "crates/opto-formal",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/0xtaruhi/opto"
+license = "GPL-3.0-only"
+
+[workspace.lints.rust]
+warnings = "deny"
+missing_docs = "deny"
+unsafe_code = "deny"
+unused_must_use = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+
+[workspace.lints.rustdoc]
+all = { level = "deny", priority = -1 }
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+bare_urls = "deny"
+
+[workspace.dependencies]
+anstream = "1.0.0"
+anstyle = "1.0.14"
+annotate-snippets = "0.12.16"
+blake3 = "1.8.2"
+clap = { version = "4.5", features = ["derive"] }
+comfy-table = { version = "8.0.0", default-features = false }
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+directories = "6.0.0"
+faer = { version = "0.24.4", default-features = false, features = ["std", "rayon", "sparse-linalg"] }
+mimalloc = { version = "0.1.52", features = ["override", "v2"] }
+opto-core = { path = "crates/opto-core" }
+opto-command-macros = { path = "crates/opto-command-macros" }
+opto-archive = { path = "crates/opto-archive" }
+opto-db = { path = "crates/opto-db" }
+opto-formats = { path = "crates/opto-formats" }
+opto-hdl = { path = "crates/opto-hdl" }
+opto-ir = { path = "crates/opto-ir" }
+opto-library = { path = "crates/opto-library" }
+opto-power = { path = "crates/opto-power" }
+opto-runtime = { path = "crates/opto-runtime" }
+opto-session = { path = "crates/opto-session" }
+opto-slang-sys = { path = "crates/opto-slang-sys" }
+opto-synth = { path = "crates/opto-synth" }
+opto-tcl-sys = { path = "crates/opto-tcl-sys" }
+opto-timing = { path = "crates/opto-timing" }
+opto-formal = { path = "crates/opto-formal" }
+rayon = "1.12"
+reedline = "0.49.0"
+nu-ansi-term = "0.50.3"
+proc-macro2 = "1.0"
+quote = "1.0"
+rkyv = { version = "0.8.18", default-features = false, features = ["bytecheck", "little_endian", "pointer_width_64", "std", "unaligned"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+smallvec = { version = "1.15", features = ["serde"] }
+syn = { version = "3.0", features = ["full"] }
+thiserror = "2.0.18"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[profile.fast-release]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
+[profile.dev]
+debug = true
+opt-level = 1
+lto = false
+incremental = true

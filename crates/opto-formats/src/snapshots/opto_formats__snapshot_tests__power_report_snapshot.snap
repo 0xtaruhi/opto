@@ -1,0 +1,50 @@
+---
+source: crates/opto-formats/src/snapshot_tests.rs
+expression: "stable_timestamp(report_power(&model, &analysis, &ReportPowerOptions\n{ kind: PowerReportKind::Summary, ..ReportPowerOptions::default() }).unwrap().render_plain())"
+---
+# Power report
+
+Design: top
+Version: opto 0.1.0
+Date: <timestamp>
+View: Summary
+Hierarchy: Hierarchical
+
+## Libraries
+
+| Library | Source |
+|---------|--------|
+| demo    | -      |
+
+## Operating conditions
+
+Operating conditions: nom_pvt
+Wire load model mode: top
+Global operating voltage: 1
+Voltage units: 1V
+Capacitance units: 1pF
+Time units: 1ns
+Dynamic power units: 1mW
+Leakage power units: 1nW
+
+## Summary
+
+Cell internal power: 0.0000 mW (0%)
+Net switching power: 0.0000 mW (0%)
+Total dynamic power: 0.0000 mW
+Cell leakage power: 2.0000 nW
+
+Information: Power group summary excludes estimated clock-tree power.
+
+## Power groups
+
+| Power group   | Internal  | Switching | Leakage   | Total     | %      | Attrs |
+|---------------|-----------|-----------|-----------|-----------|--------|-------|
+| io_pad        | 0.0000 mW | 0.0000 mW | 0.0000 nW | 0.0000 mW | 0.00   |       |
+| memory        | 0.0000 mW | 0.0000 mW | 0.0000 nW | 0.0000 mW | 0.00   |       |
+| black_box     | 0.0000 mW | 0.0000 mW | 0.0000 nW | 0.0000 mW | 0.00   |       |
+| clock_network | 0.0000 mW | 0.0000 mW | 0.0000 nW | 0.0000 mW | 0.00   | i     |
+| register      | 0.0000 mW | 0.0000 mW | 0.0000 nW | 0.0000 mW | 0.00   |       |
+| sequential    | 0.0000 mW | 0.0000 mW | 0.0000 nW | 0.0000 mW | 0.00   |       |
+| combinational | 0.0000 mW | 0.0000 mW | 2.0000 nW | 0.0000 mW | 100.00 |       |
+| Total         | 0.0000 mW | 0.0000 mW | 2.0000 nW | 0.0000 mW | 100.00 |       |

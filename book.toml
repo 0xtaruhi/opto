@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[book]
+title = "Opto Developer Guide"
+authors = ["Zhengyi Zhang"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+
+[output.html]
+git-repository-url = "https://github.com/0xtaruhi/opto"
+edit-url-template = "https://github.com/0xtaruhi/opto/edit/main/{path}"

@@ -1,0 +1,282 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+name = "real-medium-30"
+description = "Pinned medium-scale public RTL for same-input synthesis qualification"
+
+[[sources]]
+id = "epfl"
+url = "https://github.com/lsils/benchmarks/archive/0060e156826e733d69bf5b3322d1bdd0d03a1f9a.tar.gz"
+sha256 = "55d92e23bd423999f68c1af8b9679d26c6fa6709a30211aa6750badc87f4003e"
+revision = "0060e156826e733d69bf5b3322d1bdd0d03a1f9a"
+license = "MIT"
+citation = "https://www.epfl.ch/labs/lsi/page-102566-en-html/benchmarks/"
+
+[[sources]]
+id = "iwls2005"
+url = "https://iwls.org/iwls2005/IWLS_2005_benchmarks_V_1.0.tgz"
+sha256 = "f45955b87a255abd009f5bab081c658e90e7ee0b71c270d8a4948390a3033b51"
+revision = "IWLS_2005_benchmarks_V_1.0"
+license = "Per-design notices distributed with the IWLS archive"
+citation = "https://iwls.org/iwls2005/benchmarks.html"
+
+[[cases]]
+id = "epfl-adder"
+source = "epfl"
+rtl = ["arithmetic/adder.v"]
+top = "top"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-bar"
+source = "epfl"
+rtl = ["arithmetic/bar.v"]
+top = "top"
+category = "datapath"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-div"
+source = "epfl"
+rtl = ["arithmetic/div.v"]
+top = "top"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-log2"
+source = "epfl"
+rtl = ["arithmetic/log2.v"]
+top = "top"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-max"
+source = "epfl"
+rtl = ["arithmetic/max.v"]
+top = "top"
+category = "datapath"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-multiplier"
+source = "epfl"
+rtl = ["arithmetic/multiplier.v"]
+top = "top"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-sin"
+source = "epfl"
+rtl = ["arithmetic/sin.v"]
+top = "top"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-sqrt"
+source = "epfl"
+rtl = ["arithmetic/sqrt.v"]
+top = "top"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-square"
+source = "epfl"
+rtl = ["arithmetic/square.v"]
+top = "top"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-arbiter"
+source = "epfl"
+rtl = ["random_control/arbiter.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-cavlc"
+source = "epfl"
+rtl = ["random_control/cavlc.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-i2c"
+source = "epfl"
+rtl = ["random_control/i2c.v"]
+top = "i2c"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-mem-ctrl"
+source = "epfl"
+rtl = ["random_control/mem_ctrl.v"]
+top = "mem_ctrl"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-priority"
+source = "epfl"
+rtl = ["random_control/priority.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-voter"
+source = "epfl"
+rtl = ["random_control/voter.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-ctrl"
+source = "epfl"
+rtl = ["random_control/ctrl.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-dec"
+source = "epfl"
+rtl = ["random_control/dec.v"]
+top = "dec"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-int2float"
+source = "epfl"
+rtl = ["random_control/int2float.v"]
+top = "top"
+category = "datapath"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "epfl-router"
+source = "epfl"
+rtl = ["random_control/router.v"]
+top = "top"
+category = "control"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "opencores-i2c"
+source = "iwls2005"
+rtl = ["opencores/rtl/i2c/i2c_master_bit_ctrl.v", "opencores/rtl/i2c/i2c_master_byte_ctrl.v", "opencores/rtl/i2c/i2c_master_defines.v", "opencores/rtl/i2c/i2c_master_top.v", "opencores/rtl/i2c/timescale.v"]
+top = "i2c_master_top"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "wb_clk_i"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-sasc"
+source = "iwls2005"
+rtl = ["opencores/rtl/sasc/sasc_brg.v", "opencores/rtl/sasc/sasc_fifo4.v", "opencores/rtl/sasc/sasc_top.v", "opencores/rtl/sasc/timescale.v"]
+top = "sasc_top"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-usb-phy"
+source = "iwls2005"
+rtl = ["opencores/rtl/usb_phy/timescale.v", "opencores/rtl/usb_phy/usb_phy.v", "opencores/rtl/usb_phy/usb_rx_phy.v", "opencores/rtl/usb_phy/usb_tx_phy.v"]
+top = "usb_phy"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-fpu-except"
+source = "iwls2005"
+rtl = ["opencores/rtl/fpu/except.v"]
+top = "except"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-fpu-pre-norm"
+source = "iwls2005"
+rtl = ["opencores/rtl/fpu/pre_norm.v"]
+top = "pre_norm"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-fpu-pre-norm-mul"
+source = "iwls2005"
+rtl = ["opencores/rtl/fpu/pre_norm_fmul.v"]
+top = "pre_norm_fmul"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-fpu-add-sub"
+source = "iwls2005"
+rtl = ["opencores/rtl/fpu/primitives.v"]
+top = "add_sub27"
+category = "arithmetic"
+scenario = "area_unconstrained"
+
+[[cases]]
+id = "opencores-fpu-mul"
+source = "iwls2005"
+rtl = ["opencores/rtl/fpu/primitives.v"]
+top = "mul_r2"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-fpu-div"
+source = "iwls2005"
+rtl = ["opencores/rtl/fpu/primitives.v"]
+top = "div_r2"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-aes-mix-column"
+source = "iwls2005"
+rtl = ["opencores/rtl/systemcaes/byte_mixcolum.v", "opencores/rtl/systemcaes/mixcolum.v", "opencores/rtl/systemcaes/word_mixcolum.v"]
+top = "mixcolum"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0
+
+[[cases]]
+id = "opencores-aes-key-schedule"
+source = "iwls2005"
+rtl = ["opencores/rtl/systemcaes/keysched.v"]
+top = "keysched"
+category = "sequential"
+scenario = "timing_constrained"
+clock_port = "clk"
+clock_period = 10.0

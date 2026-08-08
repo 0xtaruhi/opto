@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "kernel-alu64"
+kind = "qor"
+class = "kernel"
+scenario = "area_unconstrained"
+language = "verilog"
+top = "top"
+sources = ["top.v"]
+flow = "synth"
+library_key = "sky130_hd"
+expected_area = 20042.972800
+area_tolerance = 0.001
+expected_cells = 3061
+cell_count_tolerance = 0.10
+maximum_wall_seconds = 30.0
+maximum_cpu_seconds = 120.0
+maximum_peak_rss_kib = 327680
