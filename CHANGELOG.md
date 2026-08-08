@@ -32,10 +32,9 @@ All notable changes to Opto are documented here. The format follows
 - Machine-checked documentation invariants preventing obsolete synthesis
   ownership and completion claims from re-entering current architecture
   documents.
-- A tiered industrial qualification contract for roughly hundred-thousand-,
-  million- and ten-million-gate designs. It records same-input Genus QoR,
-  end-to-end runtime and peak-RSS gates while keeping licensed artifacts
-  outside the public repository.
+- A tiered public qualification contract for roughly hundred-thousand-,
+  million- and ten-million-gate designs. It records reproducible QoR,
+  end-to-end runtime, and peak-RSS gates using redistributable inputs.
 - Initial public synthesis shell, typed design database, synthesis, timing,
   power, formal, report, qualification and public QoR infrastructure.
 - Criterion runtime benchmarks for the public `SynthesisEngine::synthesize`

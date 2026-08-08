@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    Candidate, CombinationalCellCatalog, CutDatabase, CutTruthDatabase, DC_FILL_CAP, HashMap,
-    Joint, KCut, LogicGraph, LogicNodeId, TruthTable, full_truth_mask, slot,
+    Candidate, CombinationalCellCatalog, CutDatabase, CutTruthDatabase, DONT_CARE_FILL_CAP,
+    HashMap, Joint, KCut, LogicGraph, LogicNodeId, TruthTable, full_truth_mask, slot,
 };
 use crate::planning::mapping_policy::compare_cell_cost;
 
@@ -90,7 +90,7 @@ pub(crate) fn node_candidates(
                 .with_input_inversions(inversions)
                 .bits;
                 let dont_care = full & !care;
-                if dont_care == 0 || dont_care.count_ones() > DC_FILL_CAP {
+                if dont_care == 0 || dont_care.count_ones() > DONT_CARE_FILL_CAP {
                     continue;
                 }
                 let base = cell_truth.bits & care;

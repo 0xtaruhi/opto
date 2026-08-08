@@ -17,8 +17,8 @@ fn synthesis_directives_are_database_properties() {
 
     let result = runtime
         .eval(&format!(
-            "read_hdl {{{}}}; elaborate top; set cell [get_cells u_child]; set net [get_nets n]; set_db $cell .dont_touch true; set_db $cell .ungroup false; set_db $net .dont_touch false; list [get_db $cell .dont_touch] [get_db $cell .ungroup] [get_db $net .dont_touch]",
-            source.display()
+            "read_hdl {}; elaborate top; set cell [get_cells u_child]; set net [get_nets n]; set_db $cell .dont_touch true; set_db $cell .ungroup false; set_db $net .dont_touch false; list [get_db $cell .dont_touch] [get_db $cell .ungroup] [get_db $net .dont_touch]",
+            tcl_path_word(&source)
         ))
         .unwrap();
     std::fs::remove_file(source).unwrap();
@@ -37,7 +37,10 @@ fn synthesis_database_properties_reject_invalid_values_and_object_classes() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
     runtime
-        .eval(&format!("read_hdl {{{}}}; elaborate top", source.display()))
+        .eval(&format!(
+            "read_hdl {}; elaborate top",
+            tcl_path_word(&source)
+        ))
         .unwrap();
     std::fs::remove_file(source).unwrap();
 

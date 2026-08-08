@@ -4,7 +4,7 @@
 use super::*;
 
 #[test]
-fn report_power_matches_the_dc_scalar_golden_and_survives_checkpoint() {
+fn report_power_matches_the_scalar_golden_and_survives_checkpoint() {
     let library = temp_script_path("opto-power.lib");
     let verilog = temp_script_path("opto-power.v");
     let checkpoint = temp_script_path("opto-power.ock");
@@ -17,8 +17,8 @@ fn report_power_matches_the_dc_scalar_golden_and_survives_checkpoint() {
 
     let configure = format!(
         "read_libs {}; read_hdl {}; elaborate top; synth",
-        library.display(),
-        verilog.display(),
+        tcl_path_word(&library),
+        tcl_path_word(&verilog),
     );
     let mut writer = Runtime::new(Session::new()).unwrap();
     writer.register_commands().unwrap();
@@ -31,7 +31,7 @@ fn report_power_matches_the_dc_scalar_golden_and_survives_checkpoint() {
     assert!(summary.starts_with("# Power report"));
     assert!(summary.contains("Cell internal power: 100.0000 uW (100%)"));
     assert!(summary.contains("Cell leakage power: 1.5000 nW"));
-    assert!(summary.contains(&format!("| {}", library.display())));
+    assert!(summary.contains(&format!("| {}", tcl_path_text(&library))));
     assert!(summary.contains("Operating conditions: nom_pvt"));
     assert!(summary.contains("Wire load model mode: top"));
     assert!(summary.contains("| combinational"));
@@ -95,7 +95,7 @@ fn report_power_matches_the_dc_scalar_golden_and_survives_checkpoint() {
         .unwrap();
 
     writer
-        .eval(&format!("save {}", checkpoint.display()))
+        .eval(&format!("save {}", tcl_path_word(&checkpoint)))
         .unwrap();
     let mut reader = Runtime::new(Session::new()).unwrap();
     reader.register_commands().unwrap();
@@ -103,8 +103,8 @@ fn report_power_matches_the_dc_scalar_golden_and_survives_checkpoint() {
         reader
             .eval(&format!(
                 "read_libs {}; resume {}; report_power",
-                library.display(),
-                checkpoint.display()
+                tcl_path_word(&library),
+                tcl_path_word(&checkpoint)
             ))
             .unwrap(),
         "restored report_power",
@@ -118,7 +118,7 @@ fn report_power_matches_the_dc_scalar_golden_and_survives_checkpoint() {
 }
 
 #[test]
-fn power_commands_reject_unimplemented_dc_options_explicitly() {
+fn power_commands_reject_unimplemented_options_explicitly() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 

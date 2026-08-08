@@ -17,7 +17,7 @@ body:
     id: compatibility
     attributes:
       label: Compatibility evidence
-      description: For Tcl/DC behavior, cite verified behavior or reliable documentation.
+      description: For Tcl behavior, cite the Opto contract, a public standard, or a reproducible example.
   - type: textarea
     id: proposal
     attributes:

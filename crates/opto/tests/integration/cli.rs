@@ -5,6 +5,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
+use crate::test_tcl::{tcl_path_text, tcl_path_word};
+
 fn opto() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_opto"));
     for (key, _) in std::env::vars_os() {
@@ -30,23 +32,20 @@ fn test_mapping_library() -> PathBuf {
 
 fn test_target_setup() -> String {
     let library = test_mapping_library();
-    format!("read_libs [list {}];", library.display())
-}
-
-#[test]
-fn dc_style_version_flag_is_supported() {
-    let output = opto().arg("-version").output().unwrap();
-
-    assert!(output.status.success(), "{}", output_text(&output));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+    format!("read_libs [list {}];", tcl_path_word(&library))
 }
 
 #[test]
 fn color_and_theme_flags_preserve_batch_output() {
     let output = opto()
         .args([
-            "--color", "always", "--theme", "light", "-no_init", "-x", "echo ok",
+            "--color",
+            "always",
+            "--theme",
+            "light",
+            "--no-init",
+            "-x",
+            "echo ok",
         ])
         .output()
         .unwrap();
@@ -59,7 +58,7 @@ fn color_and_theme_flags_preserve_batch_output() {
 #[test]
 fn piped_stdin_is_promptless_and_supports_multiline_tcl() {
     let mut child = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -77,8 +76,11 @@ fn piped_stdin_is_promptless_and_supports_multiline_tcl() {
 }
 
 #[test]
-fn x_evaluates_tcl_while_skipping_dc_setup_files() {
-    let output = opto().args(["-no_init", "-x", "echo ok"]).output().unwrap();
+fn x_evaluates_tcl_without_loading_init_files() {
+    let output = opto()
+        .args(["--no-init", "-x", "echo ok"])
+        .output()
+        .unwrap();
 
     assert!(output.status.success(), "{}", output_text(&output));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
@@ -87,7 +89,7 @@ fn x_evaluates_tcl_while_skipping_dc_setup_files() {
 #[test]
 fn threads_accepts_a_positive_worker_limit() {
     let output = opto()
-        .args(["-no_init", "--threads", "1", "-x", "echo ok"])
+        .args(["--no-init", "--threads", "1", "-x", "echo ok"])
         .output()
         .unwrap();
 
@@ -98,7 +100,7 @@ fn threads_accepts_a_positive_worker_limit() {
 #[test]
 fn threads_rejects_zero() {
     let output = opto()
-        .args(["-no_init", "--threads", "0", "-x", "echo ok"])
+        .args(["--no-init", "--threads", "0", "-x", "echo ok"])
         .output()
         .unwrap();
 
@@ -114,7 +116,7 @@ fn threads_rejects_zero() {
 fn embedded_tcl_reports_the_pinned_patchlevel_and_library() {
     let output = opto()
         .args([
-            "-no_init",
+            "--no-init",
             "-x",
             "list [info patchlevel] $tcl_library [file exists opto:/tcl8.6/init.tcl]",
         ])
@@ -156,15 +158,15 @@ fn opto_init_file_controls_match_the_startup_surface() {
     assert!(all.status.success(), "{}", output_text(&all));
     assert_eq!(String::from_utf8_lossy(&all.stdout), "home local\n");
 
-    let no_home = run(&["-no_home_init"], "set ::opto_setup_order");
+    let no_home = run(&["--no-home-init"], "set ::opto_setup_order");
     assert!(no_home.status.success(), "{}", output_text(&no_home));
     assert_eq!(String::from_utf8_lossy(&no_home.stdout), "local\n");
 
-    let no_local = run(&["-no_local_init"], "set ::opto_setup_order");
+    let no_local = run(&["--no-local-init"], "set ::opto_setup_order");
     assert!(no_local.status.success(), "{}", output_text(&no_local));
     assert_eq!(String::from_utf8_lossy(&no_local.stdout), "home\n");
 
-    let none = run(&["-no_init"], "info exists ::opto_setup_order");
+    let none = run(&["--no-init"], "info exists ::opto_setup_order");
     assert!(none.status.success(), "{}", output_text(&none));
     assert_eq!(String::from_utf8_lossy(&none.stdout), "0\n");
 
@@ -187,7 +189,7 @@ fn opto_does_not_depend_on_a_dynamic_tcl_library() {
 fn f_runs_tcl_script() {
     let script = temp_tcl("cli-script.tcl", "puts cli_script_ok\n");
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-f")
         .arg(&script)
         .output()
@@ -205,7 +207,7 @@ fn f_reports_tcl_errors_with_the_source_line() {
         "set ready 1\nunknown_command argument\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-f")
         .arg(&script)
         .output()
@@ -231,9 +233,9 @@ fn verilog_syntax_errors_point_at_the_exact_column() {
         "module top(input logic a, output logic y);\n  assign y = ;\nendmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
-        .arg(format!("read_hdl {}", source.display()))
+        .arg(format!("read_hdl {}", tcl_path_word(&source)))
         .output()
         .unwrap();
     std::fs::remove_file(&source).unwrap();
@@ -242,7 +244,7 @@ fn verilog_syntax_errors_point_at_the_exact_column() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("expected expression"), "{stderr}");
     assert!(
-        stderr.contains(&format!("{}:2:14", source.display())),
+        stderr.contains(&format!("{}:2:14", tcl_path_text(&source))),
         "{stderr}"
     );
     assert!(stderr.contains("assign y = ;"), "{stderr}");
@@ -255,7 +257,7 @@ fn f_runs_database_configuration_script() {
         "set_db hdl_search_path [list rtl include]\nputs [get_db hdl_search_path]\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-f")
         .arg(&script)
         .output()
@@ -277,13 +279,13 @@ fn f_runs_write_command_script() {
     let script = temp_tcl(
         "cli-write.tcl",
         &format!(
-            "read_hdl {{{}}}\nelaborate top\nwrite_hdl {{{}}}\n",
-            source.display(),
-            output_path.display()
+            "read_hdl {}\nelaborate top\nwrite_hdl {}\n",
+            tcl_path_word(&source),
+            tcl_path_word(&output_path)
         ),
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-f")
         .arg(&script)
         .output()
@@ -299,7 +301,7 @@ fn f_runs_write_command_script() {
 #[test]
 fn x_round_trips_database_search_paths() {
     let output = opto()
-        .args(["-no_init", "-x"])
+        .args(["--no-init", "-x"])
         .arg("set_db lib_search_path [list lib slow]; get_db lib_search_path")
         .output()
         .unwrap();
@@ -316,11 +318,11 @@ fn read_hdl_flow_uses_native_slang_bridge() {
         "module top(input logic [`WIDTH-1:0] a, output logic [`WIDTH-1:0] y); assign y = a; endmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "read_hdl -define {{WIDTH=4 DEBUG}} {}; elaborate top; get_db [get_db current_design] .name",
-            source.display()
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -337,11 +339,11 @@ fn read_hdl_loads_designs_without_implicit_current_design() {
         "module child(input a, output y); assign y = a; endmodule\nmodule top(input a, output y); child u_child(.a(a), .y(y)); endmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "read_hdl {}; elaborate top; puts [get_db [get_db current_design] .name]; puts [get_db [get_db designs] .name]",
-            source.display()
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -369,12 +371,12 @@ fn qor_report(name: &str, overrides: &[(&str, &str)]) -> String {
         command.env(key, value);
     }
     let output = command
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "{} read_hdl {}; elaborate top; synth; report_qor",
             test_target_setup(),
-            source.display()
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -410,7 +412,12 @@ fn a_removed_override_never_appears_in_a_report() {
 fn strip_volatile_report_fields(report: &str) -> String {
     report
         .lines()
-        .filter(|line| !line.starts_with("Date:") && !line.starts_with("Design:"))
+        .filter(|line| {
+            !line.starts_with("Date:")
+                && !line.starts_with("Design:")
+                && !line.starts_with("Synthesis stage: elapsed=")
+                && !line.starts_with("Optimization: elapsed=")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -422,11 +429,11 @@ fn read_hdl_always_comb_flow_uses_native_slang_bridge() {
         "module top(input logic a, output logic y); always_comb begin y = a; end endmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "read_hdl {}; elaborate top; puts [get_db [get_db current_design] .name]; check_design",
-            source.display()
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -443,11 +450,11 @@ fn synthesize_requires_a_mapping_library() {
         "module top(input logic a, output logic y); assign y = a; endmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "read_hdl {}; elaborate top; synth",
-            source.display()
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -470,11 +477,11 @@ fn rejects_multiple_continuous_drivers_before_netlist_aliasing() {
     let target_setup = test_target_setup();
     for command in ["check_design", "synth"] {
         let output = opto()
-            .arg("-no_init")
+            .arg("--no-init")
             .arg("-x")
             .arg(format!(
                 "{target_setup} read_hdl {}; elaborate top; {command}",
-                source.display()
+                tcl_path_word(&source)
             ))
             .output()
             .unwrap();
@@ -503,11 +510,11 @@ fn combinational_cycle_reports_hdl_before_the_synthesis_invocation() {
         &format!(
             "{}\nread_hdl {}\nelaborate top\nsynth\n",
             test_target_setup(),
-            source.display()
+            tcl_path_word(&source)
         ),
     );
     let output = opto()
-        .args(["--color", "never", "-no_init", "-f"])
+        .args(["--color", "never", "--no-init", "-f"])
         .arg(&script)
         .output()
         .unwrap();
@@ -555,11 +562,11 @@ fn rejects_internal_drive_of_externally_driven_input_port() {
     let target_setup = test_target_setup();
     for command in ["check_design", "synth"] {
         let output = opto()
-            .arg("-no_init")
+            .arg("--no-init")
             .arg("-x")
             .arg(format!(
                 "{target_setup} read_hdl {}; elaborate top; {command}",
-                source.display()
+                tcl_path_word(&source)
             ))
             .output()
             .unwrap();
@@ -582,11 +589,11 @@ fn rejects_hierarchical_output_and_continuous_driver_collision() {
     let target_setup = test_target_setup();
     for command in ["check_design", "synth"] {
         let output = opto()
-            .arg("-no_init")
+            .arg("--no-init")
             .arg("-x")
             .arg(format!(
                 "{target_setup} read_hdl {}; elaborate top; {command}",
-                source.display()
+                tcl_path_word(&source)
             ))
             .output()
             .unwrap();
@@ -614,12 +621,12 @@ fn rejects_library_output_and_continuous_driver_collision() {
     );
     for command in ["check_design", "synth"] {
         let output = opto()
-            .arg("-no_init")
+            .arg("--no-init")
             .arg("-x")
             .arg(format!(
                 "read_libs [list {0}]; read_hdl {1}; elaborate top; {command}",
-                library.display(),
-                source.display()
+                tcl_path_word(&library),
+                tcl_path_word(&source)
             ))
             .output()
             .unwrap();
@@ -647,12 +654,12 @@ fn rejects_unknown_library_instance_port() {
         "module top(input logic a, output wire y); BUF_X1 u_buffer(.A(a), .Z(y)); endmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "read_libs {}; read_hdl {}; elaborate top; check_design",
-            library.display(),
-            source.display()
+            tcl_path_word(&library),
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -680,12 +687,12 @@ fn rejects_vector_connection_to_scalar_library_pin() {
         "module top(input logic [1:0] a, output wire y); BUF_X1 u_buffer(.A(a), .Y(y)); endmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "read_libs {}; read_hdl {}; elaborate top; check_design",
-            library.display(),
-            source.display()
+            tcl_path_word(&library),
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -707,11 +714,11 @@ fn check_design_rejects_unresolved_instance_reference() {
         "module top(input logic a, output wire y); MISSING u_missing(.A(a), .Y(y)); endmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "read_hdl {}; elaborate top; check_design",
-            source.display()
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -732,11 +739,11 @@ fn rejects_multiple_procedural_drivers() {
         "module top(input wire a, b, output reg y); always @* y = a; always @* y = b; endmodule\n",
     );
     let output = opto()
-        .arg("-no_init")
+        .arg("--no-init")
         .arg("-x")
         .arg(format!(
             "read_hdl {}; elaborate top; check_design",
-            source.display()
+            tcl_path_word(&source)
         ))
         .output()
         .unwrap();
@@ -753,7 +760,7 @@ fn rejects_multiple_procedural_drivers() {
 #[test]
 fn read_hdl_rejects_unknown_options_before_bridge() {
     let output = opto()
-        .args(["-no_init", "-x", "read_hdl -bad_option rtl/top.sv"])
+        .args(["--no-init", "-x", "read_hdl -bad_option rtl/top.sv"])
         .output()
         .unwrap();
 
@@ -766,7 +773,7 @@ fn read_hdl_rejects_unknown_options_before_bridge() {
 fn get_clocks_behaves_like_a_collection_command() {
     let output = opto()
         .args([
-            "-no_init",
+            "--no-init",
             "-x",
             "create_clock -period 10 -name sys_clk; llength [get_clocks sys*]",
         ])

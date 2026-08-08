@@ -33,15 +33,12 @@ Thumbs.db
 /benchmarks/private/
 /.external/
 
-# Proprietary reference-tool regression assets belong outside the public tree.
-/tests/dc_compat/
-/benchmarks/dc_*/
-/.synopsys_dc.setup
-**/.synopsys_dc.setup
-/.synopsys_pt.setup
-**/.synopsys_pt.setup
-/benchmarks/pt_*/
-/qualification/pt_compat/
+# Non-redistributable reference assets belong outside the public tree.
+/tests/reference_private/
+/benchmarks/reference_private/
+/qualification/reference_private/
+license.dat
+*.license.dat
 
 # PDK and EDA artifacts must never be committed. Public benchmarks fetch and
 # verify their open inputs into ignored working directories.

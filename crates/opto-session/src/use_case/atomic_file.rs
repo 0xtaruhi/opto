@@ -89,6 +89,10 @@ fn sync_directory(parent: &Path, path: &Path, operation: &'static str) -> Result
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the platform implementations share one fallible durability interface"
+)]
 fn sync_directory(
     _parent: &Path,
     _path: &Path,

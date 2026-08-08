@@ -35,8 +35,6 @@ pub struct FrontendOptions {
     pub include_paths: Vec<PathBuf>,
     /// Preprocessor definitions as `(name, optional value)` pairs.
     pub defines: Vec<(String, Option<String>)>,
-    /// Enables slang's VCS-compatible language behavior.
-    pub vcs_compatibility: bool,
     /// Source-language revision.
     pub language: VerilogLanguage,
 }
@@ -208,7 +206,6 @@ fn slang_source_units(
             dependencies: Vec::new(),
             include_paths: options.include_paths.clone(),
             defines: slang_defines(options),
-            vcs_compatibility: options.vcs_compatibility,
             language: slang_language(options.language),
         })
         .collect())
@@ -219,7 +216,6 @@ fn slang_options(options: &FrontendOptions, max_threads: usize) -> SlangCompileO
         top: options.top.clone(),
         include_paths: options.include_paths.clone(),
         defines: slang_defines(options),
-        vcs_compatibility: options.vcs_compatibility,
         language: slang_language(options.language),
         max_threads: Some(max_threads),
     }

@@ -61,20 +61,15 @@ the complete cell histogram, wall/CPU time, peak RSS and failure diagnostics
 are mandatory. A timing result is accepted only as a complete tuple of clock
 period, critical delay, WNS, TNS and violating-path count.
 
-## Licensed reference runs
+## Reproducible reference runs
 
-The public checkout contains neither a commercial-tool driver nor commercial
-reports. The licensed environment owns generated scripts, tool configuration,
-logs, mapped netlists and result history. It exports one normalized
-`benchmarks/qor/schema/reference-result.schema.json` document per case and
-tool. Public tooling may consume those documents but must not copy the source
-artifacts into this repository.
-
-Run Opto and the reference tool from the same fixed host image after explicitly
-loading the licensed environment. Record exact tool versions, Opto commit and
-binary hash, library hash, input hashes, worker count and machine identity.
-Failures are first-class results; a failed or missing design never disappears
-from aggregate statistics.
+Each accepted Opto baseline exports one normalized
+`benchmarks/qor/schema/reference-result.schema.json` document per case. Run the
+candidate and baseline binaries from the same fixed host image, and record the
+exact Opto commits and binary hashes, library hash, input hashes, worker count,
+and machine identity. All published inputs must be redistributable or fetched
+from a checksum-pinned public source. Failures are first-class results; a
+failed or missing design never disappears from aggregate statistics.
 
 ## Regression policy
 
@@ -88,7 +83,6 @@ data, not hidden in the runner. The current commit-to-commit policy is:
 
 The aggregate-plus-tail policy deliberately permits local trade-offs: one
 design may lose while another gains. It rejects both a net corpus regression
-and sacrificing one design to improve the average. The long-term Genus
-throughput target remains 10x at equal QoR and uses the full 30-case pool in a
-separate licensed run. The executable gate is expected to grow toward all 30;
-reducing its case count or size floor is a policy change, not a baseline update.
+and sacrificing one design to improve the average. The executable gate is
+expected to grow toward all 30 public cases; reducing its case count or size
+floor is a policy change, not a baseline update.

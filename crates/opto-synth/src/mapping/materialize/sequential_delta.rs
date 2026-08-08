@@ -499,7 +499,7 @@ impl<'a> ArtifactBuilder<'a> {
 
     /// Names one sequential cell.
     ///
-    /// Registers and latches keep the DC-style `<state>_reg` name derived from
+    /// Registers and latches keep the `<state>_reg` name derived from
     /// the state they implement, so a published netlist, its reports, and any
     /// constraint that matches cells by name all refer to the same object a
     /// designer wrote. Only a state with no recoverable name falls back to a

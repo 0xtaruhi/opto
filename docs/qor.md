@@ -12,10 +12,9 @@ Area and cell comparisons use identical RTL and Liberty inputs. Comparative
 slack and critical delay remain unpublished until the same independent STA
 contract evaluates every mapped netlist.
 
-The production regional architecture additionally defines an external
+The production regional architecture additionally defines a public
 hundred-thousand-, million- and ten-million-gate qualification contract in
-[`architecture.md`](architecture.md). Its short-term same-host goal is
-end-to-end geometric-mean throughput no slower than Genus with five-percent
-area/timing bounds and peak RSS no higher than the reference. Ten-times
-geometric-mean throughput is the long-term target. These gates have not yet
-been demonstrated and are not performance claims about the current tree.
+[`architecture.md`](architecture.md). Candidate commits are compared with the
+last accepted Opto baseline on the same host and worker count, with versioned
+area, timing, throughput, and peak-RSS bounds. These large-scale gates have not
+yet been demonstrated and are not performance claims about the current tree.

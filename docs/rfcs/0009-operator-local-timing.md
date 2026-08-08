@@ -598,7 +598,7 @@ are evaluated at the target report precision:
 - runtime and RSS are recorded and reviewed, not silently omitted.
 
 The baseline, target files, tool revision, commands, and report precision are
-checked in before results are collected. Private PDK and commercial-tool data
+checked in before results are collected. Private PDK and non-redistributable data
 remain outside the public repository.
 ## Rollout
 
@@ -695,15 +695,9 @@ size without freezing the interface.
 **Model latch time borrowing immediately.** Deferred; unsupported multi-phase
 latch designs fail explicitly rather than using an optimistic approximation.
 
-## References
+## Evidence boundary
 
-- [Genus Synthesis Solution Datasheet](https://www.cadence.com/en_US/home/resources/datasheets/genus-synthesis-solution-ds.html)
-  — datapath microarchitecture alternatives, architecture-level PPA tradeoffs,
-  ChipWare components, concurrent MMMC, and timing/physical context clips.
-- [Genus Synthesis Solution Product Brief](https://www.cadence.com/en_US/home/resources/product-briefs/genus-synthesis-solution-pb.html)
-  — global analytical microarchitecture optimization and the local-optimum
-  limitations of traditional area-first refinement.
-
-These sources establish that datapath architecture selection is an industrial
-optimization concern. They do not establish an internal representation or
-prove any Opto QoR result.
+Datapath architecture selection is treated as an optimization problem over
+measured area, timing, and power tradeoffs. This RFC defines Opto's internal
+representation and validation requirements; no external product description
+establishes an Opto QoR result.

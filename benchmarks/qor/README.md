@@ -88,29 +88,27 @@ test if any gate or equivalence check failed. Checked-in prose tables are not
 baselines. One aggregate geometric mean must not hide a severe single-design
 regression.
 
-Reference runs performed in a separate licensed environment should export
-only the normalized fields in `schema/reference-result.schema.json`. The
-schema records tool version, input hashes, scenario, area/cells, resources and
-optional complete timing triplets. Scripts, libraries, logs and raw reports
-from that environment stay outside the public checkout.
+Accepted Opto baselines export only the normalized fields in
+`schema/reference-result.schema.json`. The schema records the Opto version,
+input hashes, scenario, area/cells, resources, and optional complete timing
+triplets. Published inputs are redistributable or fetched from a
+checksum-pinned public source.
 
 ## Target regional qualification
 
 The region-parallel architecture is qualified separately from the current
-public small-block gate. Its external corpus is tiered at approximately one
+public small-block gate. Its public corpus is tiered at approximately one
 hundred thousand, one million and ten million mapped gates and includes
 control, arithmetic, reconvergence, high fanout, pipelines, first-class
 memories and explicit sparse MMMC scenarios.
 
-For the short-term cutover gate, same-host and same-thread end-to-end
-geometric-mean throughput must be at least equal to Genus; no qualifying
-million-gate-or-larger case may fall below 0.8 times its throughput. Area and
-achieved frequency or critical delay must remain within five percent, with no
-new DRC or negative slack absent from the reference. Peak RSS must be no higher
-than Genus and bytes per mapped gate must not worsen at the ten-million-gate
-tier. Ten-times geometric-mean throughput under the same limits is the
-long-term target.
+The gate compares a candidate against the last accepted public Opto baseline
+on the same host and worker count. Area and achieved frequency or critical
+delay may regress by at most five percent per case; no new DRC or negative
+slack may appear. Peak RSS and bytes per mapped gate must not regress at the
+million- and ten-million-gate tiers. Suite manifests may additionally define
+versioned absolute throughput and memory ceilings.
 
-The public schema may carry normalized aggregate measurements from that
-external environment. It never carries licensed scripts, raw logs, private
-libraries, PDK data or tool configuration.
+The public schema carries normalized measurements, input hashes, and complete
+reproduction metadata. It never carries non-redistributable scripts, raw logs,
+private libraries, PDK data, or tool configuration.

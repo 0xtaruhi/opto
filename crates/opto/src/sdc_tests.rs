@@ -17,7 +17,7 @@ fn isolates_non_sdc_commands_before_applying_constraints() {
     let result = runtime
         .eval(&format!(
             "list [read_sdc {}] [llength [get_clocks before_error]] [llength [get_clocks after_error]]",
-            script.display()
+            tcl_path_word(&script)
         ))
         .unwrap();
     std::fs::remove_file(script).unwrap();
@@ -43,7 +43,7 @@ fn does_not_inherit_shell_tcl_variables() {
     let result = runtime
         .eval(&format!(
             "set PERIOD 7; list [read_sdc {}] [llength [get_clocks inherited_variable_clock]]",
-            script.display()
+            tcl_path_word(&script)
         ))
         .unwrap();
     std::fs::remove_file(script).unwrap();
@@ -65,7 +65,7 @@ fn syntax_only_discards_constraint_and_collection_changes() {
     let result = runtime
         .eval(&format!(
             "list [read_sdc -syntax_only -version 2.1 {}] [llength [get_clocks transient_clock]]",
-            script.display()
+            tcl_path_word(&script)
         ))
         .unwrap();
     std::fs::remove_file(script).unwrap();
@@ -80,8 +80,8 @@ fn evaluates_a_successful_sdc_file_exactly_once() {
     std::fs::write(
         &script,
         format!(
-            "set fd [open {{{}}} a]\nputs $fd evaluated\nclose $fd\ncreate_clock -period 5 -name once\n",
-            marker.display()
+            "set fd [open {} a]\nputs $fd evaluated\nclose $fd\ncreate_clock -period 5 -name once\n",
+            tcl_path_word(&marker)
         ),
     )
     .unwrap();
@@ -89,7 +89,7 @@ fn evaluates_a_successful_sdc_file_exactly_once() {
     runtime.register_commands().unwrap();
 
     let result = runtime
-        .eval(&format!("read_sdc {{{}}}", script.display()))
+        .eval(&format!("read_sdc {}", tcl_path_word(&script)))
         .unwrap();
 
     assert!(matches!(result, EvalResult::Complete(value) if value == "1"));
@@ -105,8 +105,8 @@ fn syntax_only_uses_a_safe_interpreter_without_external_side_effects() {
     std::fs::write(
         &script,
         format!(
-            "set fd [open {{{}}} w]\nputs $fd unsafe\nclose $fd\n",
-            marker.display()
+            "set fd [open {} w]\nputs $fd unsafe\nclose $fd\n",
+            tcl_path_word(&marker)
         ),
     )
     .unwrap();
@@ -114,7 +114,7 @@ fn syntax_only_uses_a_safe_interpreter_without_external_side_effects() {
     runtime.register_commands().unwrap();
 
     let result = runtime
-        .eval(&format!("read_sdc -syntax_only {{{}}}", script.display()))
+        .eval(&format!("read_sdc -syntax_only {}", tcl_path_word(&script)))
         .unwrap();
 
     assert!(matches!(result, EvalResult::Complete(value) if value == "0"));
@@ -133,15 +133,15 @@ fn rejects_command_abbreviations_and_nested_read_sdc() {
         "create_cloc -period 2 -name abbreviated_clock\n",
     )
     .unwrap();
-    std::fs::write(&outer, format!("read_sdc {}\n", nested.display())).unwrap();
+    std::fs::write(&outer, format!("read_sdc {}\n", tcl_path_word(&nested))).unwrap();
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 
     let result = runtime
         .eval(&format!(
             "list [read_sdc {}] [read_sdc {}]",
-            abbreviated.display(),
-            outer.display()
+            tcl_path_word(&abbreviated),
+            tcl_path_word(&outer)
         ))
         .unwrap();
     std::fs::remove_file(nested).unwrap();
@@ -165,7 +165,7 @@ fn exit_stops_sdc_without_exiting_the_shell() {
     let result = runtime
         .eval(&format!(
             "list [read_sdc {}] [llength [get_clocks before_exit]] [llength [get_clocks after_exit]]",
-            script.display()
+            tcl_path_word(&script)
         ))
         .unwrap();
     std::fs::remove_file(script).unwrap();

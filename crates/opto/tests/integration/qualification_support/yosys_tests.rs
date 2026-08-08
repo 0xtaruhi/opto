@@ -617,7 +617,7 @@ fn run_one(
     let process = run_process(
         opto,
         [
-            OsString::from("-no_init"),
+            OsString::from("--no-init"),
             OsString::from("-f"),
             script.as_os_str().to_owned(),
         ],

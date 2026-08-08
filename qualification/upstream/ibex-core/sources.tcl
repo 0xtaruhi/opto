@@ -23,6 +23,6 @@ while {[gets $manifest line] >= 0} {
 }
 close $manifest
 
-set ibex_vcs_options [list \
+set ibex_compile_options [list \
     +incdir+[file join $env(IBEX_ROOT) vendor lowrisc_ip ip prim rtl] \
     +incdir+[file join $env(IBEX_ROOT) vendor lowrisc_ip dv sv dv_utils]]

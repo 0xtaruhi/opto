@@ -89,7 +89,7 @@ mod tests {
     use super::NameTransform;
 
     #[test]
-    fn path_transform_strips_then_adds_dc_hierarchy_prefixes() {
+    fn path_transform_strips_then_adds_hierarchy_prefixes() {
         let transform = NameTransform::new(Some("chip.block"), Some("spef/top"));
         assert_eq!(
             transform.apply("spef|top|u1|n", '|').unwrap(),

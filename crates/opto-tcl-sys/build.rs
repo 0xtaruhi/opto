@@ -139,7 +139,7 @@ fn build_tcl(
     host: &str,
 ) {
     match (target_os, target_env) {
-        ("windows", "msvc") => build_tcl_windows_msvc(source_dir, out_dir),
+        ("windows", "msvc") => build_tcl_windows_msvc(source_dir, out_dir, target),
         ("windows", _) => panic!("opto-tcl-sys supports Windows through the MSVC toolchain"),
         _ => build_tcl_unix(source_dir, out_dir, target_os, target, host),
     }
@@ -189,14 +189,26 @@ fn build_tcl_unix(source_dir: &Path, out_dir: &Path, target_os: &str, target: &s
     }
 }
 
-fn build_tcl_windows_msvc(source_dir: &Path, out_dir: &Path) {
+fn build_tcl_windows_msvc(source_dir: &Path, out_dir: &Path, target: &str) {
     let build_dir = out_dir.join("tcl-build");
     let install_dir = out_dir.join("tcl-install");
     fs::create_dir_all(&build_dir).expect("failed to create Tcl build directory");
     fs::create_dir_all(&install_dir).expect("failed to create Tcl install directory");
 
-    let mut nmake = Command::new("nmake");
+    let nmake_tool = cc::windows_registry::find_tool(target, "nmake.exe")
+        .expect("the MSVC toolchain does not provide nmake.exe");
+    let vc_install_dir = nmake_tool
+        .path()
+        .ancestors()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("VC"))
+        })
+        .expect("nmake.exe is not inside a Visual Studio VC installation");
+    let mut nmake = nmake_tool.to_command();
     nmake
+        .env("VCINSTALLDIR", vc_install_dir)
         .current_dir(source_dir.join("win"))
         .arg("/f")
         .arg("makefile.vc")
@@ -210,7 +222,10 @@ fn build_tcl_windows_msvc(source_dir: &Path, out_dir: &Path) {
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     // Tcl 8.6's MSVC naming uses `t` for threads, `s` for a static library,
     // and `x` when that static library uses the dynamic MSVC runtime.
-    println!("cargo:rustc-link-lib=static=tcl86tsx");
+    // Keep Tcl's /GL archive intact instead of repacking it into this crate's
+    // rlib. MSVC needs the original archive metadata when linking downstream
+    // test and binary targets.
+    println!("cargo:rustc-link-lib=static:-bundle=tcl86tsx");
     for library in ["advapi32", "netapi32", "user32", "userenv", "ws2_32"] {
         println!("cargo:rustc-link-lib={library}");
     }

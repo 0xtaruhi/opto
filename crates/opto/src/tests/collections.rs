@@ -11,7 +11,10 @@ fn install_hierarchy(runtime: &mut Runtime, name: &str) -> PathBuf {
     )
     .unwrap();
     runtime
-        .eval(&format!("read_hdl {{{}}}; elaborate top", source.display()))
+        .eval(&format!(
+            "read_hdl {}; elaborate top",
+            tcl_path_word(&source)
+        ))
         .unwrap();
     source
 }

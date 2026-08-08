@@ -68,7 +68,7 @@ impl Session {
         Ok(match attribute {
             "name" | "full_name" => port.name.to_string(),
             "object_class" => "port".to_string(),
-            "direction" => dc_direction(port.direction).to_string(),
+            "direction" => direction_value(port.direction).to_string(),
             "bit_width" => port.width.to_string(),
             _ => String::new(),
         })
@@ -146,7 +146,7 @@ impl Session {
             .and_then(|reference| {
                 reference
                     .port_by_name(pin_name)
-                    .map(|port| dc_direction(port.direction).to_string())
+                    .map(|port| direction_value(port.direction).to_string())
             })
             .unwrap_or_default()
     }
@@ -272,7 +272,7 @@ fn directive_value(value: Option<bool>) -> String {
     value.map_or_else(String::new, |value| value.to_string())
 }
 
-fn dc_direction(direction: Direction) -> &'static str {
+fn direction_value(direction: Direction) -> &'static str {
     match direction {
         Direction::Input => "in",
         Direction::Output => "out",

@@ -9,8 +9,8 @@
 //! choices such as [`ColorMode`] and [`Theme`] never alter command semantics or
 //! report contents.
 //!
-//! Tcl commands normalize the small set of supported DC-style command-line
-//! spellings before typed argument parsing. Unsupported commands and options are
+//! The executable normalizes its supported single-dash command-line spellings
+//! before typed argument parsing. Unsupported commands and options are
 //! reported explicitly instead of routing through compatibility fallbacks.
 
 #![allow(
@@ -23,7 +23,7 @@
 )]
 #![allow(
     clippy::struct_excessive_bools,
-    reason = "typed command records preserve independent DC command switches without flag packing"
+    reason = "typed command records preserve independent command switches without flag packing"
 )]
 #![allow(
     clippy::missing_errors_doc,
@@ -67,6 +67,11 @@ use opto_session::{Session, SynthesisEffort, SynthesisEvent};
 use runtime::Runtime;
 #[cfg(test)]
 use std::path::PathBuf;
+#[cfg(test)]
+#[path = "../tests/support/tcl.rs"]
+mod test_tcl;
+#[cfg(test)]
+use test_tcl::{tcl_path_text, tcl_path_word};
 #[cfg(test)]
 mod tests;
 

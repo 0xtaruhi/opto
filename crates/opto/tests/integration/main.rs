@@ -6,3 +6,5 @@
 mod cli;
 mod qualification;
 mod qualification_support;
+#[path = "../support/tcl.rs"]
+mod test_tcl;

@@ -132,7 +132,7 @@ fn shell_exit_returns_requested_code() {
 }
 
 #[test]
-fn read_parasitics_accepts_dc_delay_reduction_modes() {
+fn read_parasitics_accepts_delay_reduction_modes() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 
@@ -187,7 +187,7 @@ fn shell_exit_stops_sourced_script() {
     let script = temp_script_path("opto-source-exit.tcl");
     std::fs::write(&script, "exit 5\necho should_not_run\n").unwrap();
     let args = ShellArgs {
-        command: Some(format!("source {}", script.display())),
+        command: Some(format!("source {}", tcl_path_word(&script))),
         no_init: true,
         ..ShellArgs::default()
     };
@@ -219,8 +219,8 @@ fn redirect_file_captures_command_result() {
 
     let result = runtime
         .eval(&format!(
-            "redirect -file {{{}}} {{echo hello}}",
-            path.display()
+            "redirect -file {} {{echo hello}}",
+            tcl_path_word(&path)
         ))
         .unwrap();
 

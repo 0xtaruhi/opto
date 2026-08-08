@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 format = 1
-id = "tcl-dc-collections"
+id = "tcl-collections"
 kind = "regression"
-category = "tcl_dc"
+category = "tcl"
 top = "top"
 sources = ["top.sv"]
 script = "run.tcl"

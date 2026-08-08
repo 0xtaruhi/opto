@@ -242,7 +242,7 @@ static Tcl_Channel opto_open(Tcl_Interp *interp, Tcl_Obj *path_ptr, int mode,
         return NULL;
     }
     if (Tcl_SetChannelOption(interp, channel, "-encoding", "utf-8") != TCL_OK ||
-        Tcl_SetChannelOption(interp, channel, "-translation", "lf") != TCL_OK) {
+        Tcl_SetChannelOption(interp, channel, "-translation", "auto") != TCL_OK) {
         Tcl_Close(NULL, channel);
         return NULL;
     }

@@ -5,8 +5,8 @@
 
 ## Summary
 
-Opto uses a flat Tcl command surface with a Genus/Common UI-inspired database
-model. The normal synthesis lifecycle is deliberately short:
+Opto uses a flat Tcl command surface with a coherent typed database model. The
+normal synthesis lifecycle is deliberately short:
 
 ```tcl
 set_db hdl_search_path {. ./rtl}
@@ -27,16 +27,15 @@ write_hdl build/top.v
 save build/top.ock
 ```
 
-There is one public synthesis command: `synth`. Opto does not expose
-`synthesis`, high-effort synthesis, `syn_generic`, `syn_map`, or `syn_opt`. Effort is a
-typed database property, not a command-name fork. Generic optimization,
-technology mapping, and post-map closure remain internal stages whose
-boundaries may evolve without breaking user scripts.
+There is one public synthesis command: `synth`. Effort is a typed database
+property, not a command-name fork. Generic optimization, technology mapping,
+and post-map closure remain internal stages whose boundaries may evolve
+without breaking user scripts.
 
-Opto adopts the strongest part of Genus Common UI: one coherent object and
-property model spanning configuration, synthesis, timing, power, and future
-implementation or verification domains. It does not copy Genus' historical
-stage commands or its report ensembles. Commands remain flat because
+One coherent object and property model spans configuration, synthesis, timing,
+power, and future implementation or verification domains. Internal stages are
+not exposed as historical command families or report ensembles. Commands
+remain flat because
 `report_timing` and `write_hdl` are clearer than mandatory `report timing` and
 `write hdl` nesting.
 
@@ -54,15 +53,10 @@ The command system follows these priorities, in order:
 7. Internal pipeline stages and compatibility-only concepts are not public
    API.
 
-DC and Genus are design inputs, not compatibility targets. Cadence describes
-Common UI as aligning initialization, database access, command consistency,
-reporting, and metrics across its digital tools. That consistency is worth
-adopting. Vendor command inventories and abbreviations are not.
-
-References:
-
-- [Genus Synthesis Solution datasheet](https://www.cadence.com/en_US/home/resources/datasheets/genus-synthesis-solution-ds.html)
-- [Cadence Common UI command examples](https://support1.cadence.com/public/docs/content/20448740.html)
+Opto's command catalog, typed parser, database schema, report schemas, and
+tests define this interface. Public standards such as Tcl, SDC, Liberty, SPEF,
+and SystemVerilog remain external format boundaries; another product's command
+inventory or abbreviations do not.
 
 ## Naming rules
 
@@ -105,11 +99,11 @@ forced into a generic `run` command.
 library arenas, and publishes nothing if any input fails.
 
 All successfully loaded libraries are visible database objects. A future MMMC
-scenario selects an explicit library collection. Opto does not reproduce DC's
-implicit `target_library`, wildcard `link_library`, or synthetic `*` entry.
+scenario selects an explicit library collection. Opto does not provide hidden
+library variables or synthetic wildcard entries.
 
-The singular `read_lib` command is not retained beside `read_libs`; there is
-one command accepting one or more files.
+`read_libs` is the single library-ingestion command and accepts one or more
+files.
 
 ### HDL loading
 
@@ -125,9 +119,9 @@ append batches in command order. Include directories and defines are explicit
 typed options or root database properties; there is no logical WORK-library
 setup ceremony.
 
-`analyze` and `read_file` are removed. They describe competing DC ingestion
-paths and make it unclear whether elaboration has occurred. VHDL options are
-not advertised until a real VHDL frontend and mixed-language model exist.
+`read_hdl` is the single HDL-ingestion command and never performs elaboration.
+VHDL options are not advertised until a real VHDL frontend and mixed-language
+model exist.
 
 ### Elaboration
 
@@ -146,14 +140,14 @@ get_db current_design
 set_db current_design [lindex [get_db designs cpu_top] 0]
 ```
 
-There is no separate `current_design` command, `list_designs` command, or
-parallel explicit-design argument convention on every operation.
+Design selection remains part of the database model rather than a parallel
+explicit-design argument convention on every operation.
 
 ### Constraints
 
 `read_sdc` evaluates a constraint file atomically against the selected design
 and scenario. Implemented SDC commands remain usable interactively because SDC
-is a public standards boundary, not because Opto imitates a vendor shell.
+is a public standards boundary, not because Opto imitates another shell.
 
 An SDC failure publishes no partial clocks, exceptions, delays, derates, or
 design rules. Unsupported SDC commands and options are errors rather than
@@ -190,9 +184,8 @@ One database interface scales better than separate application-variable,
 attribute, current-object, and object-list command families. It also gives
 future timing, power, physical, and formal domains a shared vocabulary.
 
-Opto therefore removes `set_app_var`, `get_app_var`, `get_attribute`,
-`list_attributes`, and standalone current-object commands. Their useful
-semantics belong in `set_db` and `get_db`.
+Configuration and object properties use the typed database API rather than
+parallel variable systems or one setter command per property.
 
 This is not an unrestricted string-addressed database. Every root property,
 object class, relationship, and object property is declared in one schema with:
@@ -266,7 +259,7 @@ remain explicit commands. SDC constraint creation also remains in SDC.
 
 Database queries return ordinary Tcl lists whose elements are typed opaque
 object handles. Consequently normal Tcl `foreach`, `lindex`, and `llength`
-replace DC's collection-control command family.
+replace a separate collection-control command family.
 
 An object handle encodes a process generation, object class, and stable object
 ID. Its printable form is not a design path. A stale handle fails explicitly;
@@ -290,9 +283,8 @@ Reports keep flat descriptive names:
 - `report_clock`;
 - `report_power`.
 
-Opto intentionally does not adopt Genus-style report ensembles. A report name
-is already unambiguous, and `report_timing` composes naturally with SDC and
-existing EDA vocabulary.
+Opto does not use report ensembles. A report name is already unambiguous, and
+`report_timing` composes naturally with SDC and existing EDA vocabulary.
 
 Where structured data exists, reports share these options:
 
@@ -333,7 +325,7 @@ continuation that depends on them.
 
 Checkpoint decoding validates the schema, frontend and cache ABIs, lengths,
 checksums, IDs, and cross-owner references before atomically replacing live
-session state. The public names are `save` and `resume`; no vendor-format
+session state. The public names are `save` and `resume`; no external-format
 compatibility aliases are retained.
 
 ## Scenarios and MMMC
@@ -403,20 +395,20 @@ than their own variable system. They add an action command only for a real
 operation. Internal phases remain internal unless users must independently
 control and consume a stable product boundary.
 
-## Deliberate departures from Genus and DC
+## Opto interface decisions
 
-Opto intentionally differs from both tools in these places:
+The public surface makes these deliberate choices:
 
-- `synth` replaces DC's `synthesis` / high-effort synthesis split and Genus'
-  `syn_generic` / `syn_map` / `syn_opt` split;
-- reports stay flat rather than using Genus report ensembles;
+- `synth` is the only public synthesis operation; internal stages remain
+  private;
+- reports stay flat rather than using report ensembles;
 - `get_db` and `set_db` are schema-typed and do not allow arbitrary database
   mutation;
 - object queries return standard Tcl lists of typed handles rather than
-  requiring a DC collection-control language;
+  requiring a separate collection-control language;
 - elaboration owns hierarchy resolution, so there is no separate `link`
   lifecycle state;
-- format-specific output commands replace DC's overloaded `write`;
+- format-specific output commands replace an overloaded generic `write`;
 - no command or option abbreviations, compatibility aliases, inert options,
   fake properties, or missing report fields;
 - no automatic name rebinding for stale objects;
@@ -428,25 +420,9 @@ unfamiliar.
 
 ## Command cutover
 
-The command migration is a breaking atomic cutover. Opto does not ship old and
-new names together.
-
-| Removed surface | Canonical replacement |
-| --- | --- |
-| `analyze`, `read_file` | `read_hdl` |
-| `synthesis`, high-effort synthesis | `synth` plus `synth_effort` |
-| `set_app_var`, `get_app_var` | `set_db`, `get_db` |
-| `current_design`, `list_designs` | `set_db` / `get_db current_design`, `get_db designs` |
-| `get_attribute`, `list_attributes` | `get_db` property projection and schema help |
-| `set_dont_touch`, `set_ungroup`, `set_dont_use` | mutable typed object properties through `set_db` |
-| `define_design_lib`, `report_design_lib` | removed; source batches and `get_db designs` / `libraries` |
-| `link` | part of `elaborate` |
-| `read_lib` | `read_libs` |
-| `write`, `write_file` | `write_hdl`, `save`, or `write_sdc` |
-| DC collection-control commands | normal Tcl lists plus `get_db` |
-
-Tests, help, completion, examples, and documentation change in the same
-cutover. No deprecated handlers or migration aliases remain.
+The command inventory is defined atomically by the declarative schema. Tests,
+help, completion, examples, and documentation change with that schema. Opto
+does not ship deprecated handlers or migration aliases.
 
 ## Implementation requirements
 
@@ -475,24 +451,23 @@ Required validation includes:
 `design elaborate`, `synth run`, and `report timing` add hierarchy without
 clarifying these already-specific operations. Opto keeps flat commands.
 
-### DC-shaped command retention
+### Compatibility-only command retention
 
-Keeping `analyze`, `synthesis`, high-effort synthesis, application variables, and the
-collection-control family would preserve historical divisions that Opto does
-not need. Familiarity alone does not justify duplicate lifecycle states or
-command-name policy forks.
+Aliases, duplicate lifecycle states, inert flags, and compatibility-only
+command families would enlarge the public contract without adding behavior.
+Familiarity alone does not justify command-name policy forks.
 
 ### Public synthesis stages
 
-`syn_generic`, `syn_map`, and `syn_opt` make implementation boundaries into a
-script contract. Opto publishes the stable operation, `synth`, and keeps its
-stages private.
+Exposing optimization, mapping, and closure as separate commands would make
+implementation boundaries into a script contract. Opto publishes the stable
+operation, `synth`, and keeps its stages private.
 
 ### Unrestricted database mutation
 
 A generic setter without a schema would bypass ownership, validation, and
-cache invalidation. Opto keeps the Common UI interaction model but makes every
-property typed and every mutation transactional.
+cache invalidation. Every Opto property is typed and every mutation is
+transactional.
 
 ### Explicit artifact plumbing
 

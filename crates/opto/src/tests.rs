@@ -31,5 +31,17 @@ fn temp_script_path(name: &str) -> PathBuf {
 fn test_target_setup() -> String {
     let library = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../qualification/libraries/opto_test.lib");
-    format!("read_libs [list {}]", library.display())
+    format!("read_libs [list {}]", tcl_path_word(&library))
+}
+
+#[test]
+fn tcl_path_words_preserve_paths_without_substitution() {
+    let path =
+        std::path::Path::new("directory with spaces/$name/[command]/{braces}/\"quote\"/a\\b");
+    let mut runtime = Runtime::new(Session::new()).unwrap();
+    let result = runtime
+        .eval(&format!("set path {}", tcl_path_word(path)))
+        .unwrap();
+
+    assert!(matches!(result, EvalResult::Complete(value) if value == tcl_path_text(path)));
 }

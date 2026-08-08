@@ -223,13 +223,13 @@ fn print_banner(palette: Palette, colors: bool) {
         let brand = Palette::terminal(palette.primary).bold();
         let muted = Palette::terminal(palette.muted);
         anstream::println!(
-            "{brand}opto{brand:#} {muted}{} · DC-compatible synthesis shell{muted:#}",
+            "{brand}opto{brand:#} {muted}{} · deterministic synthesis shell{muted:#}",
             env!("CARGO_PKG_VERSION")
         );
         anstream::println!("{muted}Tcl 8.6 · Tab complete · Ctrl-R history{muted:#}\n");
     } else {
         println!(
-            "opto {} · DC-compatible synthesis shell",
+            "opto {} · deterministic synthesis shell",
             env!("CARGO_PKG_VERSION")
         );
         println!("Tcl 8.6 · Tab complete · Ctrl-R history\n");

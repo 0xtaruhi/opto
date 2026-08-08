@@ -50,7 +50,7 @@ fn report_resources_tracks_synthesis_state_and_source_location() {
     let before = runtime
         .eval(&format!(
             "read_hdl {}; elaborate top; report_resources",
-            source.display()
+            tcl_path_word(&source)
         ))
         .unwrap();
     let after = runtime.eval("synth; report_resources").unwrap();
@@ -65,7 +65,7 @@ fn report_resources_tracks_synthesis_state_and_source_location() {
     match after {
         EvalResult::Complete(report) => {
             assert!(report.contains("DW01_add"));
-            assert!(report.contains(source.to_str().unwrap()));
+            assert!(report.contains(&tcl_path_text(&source)));
             assert!(report.contains("add_5"));
             assert!(report.contains("cla"));
             assert!(report.contains("| Resource"));
@@ -96,7 +96,7 @@ fn report_resources_accepts_design_lists_and_hierarchy() {
     runtime
         .eval(&format!(
             "read_hdl {}; elaborate top; synth",
-            source.display()
+            tcl_path_word(&source)
         ))
         .unwrap();
 
@@ -134,7 +134,7 @@ fn report_resources_accepts_design_lists_and_hierarchy() {
 }
 
 #[test]
-fn report_timing_accepts_dc_delay_type_selectors() {
+fn report_timing_accepts_documented_delay_type_selectors() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 
@@ -179,7 +179,7 @@ fn get_clocks_returns_collection_handle() {
 }
 
 #[test]
-fn set_clock_transition_accepts_dc_edge_and_delay_options() {
+fn set_clock_transition_accepts_edge_and_delay_options() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 
@@ -193,7 +193,7 @@ fn set_clock_transition_accepts_dc_edge_and_delay_options() {
 }
 
 #[test]
-fn design_rule_commands_use_dc_names_and_object_lists() {
+fn design_rule_commands_use_documented_names_and_object_lists() {
     let source = temp_script_path("opto-design-rules.sv");
     std::fs::write(
         &source,
@@ -203,7 +203,10 @@ fn design_rule_commands_use_dc_names_and_object_lists() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
     runtime
-        .eval(&format!("read_hdl {{{}}}; elaborate top", source.display()))
+        .eval(&format!(
+            "read_hdl {}; elaborate top",
+            tcl_path_word(&source)
+        ))
         .unwrap();
 
     for command in [

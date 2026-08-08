@@ -75,7 +75,7 @@ You represent that:
    becomes inaccurate.
 
 Do not submit confidential information, trade secrets, proprietary PDK data,
-private RTL, commercial-tool material, credentials, or anything else that You
+private RTL, non-redistributable material, credentials, or anything else that You
 are not authorized to publish and license.
 
 ## 5. Public project license

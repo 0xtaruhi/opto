@@ -26,7 +26,7 @@ restated from the SDC text, and whose table is pinned in the public tree by
 isolated unit tests.
 
 The implementation also lands the four public Tcl commands against this
-mechanism. Their DC-compatible point classes, edge-qualified forms,
+mechanism. Their documented point classes, edge-qualified forms,
 setup/hold selection, `-start`/`-end`, `-reset_path`, comments, and
 clock-latency option are therefore part of this RFC's completed surface.
 
@@ -107,7 +107,7 @@ PathException {
 rise/fall qualification of every path point.
 
 An unrestricted false path or multicycle path is rejected at the command
-boundary. A global maximum/minimum delay remains valid DC behavior. Every
+boundary. A global maximum/minimum delay remains valid behavior. Every
 explicit `through` filter must be nonempty, and its edge qualifier occupies the
 same index.
 
@@ -310,7 +310,7 @@ checking, which is the tree's usual instrument. Three layers replace it.
 - **Invariant-oriented cases.** The regressions verify that a winning false
   path removes the path, setup and hold multicycle adjustments use their
   respective equations, reversed `through` sequences do not match, and path
-  delays choose the DC-compatible tighter value after priority arbitration.
+  delays choose the documented tighter value after priority arbitration.
 - **Arbitration table pinned by isolated tests.** The ranks, the specificity
   mask, the tightness rules, and the multicycle equations each have a unit test
   in `constraints/arbitration.rs` that fails on any change. These tests are the

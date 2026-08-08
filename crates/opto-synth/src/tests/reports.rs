@@ -34,7 +34,7 @@ fn reports_are_derived_from_rtl_module() {
 }
 
 #[test]
-fn area_report_counts_port_and_net_bits_like_dc() {
+fn area_report_counts_port_and_net_bits() {
     let mut module = WordModule::new("top");
     let vector = WordType::new(2, false, LogicStateKind::FourState).unwrap();
     let input = module

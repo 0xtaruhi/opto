@@ -336,11 +336,8 @@ mod tests {
 
     #[test]
     fn parses_slang_source_diagnostic() {
-        let path = std::env::temp_dir().join(format!(
-            "opto-diagnostic-{}-{}.sv",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let path =
+            std::env::temp_dir().join(format!("opto-diagnostic-{}-slang.sv", std::process::id()));
         std::fs::write(&path, "module top;\n  assign y = ;\nendmodule\n").unwrap();
         let message = format!(
             "verilog frontend: slang compilation failed: {}:2:14: error: expected expression\n  assign y = ;\n             ^",

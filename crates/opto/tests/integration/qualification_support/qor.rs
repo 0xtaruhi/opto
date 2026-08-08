@@ -29,7 +29,7 @@ pub(super) fn measure_opto(case: &Case, opto: &Path, output_root: &Path) -> Opto
     let opto_run = run_process(
         opto,
         vec![
-            OsString::from("-no_init"),
+            OsString::from("--no-init"),
             OsString::from("-f"),
             opto_script.as_os_str().to_owned(),
         ],
@@ -130,7 +130,7 @@ pub(super) fn run(case: &Case, opto: &Path, yosys: &Path, output_root: &Path) ->
         let run = run_process(
             opto,
             [
-                OsString::from("-no_init"),
+                OsString::from("--no-init"),
                 OsString::from("-f"),
                 script.as_os_str().to_owned(),
             ],

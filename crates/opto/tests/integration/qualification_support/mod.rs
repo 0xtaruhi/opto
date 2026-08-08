@@ -170,7 +170,7 @@ pub(super) fn run_named_suite(relative_path: &str, mode: RunMode) {
     let document = ResultDocument {
         format: schema::FORMAT_VERSION,
         suite: suite.name,
-        opto: tool_identity(&opto, &["-version"]),
+        opto: tool_identity(&opto, &["--version"]),
         yosys: yosys.as_deref().map(|path| tool_identity(path, &["-V"])),
         results,
     };
@@ -556,7 +556,7 @@ fn run_regression_case(
     ]);
     let run = run(
         opto,
-        ["-no_init".as_ref(), "-f".as_ref(), script.as_os_str()],
+        ["--no-init".as_ref(), "-f".as_ref(), script.as_os_str()],
         &environment,
         &output.join("opto.log"),
         false,

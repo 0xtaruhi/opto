@@ -8,7 +8,7 @@
 #![allow(
     clippy::fn_params_excessive_bools,
     clippy::struct_excessive_bools,
-    reason = "typed use-case options preserve independent DC command switches without lossy flag packing"
+    reason = "typed use-case options preserve independent command switches without lossy flag packing"
 )]
 
 //! Stateful synthesis and design-analysis session.

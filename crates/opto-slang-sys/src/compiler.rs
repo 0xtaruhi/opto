@@ -30,9 +30,6 @@ fn configured_path_compiler(
     options: &SlangCompileOptions,
 ) -> Result<Compiler, SlangError> {
     let compiler = Compiler::new()?;
-    if options.vcs_compatibility {
-        compiler.set_vcs_compatibility()?;
-    }
     compiler.set_language(options.language)?;
     if let Some(max_threads) = options.max_threads {
         compiler.set_max_threads(max_threads)?;
@@ -112,9 +109,6 @@ fn configured_compiler(
         ));
     }
     let compiler = Compiler::new()?;
-    if units.iter().any(|unit| unit.vcs_compatibility) {
-        compiler.set_vcs_compatibility()?;
-    }
     compiler.set_language(
         units
             .iter()
@@ -232,13 +226,6 @@ impl Compiler {
         // SAFETY: the compiler is live and `top` is NUL-terminated and valid through the call.
         self.check_status(unsafe {
             ffi::opto_slang_compiler_set_top(self.raw.as_ptr(), top.as_ptr())
-        })
-    }
-
-    fn set_vcs_compatibility(&self) -> Result<(), SlangError> {
-        // SAFETY: `self.raw` is a live compiler handle owned by this wrapper.
-        self.check_status(unsafe {
-            ffi::opto_slang_compiler_set_vcs_compatibility(self.raw.as_ptr())
         })
     }
 

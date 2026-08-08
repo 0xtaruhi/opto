@@ -68,7 +68,7 @@ impl Session {
         self.create_clock_with_options(ClockSpec::new(name, period, sources, waveform)?, false)
     }
 
-    /// Create a clock with DC-compatible source-extension and comment options.
+    /// Create a clock with source-extension and comment options.
     pub fn create_clock_with_options(
         &mut self,
         clock: ClockSpec,

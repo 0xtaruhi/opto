@@ -25,7 +25,7 @@
 </div>
 
 Opto is an open-source synthesis shell written primarily in Rust. It presents
-a familiar, DC-shaped Tcl command surface while using a typed database,
+a compact, documented Tcl command surface while using a typed database,
 region-parallel optimization, deterministic assembly, Liberty technology
 mapping, incremental timing analysis, and transactional post-map repair under
 the hood.
@@ -40,7 +40,7 @@ the hood.
 | | |
 |---|---|
 | **One product entry point** | A single `opto` executable runs scripts, evaluates commands, or opens the interactive shell. There is no project-manager or manifest layer. |
-| **Familiar Tcl surface** | Commands, arguments, collections, and reports draw from established ASIC synthesis workflows without claiming strict DC or Genus compatibility. |
+| **Documented Tcl surface** | Commands, arguments, collections, and reports form one tested Opto interface with explicit errors for unsupported behavior. |
 | **One reproducible flow** | Every design follows the same production pipeline. Effort settings bound search policy; they do not select a hidden alternate architecture. |
 | **Built for parallel scale** | Compact typed IDs, contiguous arenas, string interning, region-private work, and deterministic publication are first-class design constraints. |
 | **Integrated analysis** | Typed timing constraints, setup/hold analysis, latch transparency, sparse scenarios, parasitics, power estimation, and incremental updates feed synthesis decisions. |
@@ -53,7 +53,7 @@ the hood.
 - The latest stable Rust toolchain; Opto does not define a fixed MSRV.
 - CMake 3.20 or newer, a C++20 compiler, and Git.
 - `make` on Unix, or MSVC with `nmake` on Windows.
-- Linux x86-64 builds use `clang` and the `mold` linker.
+- Opto uses the platform's default linker.
 
 Clone the repository together with its pinned frontend dependencies:
 
@@ -61,7 +61,7 @@ Clone the repository together with its pinned frontend dependencies:
 git clone --recurse-submodules https://github.com/0xtaruhi/opto.git
 cd opto
 cargo build --release --locked
-./target/release/opto -version
+./target/release/opto --version
 ```
 
 On Windows, run `target\release\opto.exe`. If the repository was cloned
@@ -95,7 +95,7 @@ Then run it:
 For a quick non-interactive command:
 
 ```sh
-./target/release/opto -no_init -x \
+./target/release/opto --no-init -x \
   "read_libs cells.lib; read_hdl top.sv; elaborate top; synth; report_area"
 ```
 
@@ -142,9 +142,9 @@ matrix says so.
 | Opto is | Opto is not |
 |---|---|
 | A synthesis shell and implementation platform | A project manager or manifest-based build system |
-| A coherent Tcl workflow influenced by DC and Genus | A strict compatibility clone of either tool |
+| A coherent, documented Tcl workflow | A compatibility clone of another tool |
 | A deterministic regional synthesis architecture | A collection of user-selectable synthesis pipelines |
-| A platform for reproducible public qualification | A source of unqualified commercial-tool parity claims |
+| A platform for reproducible public qualification | A source of unqualified parity claims |
 | An actively developed pre-1.0 project | A signoff replacement for a production ASIC flow |
 
 ## Project status
@@ -205,9 +205,9 @@ models do not, so no signoff correlation is claimed.
 
 ### Physical awareness
 
-There is no placement, congestion, or extracted interconnect model.
-Comparisons against placement-aware flows such as DC Topographical, Fusion
-Compiler, or Genus iSpatial are not meaningful yet.
+There is no placement, congestion, or extracted interconnect model. Results
+must therefore not be compared with placement-aware flows as if they measured
+the same problem.
 
 ### Memories
 
@@ -224,14 +224,17 @@ bounded local candidates, compact portable plans, deterministic local-ID
 stitch, dirty-region epochs, and reachable regional checkpoint records. Public
 regressions cover pinned Ibex and CVA6 configurations.
 
-Hundred-thousand-, million-, and ten-million-gate qualification and the stated
-10× Genus target have not yet been demonstrated.
+Hundred-thousand-, million-, and ten-million-gate qualification has not yet
+been demonstrated.
 
 ### Frontend
 
 SystemVerilog coverage is measured against the pinned `sv-tests` and Yosys
 corpora rather than claimed complete. VHDL and mixed-language designs are not
-supported.
+supported. The extended frontend and formal qualification workflow remains a
+manual evidence run while its [known equivalence failures](https://github.com/0xtaruhi/opto/issues/2)
+are resolved; required pull-request CI does not present that incomplete
+baseline as a passing guarantee.
 
 </details>
 
@@ -271,7 +274,7 @@ measurements may use `fast-release` when the profile is recorded explicitly.
 
 ```sh
 cargo build --profile fast-release --locked
-./target/fast-release/opto -version
+./target/fast-release/opto --version
 ```
 
 When using multiple Git worktrees, point `CARGO_TARGET_DIR` at one shared local
@@ -299,8 +302,9 @@ follow [AGENTS.md](AGENTS.md).
 
 ## Public data policy
 
-Proprietary PDK files, synthesized libraries, commercial-tool scripts and logs,
-license configuration, private QoR baselines, and internal regression assets
+Proprietary PDK files, characterized libraries that cannot be redistributed,
+non-redistributable scripts and logs, license configuration, private QoR
+baselines, and internal regression assets
 are intentionally excluded. Keep those inputs outside this checkout. Public
 benchmarks must use redistributable inputs or pinned sources verified by
 checksum.

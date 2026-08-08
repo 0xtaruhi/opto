@@ -99,7 +99,6 @@ fn native_analysis_defers_default_parameter_elaboration() {
         dependencies: Vec::new(),
         include_paths: Vec::new(),
         defines: Vec::new(),
-        vcs_compatibility: false,
         language: SlangLanguage::SystemVerilog2017,
     };
 
@@ -124,7 +123,6 @@ fn native_verilog_2005_rejects_systemverilog_port_shortcuts() {
             dependencies: Vec::new(),
             include_paths: Vec::new(),
             defines: Vec::new(),
-            vcs_compatibility: false,
             language: SlangLanguage::Verilog2005,
         };
 
@@ -151,7 +149,6 @@ fn native_source_units_preserve_independent_macro_scopes() {
             dependencies: Vec::new(),
             include_paths: Vec::new(),
             defines: Vec::new(),
-            vcs_compatibility: false,
             language: SlangLanguage::SystemVerilog2017,
         },
     ];
@@ -169,33 +166,6 @@ fn native_source_units_preserve_independent_macro_scopes() {
         .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(widths["width_two"], 2);
     assert_eq!(widths["width_three"], 3);
-}
-
-#[test]
-fn native_compile_applies_vcs_compatibility_explicitly() {
-    let source = NativeTestSource::new(
-        "module top(output logic y); assign y = later; logic later; endmodule\n",
-    );
-    let strict = compile(
-        std::slice::from_ref(&source.path),
-        &SlangCompileOptions {
-            top: Some("top".to_string()),
-            ..SlangCompileOptions::default()
-        },
-    )
-    .unwrap_err();
-    assert!(strict.to_string().contains("used before its declaration"));
-
-    let compilation = compile(
-        std::slice::from_ref(&source.path),
-        &SlangCompileOptions {
-            top: Some("top".to_string()),
-            vcs_compatibility: true,
-            ..SlangCompileOptions::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(compilation.top().unwrap(), Some("top"));
 }
 
 #[test]

@@ -9,7 +9,6 @@ use opto::{
     print_error,
 };
 use opto_session::{Session, SessionConfig, SynthesisConfig, SynthesisDiagnostics};
-use std::ffi::OsString;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -98,8 +97,7 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<i32, OptoError> {
-    let args = normalize_dc_style_args(std::env::args_os());
-    let cli = match Cli::try_parse_from(args) {
+    let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err)
             if matches!(
@@ -179,17 +177,4 @@ fn synthesis_diagnostics_from_environment() -> SynthesisConfig {
             check_incremental: std::env::var_os("OPTO_CHECK_INCREMENTAL").is_some(),
         },
     }
-}
-
-fn normalize_dc_style_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
-    args.into_iter()
-        .map(|arg| match arg.to_str() {
-            Some("-version") => OsString::from("--version"),
-            Some("-help") => OsString::from("--help"),
-            Some("-no_init") => OsString::from("--no-init"),
-            Some("-no_home_init") => OsString::from("--no-home-init"),
-            Some("-no_local_init") => OsString::from("--no-local-init"),
-            _ => arg,
-        })
-        .collect()
 }

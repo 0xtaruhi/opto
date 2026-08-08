@@ -16,8 +16,8 @@ fn read_hdl_accepts_preprocessor_options() {
 
     let result = runtime
         .eval(&format!(
-            "read_hdl -define WIDTH=8 -incdir . {{{}}}",
-            source.display()
+            "read_hdl -define WIDTH=8 -incdir . {}",
+            tcl_path_word(&source)
         ))
         .unwrap();
     std::fs::remove_file(source).unwrap();

@@ -19,7 +19,7 @@ jobs:
           - os: ubuntu-24.04
             asset: opto-linux-x86_64
             binary: target/release/opto
-          - os: macos-14
+          - os: macos-15
             asset: opto-macos-aarch64
             binary: target/release/opto
           - os: windows-2022

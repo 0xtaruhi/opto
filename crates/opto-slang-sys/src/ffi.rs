@@ -354,7 +354,6 @@ unsafe extern "C" {
     ) -> c_int;
     pub(crate) fn opto_slang_compiler_set_top(compiler: *mut Compiler, top: *const c_char)
     -> c_int;
-    pub(crate) fn opto_slang_compiler_set_vcs_compatibility(compiler: *mut Compiler) -> c_int;
     pub(crate) fn opto_slang_compiler_set_language(
         compiler: *mut Compiler,
         language: c_int,

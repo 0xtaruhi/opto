@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Reject private or proprietary artifacts from the public repository tree."""
+"""Reject private, secret, or non-redistributable artifacts from the public tree."""
 
 import re
 import sys
@@ -12,19 +12,14 @@ from check_license_headers import ROOT, repository_files
 
 
 FORBIDDEN_PREFIXES = (
-    "benchmarks/dc_qor/",
     "benchmarks/iscas89/",
     "benchmarks/qor/private/",
-    "qualification/dc_compat/",
+    "benchmarks/reference_private/",
+    "qualification/reference_private/",
+    "tests/reference_private/",
 )
 FORBIDDEN_PATHS = {
-    "crates/opto/tests/dc_compat.rs",
     "docs/big-refactor-execution-plan.md",
-    "qualification/upstream/ibex-core/compare.sh",
-    "qualification/upstream/ibex-core/dc.tcl",
-    "qualification/upstream/ibex-core/formality.tcl",
-    "qualification/upstream/ibex-core/reference.sh",
-    "qualification/upstream/ibex-core/verify.sh",
 }
 FORBIDDEN_SUFFIXES = (
     ".7z",
@@ -71,16 +66,13 @@ FORBIDDEN_FILENAMES = {
     "id_ecdsa",
     "id_ed25519",
     "id_rsa",
+    "license.dat",
     "service-account.json",
 }
 FORBIDDEN_TEXT = (
     ("foundry/process marker", "".join(("ts", "mc"))),
     ("private PDK path", "".join(("/data", "/pdk"))),
     ("private workspace path", "".join(("/data", "/eda-work"))),
-    ("commercial shell executable", "".join(("dc", "_shell"))),
-    ("commercial verification executable", "".join(("formal", "ity"))),
-    ("commercial signoff executable", "".join(("pt", "_shell"))),
-    ("commercial signoff tool", "".join(("prime", "time"))),
 )
 SECRET_PATTERNS = (
     (
@@ -120,6 +112,7 @@ SECRET_PATTERNS = (
 SELF = Path("tools/check_public_repository.py")
 PUBLIC_SYNTHETIC_LIBRARIES = {
     "benchmarks/qor/libraries/cover_test.lib",
+    "qualification/libraries/frontend_sequential.lib",
     "qualification/libraries/opto_test.lib",
 }
 

@@ -74,9 +74,11 @@ fn main() {
     println!("cargo:rustc-link-lib=static=opto_slang_bridge");
     println!("cargo:rustc-link-lib=static=svlang");
     println!("cargo:rustc-link-lib=static=fmt");
-    let cxx = cmake_cxx_compiler(&build_dir)
-        .unwrap_or_else(|| fail("CMake did not record the selected C++ compiler"));
-    link_cpp_standard_library(&cxx);
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        let cxx = cmake_cxx_compiler(&build_dir)
+            .unwrap_or_else(|| fail("CMake did not record the selected C++ compiler"));
+        link_cpp_standard_library(&cxx);
+    }
 }
 
 fn source_tree_fingerprint(roots: &[(&str, PathBuf)]) -> u64 {

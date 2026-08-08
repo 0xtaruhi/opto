@@ -17,15 +17,14 @@ propagates contracts, and publishes private artifacts. No semantic candidate
 may span owners.
 
 [RFC 0010](rfcs/0010-command-surface.md) defines the public command design: a
-flat Tcl surface with a Genus/Common UI-inspired typed database model and one
+flat Tcl surface with a coherent typed database model and one
 canonical `read_hdl` -> `elaborate` -> `synth` lifecycle.
 
 Opto targets industrial logical synthesis from small blocks through
-multi-million-gate designs. The performance objective is eventually to beat a
-same-input Genus run by 10x while remaining in the same practical QoR range.
-That objective is a benchmark gate, not a claim made from one small design.
-Runtime, peak RSS, QoR, deterministic output, and useful diagnostics are all
-correctness properties.
+multi-million-gate designs. Performance objectives are versioned against
+public, checksum-pinned suites and the last accepted Opto baseline; one small
+design never establishes a product-level claim. Runtime, peak RSS, QoR,
+deterministic output, and useful diagnostics are all correctness properties.
 
 ## Product Boundary
 
@@ -34,11 +33,10 @@ surface is a flat Tcl shell with a typed `get_db` / `set_db` model; process
 options are parsed by `clap`. There is no project manager, manifest-driven
 product mode, alternate mapper, or backend-specific executable.
 
-DC and Genus are prior art that Opto draws on; neither is a compatibility
-target. The lifecycle and database model lean toward Genus Common UI because
-it has fewer command-family seams, while flat report names and standard SDC
-commands are retained where they are clearer. Departures are recorded in
-[Intentional departures from prior art](#intentional-departures-from-prior-art).
+Opto's command catalog, typed argument grammar, database schema, report
+schemas, and tests define the public contract. Flat report names and standard
+SDC commands are retained where they are clear. Interface decisions are
+recorded in [Public interface policy](#public-interface-policy).
 Internal concepts such as regions, construction vectors, Boolean subjects,
 contracts, and epochs are not exposed as invented Tcl controls. Unsupported
 behavior reports an explicit error.
@@ -849,32 +847,28 @@ Exact endpoint resolution probes the current design's typed locator keys and
 the global clock key directly; it never scans the registry or materializes
 unrelated locator strings.
 
-## Intentional Departures From Prior Art
+## Public Interface Policy
 
-DC and Genus are prior art that Opto draws on, not compatibility targets. The
-public Tcl surface uses Genus/Common UI's coherent database idea as its main
-influence, keeps flat commands, and removes vendor lifecycle splits that do not
-serve Opto. Internal architecture follows whichever design is better,
-including neither. Where Opto deliberately departs from both tools, the
-departure and its reason are recorded here. An undocumented divergence is a
-defect, not a design.
+The public Tcl surface keeps flat action commands and a coherent typed object
+and property model. Opto's own documentation is authoritative; another
+product's lifecycle or aliases do not define compatibility requirements. An
+undocumented divergence between implementation, tests, and this contract is a
+defect.
 
-- **No separately publishable generic netlist.** Opto follows the useful Genus
-  ordering: technology-independent optimization and semantic architecture work
-  are mandatory stages before target mapping, never a fallback selected by an
-  empty library. Unlike Genus, Opto does not expose `syn_generic` as a terminal
-  product boundary. Word-level normalization runs before regional planning and
-  region-private restructuring runs immediately before Liberty covering. A
-  `synth` without a target library is therefore an explicit error.
-- **No inert compatibility options.** Opto does not accept DC-shaped flags that
+- **No separately publishable generic netlist.** Technology-independent
+  optimization and semantic architecture work are mandatory stages before
+  target mapping, never a fallback selected by an empty library. Word-level
+  normalization runs before regional planning and region-private restructuring
+  runs immediately before Liberty covering. A `synth` without a target library
+  is therefore an explicit error.
+- **No inert compatibility options.** Opto does not accept flags that
   cannot affect behavior, including report pagination switches, switching-
   activity verbosity, and parasitic database write-back controls. Implemented
   options have observable semantics; unavailable behavior is rejected instead
   of being silently acknowledged.
-- **Genus-inspired database model without Genus stage debt.** Opto uses typed
-  `get_db` / `set_db`, `read_hdl`, and `elaborate`, but exposes one `synth`
-  operation instead of either Genus' public stage commands or DC's split synthesis
-  variants. Reports remain flat. Database writes are schema-declared,
+- **One database model and one synthesis operation.** Opto uses typed `get_db`
+  / `set_db`, `read_hdl`, and `elaborate`, and exposes one `synth` operation.
+  Reports remain flat. Database writes are schema-declared,
   transactional mutations rather than unrestricted path-based assignment.
   RFC 0010 is the normative command-design policy.
 
@@ -929,17 +923,17 @@ defect, not a design.
 | One shared sparse MMMC owner service | Implemented |
 | Transactional mapped optimization and exact STA | Implemented |
 | Structured source diagnostics | Implemented for synthesis/frontend errors carried by typed diagnostics; coverage continues to expand |
-| DC-shaped `report_timing` core path report | Implemented; unsupported advanced report modes are explicit errors |
-| Genus-inspired flat Opto command policy | Defined by RFC 0010; command cutover, scenarios, and structured reports remain pending |
+| Opto `report_timing` core path report | Implemented; unsupported advanced report modes are explicit errors |
+| Flat Opto command policy | Defined by RFC 0010; command cutover, scenarios, and structured reports remain pending |
 | Same-host real medium-scale regression guard | Implemented for 14 executable 353–10,225-cell cases selected from a pinned 30-case public pool |
 | Multi-million-gate runtime/RSS/QoR qualification | Not yet demonstrated |
-| Same-input 10x Genus runtime with comparable QoR | Target; not yet demonstrated |
+| Versioned public scale-suite performance targets | Target; not yet demonstrated |
 
 ## Known Architectural Gaps
 
 No open representation cutover remains in the synthesis front half,
 mapped-owner, MMMC, or publication path. The remaining unproven product targets are
-multi-million-gate runtime/RSS and same-input QoR/runtime comparison. Those
+multi-million-gate runtime/RSS and public-suite QoR/runtime comparison. Those
 require the benchmark evidence below, not compatibility paths or additional
 ownership models.
 
@@ -972,14 +966,13 @@ only; repeated serial performance measurement belongs to the dedicated runtime
 benchmark. Tiny semantic tests never contribute to this quality decision, and
 policy thresholds live in the manifest rather than in synthesis code.
 
-Comparison with Genus uses identical RTL, Tcl intent, Liberty, SDC, wire/RC
-inputs, machine class, and usable thread count. Commercial binaries, licenses,
-private PDKs, scripts, and raw results stay outside the public repository.
-
-The 10x target is accepted only when geometric-mean end-to-end runtime improves
-without a material QoR cliff and no individual scale tier violates the agreed
-RSS ceiling. A fast frontend on a small non-production circuit is not evidence
-for the target.
+Published comparisons use identical RTL, Tcl intent, Liberty, SDC, wire/RC
+inputs, machine class, and usable thread count. Inputs must be redistributable
+or fetched from a public checksum-pinned source. A performance target is
+accepted only when geometric-mean end-to-end runtime improves without a
+material QoR cliff and no individual scale tier violates its versioned RSS
+ceiling. A fast frontend on a small non-production circuit is not evidence for
+the target.
 
 ## Implementation Policy
 

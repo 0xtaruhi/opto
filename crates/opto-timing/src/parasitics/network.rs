@@ -113,7 +113,7 @@ pub(super) fn compute(
                 return Err(invalid_net(
                     &net,
                     format!(
-                        "coupling capacitor '{}'-'{second}' is unsupported by DC read_parasitics",
+                        "read_parasitics does not support coupling capacitor '{}'-'{second}'",
                         capacitor.first
                     ),
                 ));

@@ -76,7 +76,7 @@ path-exception arbitration rule.
 | Mapped ownership | Complete | Global, single-region, or exact driver-to-sink boundary-edge atoms with stable reverse footprints |
 | Post-map | Complete | Design-rule, fanout, sizing, and MFS changes use measured transactional evaluation |
 | Diagnostics | Complete for typed synthesis failures | Source spans, related locations, notes/help, and command invocation render together |
-| Timing reporting | Complete for the supported core surface | Real mapped max/min path reporting with DC selectors |
+| Timing reporting | Complete for the supported core surface | Real mapped max/min path reporting with typed selectors |
 | Large-design qualification | In progress | CVA6 and larger scale/RSS gates remain benchmark work, not architecture work |
 
 ## Source Changes
@@ -247,13 +247,13 @@ increasing pass counts when the dominant delay source is unknown.
 supported command surface includes:
 
 - `-from` and `-to` collections;
-- `-delay max|min` and DC-compatible `-delay_type`;
+- `-delay max|min` and the documented `-delay_type` spelling;
 - one requested path through `-max_paths 1`;
 - `-significant_digits`;
 - full path output.
 
 Unsupported `min_max`, multi-path, or alternate path formats return explicit
-“not implemented” diagnostics rather than silently approximating DC.
+“not implemented” diagnostics rather than silently approximating behavior.
 
 ## Deleted Practices
 
@@ -337,9 +337,9 @@ The important result is causal:
 - encoding class preservation in global dataflow restored and improved QoR;
 - the obsolete duplicate target cover remained deleted.
 
-This is a regression proof for the ownership fix, not evidence of the 10x
-Genus objective. Ibex is too small and not production-shaped enough for that
-claim.
+This is a regression proof for the ownership fix, not evidence of a
+large-scale performance objective. Ibex is too small and not
+production-shaped enough for that claim.
 
 ## Verification
 
@@ -370,9 +370,8 @@ cargo test --workspace --all-features
 git diff --check
 ```
 
-Vendor environment paths are build inputs only and are not committed.
-Commercial tools, private PDKs, licenses, and their reports remain outside the
-repository.
+Private PDKs, license configuration, and non-redistributable inputs or reports
+remain outside the repository.
 
 ## Remaining Qualification
 
@@ -383,8 +382,8 @@ next work is evidence-driven:
 2. add stage-level wall-time and peak-RSS baselines;
 3. profile large regional rewrite/cut/cover tasks with sampling tools;
 4. qualify one hundred-thousand-, one-million-, and ten-million-gate tier;
-5. compare identical inputs against Genus for area, WNS/TNS, cell mix, runtime,
-   and RSS;
+5. compare identical public inputs against the last accepted Opto baseline for
+   area, WNS/TNS, cell mix, runtime, and RSS;
 6. improve only measured bottlenecks without adding alternate owners.
 
 A future optimization follows RFC 0007 for front-half locality and preserves

@@ -30,28 +30,23 @@ Case sizes are kept near 200 ms; a larger design would lengthen the comparison
 without making it more sensitive, because the gate compares ratios.
 
 Public, reproducible QoR infrastructure is under [`qor/`](qor/README.md).
-Commercial-tool inputs and results, private PDKs and license configuration are
-never stored in this repository. They may consume the same normalized result
-schema from an external workspace so public and private measurements can be
-compared without publishing restricted artifacts.
+Non-redistributable inputs and results, private PDKs, and license configuration
+are never stored in this repository. Published measurements use checksum-pinned
+public inputs and retain enough metadata to be reproduced independently.
 
-## Regional industrial-scale contract
+## Regional scale contract
 
-The accepted architecture adds a tiered external scale corpus at roughly one
+The accepted architecture adds a tiered public scale corpus at roughly one
 hundred thousand, one million and ten million mapped gates. It must cover
 control-dense, arithmetic, high-fanout, deep-pipeline, memory and multi-clock
 designs. These are target qualification classes, not a claim that the current
 full-root mapper has passed them.
 
-Genus comparisons use the same host, thread count, RTL, Tcl, SDC, Liberty,
-scenarios and interconnect inputs. End-to-end time includes read, elaboration,
-technology-independent optimization, mapping and post-map closure. The short-term target is
-geometric-mean throughput at least equal to Genus, with no qualifying
-million-gate-or-larger case below 0.8 times its throughput. The long-term goal
-is ten-times geometric-mean throughput.
-
-Area and achieved frequency or critical delay must remain within five percent,
-with no new DRC or negative slack absent from the reference. Peak RSS must not
-exceed Genus, and bytes per mapped gate must not worsen between the million-
-and ten-million-gate tiers. Licensed commands, reports and raw results remain
-outside this checkout.
+Each published run records the same host image, thread count, RTL, Tcl, SDC,
+Liberty, scenarios, and interconnect inputs. End-to-end time includes read,
+elaboration, technology-independent optimization, mapping, and post-map
+closure. Commit-to-commit gates cover throughput, area, achieved frequency or
+critical delay, DRC status, slack, peak RSS, and bytes per mapped gate. The
+million- and ten-million-gate tiers must demonstrate bounded memory growth;
+absolute targets are versioned with the public suite rather than defined
+relative to a closed-source product.

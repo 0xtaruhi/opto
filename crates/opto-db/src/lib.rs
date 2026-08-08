@@ -436,7 +436,7 @@ fn exact_name_rows(names: impl IntoIterator<Item = NameId>) -> Box<[ExactNameRow
     rows.into_boxed_slice()
 }
 
-/// Matches a DC-style `*`/`?` wildcard pattern against a complete name.
+/// Matches a shell-style `*`/`?` wildcard pattern against a complete name.
 ///
 /// An empty pattern and `"*"` both select every name. Matching is byte-wise,
 /// deterministic, and does not implement regular-expression syntax.
@@ -479,7 +479,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wildcard_patterns_match_common_dc_shapes() {
+    fn wildcard_patterns_match_common_shell_shapes() {
         assert!(matches_pattern("clk", "*"));
         assert!(matches_pattern("data_in", "data*"));
         assert!(matches_pattern("data_in", "data_??"));

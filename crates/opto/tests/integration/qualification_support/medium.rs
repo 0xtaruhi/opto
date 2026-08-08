@@ -658,7 +658,7 @@ fn output_directory(suite: &str) -> PathBuf {
 
 fn tool_identity(path: &Path) -> ToolIdentity {
     let output = Command::new(path)
-        .arg("-version")
+        .arg("--version")
         .output()
         .unwrap_or_else(|error| panic!("query {} version: {error}", path.display()));
     let version = String::from_utf8_lossy(if output.stdout.is_empty() {

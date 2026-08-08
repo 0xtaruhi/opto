@@ -50,7 +50,7 @@ pub enum AnnotationTarget {
 pub enum SynthesisDirectiveKind {
     /// Prevent the selected design object from being modified or replaced.
     DontTouch,
-    /// DC-compatible hierarchy collapsing control. `false` preserves hierarchy.
+    /// Hierarchy collapsing control. `false` preserves hierarchy.
     Ungroup,
     /// Preserve a named signal as an optimization boundary.
     KeepSignal,

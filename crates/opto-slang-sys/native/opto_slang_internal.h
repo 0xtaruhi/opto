@@ -237,7 +237,6 @@ struct OptoSlangAnalysis {
 struct OptoSlangCompiler {
     std::vector<OptoSlangSourceUnit> units;
     std::optional<std::string> top;
-    bool vcs_compatibility = false;
     slang::LanguageVersion language = slang::LanguageVersion::v1800_2017;
     uint32_t max_threads = 0;
     std::string last_error;

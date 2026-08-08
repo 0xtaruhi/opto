@@ -118,7 +118,6 @@ fn source_unit(source: &NativeTestSource, define: &str, value: &str) -> SlangSou
             name: define.to_string(),
             value: Some(value.to_string()),
         }],
-        vcs_compatibility: false,
         language: SlangLanguage::SystemVerilog2017,
     }
 }

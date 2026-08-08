@@ -458,7 +458,7 @@ fn validation_command_trampoline_impl(
         // the same restricted command set, so reading them cannot expose host-side operations.
         return eval_file(interp, &path);
     }
-    if spec.name == "exit" || spec.name == "quit" {
+    if spec.name == "exit" {
         set_result(interp, "");
         return TCL_RETURN;
     }

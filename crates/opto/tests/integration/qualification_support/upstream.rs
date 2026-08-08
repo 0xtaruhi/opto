@@ -61,7 +61,7 @@ pub(super) fn run(case: &Case, opto: &Path, output_root: &Path) -> ResultEntry {
         let output = run_process(
             opto,
             vec![
-                OsString::from("-no_init"),
+                OsString::from("--no-init"),
                 OsString::from("-f"),
                 script.as_os_str().to_owned(),
             ],

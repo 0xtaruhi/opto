@@ -25,7 +25,7 @@ pub enum ReadParasiticsCompletion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// DC-compatible controls for SPEF import.
+/// Controls for SPEF import.
 pub struct ReadParasiticsOptions {
     /// Delay calculation model selected for imported RC networks.
     pub delay_model: ParasiticDelayModel,
@@ -188,7 +188,7 @@ fn append_import_summary(
     );
 }
 impl Session {
-    /// Parse and attach SPEF parasitics according to DC-compatible options.
+    /// Parse and attach SPEF parasitics according to the requested options.
     pub fn read_parasitics(
         &mut self,
         files: &[PathBuf],

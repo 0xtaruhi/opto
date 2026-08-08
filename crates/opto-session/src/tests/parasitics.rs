@@ -149,7 +149,7 @@ fn normalize_report_date(output: &str) -> String {
 }
 
 #[test]
-fn read_parasitics_default_output_matches_dc_golden() {
+fn read_parasitics_default_output_matches_golden() {
     let mut fixture = fixture("read-parasitics-default-golden");
     let output = fixture
         .session
@@ -169,7 +169,7 @@ fn read_parasitics_default_output_matches_dc_golden() {
 }
 
 #[test]
-fn read_parasitics_completion_and_incremental_counts_match_dc_golden() {
+fn read_parasitics_completion_and_incremental_counts_match_golden() {
     let mut fixture = fixture("read-parasitics-completion-golden");
     let elmore = ReadParasiticsOptions {
         delay_model: ParasiticDelayModel::Elmore,
@@ -223,7 +223,7 @@ fn read_parasitics_completion_and_incremental_counts_match_dc_golden() {
 }
 
 #[test]
-fn read_parasitics_verbose_and_loop_output_match_dc_golden() {
+fn read_parasitics_verbose_and_loop_output_match_golden() {
     let mut fixture = fixture("read-parasitics-verbose-golden");
     let verbose = fixture
         .session

@@ -69,19 +69,15 @@ owner the rights needed for both public open-source distribution and
 alternative commercial licensing. Do not submit material that you cannot make
 public or license under those terms.
 
-## Prior art and architecture
+## Public interface and architecture
 
-DC and Genus are design inputs, not compatibility targets. Opto adopts what is
-good in either and is free to depart from both when it has a better design.
-
-The public Tcl surface follows DC command spelling, arguments, collections,
-reports, and flow behavior as its default, because that shape is itself worth
-adopting. Treat it as a deviatable default rather than a contract: verify
-behavior against reliable sources before changing it, record any intentional
-departure from DC and Genus in
-[`docs/architecture.md`](docs/architecture.md), and state which tool a design
-borrows from and why. Whether the surface follows prior art or departs from
-it, do not expose invented commands or retain deprecated aliases.
+Opto defines its own public Tcl interface. Its command catalog, typed argument
+grammar, object model, reports, tests, and architecture documentation are the
+reviewable contract; another synthesis product is not the specification.
+Verify behavior against public standards and reproducible examples before
+changing it, and record intentional interface changes in
+[`docs/architecture.md`](docs/architecture.md). Do not expose invented
+commands, inert options, compatibility-only aliases, or deprecated names.
 
 Keep the target contracts and dependency/ownership rules in
 [`docs/architecture.md`](docs/architecture.md). Its conformance matrix is the
@@ -94,8 +90,8 @@ deterministic.
 
 ## Public repository policy
 
-Do not commit proprietary PDKs, commercial-tool assets, license configuration,
-private regressions, or their raw outputs. Public benchmarks must use
+Do not commit proprietary PDKs, non-redistributable assets, license
+configuration, private regressions, or their raw outputs. Public benchmarks must use
 redistributable or checksum-pinned inputs. See the repository data policy in
 the README.
 

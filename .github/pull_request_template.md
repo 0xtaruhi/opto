@@ -16,11 +16,11 @@ Describe the problem and the resulting behavior.
 - [ ] QoR-affecting changes include representative results and baseline updates.
 - [ ] No proprietary inputs, reports, paths, or license configuration are included.
 
-## Prior art and design
+## Interface and design
 
-Document architectural tradeoffs when applicable. When a change follows DC or
-Genus behavior, cite the verified behavior; when it departs from both, record
-the departure and its reason in `docs/architecture.md`.
+Document architectural tradeoffs when applicable. For public-interface
+changes, cite the Opto contract, a public standard, or a reproducible example,
+and record the rationale in `docs/architecture.md`.
 
 ## Contributor license agreement
 

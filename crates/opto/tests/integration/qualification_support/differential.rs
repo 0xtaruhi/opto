@@ -79,7 +79,8 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let root = workspace_root();
     let flow = root.join("qualification/scripts/frontend-differential.tcl");
     let library = root.join("qualification/libraries/opto_test.lib");
-    verify_reset_latch_negative_control(&config.yosys, &library, &output_dir)?;
+    let sequential_library = root.join("qualification/libraries/frontend_sequential.lib");
+    verify_reset_latch_negative_control(&config.yosys, &library, &sequential_library, &output_dir)?;
     let mut summary = String::from("seed\tfamily\twidth\tstatus\tstage\tartifact_dir\n");
     let mut failure_count = 0u64;
 
@@ -107,13 +108,20 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             .env("FRONTEND_DIFF_RTL", &candidate)
             .env("FRONTEND_DIFF_NETLIST", &netlist)
             .env("FRONTEND_DIFF_LIBRARY", &library)
+            .env("FRONTEND_DIFF_SEQUENTIAL_LIBRARY", &sequential_library)
             .output()?;
         write_command_log(&case_dir.join("opto.log"), &opto_output)?;
         let (status, stage) = if !opto_output.status.success() || !netlist.is_file() {
             failure_count += 1;
             ("fail", "opto")
         } else {
-            let formal_output = run_formal(&config.yosys, &reference, &netlist, &library)?;
+            let formal_output = run_formal(
+                &config.yosys,
+                &reference,
+                &netlist,
+                &library,
+                &sequential_library,
+            )?;
             write_command_log(&case_dir.join("formal.log"), &formal_output)?;
             if formal_output.status.success() {
                 ("pass", "formal")
@@ -152,7 +160,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         output_dir.join("metadata.txt"),
         format!(
             "opto={}\nyosys={}\nseed_start={}\nseeds={}\nfailures={}\n",
-            command_version(&opto, ["-version"]),
+            command_version(&opto, ["--version"]),
             command_version(&config.yosys, ["-V"]),
             config.seed_start,
             config.seeds,
@@ -188,6 +196,7 @@ fn run_formal(
     reference: &Path,
     netlist: &Path,
     library: &Path,
+    sequential_library: &Path,
 ) -> std::io::Result<Output> {
     // Keep latch state visible to equivalence: async2sync can hide the state
     // relation behind an asserted asynchronous reset.
@@ -200,6 +209,7 @@ clk2fflogic; opt;
 rename top gold;
 design -stash gold;
 read_liberty -ignore_miss_func "{}";
+read_liberty -ignore_miss_func "{}";
 read_verilog "{}";
 hierarchy -check -top top;
 flatten; proc; memory; opt;
@@ -207,6 +217,7 @@ clk2fflogic; opt;
 rename top gate;
 design -stash gate;
 design -reset;
+read_liberty -ignore_miss_func "{}";
 read_liberty -ignore_miss_func "{}";
 design -copy-from gold -as gold gold;
 design -copy-from gate -as gate gate;
@@ -218,8 +229,10 @@ equiv_status -assert;
 "#,
         yosys_quote(reference),
         yosys_quote(library),
+        yosys_quote(sequential_library),
         yosys_quote(netlist),
-        yosys_quote(library)
+        yosys_quote(library),
+        yosys_quote(sequential_library)
     );
     Command::new(yosys)
         .arg("-Q")
@@ -231,6 +244,7 @@ equiv_status -assert;
 fn verify_reset_latch_negative_control(
     yosys: &Path,
     library: &Path,
+    sequential_library: &Path,
     output_dir: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let control = output_dir.join("negative-reset-latch-control");
@@ -255,7 +269,7 @@ fn verify_reset_latch_negative_control(
          end\n\
          endmodule\n",
     )?;
-    let proof = run_formal(yosys, &reference, &candidate, library)?;
+    let proof = run_formal(yosys, &reference, &candidate, library, sequential_library)?;
     write_command_log(&control.join("formal.log"), &proof)?;
     if proof.status.success() {
         return Err(format!(

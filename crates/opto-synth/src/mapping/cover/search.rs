@@ -11,7 +11,7 @@ use crate::planning::mapping_policy::{CellCost, MappingCost};
 use hashbrown::HashMap;
 use opto_runtime::ExecutionContext;
 
-const DC_FILL_CAP: u32 = 4;
+const DONT_CARE_FILL_CAP: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LibraryCoverSource {

@@ -133,21 +133,15 @@ rows existed and treated the estimator as freely reusable. The evidence:
   ordinal reduces to instance enumeration order, so adding one instance
   renumbers every later occurrence.
 
-### Gap against published industrial practice
+### Gap against the target architecture
 
-Public Cadence material describes Genus as distributing synthesis with a
-timing-driven partitioning algorithm that slices transparently across design
-hierarchy, at two cluster levels (coarse 100K+ instances, fine 10K+ instances),
-with a Tcl command that clips the full timing and physical context of any design
-subset.
+A scalable timing-driven partitioner must cut across source hierarchy, retain
+the timing context of every region, keep state boundaries explicit, and avoid
+cutting critical launch-to-capture cones arbitrarily. Coarse regions amortize
+scheduling and publication costs; finer subregions bound local optimization
+work. The current implementation does not yet satisfy that complete contract.
 
-Synopsys patent US8261220 (*Path preserving design partitioning with
-redundancy*, filed 2009): storage devices cannot be divided between partitions
-but can be shared, **timing paths leading to a given storage device must be kept
-in the same partition**, and objects may be duplicated to keep launch, data, and
-capture paths intact.
-
-| Criterion | Industry | opto today |
+| Criterion | Target | Opto today |
 | --- | --- | --- |
 | Partition objective | timing criticality; cut only non-critical edges | equal work, `target_work: 32_768` |
 | Flip-flop treatment | FF's fan-in path stays with the FF | every `is_state` op is its own single-op region |
@@ -157,9 +151,8 @@ capture paths intact.
 
 ### What is deliberately not copied
 
-**Physical awareness.** Genus partitions with wirelength because `syn_generic`
-runs a generic placer. opto has none; criticality is logic-depth driven and will
-misrank wire-dominated designs.
+**Physical awareness.** Opto has no placement model; criticality is
+logic-depth driven and will misrank wire-dominated designs.
 
 **Global architecture solve.** Rejected: a cross-region joint optimizer makes any
 region's cost change reallocate every other region's decision. **We trade a

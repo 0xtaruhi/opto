@@ -302,7 +302,7 @@ impl TimingContext {
 
     /// Sets selected rise/fall and min/max transition slots on clocks.
     ///
-    /// Empty edge or delay selections mean both, matching DC command semantics.
+    /// Empty edge or delay selections mean both.
     ///
     /// # Errors
     ///

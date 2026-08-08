@@ -16,7 +16,10 @@ fn read_sdc_evaluates_clock_constraints() {
     runtime.register_commands().unwrap();
 
     let result = runtime
-        .eval(&format!("read_sdc {}; report_clock", script.display()))
+        .eval(&format!(
+            "read_sdc {}; report_clock",
+            tcl_path_word(&script)
+        ))
         .unwrap();
     std::fs::remove_file(script).unwrap();
 
@@ -50,7 +53,7 @@ fn generated_clock_derives_period_and_waveform() {
              create_generated_clock -name divided -source [get_ports clk] \
                -master_clock [get_clocks master] -divide_by 2 [get_ports gclk]; \
              report_clock",
-            source.display()
+            tcl_path_word(&source)
         ))
         .unwrap();
     std::fs::remove_file(source).unwrap();
@@ -84,7 +87,7 @@ fn generated_clock_derives_period_and_waveform() {
         .unwrap();
     let written = temp_script_path("opto-written.sdc");
     runtime
-        .eval(&format!("write_sdc {}", written.display()))
+        .eval(&format!("write_sdc {}", tcl_path_word(&written)))
         .unwrap();
     let contents = std::fs::read_to_string(&written).unwrap();
     std::fs::remove_file(written).unwrap();
@@ -124,7 +127,7 @@ fn typed_sdc_commands_execute_through_the_shell() {
             "read_hdl {}; elaborate top; \
              create_clock -name c1 -period 10 [get_ports clk]; \
              create_clock -name c2 -period 12",
-            source.display()
+            tcl_path_word(&source)
         ))
         .unwrap();
 
@@ -217,8 +220,8 @@ library (demo) {
              list [get_db [all_registers] .name] \
                   [get_db [all_registers -edge_triggered] .name] \
                   [get_db [all_registers -level_sensitive] .name]",
-            lib.display(),
-            source.display()
+            tcl_path_word(&lib),
+            tcl_path_word(&source)
         ))
         .unwrap();
     std::fs::remove_file(lib).unwrap();
@@ -285,9 +288,9 @@ pin (Y) {
     let result = runtime
         .eval(&format!(
             "read_libs {}; read_hdl {}; elaborate top; synth; read_sdc {}; report_timing -from [get_ports b] -to [get_ports y]",
-            lib.display(),
-            source.display(),
-            sdc.display()
+            tcl_path_word(&lib),
+            tcl_path_word(&source),
+            tcl_path_word(&sdc)
         ))
         .unwrap();
 
@@ -303,7 +306,7 @@ pin (Y) {
 
     let written = temp_script_path("opto-timing-roundtrip.sdc");
     runtime
-        .eval(&format!("write_sdc {}", written.display()))
+        .eval(&format!("write_sdc {}", tcl_path_word(&written)))
         .unwrap();
     let contents = std::fs::read_to_string(&written).unwrap();
     crate::validate_sdc_syntax(&contents).unwrap();
@@ -315,9 +318,9 @@ pin (Y) {
             "read_libs {}; \
              read_hdl {}; elaborate top; synth; read_sdc {}; \
              report_timing -from [get_ports b] -to [get_ports y]",
-            lib.display(),
-            source.display(),
-            written.display()
+            tcl_path_word(&lib),
+            tcl_path_word(&source),
+            tcl_path_word(&written)
         ))
         .unwrap();
     match result {
@@ -372,8 +375,8 @@ library (demo) {
              set_input_delay -clock [get_clocks vclk] -max 1.0 [get_ports a]; \
              set_output_delay -clock [get_clocks vclk] -max 2.0 [get_ports y]; \
              report_timing -from [get_ports a] -to [get_ports y]",
-            lib.display(),
-            source.display()
+            tcl_path_word(&lib),
+            tcl_path_word(&source)
         ))
         .unwrap();
     std::fs::remove_file(lib).unwrap();
@@ -393,7 +396,7 @@ library (demo) {
 }
 
 #[test]
-fn dc_path_exception_commands_preserve_typed_ordered_points() {
+fn path_exception_commands_preserve_typed_ordered_points() {
     let source = temp_script_path("opto-path-exceptions.sv");
     std::fs::write(
         &source,
@@ -418,7 +421,7 @@ endmodule
              set_max_delay 0.4 -rise_from [get_ports a] -through [get_nets n] -fall_to [get_ports y] -ignore_clock_latency; \
              set_min_delay 0.2 -fall -from [get_ports a] -to [get_ports y]; \
              set_multicycle_path 3 -hold -start -from [get_ports a] -to [get_ports y]",
-            source.display()
+            tcl_path_word(&source)
         ))
         .unwrap();
     std::fs::remove_file(source).unwrap();
@@ -487,8 +490,8 @@ library (demo) {
 
     let setup = format!(
         "read_libs {}; read_hdl {}; elaborate top",
-        lib.display(),
-        source.display()
+        tcl_path_word(&lib),
+        tcl_path_word(&source)
     );
     runtime.eval(&setup).unwrap();
     let baseline = runtime.eval("synth; report_area").unwrap();

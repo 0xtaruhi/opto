@@ -15,7 +15,7 @@ fn read_hdl_requires_explicit_elaboration() {
     runtime.register_commands().unwrap();
 
     runtime
-        .eval(&format!("read_hdl {{{}}}", source.display()))
+        .eval(&format!("read_hdl {}", tcl_path_word(&source)))
         .unwrap();
     let before = runtime.eval("get_db current_design").unwrap();
     let after = runtime
@@ -41,9 +41,9 @@ fn write_hdl_uses_a_single_unambiguous_form() {
 
     runtime
         .eval(&format!(
-            "read_hdl {{{}}}; elaborate top; write_hdl {{{}}}",
-            source.display(),
-            output.display()
+            "read_hdl {}; elaborate top; write_hdl {}",
+            tcl_path_word(&source),
+            tcl_path_word(&output)
         ))
         .unwrap();
     let text = std::fs::read_to_string(&output).unwrap();
@@ -66,9 +66,9 @@ fn save_and_resume_restore_a_session_across_runtimes() {
     writer.register_commands().unwrap();
     writer
         .eval(&format!(
-            "read_hdl {{{}}}; elaborate top; set_db synth_effort high; set_db clock_gating true; save {{{}}}",
-            source.display(),
-            checkpoint.display()
+            "read_hdl {}; elaborate top; set_db synth_effort high; set_db clock_gating true; save {}",
+            tcl_path_word(&source),
+            tcl_path_word(&checkpoint)
         ))
         .unwrap();
     assert_eq!(
@@ -80,15 +80,15 @@ fn save_and_resume_restore_a_session_across_runtimes() {
     reader.register_commands().unwrap();
     let restored = reader
         .eval(&format!(
-            "resume {{{}}}; list [get_db [get_db current_design] .name] [get_db [get_db designs] .name] [get_db synth_effort] [get_db clock_gating]",
-            checkpoint.display()
+            "resume {}; list [get_db [get_db current_design] .name] [get_db [get_db designs] .name] [get_db synth_effort] [get_db clock_gating]",
+            tcl_path_word(&checkpoint)
         ))
         .unwrap();
     assert!(matches!(restored, EvalResult::Complete(value) if value == "top top high true"));
 
     std::fs::write(&checkpoint, b"invalid-opto-database").unwrap();
     let error = reader
-        .eval(&format!("resume {{{}}}", checkpoint.display()))
+        .eval(&format!("resume {}", tcl_path_word(&checkpoint)))
         .unwrap_err();
     assert!(error.to_string().contains("not an Opto checkpoint"));
 

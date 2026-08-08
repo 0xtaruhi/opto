@@ -35,7 +35,7 @@ Industrial synthesis must scale in several dimensions simultaneously:
 - millions of operations and mapped gates;
 - enough parallel work to use many cores;
 - predictable peak memory;
-- target-aware QoR near commercial tools;
+- target-aware QoR that meets the versioned public-suite gates;
 - identical output across worker counts;
 - local incremental invalidation;
 - failures that identify the RTL, constraint, or library cause.
@@ -642,6 +642,6 @@ Required tests and benchmarks cover:
 - incremental clean-region reuse;
 - wall time, peak RSS, area, timing, and cell composition at increasing scale.
 
-The architecture is considered industrially qualified only after production-
-shaped million-gate tiers and identical-input Genus comparisons satisfy the
-gates in `docs/architecture.md`.
+The architecture is considered industrially qualified only after the public,
+production-shaped million-gate tiers satisfy the versioned gates in
+`docs/architecture.md`.

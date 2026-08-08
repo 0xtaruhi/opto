@@ -49,8 +49,6 @@ pub struct SlangCompileOptions {
     pub include_paths: Vec<PathBuf>,
     /// Preprocessor definitions in command-line order.
     pub defines: Vec<SlangDefine>,
-    /// Enables slang's VCS compatibility settings.
-    pub vcs_compatibility: bool,
     /// Verilog-family source revision.
     pub language: SlangLanguage,
     /// Maximum native worker count, or `None` for the runtime default.
@@ -68,8 +66,6 @@ pub struct SlangSourceUnit {
     pub include_paths: Vec<PathBuf>,
     /// Preprocessor definitions in command-line order.
     pub defines: Vec<SlangDefine>,
-    /// Enables slang's VCS compatibility settings.
-    pub vcs_compatibility: bool,
     /// Verilog-family source revision.
     pub language: SlangLanguage,
 }

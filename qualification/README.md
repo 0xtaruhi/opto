@@ -30,13 +30,12 @@ families, but repeating the same grammar distribution is not a substitute for
 new language constructs or independently authored RTL. Coverage growth should
 prefer curated upstream cases and proof closure over larger random seed counts.
 
-The target region-parallel cutover has an additional external industrial-scale
+The target region-parallel cutover has an additional public scale
 gate at approximately one hundred thousand, one million and ten million mapped
 gates. It covers control, arithmetic, fanout, pipelines, memory, multi-clock
-and explicit sparse MMMC behavior. The target corpus and Genus comparison
-contract are specified in [`../docs/architecture.md`](../docs/architecture.md);
-licensed inputs and results remain outside this repository. This target tier is
-not part of the current coverage counts above.
+and explicit sparse MMMC behavior. The reproducible corpus and regression
+contract are specified in [`../docs/architecture.md`](../docs/architecture.md).
+This target tier is not part of the current coverage counts above.
 
 ## Layout
 

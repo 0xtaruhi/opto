@@ -148,7 +148,7 @@ fn analyze_edge(
         .map(|node| capacitance_farads[*node])
         .collect::<Vec<_>>();
     let steady = solve_sparse(&system.factor, &system.source_conductance);
-    // The DC response is a useful excitation seed: it points the first Krylov
+    // The direct-current response is a useful excitation seed: it points the first Krylov
     // vector toward the input-to-output transfer rather than an arbitrary
     // coordinate axis.
     let basis = arnoldi_basis(&system.matrix, &system.factor, &capacitance, steady);

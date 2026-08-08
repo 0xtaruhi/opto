@@ -174,13 +174,6 @@ std::unique_ptr<Compilation> create_compilation(
         driver.options.topModules.push_back(*compiler.top);
     }
     driver.options.numThreads = compiler.max_threads;
-    if (compiler.vcs_compatibility) {
-        driver::CompatSettings compatibility;
-        compatibility.setMode(driver::CompatMode::Vcs);
-        for (const auto flag : compatibility.getCompilationFlags()) {
-            driver.options.compilationFlags.at(flag) = true;
-        }
-    }
     driver.options.compilationFlags.at(CompilationFlags::IgnoreUnknownModules) = true;
     if (compiler.max_threads != 1) {
         driver.threadPool = std::make_shared<ThreadPool>(compiler.max_threads);
@@ -260,7 +253,7 @@ std::unique_ptr<Compilation> create_compilation(
         parse_options.set(std::move(preprocessor));
         auto lexer = parse_options.getOrDefault<parsing::LexerOptions>();
         lexer.languageVersion = compiler.language;
-        for (std::string_view prefix : {"pragma", "synopsys", "synthesis"}) {
+        for (std::string_view prefix : {"pragma", "synthesis"}) {
             lexer.commentHandlers[prefix]["translate_off"] = {
                 parsing::CommentHandler::TranslateOff,
                 "translate_on",
@@ -532,15 +525,6 @@ OptoSlangStatus opto_slang_compiler_set_top(
     } catch (...) {
         return fail(compiler, "unknown failure while setting the slang top module");
     }
-}
-
-OptoSlangStatus opto_slang_compiler_set_vcs_compatibility(
-    OptoSlangCompiler* compiler) {
-    if (require_compiler(compiler) != OPTO_SLANG_OK) {
-        return OPTO_SLANG_ERROR;
-    }
-    compiler->vcs_compatibility = true;
-    return OPTO_SLANG_OK;
 }
 
 OptoSlangStatus opto_slang_compiler_set_language(

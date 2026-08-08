@@ -315,7 +315,6 @@ OptoSlangStatus opto_slang_compiler_add_include_dir(OptoSlangCompiler *compiler,
 OptoSlangStatus opto_slang_compiler_add_define(
     OptoSlangCompiler *compiler, const char *name, const char *value);
 OptoSlangStatus opto_slang_compiler_set_top(OptoSlangCompiler *compiler, const char *top);
-OptoSlangStatus opto_slang_compiler_set_vcs_compatibility(OptoSlangCompiler *compiler);
 OptoSlangStatus opto_slang_compiler_set_language(
     OptoSlangCompiler *compiler, int language);
 OptoSlangStatus opto_slang_compiler_set_max_threads(

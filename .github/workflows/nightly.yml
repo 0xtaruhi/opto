@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 # SPDX-License-Identifier: GPL-3.0-only
 
-name: Nightly verification
+name: Extended verification
 
 on:
-  schedule:
-    - cron: "23 17 * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,6 +20,97 @@ env:
   RUSTC_WRAPPER: sccache
 
 jobs:
+  frontend-qualification:
+    name: Frontend and formal qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: frontend-qualification
+
+      - name: Install Yosys
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends yosys
+
+      - name: Prove generated frontend cases
+        id: generated
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /usr/bin/yosys
+          OPTO_DIFFERENTIAL_SEEDS: 512
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::generated_differential --locked -- --exact --ignored --nocapture
+
+      - name: Prove static regression corpus
+        id: regression
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /usr/bin/yosys
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::presubmit_equivalence --locked -- --exact --ignored --nocapture
+
+      - name: Prove generated semantic matrix
+        id: semantics
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /usr/bin/yosys
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::generated_semantic_equivalence --locked -- --exact --ignored --nocapture
+
+      - name: Prove self-contained mapping fixtures
+        id: mapping
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /usr/bin/yosys
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::presubmit_qor --locked -- --exact --ignored --nocapture
+
+      - name: Cross-check opto-formal against Yosys SAT
+        id: formal
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /usr/bin/yosys
+          OPTO_FORMAL_DIFFERENTIAL_CASES: 64
+        run: cargo test -p opto-formal --test yosys_differential --locked -- --ignored --nocapture
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-qualification
+          path: ${{ runner.temp }}/opto-regression
+
+      - name: Report qualification result
+        if: always()
+        env:
+          GENERATED: ${{ steps.generated.outcome }}
+          REGRESSION: ${{ steps.regression.outcome }}
+          SEMANTICS: ${{ steps.semantics.outcome }}
+          MAPPING: ${{ steps.mapping.outcome }}
+          FORMAL: ${{ steps.formal.outcome }}
+        run: |
+          printf 'generated=%s regression=%s semantics=%s mapping=%s formal=%s\n' \
+            "$GENERATED" "$REGRESSION" "$SEMANTICS" "$MAPPING" "$FORMAL"
+          test "$GENERATED" = success
+          test "$REGRESSION" = success
+          test "$SEMANTICS" = success
+          test "$MAPPING" = success
+          test "$FORMAL" = success
+
   synthesis-runtime:
     name: Synthesis runtime regression
     runs-on: ubuntu-24.04

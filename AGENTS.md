@@ -60,9 +60,8 @@ the more specific repository document or maintainer direction takes priority.
 - Preserve one user-facing executable: `opto`.
 - Do not introduce a project manager, a manifest-driven build model, alternate
   production pipelines, or additional user-entry binaries.
-- Use `clap` for new or changed command-line arguments. If a required
-  DC-shaped argument cannot be parsed directly by `clap`, normalize it before
-  entering the typed `clap` layer.
+- Use `clap` for new or changed command-line arguments. Define one canonical
+  spelling per option; do not add a pre-`clap` normalization or alias layer.
 - Unsupported functionality must return a clear error. Do not silently ignore
   commands, flags, constraints, or malformed data.
 - Do not add fallback implementations, legacy compatibility branches,
@@ -74,17 +73,16 @@ the more specific repository document or maintainer direction takes priority.
 
 ## Tcl and synthesis behavior
 
-- DC and Genus are sources of prior art, not compatibility targets.
-- The public Tcl command surface follows DC-style spelling, arguments,
-  collections, reports, and flow behavior by default because those conventions
-  are useful. This is a documented default, not an unconditional compatibility
-  promise.
+- Treat Opto's documented command catalog, argument grammar, object model, and
+  report schemas as the public contract. Do not describe another product as
+  the specification or compatibility target.
 - Verify command names, option behavior, collection semantics, and report
-  fields against reliable documentation or observed behavior before changing
-  them. Never expose commands that Opto does not implement.
-- Opto may intentionally depart from both DC and Genus when a better coherent
-  design exists. Record the departure and rationale in
-  `docs/architecture.md`, including which prior-art behavior was considered.
+  fields against Opto's tests, architecture documents, public standards, and
+  reproducible examples before changing them. Never expose commands that Opto
+  does not implement.
+- Record intentional public-interface changes and their rationale in
+  `docs/architecture.md`. Prefer a small, coherent Opto interface over aliases
+  added solely to resemble another tool.
 - Preserve the single synthesis path. Effort settings may control bounded
   search policy, but must not select a separate implementation architecture.
 
@@ -157,9 +155,9 @@ the more specific repository document or maintainer direction takes priority.
 
 ## Public repository and licensing rules
 
-- Never commit proprietary PDKs, commercial-tool binaries or scripts, license
+- Never commit proprietary PDKs, non-redistributable binaries or scripts, license
   configuration, credentials, private RTL, internal regressions, private QoR
-  baselines, or raw commercial-tool results.
+  baselines, or non-redistributable results.
 - Public benchmark inputs must be redistributable or fetched from a pinned
   revision and verified by checksum.
 - Do not commit generated build directories, local editor state, temporary

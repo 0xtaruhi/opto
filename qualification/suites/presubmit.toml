@@ -23,5 +23,5 @@ cases = [
   "qualification/cases/memories/dual_port_register_bank/case.toml",
   "qualification/cases/semantics/resolved_nets/case.toml",
   "qualification/cases/sdc/max_delay/case.toml",
-  "qualification/cases/tcl_dc/collections/case.toml",
+  "qualification/cases/tcl/collections/case.toml",
 ]
