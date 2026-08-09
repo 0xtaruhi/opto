@@ -1,0 +1,106 @@
+// SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+// SPDX-License-Identifier: GPL-3.0-only
+
+use super::*;
+
+#[test]
+fn statement_kind_inventory_covers_every_slang_node() {
+    assert_semantic_inventory(
+        ast_visitor_case_kinds("switch (kind)"),
+        &[
+            "Invalid",
+            "Empty",
+            "List",
+            "Block",
+            "ExpressionStatement",
+            "VariableDeclaration",
+            "Return",
+            "Break",
+            "Conditional",
+            "Case",
+            "ForLoop",
+        ],
+        &[
+            "Continue",
+            "Disable",
+            "PatternCase",
+            "RepeatLoop",
+            "ForeachLoop",
+            "WhileLoop",
+            "DoWhileLoop",
+            "ForeverLoop",
+            "Timed",
+            "ImmediateAssertion",
+            "ConcurrentAssertion",
+            "DisableFork",
+            "Wait",
+            "WaitFork",
+            "WaitOrder",
+            "EventTrigger",
+            "ProceduralAssign",
+            "ProceduralDeassign",
+            "RandCase",
+            "RandSequence",
+            "ProceduralChecker",
+        ],
+    );
+}
+
+#[test]
+fn operator_inventory_covers_every_slang_operator() {
+    assert_semantic_inventory(
+        operator_kinds(0),
+        &[
+            "Plus",
+            "Minus",
+            "BitwiseNot",
+            "BitwiseAnd",
+            "BitwiseOr",
+            "BitwiseXor",
+            "BitwiseNand",
+            "BitwiseNor",
+            "BitwiseXnor",
+            "LogicalNot",
+            "Preincrement",
+            "Predecrement",
+            "Postincrement",
+            "Postdecrement",
+        ],
+        &[],
+    );
+    assert_semantic_inventory(
+        operator_kinds(1),
+        &[
+            "Add",
+            "Subtract",
+            "Multiply",
+            "Divide",
+            "Mod",
+            "BinaryAnd",
+            "BinaryOr",
+            "BinaryXor",
+            "BinaryXnor",
+            "Equality",
+            "Inequality",
+            "GreaterThanEqual",
+            "GreaterThan",
+            "LessThanEqual",
+            "LessThan",
+            "LogicalAnd",
+            "LogicalOr",
+            "LogicalShiftLeft",
+            "LogicalShiftRight",
+            "ArithmeticShiftLeft",
+            "ArithmeticShiftRight",
+            "Power",
+        ],
+        &[
+            "CaseEquality",
+            "CaseInequality",
+            "WildcardEquality",
+            "WildcardInequality",
+            "LogicalImplication",
+            "LogicalEquivalence",
+        ],
+    );
+}

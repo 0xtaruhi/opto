@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+name = "qor-public"
+cases = [
+  "benchmarks/qor/cases/kernels/add256/case.toml",
+  "benchmarks/qor/cases/kernels/alu64/case.toml",
+  "benchmarks/qor/cases/kernels/const-addsub32/case.toml",
+  "benchmarks/qor/cases/kernels/const-mul32/case.toml",
+  "benchmarks/qor/cases/kernels/const-div32/case.toml",
+  "benchmarks/qor/cases/blocks/mac8x8/case.toml",
+  "benchmarks/qor/cases/blocks/priority64/case.toml",
+  "benchmarks/qor/cases/blocks/crossbar8x32/case.toml",
+  "benchmarks/qor/cases/blocks/pipeline-adder32/case.toml",
+  "benchmarks/qor/cases/blocks/pipeline-adder64-timing/case.toml",
+]

@@ -1,0 +1,456 @@
+/* SPDX-FileCopyrightText: 2026 Zhengyi Zhang */
+/* SPDX-License-Identifier: GPL-3.0-only */
+
+library (opto_test) {
+  /* Synthetic symmetric tables keep this test library deterministic. */
+  delay_model : table_lookup;
+  time_unit : "1ns";
+  voltage_unit : "1V";
+  nom_voltage : 1.0;
+  current_unit : "1mA";
+  leakage_power_unit : "1nW";
+  capacitive_load_unit (1, pf);
+
+  cell (BUF_X1) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (INV_X1) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (AND2_X1) {
+    area : 1.5;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (B) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "A B";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "B";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (OR2_X1) {
+    area : 1.5;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (B) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "A + B";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "B";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (NAND2_X1) {
+    area : 1.25;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (B) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "!(A B)";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "B";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (NOR2_X1) {
+    area : 1.25;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (B) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "!(A + B)";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "B";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (XOR2_X1) {
+    area : 2.0;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (B) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "A ^ B";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "B";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (XNOR2_X1) {
+    area : 2.0;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (B) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "!(A ^ B)";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "B";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (MUX2_X1) {
+    area : 2.5;
+    pin (S) { direction : input; capacitance : 0.01; }
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (B) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "((S B) + (!S A))";
+      timing () {
+        related_pin : "S";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "B";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (DFF_X1) {
+    area : 4.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "D";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (DFFSR_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "D";
+      clear : "CLR";
+      preset : "PRE";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (CLR) { direction : input; capacitance : 0.01; }
+    pin (PRE) { direction : input; capacitance : 0.01; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (QUAL_DFFN_X1) {
+    area : 4.0;
+    ff (IQ, IQN) {
+      clocked_on : "!CLK";
+      next_state : "D";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFRN_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "D";
+      clear : "!RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFR_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "D";
+      clear : "RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFP_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "D";
+      preset : "RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFPN_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "D";
+      preset : "!RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFE_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "((D EN) + (IQ !EN))";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFER_X1) {
+    area : 6.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "((D EN) + (IQ !EN))";
+      clear : "RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFERN_X1) {
+    area : 6.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "((D EN) + (IQ !EN))";
+      clear : "!RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFEP_X1) {
+    area : 6.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "((D EN) + (IQ !EN))";
+      preset : "RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFEPN_X1) {
+    area : 6.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "((D EN) + (IQ !EN))";
+      preset : "!RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFNP_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "!CLK";
+      next_state : "D";
+      preset : "RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_DFFNRN_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "!CLK";
+      next_state : "D";
+      clear : "!RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_LATCH_X1) {
+    area : 3.0;
+    latch (IQ, IQN) {
+      data_in : "D";
+      enable : "EN";
+    }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_LATCHR_X1) {
+    area : 4.0;
+    latch (IQ, IQN) {
+      data_in : "D";
+      enable : "EN";
+      clear : "RESET";
+    }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (QUAL_LATCHRN_X1) {
+    area : 4.0;
+    latch (IQ, IQN) {
+      data_in : "D";
+      enable : "EN";
+      clear : "!RESET";
+    }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+}

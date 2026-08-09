@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "block-pipeline-adder32"
+kind = "qor"
+class = "block"
+scenario = "area_unconstrained"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth_high"
+library_key = "sky130_hd"
+sequential = true
+expected_area = 1293.740800
+area_tolerance = 0.001

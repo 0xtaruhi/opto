@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+name = "qor-presubmit"
+cases = [
+  "benchmarks/qor/cases/presubmit/add4-logic/case.toml",
+  "benchmarks/qor/cases/presubmit/cover-shared-inversion/case.toml",
+  "benchmarks/qor/cases/presubmit/cover-cheap-shared-node/case.toml",
+  "benchmarks/qor/cases/presubmit/cover-reconvergent-fanout/case.toml",
+  "benchmarks/qor/cases/presubmit/known-zero-add32/case.toml",
+]

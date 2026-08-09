@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "opto-formats"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+comfy-table.workspace = true
+thiserror.workspace = true
+opto-ir.workspace = true
+opto-power.workspace = true
+opto-timing.workspace = true
+
+[dev-dependencies]
+opto-db.workspace = true
+opto-library.workspace = true
+opto-runtime.workspace = true
+opto-timing.workspace = true

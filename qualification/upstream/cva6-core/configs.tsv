@@ -1,0 +1,3 @@
+# id	config_path	sha256	minimum_ports	minimum_nets
+rv32imac_sv32	core/include/cv32a6_imac_sv32_config_pkg.sv	4db1f2a9dabe41e2b0386e18fabad6842197fd7bd346b22140de6eea695ac37e	5000	15000
+rv64imafdc_sv39	core/include/cv64a6_imafdc_sv39_config_pkg.sv	d31679538fca1011d37652e7533e49491fe5f1cfbcc30b4099afa1b78e7a46fc	8000	25000

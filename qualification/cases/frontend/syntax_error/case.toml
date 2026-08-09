@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "frontend-syntax-error"
+kind = "regression"
+category = "negative"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "elaborate"
+expect = "fail"
+expect_log = ["expected"]

@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+name = "regression-presubmit"
+cases = [
+  "qualification/cases/smoke/boolean5/case.toml",
+  "qualification/cases/smoke/procedural_case/case.toml",
+  "qualification/cases/smoke/add4/case.toml",
+  "qualification/cases/smoke/add32/case.toml",
+  "qualification/cases/frontend/packed_generate/case.toml",
+  "qualification/cases/frontend/syntax_error/case.toml",
+  "qualification/cases/semantics/signed_arithmetic/case.toml",
+  "qualification/cases/semantics/division/case.toml",
+  "qualification/cases/processes/case_priority/case.toml",
+  "qualification/cases/hierarchy/parameter_generate/case.toml",
+  "qualification/cases/sequential/dff_enable/case.toml",
+  "qualification/cases/sequential/async_set_clear/case.toml",
+  "qualification/cases/sequential/fsm_equivalent_states/case.toml",
+  "qualification/cases/sequential/fsm_sparse/case.toml",
+  "qualification/cases/sequential/fsm_sparse_timing/case.toml",
+  "qualification/cases/memories/sync_ram/case.toml",
+  "qualification/cases/memories/dual_port_register_bank/case.toml",
+  "qualification/cases/semantics/resolved_nets/case.toml",
+  "qualification/cases/sdc/max_delay/case.toml",
+  "qualification/cases/tcl/collections/case.toml",
+]

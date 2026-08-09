@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "sdc-max-delay"
+kind = "regression"
+category = "sdc"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+constraints = [
+  "set input_ports [concat [get_ports a] [get_ports b]]",
+  "set_input_transition 0.1 $input_ports",
+  "set_load 0.05 [get_ports y]",
+  "set_max_delay 20.0 -from $input_ports -to [get_ports y]",
+]
+
+[assertions]
+min_ports = 3
+min_cells = 1

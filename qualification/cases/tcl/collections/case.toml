@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "tcl-collections"
+kind = "regression"
+category = "tcl"
+top = "top"
+sources = ["top.sv"]
+script = "run.tcl"
+
+[assertions]
+min_ports = 2

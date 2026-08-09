@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "opto-command-macros"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+description = "Derive macros for typed Opto Tcl command arguments"
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true

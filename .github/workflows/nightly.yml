@@ -1,0 +1,473 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: Nightly verification
+
+on:
+  schedule:
+    - cron: "23 17 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CMAKE_CXX_COMPILER_LAUNCHER: sccache
+  RUSTC_WRAPPER: sccache
+
+jobs:
+  yosys-toolchain:
+    name: Build pinned Yosys toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Restore pinned Yosys installation
+        id: yosys-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/opto-yosys
+          key: linux-x64-yosys-a0fbe6e13311d4909938c63eeb28b6c730467e6c-v1
+
+      - name: Install compiler cache
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Install Yosys build dependencies
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bison flex gawk libffi-dev libfl-dev libreadline-dev ninja-build \
+            pkg-config tcl-dev zlib1g-dev
+
+      - name: Check out audited Yosys revision
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: YosysHQ/yosys
+          ref: a0fbe6e13311d4909938c63eeb28b6c730467e6c
+          path: .external/yosys-toolchain
+          submodules: recursive
+
+      - name: Build audited Yosys revision
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S .external/yosys-toolchain -B "$RUNNER_TEMP/yosys-build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/opto-yosys \
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build "$RUNNER_TEMP/yosys-build" --parallel 4
+          cmake --install "$RUNNER_TEMP/yosys-build" --strip
+
+      - name: Verify pinned Yosys installation
+        run: /tmp/opto-yosys/bin/yosys -V
+
+      - name: Upload pinned Yosys installation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pinned-yosys
+          path: /tmp/opto-yosys
+          retention-days: 1
+
+  frontend-qualification:
+    name: Frontend and formal qualification
+    needs: yosys-toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: frontend-qualification
+
+      - name: Download pinned Yosys installation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pinned-yosys
+          path: /tmp/opto-yosys
+
+      - name: Enable pinned Yosys executables
+        run: chmod -R u+rx /tmp/opto-yosys/bin
+
+      - name: Prove generated frontend cases
+        id: generated
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
+          OPTO_DIFFERENTIAL_SEEDS: 512
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::generated_differential --locked -- --exact --ignored --nocapture
+
+      - name: Prove static regression corpus
+        id: regression
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::presubmit_equivalence --locked -- --exact --ignored --nocapture
+
+      - name: Prove generated semantic matrix
+        id: semantics
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::generated_semantic_equivalence --locked -- --exact --ignored --nocapture
+
+      - name: Prove self-contained mapping fixtures
+        id: mapping
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::presubmit_qor --locked -- --exact --ignored --nocapture
+
+      - name: Cross-check opto-formal against Yosys SAT
+        id: formal
+        continue-on-error: true
+        env:
+          OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
+          OPTO_FORMAL_DIFFERENTIAL_CASES: 64
+        run: cargo test -p opto-formal --test yosys_differential --locked -- --ignored --nocapture
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-qualification
+          path: ${{ runner.temp }}/opto-regression
+
+      - name: Report qualification result
+        if: always()
+        env:
+          GENERATED: ${{ steps.generated.outcome }}
+          REGRESSION: ${{ steps.regression.outcome }}
+          SEMANTICS: ${{ steps.semantics.outcome }}
+          MAPPING: ${{ steps.mapping.outcome }}
+          FORMAL: ${{ steps.formal.outcome }}
+        run: |
+          printf 'generated=%s regression=%s semantics=%s mapping=%s formal=%s\n' \
+            "$GENERATED" "$REGRESSION" "$SEMANTICS" "$MAPPING" "$FORMAL"
+          test "$GENERATED" = success
+          test "$REGRESSION" = success
+          test "$SEMANTICS" = success
+          test "$MAPPING" = success
+          test "$FORMAL" = success
+
+  synthesis-runtime:
+    name: Synthesis runtime regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: synthesis-runtime
+
+      - name: Install critcmp
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: critcmp@0.1.8
+
+      - name: Resolve the previous revision
+        id: previous
+        run: |
+          if base="$(git rev-parse HEAD^ 2>/dev/null)"; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "revision=$base" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No previous revision exists; running the current benchmark without a regression comparison."
+          fi
+
+      - name: Measure the previous revision
+        if: steps.previous.outputs.available == 'true'
+        env:
+          BASE_REVISION: ${{ steps.previous.outputs.revision }}
+        run: |
+          base="$BASE_REVISION"
+          echo "Comparing against $base"
+          git checkout --detach "$base"
+          git submodule update --init --recursive
+          cargo bench -p opto-synth --bench synthesis --locked -- --save-baseline base --noplot
+
+      - name: Measure this revision
+        run: |
+          git checkout --force ${{ github.sha }}
+          git submodule update --init --recursive
+          cargo bench -p opto-synth --bench synthesis --locked -- --save-baseline head --noplot
+
+      - name: Reject a runtime regression
+        if: steps.previous.outputs.available == 'true'
+        run: |
+          critcmp base head
+          critcmp --threshold 25 base head > "$RUNNER_TEMP/critcmp.txt"
+          if grep -qE '\+[0-9]+\.[0-9]+%' "$RUNNER_TEMP/critcmp.txt"; then
+            echo "::error::a synthesis benchmark regressed by more than 25%"
+            cat "$RUNNER_TEMP/critcmp.txt"
+            exit 1
+          fi
+
+  medium-qor-regression:
+    name: Real medium-scale QoR regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Check out repository and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: medium-qor-regression
+
+      - name: Resolve the previous revision
+        id: previous
+        run: |
+          if base="$(git rev-parse HEAD^ 2>/dev/null)"; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "revision=$base" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No previous revision exists; skipping the comparative QoR gate."
+          fi
+
+      - name: Fetch pinned public RTL and Liberty
+        if: steps.previous.outputs.available == 'true'
+        run: |
+          benchmarks/real/fetch.sh "$RUNNER_TEMP/opto-real-medium-30"
+          benchmarks/qor/libraries/fetch_sky130.sh "$RUNNER_TEMP/sky130-hd.lib"
+
+      - name: Build merge-base and candidate binaries
+        if: steps.previous.outputs.available == 'true'
+        env:
+          BASE_REVISION: ${{ steps.previous.outputs.revision }}
+        run: |
+          head=${{ github.sha }}
+          git checkout --detach "$BASE_REVISION"
+          git submodule update --init --recursive
+          cargo build --profile fast-release --bin opto --locked
+          cp target/fast-release/opto "$RUNNER_TEMP/opto-base"
+          git checkout --force "$head"
+          git submodule update --init --recursive
+          cargo build --profile fast-release --bin opto --locked
+          cp target/fast-release/opto "$RUNNER_TEMP/opto-head"
+
+      - name: Gate same-host QoR
+        if: steps.previous.outputs.available == 'true'
+        env:
+          OPTO_SOURCE_REAL_MEDIUM: ${{ runner.temp }}/opto-real-medium-30
+          OPTO_LIBRARY_REAL_MEDIUM: ${{ runner.temp }}/sky130-hd.lib
+          OPTO_QOR_BASELINE_BINARY: ${{ runner.temp }}/opto-base
+          OPTO_QOR_BINARY: ${{ runner.temp }}/opto-head
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: >-
+          cargo test -p opto --test integration
+          qualification::real_medium_qor_regression --locked --
+          --exact --ignored --nocapture
+
+      - name: Upload medium-scale measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-medium-qor-regression
+          path: ${{ runner.temp }}/opto-regression/real-medium-gate
+
+  input-fuzz-smoke:
+    name: Input fuzz smoke tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install nightly Rust
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: nightly-fuzz
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-fuzz
+
+      - name: Fuzz Liberty parser
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu liberty -- -max_total_time=30
+
+      - name: Fuzz SPEF parser
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu spef -- -max_total_time=30
+
+      - name: Fuzz SDC parser
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu sdc -- -max_total_time=30
+
+      - name: Fuzz checkpoint decoder
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu checkpoint -- -max_total_time=30
+
+  address-sanitizer:
+    name: FFI address sanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: -Zsanitizer=address
+      RUSTDOCFLAGS: -Zsanitizer=address
+    steps:
+      - name: Check out repository and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install nightly Rust
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: nightly-asan
+
+      - name: Test FFI boundary crates with ASan
+        run: cargo +nightly test -p opto-slang-sys -p opto-tcl-sys -Zbuild-std --target x86_64-unknown-linux-gnu --locked
+
+  systemverilog-conformance:
+    name: CHIPS Alliance sv-tests conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out Opto and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: nightly-sv-tests
+
+      - name: Check out audited sv-tests revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: chipsalliance/sv-tests
+          ref: 2913f075dcd10e4d64b7d912fe7d4675dd0a1e29
+          path: .external/sv-tests
+
+      - name: Run 1,027-file audit and 137-case ASIC frontend contract
+        env:
+          OPTO_SOURCE_SV_TESTS: ${{ github.workspace }}/.external/sv-tests
+          OPTO_SV_TESTS_JOBS: 8
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::systemverilog_conformance --locked -- --exact --ignored --nocapture
+
+      - name: Upload mismatch diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sv-tests-conformance
+          path: ${{ runner.temp }}/opto-regression/sv-tests-conformance
+
+  yosys-rtl-qualification:
+    name: Yosys RTL qualification corpus
+    needs: yosys-toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out Opto and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: nightly-yosys
+
+      - name: Download pinned Yosys installation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pinned-yosys
+          path: /tmp/opto-yosys
+
+      - name: Enable pinned Yosys executables
+        run: chmod -R u+rx /tmp/opto-yosys/bin
+
+      - name: Check out audited Yosys revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: YosysHQ/yosys
+          ref: a0fbe6e13311d4909938c63eeb28b6c730467e6c
+          path: .external/yosys
+
+      - name: Compile 210 designs and prove the audited observable subset
+        env:
+          OPTO_SOURCE_YOSYS_TESTS: ${{ github.workspace }}/.external/yosys
+          OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
+          OPTO_YOSYS_TESTS_JOBS: 8
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::yosys_rtl_qualification --locked -- --exact --ignored --nocapture
+
+      - name: Upload mismatch diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yosys-rtl-qualification
+          path: ${{ runner.temp }}/opto-regression/yosys-rtl-qualification

@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+version: 2
+
+multi-ecosystem-groups:
+  dependency-updates:
+    schedule:
+      interval: weekly
+
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/fuzz"
+    patterns:
+      - "*"
+    multi-ecosystem-group: dependency-updates
+    groups:
+      cargo-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    patterns:
+      - "*"
+    multi-ecosystem-group: dependency-updates
+    groups:
+      actions-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+# slang and fmt form one native compatibility set and are upgraded together manually.

@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+name = "upstream-cva6"
+cases = [
+  "qualification/upstream/cva6-core/case.toml",
+]

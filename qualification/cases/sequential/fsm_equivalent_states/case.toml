@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "sequential-fsm-equivalent-states"
+kind = "regression"
+category = "sequential"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+sequential = true
+equivalence = true
+equivalence_initial_state = "zero"
+
+[assertions]
+min_ports = 4
+min_cells = 6

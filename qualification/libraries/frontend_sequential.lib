@@ -1,0 +1,92 @@
+/* SPDX-FileCopyrightText: 2026 Zhengyi Zhang */
+/* SPDX-License-Identifier: GPL-3.0-only */
+
+/* Functional cells used only by frontend equivalence qualification. */
+library (opto_frontend_sequential) {
+  delay_model : table_lookup;
+  time_unit : "1ns";
+  voltage_unit : "1V";
+  current_unit : "1mA";
+  capacitive_load_unit (1, pf);
+
+  cell (DFFN_X1) {
+    area : 4.0;
+    ff (IQ, IQN) {
+      clocked_on : "!CLK";
+      next_state : "D";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (DFFRN_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "CLK";
+      next_state : "D";
+      clear : "!RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (DFFNP_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "!CLK";
+      next_state : "D";
+      preset : "RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (DFFNRN_X1) {
+    area : 5.0;
+    ff (IQ, IQN) {
+      clocked_on : "!CLK";
+      next_state : "D";
+      clear : "!RESET";
+    }
+    pin (CLK) { direction : input; clock : true; }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (LATCH_X1) {
+    area : 3.0;
+    latch (IQ, IQN) {
+      data_in : "D";
+      enable : "EN";
+    }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (LATCHR_X1) {
+    area : 4.0;
+    latch (IQ, IQN) {
+      data_in : "D";
+      enable : "EN";
+      clear : "RESET";
+    }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+  cell (LATCHRN_X1) {
+    area : 4.0;
+    latch (IQ, IQN) {
+      data_in : "D";
+      enable : "EN";
+      clear : "!RESET";
+    }
+    pin (D) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (RESET) { direction : input; capacitance : 0.01; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+}

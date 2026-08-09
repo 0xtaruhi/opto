@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "extended-address-generator32"
+kind = "qor"
+class = "extended"
+scenario = "timing_constrained"
+language = "verilog"
+top = "top"
+sources = ["top.v"]
+flow = "synth"
+library = "../../../../../qualification/libraries/opto_test.lib"
+report_timing = true
+clock_period = 60.0
+constraints = [
+  "set base_index [concat [get_ports base] [get_ports index]]",
+  "set offsets [concat [get_ports displacement] [get_ports correction]]",
+  "set input_ports [concat $base_index $offsets]",
+  "set_input_transition 0.1 $input_ports",
+  "set_load 0.05 [get_ports address]",
+  "set_max_delay 60.0 -from $input_ports -to [get_ports address]",
+]
+expected_area = 1033.75
+area_tolerance = 0.0
+expected_cells = 595
+cell_count_tolerance = 0.0
+expected_worst_slack = 23.0
+worst_slack_tolerance = 0.0
+expected_total_negative_slack = 0.0
+total_negative_slack_tolerance = 0.0
+maximum_violating_paths = 0
+maximum_wall_seconds = 300.0
+maximum_cpu_seconds = 600.0
+maximum_peak_rss_kib = 524288
+
+[expected_cell_histogram]
+AND2_X1 = 19
+INV_X1 = 11
+MUX2_X1 = 86
+NAND2_X1 = 133
+NOR2_X1 = 98
+OR2_X1 = 11
+XNOR2_X1 = 92
+XOR2_X1 = 145

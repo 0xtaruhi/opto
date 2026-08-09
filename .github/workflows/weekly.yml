@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: Extended synthesis qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CMAKE_CXX_COMPILER_LAUNCHER: sccache
+  RUSTC_WRAPPER: sccache
+
+jobs:
+  yosys-toolchain:
+    name: Build pinned Yosys toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Restore pinned Yosys installation
+        id: yosys-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/opto-yosys
+          key: linux-x64-yosys-a0fbe6e13311d4909938c63eeb28b6c730467e6c-v1
+
+      - name: Install compiler cache
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Install Yosys build dependencies
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bison flex gawk libffi-dev libfl-dev libreadline-dev ninja-build \
+            pkg-config tcl-dev zlib1g-dev
+
+      - name: Check out audited Yosys revision
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: YosysHQ/yosys
+          ref: a0fbe6e13311d4909938c63eeb28b6c730467e6c
+          path: .external/yosys-toolchain
+          submodules: recursive
+
+      - name: Build audited Yosys revision
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S .external/yosys-toolchain -B "$RUNNER_TEMP/yosys-build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/opto-yosys \
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build "$RUNNER_TEMP/yosys-build" --parallel 4
+          cmake --install "$RUNNER_TEMP/yosys-build" --strip
+
+      - name: Verify pinned Yosys installation
+        run: /tmp/opto-yosys/bin/yosys -V
+
+      - name: Upload pinned Yosys installation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pinned-yosys
+          path: /tmp/opto-yosys
+          retention-days: 1
+
+  upstream-cores:
+    name: Pinned Ibex and CVA6 designs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out Opto and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: weekly-upstream
+
+      - name: Check out pinned Ibex
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: lowRISC/ibex
+          ref: c6edaa4060b1a3cd27fda928058db4f0ee3d24bd
+          path: .external/ibex
+
+      - name: Check out pinned CVA6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: openhwgroup/cva6
+          ref: ed2efa51744387f510bfa4dcec29eb2e1f5697cf
+          path: .external/cva6
+
+      - name: Initialize CVA6 synthesis submodules
+        run: >-
+          git -C .external/cva6 submodule update --init --recursive
+          core/cvfpu
+          core/cache_subsystem/hpdcache
+
+      - name: Elaborate pinned Ibex configurations
+        env:
+          OPTO_SOURCE_IBEX: ${{ github.workspace }}/.external/ibex
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::upstream_ibex --locked -- --exact --ignored --nocapture
+
+      - name: Elaborate pinned CVA6 configurations
+        env:
+          OPTO_SOURCE_CVA6: ${{ github.workspace }}/.external/cva6
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::upstream_cva6 --locked -- --exact --ignored --nocapture
+
+      - name: Upload upstream reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upstream-core-reports
+          path: ${{ runner.temp }}/opto-regression
+
+  public-qor:
+    name: Public and extended QoR
+    needs: yosys-toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out Opto and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: weekly-qor
+
+      - name: Restore QoR trend history
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .qor-dashboard
+          key: ${{ runner.os }}-qor-history-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-qor-history-
+
+      - name: Download pinned Yosys installation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pinned-yosys
+          path: /tmp/opto-yosys
+
+      - name: Enable pinned Yosys executables
+        run: chmod -R u+rx /tmp/opto-yosys/bin
+
+      - name: Build benchmark binary
+        run: cargo build --profile fast-release --bin opto --locked
+
+      - name: Fetch checksum-pinned public Liberty
+        run: benchmarks/qor/libraries/fetch_sky130.sh "$RUNNER_TEMP/sky130.lib"
+
+      - name: Run public QoR suite
+        env:
+          OPTO_QOR_BINARY: ${{ github.workspace }}/target/fast-release/opto
+          OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
+          OPTO_LIBRARY_SKY130_HD: ${{ runner.temp }}/sky130.lib
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::public_qor --locked -- --exact --ignored --nocapture
+
+      - name: Run extended self-contained QoR suite
+        env:
+          OPTO_QOR_BINARY: ${{ github.workspace }}/target/fast-release/opto
+          OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
+          OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
+        run: cargo test -p opto --test integration qualification::extended_qor --locked -- --exact --ignored --nocapture
+
+      - name: Append measurement and render QoR dashboard
+        run: >-
+          python3 tools/render_qor_dashboard.py
+          --result "$RUNNER_TEMP/opto-regression/qor-public/results.json"
+          --history .qor-dashboard/history.json
+          --output .qor-dashboard/dashboard/index.html
+          --commit "$GITHUB_SHA"
+
+      - name: Save QoR trend history
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .qor-dashboard
+          key: ${{ runner.os }}-qor-history-${{ github.run_id }}
+
+      - name: Install mdBook
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: mdbook
+
+      - name: Build documentation and API reference
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
+        run: |
+          mdbook build
+          cargo doc --workspace --all-features --no-deps --locked
+          cp -R target/doc target/book/api
+          cp -R .qor-dashboard/dashboard target/book/qor
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: target/book
+
+      - name: Deploy documentation and QoR dashboard
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+
+      - name: Upload QoR provenance and diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qor-results
+          path: |
+            ${{ runner.temp }}/opto-regression/qor-public
+            ${{ runner.temp }}/opto-regression/qor-extended

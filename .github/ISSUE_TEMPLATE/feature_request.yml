@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: Feature request
+description: Propose a synthesis, compatibility, or infrastructure improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or contributor problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility evidence
+      description: For Tcl behavior, cite the Opto contract, a public standard, or a reproducible example.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Describe semantics, architecture impact, tests, and QoR measurement needs.
+    validations:
+      required: true

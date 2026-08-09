@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "frontend-packed-generate"
+kind = "regression"
+category = "frontend"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "elaborate"
+
+[assertions]
+min_ports = 2
+min_nets = 8

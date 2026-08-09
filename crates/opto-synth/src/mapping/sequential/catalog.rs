@@ -1,0 +1,242 @@
+// SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+// SPDX-License-Identifier: GPL-3.0-only
+
+#[cfg(test)]
+use crate::TargetCell;
+use crate::mapping::{MappedCell, MappedInputConnection, MappedOutputConnection};
+use crate::planning::mapping_policy::{CellCost, MappingCost, compare_mapping_cost};
+use crate::{
+    SynthesisOptions, TargetCellRef, TargetPinDirection, TargetPinRef, TargetSequentialKind,
+    TargetSequentialRef,
+};
+use opto_ir::word;
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
+
+pub(crate) mod cells;
+
+use cells::{
+    AsyncControl, AsyncResetRequest, LatchCell, SequentialCell, SequentialEnableCell,
+    SequentialInvertedOutput, asynchronous_controls, cell_cost, compare_cells, compare_latch_cells,
+    enable_flip_flop_pattern, is_input_pin, latch_cell, next_state_input_pins, state_output_pins,
+};
+
+#[derive(Debug, Default)]
+pub(crate) struct SequentialCellCatalog {
+    cells: Vec<SequentialCell>,
+    enable_cells: Vec<SequentialEnableCell>,
+    latch_cells: Vec<LatchCell>,
+}
+
+impl SequentialCellCatalog {
+    pub(crate) fn new(options: &SynthesisOptions) -> Self {
+        let mut catalog = Self::default();
+        for (_, cell) in options.target_cells.synthesis_cells() {
+            for sequential in cell.sequential() {
+                if sequential.kind() == TargetSequentialKind::Latch {
+                    if let Some(latch) = latch_cell(cell, sequential) {
+                        catalog.latch_cells.push(latch);
+                    }
+                    continue;
+                }
+                if sequential.kind() != TargetSequentialKind::FlipFlop
+                    || sequential.enable().is_some()
+                {
+                    continue;
+                }
+                let Some((clock_pin, clock_positive)) = sequential
+                    .clocked_on()
+                    .and_then(crate::BooleanFunctionRef::as_literal)
+                else {
+                    continue;
+                };
+                let Some(next_state) = sequential.next_state() else {
+                    continue;
+                };
+                let Some((output_pin, inverted_output_pin)) = state_output_pins(cell, sequential)
+                else {
+                    continue;
+                };
+                if !is_input_pin(cell, clock_pin) {
+                    continue;
+                }
+                let Some(resets) = asynchronous_controls(cell, sequential) else {
+                    continue;
+                };
+                let reset_pins = resets
+                    .iter()
+                    .map(|control| control.pin.as_str())
+                    .collect::<Vec<_>>();
+                let edge = if clock_positive {
+                    word::Edge::Pos
+                } else {
+                    word::Edge::Neg
+                };
+                let Some(data_pins) = next_state_input_pins(cell, sequential, next_state) else {
+                    if let Some(pattern) = enable_flip_flop_pattern(cell, sequential, next_state) {
+                        let pin_names = [pattern.data_pin, pattern.enable_pin];
+                        let cost = cell_cost(cell, &pin_names, clock_pin, &reset_pins, output_pin);
+                        let inverted_output =
+                            inverted_output_pin.map(|pin| SequentialInvertedOutput {
+                                pin: pin.name().to_string(),
+                                cost: cell_cost(cell, &pin_names, clock_pin, &reset_pins, pin),
+                            });
+                        catalog.enable_cells.push(SequentialEnableCell {
+                            cell_name: cell.name().to_string(),
+                            data_pin: pattern.data_pin.to_string(),
+                            enable_pin: pattern.enable_pin.to_string(),
+                            enable_active_high: pattern.enable_active_high,
+                            clock_pin: clock_pin.to_string(),
+                            output_pin: output_pin.name().to_string(),
+                            inverted_output,
+                            resets,
+                            edge,
+                            cost,
+                        });
+                    }
+                    continue;
+                };
+                let data_pin_names = data_pins.iter().map(|pin| pin.name()).collect::<Vec<_>>();
+                let cost = cell_cost(cell, &data_pin_names, clock_pin, &reset_pins, output_pin);
+                let inverted_output = inverted_output_pin.map(|pin| SequentialInvertedOutput {
+                    pin: pin.name().to_string(),
+                    cost: cell_cost(cell, &data_pin_names, clock_pin, &reset_pins, pin),
+                });
+                let Some((data_pin, true)) = next_state.as_literal() else {
+                    continue;
+                };
+                let candidate = SequentialCell {
+                    cell_name: cell.name().to_string(),
+                    data_pin: data_pin.to_string(),
+                    clock_pin: clock_pin.to_string(),
+                    output_pin: output_pin.name().to_string(),
+                    inverted_output,
+                    resets,
+                    edge,
+                    cost,
+                };
+                catalog.cells.push(candidate);
+            }
+        }
+        catalog.cells.sort_by(|left, right| {
+            (left.edge as u8)
+                .cmp(&(right.edge as u8))
+                .then_with(|| left.resets.cmp(&right.resets))
+                .then_with(|| compare_cells(left, right))
+        });
+        catalog.latch_cells.sort_by(|left, right| {
+            left.resets
+                .cmp(&right.resets)
+                .then_with(|| compare_latch_cells(left, right))
+        });
+        catalog
+    }
+
+    pub(crate) fn best(
+        &self,
+        edge: word::Edge,
+        resets: &[AsyncResetRequest],
+        inverted_output: bool,
+        inverter: Option<CellCost>,
+    ) -> Option<&SequentialCell> {
+        self.cells
+            .iter()
+            .filter(|cell| {
+                cell.edge == edge
+                    && cell
+                        .resets
+                        .iter()
+                        .map(AsyncControl::request)
+                        .eq(resets.iter().copied())
+            })
+            .filter(|cell| cell.mapping_cost(inverted_output, inverter).is_some())
+            .min_by(|left, right| {
+                let left_cost = left
+                    .mapping_cost(inverted_output, inverter)
+                    .expect("filtered sequential candidate has an implementation cost");
+                let right_cost = right
+                    .mapping_cost(inverted_output, inverter)
+                    .expect("filtered sequential candidate has an implementation cost");
+                compare_mapping_cost(left_cost, right_cost).then_with(|| compare_cells(left, right))
+            })
+    }
+
+    pub(crate) fn has_enable_cell(&self, edge: word::Edge, resets: &[AsyncResetRequest]) -> bool {
+        self.enable_cells.iter().any(|cell| {
+            cell.edge == edge
+                && cell
+                    .resets
+                    .iter()
+                    .map(AsyncControl::request)
+                    .eq(resets.iter().copied())
+        })
+    }
+
+    pub(crate) fn best_enable(
+        &self,
+        edge: word::Edge,
+        resets: &[AsyncResetRequest],
+        enable_active_high: bool,
+        inverted_output: bool,
+        inverter: Option<CellCost>,
+    ) -> Option<&SequentialEnableCell> {
+        self.enable_cells
+            .iter()
+            .filter(|cell| {
+                cell.edge == edge
+                    && cell
+                        .resets
+                        .iter()
+                        .map(AsyncControl::request)
+                        .eq(resets.iter().copied())
+            })
+            .filter(|cell| {
+                cell.mapping_cost(enable_active_high, inverted_output, inverter)
+                    .is_some()
+            })
+            .min_by(|left, right| {
+                let left_cost = left
+                    .mapping_cost(enable_active_high, inverted_output, inverter)
+                    .expect("filtered sequential candidate has an implementation cost");
+                let right_cost = right
+                    .mapping_cost(enable_active_high, inverted_output, inverter)
+                    .expect("filtered sequential candidate has an implementation cost");
+                compare_mapping_cost(left_cost, right_cost)
+                    .then_with(|| left.cell_name.cmp(&right.cell_name))
+            })
+    }
+
+    pub(crate) fn best_latch(
+        &self,
+        resets: &[AsyncResetRequest],
+        enable_active_high: bool,
+        inverted_output: bool,
+        inverter: Option<CellCost>,
+    ) -> Option<&LatchCell> {
+        self.latch_cells
+            .iter()
+            .filter(|cell| {
+                cell.resets
+                    .iter()
+                    .map(AsyncControl::request)
+                    .eq(resets.iter().copied())
+            })
+            .filter(|cell| {
+                cell.mapping_cost(enable_active_high, inverted_output, inverter)
+                    .is_some()
+            })
+            .min_by(|left, right| {
+                let left_cost = left
+                    .mapping_cost(enable_active_high, inverted_output, inverter)
+                    .expect("filtered latch candidate has an implementation cost");
+                let right_cost = right
+                    .mapping_cost(enable_active_high, inverted_output, inverter)
+                    .expect("filtered latch candidate has an implementation cost");
+                compare_mapping_cost(left_cost, right_cost)
+                    .then_with(|| compare_latch_cells(left, right))
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,58 @@
+/* SPDX-FileCopyrightText: 2026 Zhengyi Zhang */
+/* SPDX-License-Identifier: GPL-3.0-only */
+
+library (cover_test) {
+  delay_model : table_lookup;
+  time_unit : "1ns";
+  capacitive_load_unit (1, pf);
+
+  cell (BUF_X1) {
+    area : 1.0;
+    pin (A) { direction : input; }
+    pin (Y) { direction : output; function : "A"; }
+  }
+  cell (INV_X1) {
+    area : 0.4;
+    pin (A) { direction : input; }
+    pin (Y) { direction : output; function : "!A"; }
+  }
+  cell (AND2_X1) {
+    area : 1.0;
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "A B"; }
+  }
+  cell (NAND2_X1) {
+    area : 0.8;
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "!(A B)"; }
+  }
+  cell (OR2_X1) {
+    area : 0.8;
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "A + B"; }
+  }
+  cell (XOR2_X1) {
+    area : 2.5;
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (Y) { direction : output; function : "A ^ B"; }
+  }
+  cell (AND3_X1) {
+    area : 0.7;
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (C) { direction : input; }
+    pin (Y) { direction : output; function : "A B C"; }
+  }
+  cell (AND4_X1) {
+    area : 2.0;
+    pin (A) { direction : input; }
+    pin (B) { direction : input; }
+    pin (C) { direction : input; }
+    pin (D) { direction : input; }
+    pin (Y) { direction : output; function : "A B C D"; }
+  }
+}

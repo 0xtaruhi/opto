@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "opto-formal"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+opto-ir.workspace = true
+varisat = "=0.2.2"
+
+[[test]]
+name = "yosys_differential"
+path = "tests/yosys_differential.rs"

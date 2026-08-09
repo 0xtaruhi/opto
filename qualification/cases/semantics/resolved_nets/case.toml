@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "semantics-resolved-nets"
+kind = "regression"
+category = "semantics"
+language = "verilog"
+top = "top"
+sources = ["top.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 6
+min_cells = 2

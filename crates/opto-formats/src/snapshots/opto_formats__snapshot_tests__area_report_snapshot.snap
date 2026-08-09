@@ -1,0 +1,38 @@
+---
+source: crates/opto-formats/src/snapshot_tests.rs
+expression: "stable_timestamp(report_mapped_area(&mapped_fixture(), &context).render_plain())"
+---
+# Area report
+
+Design: top
+Version: opto 0.1.0
+Date: <timestamp>
+
+Information: Updating design information...
+
+## Libraries
+
+| Library | Source   |
+|---------|----------|
+| demo    | demo.lib |
+
+## Counts
+
+Number of ports: 2
+Number of nets: 2
+Number of cells: 1
+Number of combinational cells: 1
+Number of sequential cells: 0
+Number of macros/black boxes: 0
+Number of buf/inv: 1
+Number of references: 1
+
+## Area
+
+Combinational area: 1.250000
+Buf/Inv area: 1.250000
+Noncombinational area: 0.000000
+Macro/Black Box area: 0.000000
+Net Interconnect area: undefined (wire load has zero net area)
+Total cell area: 1.250000
+Total area: undefined

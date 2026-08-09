@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "memories-sync-ram"
+kind = "regression"
+category = "memories"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "elaborate"
+
+[assertions]
+min_ports = 5
+min_nets = 64

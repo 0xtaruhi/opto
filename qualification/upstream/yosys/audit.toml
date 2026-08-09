@@ -1,0 +1,189 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 2
+
+[[reject_synthesis]]
+path = "proc/rmdead.v"
+category = "invalid-multiple-driver-rtl"
+reason = "The file intentionally drives one variable from four always blocks; ASIC synthesis must reject the unresolved procedural drivers."
+
+[[exclude]]
+path = "memories/issue00335.v"
+category = "initial-state"
+reason = "Exercises an initial block that preloads memory, which is an FPGA or simulation initialization feature rather than the ASIC synthesis contract."
+
+[[exclude]]
+path = "memories/read_arst.v"
+category = "initial-state"
+reason = "Uses an initial assignment to establish power-up state; opto targets explicit reset hardware for ASIC synthesis."
+
+[[exclude]]
+path = "memories/wide_all.v"
+category = "initial-state"
+reason = "Preloads memories from an initial block and therefore tests FPGA or simulation initialization semantics."
+
+[[exclude]]
+path = "memories/wide_read_mixed.v"
+category = "initial-state"
+reason = "Uses an initial output assignment and is outside the explicit-reset ASIC synthesis contract."
+
+[[exclude]]
+path = "simple/case_expr_const.v"
+category = "simulation-testbench"
+reason = "Checks case-expression behavior from an initial testbench rather than describing persistent hardware."
+
+[[exclude]]
+path = "simple/case_expr_extend.sv"
+category = "simulation-testbench"
+reason = "Checks expression sizing from an initial testbench rather than describing persistent hardware."
+
+[[exclude]]
+path = "simple/case_expr_non_const.v"
+category = "simulation-testbench"
+reason = "Uses declaration initialization and an initial testbench to inspect language semantics."
+
+[[exclude]]
+path = "simple/case_expr_query.sv"
+category = "simulation-testbench"
+reason = "Uses an initial testbench to query expression behavior and does not define ASIC hardware."
+
+[[exclude]]
+path = "simple/const_branch_finish.v"
+category = "simulation-testbench"
+reason = "Relies on $display and $finish inside initial control flow."
+
+[[exclude]]
+path = "simple/dff_init.v"
+category = "initial-state"
+reason = "Tests register power-up initialization instead of an explicit reset network."
+
+[[exclude]]
+path = "simple/forgen01.v"
+category = "simulation-testbench"
+reason = "The generated structure is observed through an initial testbench in the same compilation unit."
+
+[[exclude]]
+path = "simple/func_width_scope.v"
+category = "yosys-language-extension"
+reason = "Calls generate-block-local functions from constant expressions, a Yosys extension rejected by the standards-oriented Slang frontend."
+
+[[exclude]]
+path = "simple/generate.v"
+category = "simulation-testbench"
+reason = "The compilation unit includes an initial test module and is not a pure synthesizable RTL case."
+
+[[exclude]]
+path = "simple/local_loop_var.sv"
+category = "simulation-testbench"
+reason = "Observes local loop-variable behavior from an initial testbench."
+
+[[exclude]]
+path = "simple/matching_end_labels.sv"
+category = "simulation-testbench"
+reason = "Primarily validates parser end-label matching through an initial testbench."
+
+[[exclude]]
+path = "simple/module_scope_func.v"
+category = "yosys-language-extension"
+reason = "Mixes initial task calls with generate-local constant function lookup accepted as a Yosys extension."
+
+[[exclude]]
+path = "simple/named_genblk.v"
+category = "yosys-language-extension"
+reason = "References an unnamed generate block through its generated genblk name, a non-standard compatibility extension."
+
+[[exclude]]
+path = "simple/repwhile.v"
+category = "simulation-testbench"
+reason = "Uses repeat and while loops in an initial testbench rather than a synthesizable process."
+
+[[exclude]]
+path = "simple/retime.v"
+category = "initial-state"
+reason = "Depends on declaration-time register initialization for retiming experiments."
+
+[[exclude]]
+path = "simple/string_format.v"
+category = "simulation-testbench"
+reason = "Exercises formatted $display calls in an initial block."
+
+[[exclude]]
+path = "simple/unnamed_block_decl.sv"
+category = "simulation-testbench"
+reason = "Exercises block declarations from an initial testbench."
+
+[[exclude]]
+path = "simple/genblk_collide.v"
+category = "parser-only"
+reason = "Checks generate-block name resolution but exposes no observable hardware design to the synthesis and equivalence harness."
+
+[[exclude]]
+path = "simple/ifdef_1.v"
+category = "preprocessor-only"
+reason = "Checks nested conditional-preprocessor selection but exposes no observable hardware behavior to the synthesis and equivalence harness."
+
+[[exclude]]
+path = "simple/ifdef_2.v"
+category = "preprocessor-only"
+reason = "Checks conditional-preprocessor branch precedence but exposes no observable hardware behavior to the synthesis and equivalence harness."
+
+[[exclude]]
+path = "simple/macro_arg_surrounding_spaces.v"
+category = "preprocessor-only"
+reason = "Checks whitespace handling around macro arguments but exposes no observable hardware behavior to the synthesis and equivalence harness."
+
+[[exclude]]
+path = "simple/nested_genblk_resolve.v"
+category = "parser-only"
+reason = "Checks nested unnamed generate-block name resolution but exposes no observable hardware design to the synthesis and equivalence harness."
+
+[[exclude]]
+path = "simple/specify.v"
+category = "timing-annotation-only"
+reason = "Exercises specify-block syntax and timing annotations without observable synthesizable behavior."
+
+[[reject_frontend]]
+path = "errors/syntax_err01.v"
+category = "invalid-verilog-2005-integer-range"
+reason = "Verilog-2005 does not permit a packed dimension on the integer type."
+
+[[reject_frontend]]
+path = "errors/syntax_err02.v"
+category = "invalid-verilog-2005-task-integer-range"
+reason = "Verilog-2005 does not permit a packed dimension on an integer task variable."
+
+[[reject_frontend]]
+path = "errors/syntax_err03.v"
+category = "invalid-verilog-2005-dimension"
+reason = "A Verilog-2005 packed dimension must specify both bounds as a range."
+
+[[reject_frontend]]
+path = "errors/syntax_err04.v"
+category = "invalid-verilog-2005-net-dimension"
+reason = "A Verilog-2005 net dimension must specify both bounds as a range."
+
+[[reject_frontend]]
+path = "errors/syntax_err05.v"
+category = "invalid-verilog-2005-array-port"
+reason = "Verilog-2005 does not permit an unpacked array in an ANSI port declaration."
+
+[[reject_frontend]]
+path = "errors/syntax_err09.v"
+category = "invalid-verilog-2005-port-initializer"
+reason = "Verilog-2005 does not permit an initializer in an ANSI port declaration."
+
+[[reject_frontend]]
+path = "errors/syntax_err10.v"
+category = "invalid-verilog-2005-parameter-integer-range"
+reason = "Verilog-2005 does not permit a packed dimension on an integer parameter."
+
+[[reject_frontend]]
+path = "errors/syntax_err12.v"
+category = "invalid-verilog-2005-port-default"
+reason = "Verilog-2005 does not permit a default value in an ANSI port declaration."
+
+[[reject_frontend]]
+path = "errors/syntax_err13.v"
+category = "invalid-verilog-2005-parameter-port"
+reason = "Every Verilog-2005 parameter-port-list entry must repeat the parameter keyword."
