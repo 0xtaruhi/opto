@@ -156,6 +156,12 @@ fn run_postmap_observed(
     .unwrap();
     let catalog = PostmapCellCatalog::new(options);
     let profile = fanout_load_profile(mapped, options);
+    let connectivity = crate::mapping::materialize::FrozenObservableConnectivity::capture(
+        mapped,
+        &options.target_cells,
+        &crate::ReferencePortMap::new(),
+    )
+    .unwrap();
     optimize_mapped_netlist(
         PostmapRequest {
             mapped,
@@ -168,6 +174,7 @@ fn run_postmap_observed(
             policy: SynthesisEffort::High.policy(),
             runtime: crate::test_runtime(),
             power_evaluator: test_power_evaluator(),
+            connectivity: &connectivity,
         },
         crate::SynthesisConfig::default(),
         observer,
@@ -1073,6 +1080,12 @@ fn rejected_clone_rolls_back_mapped_and_timing_state() {
     let runtime = runtime();
     let mut power =
         MmmcPower::new(&incremental, &scenarios, &runtime, test_power_evaluator()).unwrap();
+    let connectivity = crate::mapping::materialize::FrozenObservableConnectivity::capture(
+        &mapped,
+        &options.target_cells,
+        &crate::ReferencePortMap::new(),
+    )
+    .unwrap();
 
     let net = mapped_net_by_name(&mapped, "n1");
     let sinks = buffering::net_sink_pins(&mapped, &options.target_cells, net).unwrap();
@@ -1105,6 +1118,7 @@ fn rejected_clone_rolls_back_mapped_and_timing_state() {
                 design_rule_summary,
             }),
             operation: "post-map timing transaction",
+            connectivity: &connectivity,
         },
         candidate,
     )
@@ -1148,6 +1162,12 @@ fn stale_clone_candidates_are_skipped() {
     let runtime = runtime();
     let mut power =
         MmmcPower::new(&incremental, &scenarios, &runtime, test_power_evaluator()).unwrap();
+    let connectivity = crate::mapping::materialize::FrozenObservableConnectivity::capture(
+        &mapped,
+        &options.target_cells,
+        &crate::ReferencePortMap::new(),
+    )
+    .unwrap();
 
     let net = mapped_net_by_name(&mapped, "n1");
     let sinks = buffering::net_sink_pins(&mapped, &options.target_cells, net).unwrap();
@@ -1183,6 +1203,7 @@ fn stale_clone_candidates_are_skipped() {
                 design_rule_summary,
             }),
             operation: "post-map timing transaction",
+            connectivity: &connectivity,
         },
         candidate,
     )

@@ -16,8 +16,20 @@ foreach option $ibex_compile_options {
 }
 read_hdl -define SYNTHESIS -incdir $include_dirs $ibex_sources
 elaborate ibex_core
+set synthesis_requested [expr {
+    [info exists env(IBEX_SYNTHESIS)] && $env(IBEX_SYNTHESIS) eq "1"
+}]
+if {$synthesis_requested} {
+    set target [file normalize [file join [file dirname [info script]] .. .. libraries opto_test.lib]]
+    read_libs [list $target]
+    synth
+}
 redirect -file $env(IBEX_CHECK_REPORT) {
     check_design
     report_area
+}
+if {$synthesis_requested && [info exists env(IBEX_NETLIST_DIRECTORY)]} {
+    file mkdir $env(IBEX_NETLIST_DIRECTORY)
+    write_hdl -hierarchy [file join $env(IBEX_NETLIST_DIRECTORY) ibex_core.v]
 }
 exit

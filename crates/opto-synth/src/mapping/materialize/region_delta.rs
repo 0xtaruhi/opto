@@ -22,11 +22,7 @@ use std::fmt::Write as _;
 
 mod aliases;
 
-use aliases::library_boundary_aliases;
-pub(crate) use aliases::{
-    BoundaryAlias, BoundaryAliasSource, MappedValueSignal, WordMappedSignals,
-    regional_binding_values, regional_boundary_aliases,
-};
+pub(crate) use aliases::{MappedValueSignal, WordMappedSignals, regional_binding_values};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ArtifactSignal {
@@ -164,7 +160,6 @@ impl MappedRegionArtifact {
         }
 
         let cover = super::super::cover::decode_portable_cover(plan.payload())?;
-        let boundary_aliases = library_boundary_aliases(plan, binding, ownership)?;
         if cover.cells().len() != plan.local_cell_count() as usize
             || cover.outputs().len() != binding.outputs.len()
         {
@@ -189,12 +184,10 @@ impl MappedRegionArtifact {
             .copied()
             .map(|value| mapped_values.require(value).map(ArtifactSignal::Mapped))
             .collect::<Result<Vec<_>, _>>()?;
-        let output_groups = binding.resolve_output_groups(ownership)?;
+        let output_values = binding.resolve_outputs(ownership)?;
         let mut output_targets = vec![[None::<MappedValueSignal>; 2]; cover.cells().len()];
-        for (values, source) in output_groups.iter().zip(cover.outputs()) {
-            validate_output_aliases(mapped_values, &boundary_aliases, values)?;
-            let target = uniform_output_signal(mapped_values, values)?;
-            let Some(target) = target else { continue };
+        for (&value, source) in output_values.iter().zip(cover.outputs()) {
+            let target = mapped_values.require(value)?;
             match *source {
                 LibraryCoverSource::Cell(index) => {
                     assign_output_target(&mut output_targets, index, 0, target)?;
@@ -202,7 +195,26 @@ impl MappedRegionArtifact {
                 LibraryCoverSource::CellSecond(index) => {
                     assign_output_target(&mut output_targets, index, 1, target)?;
                 }
-                LibraryCoverSource::Constant(_) | LibraryCoverSource::Input(_) => {}
+                LibraryCoverSource::Constant(value) => {
+                    validate_frozen_output(
+                        plan.region(),
+                        target,
+                        MappedValueSignal::Constant(value),
+                    )?;
+                }
+                LibraryCoverSource::Input(index) => {
+                    let source = inputs.get(index).copied().ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "regional cover output references an unknown input",
+                        )
+                    })?;
+                    let ArtifactSignal::Mapped(source) = source else {
+                        return Err(crate::SynthError::invariant(
+                            "regional cover input is not part of the frozen substrate",
+                        ));
+                    };
+                    validate_frozen_output(plan.region(), target, source)?;
+                }
             }
         }
         let mut output_owners = std::collections::BTreeSet::new();
@@ -219,7 +231,7 @@ impl MappedRegionArtifact {
             }
         }
         let mut internal_net_count = 0usize;
-        let cell_outputs = cover
+        let mut cell_outputs = cover
             .cells()
             .iter()
             .enumerate()
@@ -243,9 +255,17 @@ impl MappedRegionArtifact {
                 .copied()
                 .map(|source| resolve_cover_source(source, &inputs, &cell_outputs, index))
                 .collect::<Result<Vec<_>, _>>()?;
-            let primary = cell_outputs[index][0].ok_or_else(|| {
+            let mut primary = cell_outputs[index][0].ok_or_else(|| {
                 crate::SynthError::invariant("regional cell has no primary output")
             })?;
+            if sources.contains(&primary) && matches!(primary, ArtifactSignal::Mapped(_)) {
+                // The frozen substrate already proves this publication target
+                // equivalent to a cell input. A region may retain its
+                // conservative implementation artifact, but it cannot drive
+                // an equivalence class that it also imports.
+                primary = allocate_output(None, &mut internal_net_count)?;
+                cell_outputs[index][0] = Some(primary);
+            }
             let (mapped, library_cell) = match cell.binding(catalog)? {
                 LibraryCoverBinding::Single(binding) => {
                     if cell_outputs[index][1].is_some() {
@@ -269,12 +289,18 @@ impl MappedRegionArtifact {
                     )
                 }
                 LibraryCoverBinding::Joint(binding) => {
-                    let secondary = cell_outputs[index][1].ok_or_else(|| {
+                    let mut secondary = cell_outputs[index][1].ok_or_else(|| {
                         crate::SynthError::invariant("joint regional cell has no secondary output")
                     })?;
+                    if sources.contains(&secondary)
+                        && matches!(secondary, ArtifactSignal::Mapped(_))
+                    {
+                        secondary = allocate_output(None, &mut internal_net_count)?;
+                        cell_outputs[index][1] = Some(secondary);
+                    }
                     if sources.contains(&primary) || sources.contains(&secondary) {
                         return Err(crate::SynthError::invariant(format!(
-                            "regional cover cell {index} in {:?} binds outputs [{primary:?}, {secondary:?}] to one of its inputs {sources:?}",
+                            "regional joint cover cell {index} in {:?} has a local output cycle",
                             plan.region()
                         )));
                     }
@@ -299,7 +325,7 @@ impl MappedRegionArtifact {
             };
             if sources.contains(&primary) {
                 return Err(crate::SynthError::invariant(format!(
-                    "regional cover cell {index} in {:?} binds its output {primary:?} to one of its inputs {sources:?}",
+                    "regional cover cell {index} in {:?} has a local output cycle",
                     plan.region()
                 )));
             }
@@ -572,65 +598,16 @@ fn synthetic_value(index: usize) -> Result<word::ValueId, crate::SynthError> {
     word::ValueId::from_index(index).map_err(crate::SynthError::from)
 }
 
-/// Resolves the one substrate signal a group of equivalent region outputs drives.
-///
-/// A group may legitimately mix representations. A literal constant carries no
-/// signal bit and so has no net at all, while a bit the same alias proved
-/// constant keeps its net and gains a constant driver. Both spell the same
-/// value, and the net is the one the rest of the design reads, so it wins.
-/// What must still hold is that the group names at most one net and agrees on
-/// its constant.
-fn uniform_output_signal(
-    mapped: &WordMappedSignals,
-    values: &[word::ValueId],
-) -> Result<Option<MappedValueSignal>, crate::SynthError> {
-    let mut net = None::<(word::ValueId, NetId)>;
-    let mut constant = None::<(word::ValueId, bool)>;
-    for &value in values {
-        match mapped.require(value)? {
-            MappedValueSignal::Net(current) => {
-                if let Some((previous, resolved)) = net
-                    && resolved != current
-                {
-                    return Err(crate::SynthError::invariant(format!(
-                        "equivalent regional outputs drive two substrate nets: \
-                         {previous:?}->{resolved:?} (alias {:?}) and \
-                         {value:?}->{current:?} (alias {:?})",
-                        mapped.boundary_alias(previous),
-                        mapped.boundary_alias(value),
-                    )));
-                }
-                net = Some((value, current));
-            }
-            MappedValueSignal::Constant(current) => {
-                if let Some((previous, resolved)) = constant
-                    && resolved != current
-                {
-                    return Err(crate::SynthError::invariant(format!(
-                        "equivalent regional outputs hold two constants: \
-                         {previous:?}->{resolved} and {value:?}->{current}"
-                    )));
-                }
-                constant = Some((value, current));
-            }
-        }
-    }
-    Ok(net
-        .map(|(_, net)| MappedValueSignal::Net(net))
-        .or(constant.map(|(_, value)| MappedValueSignal::Constant(value))))
-}
-
-fn validate_output_aliases(
-    mapped: &WordMappedSignals,
-    aliases: &[BoundaryAlias],
-    values: &[word::ValueId],
+fn validate_frozen_output(
+    region: crate::RegionAnchorId,
+    target: MappedValueSignal,
+    source: MappedValueSignal,
 ) -> Result<(), crate::SynthError> {
-    for &value in values {
-        let source = aliases
-            .binary_search_by_key(&value, |alias| alias.target)
-            .ok()
-            .map(|index| aliases[index].source);
-        mapped.validate_alias(value, source)?;
+    if target != source {
+        return Err(crate::SynthError::invariant(format!(
+            "regional cover for {region:?} simplified an output from frozen \
+             substrate signal {target:?} to {source:?}"
+        )));
     }
     Ok(())
 }

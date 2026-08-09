@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{LibraryCover, LibraryCoverCell, LibraryCoverSource, MappingCost, inverter_truth};
+use super::{
+    CombinationalCellCatalog, LibraryCover, LibraryCoverBinding, LibraryCoverCell,
+    LibraryCoverSource, MappingCost, inverter_truth,
+};
 
 impl LibraryCover {
     pub(crate) fn normalize(self, collapse_inverters: bool) -> Result<Self, crate::SynthError> {
@@ -38,6 +41,56 @@ impl LibraryCover {
             .map(|source| remap_cover_source(source, &sources))
             .collect::<Result<Vec<_>, _>>()?;
         prune_cover(cells, outputs, self.total_area, self.output_costs)
+    }
+
+    /// Gives every published root a distinct physical driver artifact.
+    pub(crate) fn isolate_outputs(
+        &mut self,
+        catalog: &CombinationalCellCatalog,
+    ) -> Result<(), crate::SynthError> {
+        let mut uses = hashbrown::HashMap::new();
+        for &source in &self.outputs {
+            *uses.entry(source).or_insert(0usize) += 1;
+        }
+        let requires_driver = |source: &LibraryCoverSource| {
+            !matches!(
+                *source,
+                LibraryCoverSource::Cell(_) | LibraryCoverSource::CellSecond(_)
+            ) || uses.get(source) != Some(&1)
+        };
+        if !self.outputs.iter().any(requires_driver) {
+            return Ok(());
+        }
+        let truth = crate::boolean::logic::identity_truth();
+        let binding = catalog.best_binding_for_truth(truth).ok_or_else(|| {
+            crate::SynthError::mapping("target library cannot isolate regional output obligations")
+        })?;
+        let mut cells = std::mem::take(&mut self.cells).into_vec();
+        let mut outputs = std::mem::take(&mut self.outputs).into_vec();
+        let mut output_costs = std::mem::take(&mut self.output_costs).into_vec();
+        let cost = catalog.cost_for_binding(binding);
+        for (index, source) in outputs.iter_mut().enumerate() {
+            if !requires_driver(source) {
+                continue;
+            }
+            let input = *source;
+            let cell = cells.len();
+            cells.push(LibraryCoverCell {
+                second_node: None,
+                binding: LibraryCoverBinding::Single(binding),
+                binding_identity: catalog.binding_identity(binding).into_boxed_slice(),
+                truth,
+                second_truth: None,
+                sources: Box::new([input]),
+            });
+            *source = LibraryCoverSource::Cell(cell);
+            self.total_area += cost.area;
+            output_costs[index] = output_costs[index].cell(cost);
+        }
+        self.cells = cells.into_boxed_slice();
+        self.outputs = outputs.into_boxed_slice();
+        self.output_costs = output_costs.into_boxed_slice();
+        Ok(())
     }
 }
 

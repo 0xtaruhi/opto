@@ -222,20 +222,10 @@ impl RegionalWordImporter<'_> {
         let Some(bits) = self.signal_drivers.resolve_reference(reference) else {
             return self.import_boundary(source, ty, span);
         };
-        let Some(&(driver, _)) = bits.first() else {
-            return self.import_boundary(source, ty, span);
-        };
-        let direct = bits
-            .iter()
-            .enumerate()
-            .all(|(offset, &(candidate, driver_bit))| {
-                candidate == driver && usize::try_from(driver_bit).ok() == Some(offset)
-            })
-            && self
-                .source
-                .value(driver)
-                .is_some_and(|value| value.ty == ty);
-        if direct {
+        if let Some(driver) = self
+            .signal_drivers
+            .exact_reference_driver(self.source, reference, ty)
+        {
             self.import(driver)
         } else {
             let mut parts = Vec::with_capacity(bits.len());

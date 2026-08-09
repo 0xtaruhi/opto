@@ -358,6 +358,7 @@ pub(crate) fn optimize_owned_combinational_dataflow(
 pub(crate) fn rebalance_priority_muxes_in_regions(
     module: &mut word::WordModule,
     owners: &mut Vec<Option<crate::RegionRowId>>,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<bool, crate::SynthError> {
     if owners.len() != module.operations().len() {
         return Err(crate::SynthError::invariant(
@@ -390,6 +391,12 @@ pub(crate) fn rebalance_priority_muxes_in_regions(
                 "priority-mux generated ownership does not align with the operation arena",
             ));
         }
+        ownership.claim_range(
+            module,
+            generated.range.start,
+            generated.range.end,
+            &generated.sources,
+        )?;
         owners.extend(std::iter::repeat_n(
             Some(generated.scope),
             generated.range.len(),
@@ -401,9 +408,10 @@ pub(crate) fn rebalance_priority_muxes_in_regions(
 pub(crate) fn optimize_owned_priority_dataflow(
     module: &mut word::WordModule,
     owners: &mut Vec<Option<crate::RegionRowId>>,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<DataflowChanges, crate::SynthError> {
     optimize_owned_combinational_dataflow(module, owners)?;
-    rebalance_priority_muxes_in_regions(module, owners)?;
+    rebalance_priority_muxes_in_regions(module, owners, ownership)?;
     optimize_owned_combinational_dataflow(module, owners)
 }
 

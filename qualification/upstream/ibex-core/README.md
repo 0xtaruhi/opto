@@ -17,3 +17,18 @@ OPTO_REGRESSION_OUTPUT=/tmp/opto-regression \
 
 The upstream RTL, local libraries, and generated artifacts remain outside the
 repository.
+
+Set `IBEX_SYNTHESIS=1` to map the complete core with the qualification library.
+When `IBEX_NETLIST_DIRECTORY` is also set, the flow writes `ibex_core.v` there.
+The same self-checking program can then run against the pinned RTL and mapped
+gate netlist:
+
+```sh
+IBEX_ROOT=/path/to/ibex \
+  qualification/upstream/ibex-core/run_smoke.sh rtl /tmp/ibex-rtl
+
+qualification/upstream/ibex-core/run_smoke.sh gate /tmp/ibex-gate \
+  /tmp/ibex-netlist/ibex_core.v
+```
+
+Both simulations must write the value `12` to signature address `0x104`.

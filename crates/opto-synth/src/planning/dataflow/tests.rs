@@ -646,7 +646,10 @@ fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
     }
     let original_operations = owners.len();
 
-    optimize_owned_priority_dataflow(&mut module, &mut owners).unwrap();
+    let regions = crate::SynthesisRegionGraph::build(&module).unwrap();
+    let mut ownership =
+        crate::regional::StructuralOwnershipProvenance::new(&module, &regions).unwrap();
+    optimize_owned_priority_dataflow(&mut module, &mut owners, &mut ownership).unwrap();
     assert_eq!(owners.len(), module.operations().len());
     assert!(owners.len() > original_operations);
     assert!(

@@ -26,6 +26,7 @@ pub(super) struct TimingOptimizationRequest<'a> {
     pub(super) scenarios: &'a ScenarioSet,
     pub(super) runtime: &'a ExecutionContext,
     pub(super) power_evaluator: Arc<dyn crate::SynthesisPowerEvaluator>,
+    pub(super) connectivity: &'a crate::mapping::materialize::FrozenObservableConnectivity,
     pub(super) diagnostics: crate::SynthesisDiagnostics,
     pub(super) observer: &'a mut dyn FnMut(SynthesisProgress),
 }
@@ -35,6 +36,7 @@ pub(super) struct TimingOptimizationSession<'a> {
     pub(super) implementations: &'a mut ImplementationDb,
     pub(super) timing: MmmcTiming,
     pub(super) options: &'a SynthesisOptions,
+    connectivity: &'a crate::mapping::materialize::FrozenObservableConnectivity,
     state: TimingOptimizationState,
     observer: &'a mut dyn FnMut(SynthesisProgress),
 }
@@ -49,6 +51,7 @@ impl<'a> TimingOptimizationSession<'a> {
             scenarios,
             runtime,
             power_evaluator,
+            connectivity,
             diagnostics,
             observer,
         } = request;
@@ -63,6 +66,7 @@ impl<'a> TimingOptimizationSession<'a> {
             implementations,
             timing,
             options,
+            connectivity,
             state: TimingOptimizationState {
                 analysis: initial_metrics.analysis,
                 design_rule_summary: initial_metrics.design_rule_summary,
@@ -213,6 +217,7 @@ impl<'a> TimingOptimizationSession<'a> {
                     design_rule_summary: self.state.design_rule_summary,
                 }),
                 operation: "post-map timing transaction",
+                connectivity: self.connectivity,
             },
             candidate,
         )?;
@@ -332,6 +337,7 @@ pub(super) struct CandidateEvaluation<'a> {
     pub(super) closure: Option<ClosureBaseline<'a>>,
     /// Stable operation name used when a rollback also fails.
     pub(super) operation: &'static str,
+    pub(super) connectivity: &'a crate::mapping::materialize::FrozenObservableConnectivity,
 }
 
 /// The measurements a committed candidate produced.
@@ -364,6 +370,7 @@ pub(super) fn evaluate_candidate(
         physical: baseline,
         closure,
         operation,
+        connectivity,
     } = request;
     let PostmapCandidate {
         delta,
@@ -382,6 +389,14 @@ pub(super) fn evaluate_candidate(
     else {
         return Ok(CandidateDisposition::Stale);
     };
+    if !connectivity.preserves_affected(
+        transaction.mapped(),
+        library,
+        transaction.mapped_edit().affected_nets(),
+    )? {
+        transaction.rollback()?;
+        return Ok(CandidateDisposition::Rejected);
+    }
     let timing_metrics = match &closure {
         Some(_) => {
             let Some(views) = policies else {

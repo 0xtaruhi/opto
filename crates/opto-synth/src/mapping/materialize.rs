@@ -7,7 +7,8 @@ use crate::SynthesisOptions;
 use crate::artifact::provenance::SourceInstanceProvenance;
 use opto_ir::BitVal;
 use opto_ir::mapped::{
-    CellId, ConnectionSignal, MappedBuilder, MappedCellSpec, MappedNetlist, NetId, PortDirection,
+    CellId, ConnectionSignal, MappedBuilder, MappedCellSpec, MappedNetlist, NetId, PinId,
+    PortDirection, PortId,
 };
 use opto_ir::word;
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,7 +22,6 @@ pub(crate) const MAPPED_NET_PREFIX: &str = "_mapped_net_";
 
 use crate::artifact::MappedCellSource;
 pub(crate) use region_delta::REGION_CELL_PREFIX;
-use region_delta::{BoundaryAlias, BoundaryAliasSource};
 pub(crate) use sequential_delta::{MappedSequentialArtifact, sequential_binding_values};
 
 #[derive(Debug)]
@@ -36,6 +36,237 @@ pub(crate) struct MappedSubstrate {
     pub(crate) observed_nets: Box<[Option<NetId>]>,
 }
 
+#[derive(Debug)]
+struct ObservableOutput {
+    name: String,
+    bit: usize,
+    net: NetId,
+}
+
+/// Global mapped connectivity frozen before post-map transactions begin.
+///
+/// Regional and post-map optimizers may replace the implementation behind a
+/// boundary net, but they cannot delete that net or change its unique physical
+/// driver. Source-instance output identities are resolved once here instead of
+/// being rediscovered by every speculative edit.
+#[derive(Debug)]
+pub(crate) struct FrozenObservableConnectivity {
+    boundary_nets: BTreeSet<NetId>,
+    outputs: Box<[ObservableOutput]>,
+    source_driver_pins: BTreeSet<PinId>,
+}
+
+impl FrozenObservableConnectivity {
+    pub(crate) fn capture(
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+        reference_ports: &crate::ReferencePortMap,
+    ) -> Result<Self, crate::SynthError> {
+        let mut boundary_nets = BTreeSet::new();
+        let mut outputs = Vec::new();
+        for (index, port) in mapped.ports().iter().enumerate() {
+            let id = PortId::from_index(index).map_err(crate::SynthError::from)?;
+            let nets = mapped.port_nets(id).ok_or_else(|| {
+                crate::SynthError::invariant("mapped port has no frozen net binding")
+            })?;
+            boundary_nets.extend(nets.iter().copied());
+            if port.direction == PortDirection::Output {
+                let name = mapped.port_name(id).unwrap_or("<unnamed>");
+                outputs.extend(nets.iter().enumerate().map(|(bit, &net)| ObservableOutput {
+                    name: name.to_string(),
+                    bit,
+                    net,
+                }));
+            }
+        }
+        let mut source_driver_pins = BTreeSet::new();
+        for cell in mapped.cell_ids() {
+            let stored = mapped
+                .cell(cell)
+                .ok_or_else(|| crate::SynthError::invariant("mapped source cell is unknown"))?;
+            if stored.library_cell.is_some() {
+                continue;
+            }
+            let cell_type = mapped.cell_type(cell).ok_or_else(|| {
+                crate::SynthError::invariant("mapped source cell has no type name")
+            })?;
+            for pin in mapped.pin_ids(cell).into_iter().flatten() {
+                let connection = mapped.connection(pin).ok_or_else(|| {
+                    crate::SynthError::invariant("mapped source cell has no pin binding")
+                })?;
+                let pin_name = mapped.pin_name(connection).ok_or_else(|| {
+                    crate::SynthError::invariant("mapped source cell has no pin name")
+                })?;
+                let direction = reference_ports
+                    .get(cell_type)
+                    .and_then(|ports| ports.get(pin_name))
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(format!(
+                            "mapped source pin '{cell_type}.{pin_name}' has no direction contract"
+                        ))
+                    })?
+                    .direction;
+                if matches!(
+                    direction,
+                    word::PortDirection::Output | word::PortDirection::Inout
+                ) {
+                    source_driver_pins.insert(pin);
+                }
+            }
+        }
+        let frozen = Self {
+            boundary_nets,
+            outputs: outputs.into_boxed_slice(),
+            source_driver_pins,
+        };
+        frozen.validate(mapped, target_cells)?;
+        Ok(frozen)
+    }
+
+    pub(crate) fn preserves_affected(
+        &self,
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+        affected_nets: impl IntoIterator<Item = NetId>,
+    ) -> Result<bool, crate::SynthError> {
+        let affected = affected_nets.into_iter().collect::<BTreeSet<_>>();
+        if affected
+            .intersection(&self.boundary_nets)
+            .any(|&net| !mapped.is_live_net(net))
+        {
+            return Ok(false);
+        }
+        for output in self
+            .outputs
+            .iter()
+            .filter(|output| affected.contains(&output.net))
+        {
+            if self.driver_count(mapped, target_cells, output.net)? != 1 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn validate(
+        &self,
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+    ) -> Result<(), crate::SynthError> {
+        if let Some(&net) = self
+            .boundary_nets
+            .iter()
+            .find(|&&net| !mapped.is_live_net(net))
+        {
+            return Err(crate::SynthError::invariant(format!(
+                "mapped publication boundary net {net:?} was removed after connectivity freeze"
+            )));
+        }
+        for output in &self.outputs {
+            match self.driver_count(mapped, target_cells, output.net)? {
+                1 => {}
+                0 => {
+                    return Err(crate::SynthError::invariant(format!(
+                        "mapped output '{}[{}]' has no physical driver",
+                        output.name, output.bit
+                    )));
+                }
+                _ => {
+                    return Err(crate::SynthError::invariant(format!(
+                        "mapped output '{}[{}]' has multiple physical drivers",
+                        output.name, output.bit
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn driver_count(
+        &self,
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+        net: NetId,
+    ) -> Result<u8, crate::SynthError> {
+        let mut count = 0u8;
+        for (index, port) in mapped.ports().iter().enumerate() {
+            if !matches!(port.direction, PortDirection::Input | PortDirection::Inout) {
+                continue;
+            }
+            let id = PortId::from_index(index).map_err(crate::SynthError::from)?;
+            for _ in mapped
+                .port_nets(id)
+                .into_iter()
+                .flatten()
+                .filter(|&&candidate| candidate == net)
+            {
+                count = count.saturating_add(1);
+            }
+        }
+        for _ in mapped
+            .constant_drivers()
+            .iter()
+            .filter(|(candidate, _)| *candidate == net)
+        {
+            count = count.saturating_add(1);
+        }
+        for cell in mapped.cell_ids() {
+            let stored = mapped
+                .cell(cell)
+                .ok_or_else(|| crate::SynthError::invariant("mapped boundary cell is unknown"))?;
+            for pin in mapped.pin_ids(cell).into_iter().flatten() {
+                let connection = mapped.connection(pin).ok_or_else(|| {
+                    crate::SynthError::invariant("mapped driver cell has no pin binding")
+                })?;
+                if connection.signal != ConnectionSignal::Net(net) {
+                    continue;
+                }
+                if self.source_driver_pins.contains(&pin) {
+                    count = count.saturating_add(1);
+                    continue;
+                }
+                let Some(library_index) = stored.library_cell else {
+                    continue;
+                };
+                let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "mapped driver cell is absent from the target library",
+                    )
+                })?;
+                let library_pin = match connection.library_pin {
+                    Some(pin) => library_cell.pins().nth(pin as usize),
+                    None => mapped
+                        .pin_name(connection)
+                        .and_then(|name| library_cell.pins().find(|pin| pin.name() == name)),
+                }
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "mapped target-cell pin is absent from its target-library cell",
+                    )
+                })?;
+                if matches!(
+                    library_pin.direction(),
+                    opto_library::TargetPinDirection::Output
+                        | opto_library::TargetPinDirection::Inout
+                ) {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+        Ok(count)
+    }
+}
+
+/// Rejects a published interface whose output bits have no unique physical driver.
+#[cfg(test)]
+pub(crate) fn validate_observable_drivers(
+    mapped: &MappedNetlist,
+    target_cells: &opto_library::TargetCellSet,
+    reference_ports: &crate::ReferencePortMap,
+) -> Result<(), crate::SynthError> {
+    FrozenObservableConnectivity::capture(mapped, target_cells, reference_ports).map(drop)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct MappedSubstrateRequest<'a> {
     pub(crate) module: &'a word::WordModule,
@@ -45,7 +276,6 @@ pub(crate) struct MappedSubstrateRequest<'a> {
     pub(crate) source_instances: &'a SourceInstanceProvenance,
     pub(crate) base_revision: opto_ir::RevisionId,
     pub(crate) observed_values: &'a [word::ValueId],
-    pub(crate) boundary_aliases: &'a [BoundaryAlias],
 }
 
 fn target_pin_id(
@@ -86,7 +316,6 @@ pub(crate) fn build_test_substrate(
         source_instances,
         base_revision,
         observed_values: &[],
-        boundary_aliases: &[],
     })?;
     Ok(MappedOutput {
         netlist,
@@ -105,7 +334,6 @@ pub(crate) fn build_mapped_substrate(
         source_instances,
         base_revision,
         observed_values,
-        boundary_aliases,
     } = request;
     let offsets = signal_offsets(module)?;
     let signal_bit_count = module.signals().iter().try_fold(0usize, |count, signal| {
@@ -116,13 +344,8 @@ pub(crate) fn build_mapped_substrate(
     let bit_count = signal_bit_count
         .checked_add(module.operations().len())
         .ok_or_else(|| crate::SynthError::invariant("mapped operation count overflow"))?;
-    let (mut aliases, constants) = build_alias_classes(
-        module,
-        &offsets,
-        signal_bit_count,
-        bit_count,
-        boundary_aliases,
-    )?;
+    let (mut aliases, constants) =
+        build_alias_classes(module, &offsets, signal_bit_count, bit_count)?;
 
     // The mapped substrate represents only externally observed equivalence
     // classes; regional artifacts remain the owner of internal Word topology.
@@ -131,7 +354,6 @@ pub(crate) fn build_mapped_substrate(
         &offsets,
         signal_bit_count,
         observed_values,
-        boundary_aliases,
         &mut aliases,
     )?;
 
@@ -348,7 +570,6 @@ fn required_substrate_roots(
     offsets: &[usize],
     signal_bit_count: usize,
     observed_values: &[word::ValueId],
-    boundary_aliases: &[BoundaryAlias],
     aliases: &mut DisjointSets,
 ) -> Result<BTreeSet<usize>, crate::SynthError> {
     let mut roots = BTreeSet::new();
@@ -378,18 +599,6 @@ fn required_substrate_roots(
             roots.insert(aliases.find(bit));
         }
     }
-    for alias in boundary_aliases {
-        if let ScalarSignal::Bit(bit) =
-            scalar_signal(module, offsets, signal_bit_count, alias.target)?
-        {
-            roots.insert(aliases.find(bit));
-        }
-        if let BoundaryAliasSource::Value(value) = alias.source
-            && let ScalarSignal::Bit(bit) = scalar_signal(module, offsets, signal_bit_count, value)?
-        {
-            roots.insert(aliases.find(bit));
-        }
-    }
     Ok(roots)
 }
 
@@ -398,14 +607,21 @@ fn build_alias_classes(
     offsets: &[usize],
     signal_bit_count: usize,
     bit_count: usize,
-    boundary_aliases: &[BoundaryAlias],
 ) -> Result<(DisjointSets, BTreeMap<usize, bool>), crate::SynthError> {
     let mut aliases = DisjointSets::new(bit_count);
     let mut constants = BTreeMap::<usize, bool>::new();
+    let semantics = super::roots::FullDomainRootSemantics::new(module)?;
     for (index, operation) in module.operations().iter().enumerate() {
-        let Some(input) = scalar_cast_input(module, operation) else {
+        if module
+            .value(operation.result)
+            .is_none_or(|value| value.ty.width() != 1)
+        {
             continue;
-        };
+        }
+        let input = semantics.canonical_root(operation.result)?;
+        if input == operation.result {
+            continue;
+        }
         let output = signal_bit_count + index;
         match scalar_signal(module, offsets, signal_bit_count, input)? {
             ScalarSignal::Bit(input) => aliases.union(output, input),
@@ -417,56 +633,6 @@ fn build_alias_classes(
         match scalar_signal(module, offsets, signal_bit_count, connect.value)? {
             ScalarSignal::Bit(source) => aliases.union(target, source),
             ScalarSignal::Constant(value) => record_constant(&mut constants, target, value)?,
-        }
-    }
-    let mut constant_aliases = BTreeMap::<word::ValueId, usize>::new();
-    for alias in boundary_aliases {
-        let target = match scalar_signal(module, offsets, signal_bit_count, alias.target)? {
-            ScalarSignal::Bit(bit) => bit,
-            ScalarSignal::Constant(target) => {
-                let source = match alias.source {
-                    BoundaryAliasSource::Value(value) => {
-                        scalar_signal(module, offsets, signal_bit_count, value)?
-                    }
-                    BoundaryAliasSource::Constant(value) => ScalarSignal::Constant(value),
-                };
-                match source {
-                    ScalarSignal::Constant(source) if source == target => continue,
-                    ScalarSignal::Constant(source) => {
-                        return Err(crate::SynthError::invariant(format!(
-                            "regional boundary alias binds constant {source} to constant {target}"
-                        )));
-                    }
-                    ScalarSignal::Bit(source) => {
-                        record_constant(&mut constants, source, target)?;
-                        continue;
-                    }
-                }
-            }
-        };
-        match alias.source {
-            BoundaryAliasSource::Value(value) => {
-                match scalar_signal(module, offsets, signal_bit_count, value)? {
-                    ScalarSignal::Bit(source) => aliases.union(target, source),
-                    ScalarSignal::Constant(constant) => {
-                        record_constant(&mut constants, target, constant)?;
-                        // Constant sources have no bit to union. Their targets
-                        // must still share one class so a multi-use boundary
-                        // value materializes as one canonical mapped net.
-                        match constant_aliases.entry(value) {
-                            std::collections::btree_map::Entry::Vacant(slot) => {
-                                slot.insert(target);
-                            }
-                            std::collections::btree_map::Entry::Occupied(slot) => {
-                                aliases.union(target, *slot.get());
-                            }
-                        }
-                    }
-                }
-            }
-            BoundaryAliasSource::Constant(value) => {
-                record_constant(&mut constants, target, value)?;
-            }
         }
     }
     let mut canonical_constants = BTreeMap::<usize, bool>::new();
@@ -564,17 +730,6 @@ fn scalar_target_bit(
 enum ScalarSignal {
     Bit(usize),
     Constant(bool),
-}
-
-pub(crate) fn scalar_cast_input(
-    module: &word::WordModule,
-    operation: &word::Operation,
-) -> Option<word::ValueId> {
-    let word::OpKind::Cast { value, .. } = operation.kind else {
-        return None;
-    };
-    (module.value(operation.result)?.ty.width() == 1 && module.value(value)?.ty.width() == 1)
-        .then_some(value)
 }
 
 fn scalar_signal(

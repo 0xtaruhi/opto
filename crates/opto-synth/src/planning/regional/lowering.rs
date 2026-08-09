@@ -12,6 +12,7 @@ pub(crate) struct RegionalWordCone {
     module: word::WordModule,
     source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
+    observations: Box<[word::ValueId]>,
     operation_sources: Box<[Option<word::OpId>]>,
     memory_values: Box<[RegionalMemoryValueBinding]>,
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
@@ -26,6 +27,7 @@ pub(crate) struct RegionalWordConeRequest<'a> {
         &'a [crate::planning::regional::MemoryImplementationCandidate],
     pub(crate) target_cells: &'a opto_library::TargetCellSet,
     pub(crate) boundary_inputs: &'a [word::ValueId],
+    pub(crate) observations: Vec<word::ValueId>,
     pub(crate) roots: Vec<word::ValueId>,
 }
 
@@ -33,6 +35,7 @@ pub(crate) struct RegionalWordConeParts {
     pub(crate) module: word::WordModule,
     pub(crate) source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     pub(crate) boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
+    pub(crate) observations: Box<[word::ValueId]>,
     pub(crate) operation_sources: Box<[Option<word::OpId>]>,
     pub(crate) memory_values: Box<[RegionalMemoryValueBinding]>,
     pub(crate) root_bindings: Box<[(word::ValueId, word::SignalId)]>,
@@ -62,6 +65,7 @@ impl RegionalWordCone {
             memory_implementations,
             target_cells,
             boundary_inputs,
+            observations,
             roots,
         } = request;
         if operation_regions.len() != source.operations().len() {
@@ -96,6 +100,10 @@ impl RegionalWordCone {
         importer.import_memories(memories)?;
         for &input in boundary_inputs {
             importer.import(input)?;
+        }
+        let observations = observations.into_iter().collect::<BTreeSet<_>>();
+        for &observation in &observations {
+            importer.import(observation)?;
         }
         let mut observable_roots = BTreeMap::new();
         for root in roots.into_iter().collect::<std::collections::BTreeSet<_>>() {
@@ -196,6 +204,7 @@ impl RegionalWordCone {
             module: importer.module,
             source_to_local: importer.source_to_local,
             boundary_bindings: importer.boundary_bindings.into_boxed_slice(),
+            observations: observations.into_iter().collect(),
             operation_sources: importer.operation_sources.into_boxed_slice(),
             memory_values: memory_values.into_boxed_slice(),
             root_bindings: root_bindings.into_boxed_slice(),
@@ -207,6 +216,7 @@ impl RegionalWordCone {
             module: self.module,
             source_to_local: self.source_to_local,
             boundary_bindings: self.boundary_bindings,
+            observations: self.observations,
             operation_sources: self.operation_sources,
             memory_values: self.memory_values,
             root_bindings: self.root_bindings,
@@ -293,6 +303,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[],
+            observations: vec![],
             roots: vec![left_value],
         }) else {
             panic!("combinational feedback unexpectedly imported");
@@ -370,6 +381,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[],
+            observations: vec![],
             roots: vec![first],
         })
         .unwrap();
@@ -452,6 +464,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[],
+            observations: vec![],
             roots: vec![register, next],
         })
         .unwrap();
@@ -534,6 +547,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[],
+            observations: vec![],
             roots: vec![consumer],
         })
         .unwrap();
@@ -552,6 +566,72 @@ mod tests {
             operation_sources[1],
             Some(word::OpId::from_index(0).unwrap())
         );
+    }
+
+    #[test]
+    fn keeps_boundary_observation_identity_out_of_root_publication() {
+        let mut source = word::WordModule::new("boundary_identity");
+        let ty = word::WordType::bits(1).unwrap();
+        let inputs = ["left", "right"].map(|name| {
+            let port = source
+                .add_port(
+                    name,
+                    word::PortDirection::Input,
+                    ty,
+                    word::SourceSpan::default(),
+                )
+                .unwrap();
+            source
+                .read_signal(
+                    source.port(port).unwrap().signal,
+                    word::SourceSpan::default(),
+                )
+                .unwrap()
+        });
+        let producer = source
+            .binary(
+                word::BinaryOp::BitXor,
+                inputs[0],
+                inputs[1],
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let boundary = source
+            .add_wire("boundary", ty, word::SourceSpan::default())
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(boundary),
+                producer,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let observation = source
+            .read_signal(boundary, word::SourceSpan::default())
+            .unwrap();
+        let row = crate::RegionRowId::from_index(0).unwrap();
+
+        let cone = RegionalWordCone::build(RegionalWordConeRequest {
+            source: &source,
+            operation_regions: &[Some(row)],
+            region: row,
+            memories: &[],
+            memory_implementations: &[],
+            target_cells: &opto_library::TargetCellSet::default(),
+            boundary_inputs: &[],
+            observations: vec![observation],
+            roots: vec![producer],
+        })
+        .unwrap();
+        let RegionalWordConeParts {
+            source_to_local,
+            root_bindings,
+            ..
+        } = cone.into_parts();
+
+        assert_eq!(source_to_local[&observation], source_to_local[&producer]);
+        assert_eq!(root_bindings.len(), 1);
+        assert_eq!(root_bindings[0].0, producer);
     }
 
     #[test]
@@ -609,6 +689,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[boundary],
+            observations: vec![],
             roots: vec![consumer],
         })
         .unwrap();
@@ -684,6 +765,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[],
+            observations: vec![],
             roots: vec![root],
         })
         .unwrap();
@@ -758,6 +840,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[first],
+            observations: vec![],
             roots: vec![root],
         })
         .unwrap();
@@ -807,6 +890,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[full, lower],
+            observations: vec![],
             roots: vec![full, lower],
         })
         .unwrap();
@@ -897,6 +981,7 @@ mod tests {
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
             boundary_inputs: &[],
+            observations: vec![],
             roots: vec![root],
         })
         .unwrap();

@@ -41,7 +41,7 @@ pub(crate) enum SequentialInputRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegionPlanBinding {
     pub(crate) inputs: Arc<[RegionPlanValueBinding]>,
-    pub(crate) outputs: Arc<[Arc<[RegionPlanValueBinding]>]>,
+    pub(crate) outputs: Arc<[RegionPlanValueBinding]>,
 }
 
 impl RegionPlanBinding {
@@ -59,7 +59,7 @@ impl RegionPlanBinding {
     pub(crate) fn source_values(&self) -> impl Iterator<Item = word::ValueId> + '_ {
         self.inputs
             .iter()
-            .chain(self.outputs.iter().flat_map(|bindings| bindings.iter()))
+            .chain(self.outputs.iter())
             .filter_map(|binding| match *binding {
                 RegionPlanValueBinding::SourceBit { value, .. } => Some(value),
                 RegionPlanValueBinding::MemoryOperationBit { .. }
@@ -76,10 +76,8 @@ impl RegionPlanBinding {
         for binding in Arc::make_mut(&mut self.inputs) {
             visit(binding)?;
         }
-        for bindings in Arc::make_mut(&mut self.outputs) {
-            for binding in Arc::make_mut(bindings) {
-                visit(binding)?;
-            }
+        for binding in Arc::make_mut(&mut self.outputs) {
+            visit(binding)?;
         }
         Ok(())
     }
@@ -183,7 +181,24 @@ impl RegionPlanBinding {
         ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
         memories: &crate::planning::memory::MemoryLoweringOwnership,
     ) -> Result<(), crate::SynthError> {
-        let materialize = |binding: &mut RegionPlanValueBinding| -> Result<(), crate::SynthError> {
+        let endpoint_bits = module
+            .values()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, stored)| {
+                let word::ValueKind::Signal(reference) = stored.kind else {
+                    return None;
+                };
+                (reference.width() == 1).then(|| {
+                    word::ValueId::from_index(index)
+                        .map(|value| ((reference.signal, reference.lsb), value))
+                        .map_err(crate::SynthError::from)
+                })
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+        let materialize = |binding: &mut RegionPlanValueBinding,
+                           preserve_endpoint: bool|
+         -> Result<(), crate::SynthError> {
             let (value, bit) = match *binding {
                 RegionPlanValueBinding::SourceBit { value, bit } => (value, bit),
                 RegionPlanValueBinding::MemoryOperationBit {
@@ -230,12 +245,25 @@ impl RegionPlanBinding {
                     "regional plan binding references an unknown source value",
                 )
             })?;
-            let lowered = if bit == 0
+            let endpoint = match stored.kind {
+                word::ValueKind::Signal(reference) if preserve_endpoint => reference
+                    .lsb
+                    .checked_add(bit)
+                    .filter(|_| bit < reference.width())
+                    .and_then(|lsb| endpoint_bits.get(&(reference.signal, lsb)).copied()),
+                word::ValueKind::Signal(_)
+                | word::ValueKind::Constant(_)
+                | word::ValueKind::Operation(_) => None,
+            };
+            let lowered = if let Some(endpoint) = endpoint {
+                endpoint
+            } else if bit == 0
                 && stored.ty.width() == 1
                 && matches!(
                     stored.kind,
                     word::ValueKind::Signal(_) | word::ValueKind::Constant(_)
-                ) {
+                )
+            {
                 value
             } else {
                 ownership
@@ -258,13 +286,19 @@ impl RegionPlanBinding {
             *binding = RegionPlanValueBinding::Lowered(lowered);
             Ok(())
         };
-        self.for_each_binding_mut(materialize)
+        for binding in Arc::make_mut(&mut self.inputs) {
+            materialize(binding, false)?;
+        }
+        for binding in Arc::make_mut(&mut self.outputs) {
+            materialize(binding, true)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn lowered_values(&self) -> impl Iterator<Item = word::ValueId> + '_ {
         self.inputs
             .iter()
-            .chain(self.outputs.iter().flat_map(|bindings| bindings.iter()))
+            .chain(self.outputs.iter())
             .filter_map(|binding| match *binding {
                 RegionPlanValueBinding::Lowered(value) => Some(value),
                 RegionPlanValueBinding::SourceBit { .. }
@@ -291,27 +325,8 @@ impl RegionPlanBinding {
     ) -> Result<Vec<word::ValueId>, crate::SynthError> {
         self.outputs
             .iter()
-            .flat_map(|bindings| bindings.iter().copied())
+            .copied()
             .map(|binding| resolve_plan_value(binding, ownership))
-            .collect()
-    }
-
-    pub(crate) fn resolve_output_groups(
-        &self,
-        ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
-    ) -> Result<Vec<Vec<word::ValueId>>, crate::SynthError> {
-        self.outputs
-            .iter()
-            .map(|bindings| {
-                let mut values = bindings
-                    .iter()
-                    .copied()
-                    .map(|binding| resolve_plan_value(binding, ownership))
-                    .collect::<Result<Vec<_>, _>>()?;
-                values.sort_unstable();
-                values.dedup();
-                Ok(values)
-            })
             .collect()
     }
 }
@@ -322,19 +337,30 @@ pub(crate) struct CandidateBindingInputs<'a> {
     pub(crate) local_module: &'a word::WordModule,
     pub(crate) source_to_local: &'a std::collections::BTreeMap<word::ValueId, word::ValueId>,
     pub(crate) boundary_bindings: &'a [(word::ValueId, word::ValueId)],
+    pub(crate) observations: &'a [word::ValueId],
     pub(crate) memory_values: &'a [RegionalMemoryValueBinding],
     pub(crate) operation_sources: &'a [Option<word::OpId>],
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
     pub(crate) ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
 }
 
+pub(crate) struct CandidateBinding {
+    pub(crate) binding: RegionPlanBinding,
+    pub(crate) output_widths: Box<[usize]>,
+}
+
+type BindingMap = std::collections::BTreeMap<word::ValueId, Vec<RegionPlanValueBinding>>;
+
 fn bind_root_outputs(
     source_module: &word::WordModule,
     local_module: &word::WordModule,
+    source_to_local: &std::collections::BTreeMap<word::ValueId, word::ValueId>,
     root_bindings: &[(word::ValueId, word::SignalId)],
+    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
     local_to_sources: &mut std::collections::BTreeMap<word::ValueId, Vec<RegionPlanValueBinding>>,
 ) -> Result<(), crate::SynthError> {
-    for &(source, signal) in root_bindings {
+    let semantics = super::roots::FullDomainRootSemantics::new(local_module)?;
+    for &(source, _) in root_bindings {
         let width = source_module
             .value(source)
             .ok_or_else(|| {
@@ -344,29 +370,33 @@ fn bind_root_outputs(
             })?
             .ty
             .width();
-        for connect in local_module
-            .connects()
-            .iter()
-            .filter(|connect| connect.target.signal == signal)
-        {
-            let bit = match connect.target.range {
-                Some(range) if range.msb == range.lsb => range.lsb,
-                None if width == 1 => 0,
-                Some(_) | None => {
-                    return Err(crate::SynthError::invariant(
-                        "regional root output was not scalarized before binding",
-                    ));
-                }
-            };
-            if bit >= width {
+        let local = source_to_local.get(&source).copied().ok_or_else(|| {
+            crate::SynthError::invariant(
+                "regional root binding is absent from its frozen private cone",
+            )
+        })?;
+        let bits = match ownership.lowered_bits(local) {
+            Some(bits) => bits,
+            None if width == 1 => std::slice::from_ref(&local),
+            None => {
                 return Err(crate::SynthError::invariant(
-                    "regional root output bit exceeds its source value",
+                    "regional root binding is absent from scalar ownership",
                 ));
             }
-            local_to_sources
-                .entry(connect.value)
-                .or_default()
-                .push(RegionPlanValueBinding::SourceBit { value: source, bit });
+        };
+        if bits.len() != width as usize {
+            return Err(crate::SynthError::invariant(
+                "regional root binding width differs from scalar ownership",
+            ));
+        }
+        for (bit, &target) in bits.iter().enumerate() {
+            let bit = u32::try_from(bit)
+                .map_err(|_| crate::SynthError::capacity("regional root bit index"))?;
+            let bindings = local_to_sources
+                .entry(semantics.canonical_root(target)?)
+                .or_default();
+            bindings.retain(|binding| matches!(binding, RegionPlanValueBinding::SourceBit { .. }));
+            bindings.push(RegionPlanValueBinding::SourceBit { value: source, bit });
         }
     }
     Ok(())
@@ -376,22 +406,37 @@ pub(crate) fn build_candidate_binding<'a>(
     inputs: CandidateBindingInputs<'_>,
     subject_inputs: &[word::ValueId],
     output_values: impl IntoIterator<Item = &'a [word::ValueId]>,
-) -> Result<RegionPlanBinding, crate::SynthError> {
+) -> Result<CandidateBinding, crate::SynthError> {
     let CandidateBindingInputs {
         source_module,
         local_module,
         source_to_local,
         boundary_bindings,
+        observations,
         memory_values,
         operation_sources,
         root_bindings,
         ownership,
     } = inputs;
     let output_values = output_values.into_iter().collect::<Vec<_>>();
-    let mut local_to_sources =
-        std::collections::BTreeMap::<word::ValueId, Vec<RegionPlanValueBinding>>::new();
+    let mut local_to_sources = BindingMap::new();
+    // Input identities describe every immutable value imported into the private
+    // cone. Output identities are deliberately narrower: only explicit owned
+    // roots and owned sequential endpoints may be published by this region.
+    // Keeping the maps separate prevents a local canonicalization from turning
+    // an imported boundary input into an additional global output alias.
+    let mut local_to_outputs = BindingMap::new();
+    let root_sources = root_bindings
+        .iter()
+        .map(|&(source, _)| source)
+        .collect::<std::collections::BTreeSet<_>>();
+    let observations = observations
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
     for (source, local) in source_to_local
         .iter()
+        .filter(|(source, _)| !root_sources.contains(source) && !observations.contains(source))
         .map(|(&source, &local)| (source, local))
         .chain(boundary_bindings.iter().copied())
     {
@@ -433,14 +478,25 @@ pub(crate) fn build_candidate_binding<'a>(
                     bit,
                 },
             };
-            local_to_sources.entry(lowered).or_default().push(binding);
+            match memory_value.kind {
+                RegionalMemoryValueKind::Operation => {
+                    local_to_outputs.entry(lowered).or_default().push(binding);
+                }
+                RegionalMemoryValueKind::State => {
+                    local_to_sources.entry(lowered).or_default().push(binding);
+                }
+            }
         }
     }
+    canonicalize_bindings(local_module, &mut local_to_sources)?;
+    canonicalize_bindings(local_module, &mut local_to_outputs)?;
     bind_root_outputs(
         source_module,
         local_module,
+        source_to_local,
         root_bindings,
-        &mut local_to_sources,
+        ownership,
+        &mut local_to_outputs,
     )?;
     for (index, operation) in local_module.operations().iter().enumerate() {
         let Some(source_operation) = operation_sources.get(index).copied().flatten() else {
@@ -453,113 +509,94 @@ pub(crate) fn build_candidate_binding<'a>(
             for (bit, &lowered) in bits.iter().enumerate() {
                 let bit = u32::try_from(bit)
                     .map_err(|_| crate::SynthError::capacity("regional sequential bit index"))?;
-                local_to_sources.entry(lowered).or_insert_with(|| {
-                    vec![RegionPlanValueBinding::SequentialInputBit {
-                        operation: source_operation,
-                        role,
-                        bit,
-                    }]
-                });
+                let binding = RegionPlanValueBinding::SequentialInputBit {
+                    operation: source_operation,
+                    role,
+                    bit,
+                };
+                local_to_sources
+                    .entry(lowered)
+                    .or_insert_with(|| vec![binding]);
+                local_to_outputs
+                    .entry(lowered)
+                    .or_insert_with(|| vec![binding]);
             }
         }
     }
     for operation in local_module.operations() {
-        let Some(source) = scalar_alias_input(local_module, operation) else {
+        let Some(source) = super::roots::scalar_projection_input(local_module, operation) else {
             continue;
         };
         let Some(bindings) = local_to_sources.get(&source).cloned() else {
+            if let Some(bindings) = local_to_outputs.get(&source).cloned() {
+                local_to_outputs.entry(operation.result).or_insert(bindings);
+            }
             continue;
         };
         local_to_sources.entry(operation.result).or_insert(bindings);
+        if let Some(bindings) = local_to_outputs.get(&source).cloned() {
+            local_to_outputs.entry(operation.result).or_insert(bindings);
+        }
     }
-    for bindings in local_to_sources.values_mut() {
+    for bindings in local_to_sources
+        .values_mut()
+        .chain(local_to_outputs.values_mut())
+    {
         bindings.sort_unstable_by_key(|binding| match *binding {
-            RegionPlanValueBinding::SourceBit { value, bit } => {
-                let kind = match source_module.value(value).map(|value| &value.kind) {
-                    Some(word::ValueKind::Signal(_)) => 0,
-                    Some(word::ValueKind::Constant(_)) => 1,
-                    Some(word::ValueKind::Operation(_)) | None => 2,
-                };
-                (kind, value.raw(), bit, 0)
-            }
             RegionPlanValueBinding::MemoryOperationBit {
                 memory,
                 ordinal,
                 bit,
-            } => (3, memory.raw(), ordinal, bit),
+            } => (0, memory.raw(), ordinal, bit),
             RegionPlanValueBinding::MemoryStateBit {
                 memory,
                 ordinal,
                 bit,
-            } => (4, memory.raw(), ordinal, bit),
+            } => (1, memory.raw(), ordinal, bit),
             RegionPlanValueBinding::SequentialInputBit {
                 operation,
                 role,
                 bit,
-            } => (5, operation.raw(), sequential_role_key(role), bit),
+            } => (2, operation.raw(), sequential_role_key(role), bit),
+            RegionPlanValueBinding::SourceBit { value, bit } => {
+                let kind = match source_module.value(value).map(|value| &value.kind) {
+                    Some(word::ValueKind::Signal(_)) => 3,
+                    Some(word::ValueKind::Constant(_)) => 4,
+                    Some(word::ValueKind::Operation(_)) | None => 5,
+                };
+                (kind, value.raw(), bit, 0)
+            }
             RegionPlanValueBinding::Lowered(value) => (6, value.raw(), 0, 0),
         });
         bindings.dedup();
     }
-    let signal_bindings = local_to_sources
-        .iter()
-        .filter_map(|(&value, bindings)| {
-            let word::ValueKind::Signal(reference) = local_module.value(value)?.kind else {
-                return None;
-            };
-            Some((
-                (reference.signal, reference.lsb, reference.width()),
-                bindings.clone(),
-            ))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    for (index, value) in local_module.values().iter().enumerate() {
-        let word::ValueKind::Signal(reference) = value.kind else {
-            continue;
-        };
-        let Some(bindings) =
-            signal_bindings.get(&(reference.signal, reference.lsb, reference.width()))
-        else {
-            continue;
-        };
-        let local = word::ValueId::from_index(index).map_err(crate::SynthError::from)?;
-        local_to_sources
-            .entry(local)
-            .or_insert_with(|| bindings.clone());
-    }
-    let signal_drivers = crate::word::signal_driver::SignalDriverIndex::new(local_module)?;
-    let values_to_bind = subject_inputs
-        .iter()
-        .copied()
-        .chain(
-            output_values
-                .iter()
-                .flat_map(|values| values.iter().copied()),
-        )
-        .collect::<std::collections::BTreeSet<_>>();
-    for value in values_to_bind {
-        resolve_immutable_binding_alias(
-            value,
-            local_module,
-            &signal_drivers,
-            &mut local_to_sources,
-            &mut std::collections::BTreeSet::new(),
-        )?;
-    }
+    complete_binding_aliases(
+        local_module,
+        subject_inputs,
+        &output_values,
+        &mut local_to_sources,
+        &mut local_to_outputs,
+    )?;
     let locate = |value: word::ValueId| {
         local_to_sources
             .get(&value)
             .and_then(|bindings| bindings.first())
             .copied()
             .ok_or_else(|| {
+                let operation = local_module.value(value).and_then(|stored| match stored.kind {
+                    word::ValueKind::Operation(operation) => {
+                        local_module.operation(operation).map(|operation| &operation.kind)
+                    }
+                    word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+                });
                 crate::SynthError::invariant(format!(
-                    "region-local cover input value {value:?} ({:?}) has no immutable source-bit binding",
-                    local_module.value(value).map(|stored| &stored.kind)
+                    "region-local cover input value {value:?} ({:?}, operation {operation:?}) has no immutable source-bit binding",
+                    local_module.value(value).map(|stored| &stored.kind),
                 ))
             })
     };
     let locate_all = |value: word::ValueId| {
-        local_to_sources
+        local_to_outputs
             .get(&value)
             .cloned()
             .map(Vec::into_boxed_slice)
@@ -582,24 +619,114 @@ pub(crate) fn build_candidate_binding<'a>(
         .map(locate)
         .collect::<Result<Vec<_>, _>>()?
         .into();
+    let mut output_widths = Vec::with_capacity(output_values.len());
     let outputs = output_values
         .into_iter()
         .map(|values| {
-            let mut bindings = values
-                .iter()
-                .copied()
-                .map(locate_all)
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>();
-            bindings.sort_unstable();
-            bindings.dedup();
-            Ok(Arc::from(bindings))
+            let [value] = values else {
+                return Err(crate::SynthError::invariant(
+                    "regional publication obligation is not one global root",
+                ));
+            };
+            let bindings = locate_all(*value)?;
+            if bindings.is_empty() {
+                return Err(crate::SynthError::invariant(
+                    "regional publication obligation has no owner binding",
+                ));
+            }
+            output_widths.push(bindings.len());
+            Ok(bindings)
         })
         .collect::<Result<Vec<_>, crate::SynthError>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
         .into();
-    Ok(RegionPlanBinding { inputs, outputs })
+    Ok(CandidateBinding {
+        binding: RegionPlanBinding { inputs, outputs },
+        output_widths: output_widths.into_boxed_slice(),
+    })
+}
+
+fn canonicalize_bindings(
+    module: &word::WordModule,
+    bindings: &mut BindingMap,
+) -> Result<(), crate::SynthError> {
+    let semantics = super::roots::FullDomainRootSemantics::new(module)?;
+    let mut canonical = BindingMap::new();
+    for (value, values) in std::mem::take(bindings) {
+        canonical
+            .entry(semantics.canonical_root(value)?)
+            .or_default()
+            .extend(values);
+    }
+    *bindings = canonical;
+    Ok(())
+}
+
+fn complete_binding_aliases(
+    module: &word::WordModule,
+    subject_inputs: &[word::ValueId],
+    output_values: &[&[word::ValueId]],
+    sources: &mut BindingMap,
+    outputs: &mut BindingMap,
+) -> Result<(), crate::SynthError> {
+    let signal_bindings = |bindings: &BindingMap| {
+        bindings
+            .iter()
+            .filter_map(|(&value, bindings)| {
+                let word::ValueKind::Signal(reference) = module.value(value)?.kind else {
+                    return None;
+                };
+                Some((
+                    (reference.signal, reference.lsb, reference.width()),
+                    bindings.clone(),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let source_signals = signal_bindings(sources);
+    let output_signals = signal_bindings(outputs);
+    for (index, value) in module.values().iter().enumerate() {
+        let word::ValueKind::Signal(reference) = value.kind else {
+            continue;
+        };
+        let local = word::ValueId::from_index(index).map_err(crate::SynthError::from)?;
+        let key = (reference.signal, reference.lsb, reference.width());
+        if let Some(bindings) = source_signals.get(&key) {
+            sources.entry(local).or_insert_with(|| bindings.clone());
+        }
+        if let Some(bindings) = output_signals.get(&key) {
+            outputs.entry(local).or_insert_with(|| bindings.clone());
+        }
+    }
+    let drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
+    for &value in subject_inputs {
+        resolve_immutable_binding_alias(
+            value,
+            module,
+            &drivers,
+            sources,
+            &mut std::collections::BTreeSet::new(),
+        )?;
+        resolve_immutable_binding_alias(
+            value,
+            module,
+            &drivers,
+            outputs,
+            &mut std::collections::BTreeSet::new(),
+        )?;
+    }
+    for &value in output_values.iter().flat_map(|values| values.iter()) {
+        resolve_immutable_binding_alias(
+            value,
+            module,
+            &drivers,
+            outputs,
+            &mut std::collections::BTreeSet::new(),
+        )?;
+    }
+    Ok(())
 }
 
 fn resolve_immutable_binding_alias(
@@ -620,25 +747,13 @@ fn resolve_immutable_binding_alias(
     let stored = module.value(value).ok_or_else(|| {
         crate::SynthError::invariant("region-local binding references an unknown value")
     })?;
-    let source =
-        match stored.kind {
-            word::ValueKind::Operation(operation) => module
-                .operation(operation)
-                .and_then(|operation| scalar_alias_input(module, operation)),
-            word::ValueKind::Signal(reference) => signal_drivers
-                .resolve_reference(reference)
-                .and_then(|resolved| match resolved.as_slice() {
-                    [(driver, 0)]
-                        if module
-                            .value(*driver)
-                            .is_some_and(|driver| driver.ty.width() == 1) =>
-                    {
-                        Some(*driver)
-                    }
-                    _ => None,
-                }),
-            word::ValueKind::Constant(_) => None,
-        };
+    let source = match stored.kind {
+        word::ValueKind::Operation(operation) => module
+            .operation(operation)
+            .and_then(|operation| super::roots::scalar_projection_input(module, operation)),
+        word::ValueKind::Signal(reference) => signal_drivers.scalar_driver(module, reference),
+        word::ValueKind::Constant(_) => None,
+    };
     let resolved = source
         .map(|source| {
             resolve_immutable_binding_alias(source, module, signal_drivers, bindings, active)
@@ -726,44 +841,6 @@ fn sequential_role_key(role: SequentialInputRole) -> u32 {
         SequentialInputRole::Enable => 2,
         SequentialInputRole::ResetControl(index) => index.saturating_mul(2).saturating_add(3),
         SequentialInputRole::ResetValue(index) => index.saturating_mul(2).saturating_add(4),
-    }
-}
-
-fn scalar_alias_input(
-    module: &word::WordModule,
-    operation: &word::Operation,
-) -> Option<word::ValueId> {
-    let result = module.value(operation.result)?;
-    if result.ty.width() != 1 {
-        return None;
-    }
-    match &operation.kind {
-        word::OpKind::Cast { value, .. }
-            if module
-                .value(*value)
-                .is_some_and(|value| value.ty.width() == 1) =>
-        {
-            Some(*value)
-        }
-        word::OpKind::Extract { value, lsb, .. }
-            if *lsb == 0
-                && module
-                    .value(*value)
-                    .is_some_and(|value| value.ty.width() == 1) =>
-        {
-            Some(*value)
-        }
-        word::OpKind::Concat { parts } if parts.len() == 1 => Some(parts[0]),
-        word::OpKind::Unary { .. }
-        | word::OpKind::Binary { .. }
-        | word::OpKind::Mux { .. }
-        | word::OpKind::Register(_)
-        | word::OpKind::Latch(_)
-        | word::OpKind::Extract { .. }
-        | word::OpKind::DynamicExtract { .. }
-        | word::OpKind::DynamicInsert { .. }
-        | word::OpKind::Cast { .. }
-        | word::OpKind::Concat { .. } => None,
     }
 }
 

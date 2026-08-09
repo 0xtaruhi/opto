@@ -3,7 +3,7 @@
 
 use self::search::{CoverTiming, LibraryCover};
 pub(crate) use self::search::{LibraryCoverBinding, LibraryCoverSource};
-use super::roots::{MappingRoot, requires_combinational_cover};
+use super::roots::MappingRoot;
 use super::{CombinationalCellCatalog, word};
 use crate::boolean::logic::cuts::{CutDatabase, CutTruthDatabase};
 use crate::boolean::logic::network::LogicNodeId;
@@ -13,20 +13,13 @@ mod portable;
 mod response;
 mod search;
 
-use crate::mapping::{RegionPlanBinding, RegionPlanValueBinding};
-use portable::PortableCoverBinding;
-pub(crate) use portable::{
-    decode as decode_portable_cover, empty_plan_key,
-    reconstruct_binding as reconstruct_plan_binding,
-};
+use crate::mapping::RegionPlanBinding;
+pub(crate) use portable::{decode as decode_portable_cover, empty_plan_key};
 pub(crate) use response::CoverResponseModels;
 
 pub(crate) struct AnalyzedRegionCover {
-    subject: RegionLogicGraph,
     inputs: Box<[word::ValueId]>,
     outputs: Box<[AnalyzedRegionOutput]>,
-    cuts: CutDatabase,
-    truths: CutTruthDatabase,
     cover: LibraryCover,
 }
 
@@ -35,12 +28,7 @@ pub(crate) enum RegionCoverAnalysis {
     Covered(Box<AnalyzedRegionCover>),
 }
 
-impl RegionCoverAnalysis {
-    pub(crate) const fn is_covered(&self) -> bool {
-        matches!(self, Self::Covered(_))
-    }
-}
-
+#[derive(Clone)]
 pub(crate) struct AnalyzedRegionOutput {
     node: LogicNodeId,
     values: Box<[word::ValueId]>,
@@ -50,8 +38,6 @@ type SelectedSubjectCover = (Box<[AnalyzedRegionOutput]>, LibraryCover);
 
 #[derive(Clone, Copy)]
 pub(crate) struct CompactPlanInputs<'a, 'scenario> {
-    /// Resolves a subject leaf to the scalar signal bit that identifies it.
-    pub(crate) module: &'a word::WordModule,
     pub(crate) region: crate::SynthesisRegion,
     pub(crate) context: crate::RegionContextKey,
     pub(crate) boundary_response: &'a [crate::BoundaryContract],
@@ -64,58 +50,39 @@ pub(crate) struct CompactPlanInputs<'a, 'scenario> {
 
 impl AnalyzedRegionCover {
     pub(crate) fn candidate_binding(
-        &self,
+        &mut self,
         inputs: crate::mapping::CandidateBindingInputs<'_>,
+        catalog: &CombinationalCellCatalog,
     ) -> Result<RegionPlanBinding, crate::SynthError> {
-        crate::mapping::build_candidate_binding(
+        let candidate = crate::mapping::build_candidate_binding(
             inputs,
             &self.inputs,
             self.outputs.iter().map(|output| output.values.as_ref()),
-        )
-    }
-
-    pub(crate) fn lowered_binding(&self) -> RegionPlanBinding {
-        RegionPlanBinding {
-            inputs: self
-                .inputs
-                .iter()
-                .copied()
-                .map(RegionPlanValueBinding::Lowered)
-                .collect(),
-            outputs: self
-                .outputs
-                .iter()
-                .map(|output| {
-                    output
-                        .values
-                        .iter()
-                        .copied()
-                        .map(RegionPlanValueBinding::Lowered)
-                        .collect()
-                })
-                .collect(),
+        )?;
+        if candidate.output_widths.len() != self.outputs.len() {
+            return Err(crate::SynthError::invariant(
+                "regional owner bindings do not align with cover outputs",
+            ));
         }
-    }
-
-    pub(crate) fn reselect(
-        mut self,
-        module: &word::WordModule,
-        request: RegionCoverRequest<'_>,
-    ) -> Result<RegionCoverAnalysis, crate::SynthError> {
-        let Some((outputs, cover)) = select_subject_cover(
-            &self.subject,
-            &self.cuts,
-            &self.truths,
-            &self.inputs,
-            module,
-            &request,
-        )?
-        else {
-            return Ok(RegionCoverAnalysis::NoCombinationalLogic);
-        };
-        self.outputs = outputs;
-        self.cover = cover;
-        Ok(RegionCoverAnalysis::Covered(Box::new(self)))
+        let mut outputs = Vec::with_capacity(candidate.binding.outputs.len());
+        let mut cover_outputs = Vec::with_capacity(candidate.binding.outputs.len());
+        let mut output_costs = Vec::with_capacity(candidate.binding.outputs.len());
+        for (((output, &source), &cost), &width) in self
+            .outputs
+            .iter()
+            .zip(self.cover.outputs.iter())
+            .zip(self.cover.output_costs.iter())
+            .zip(candidate.output_widths.iter())
+        {
+            outputs.extend(std::iter::repeat_n(output.clone(), width));
+            cover_outputs.extend(std::iter::repeat_n(source, width));
+            output_costs.extend(std::iter::repeat_n(cost, width));
+        }
+        self.outputs = outputs.into_boxed_slice();
+        self.cover.outputs = cover_outputs.into_boxed_slice();
+        self.cover.output_costs = output_costs.into_boxed_slice();
+        self.cover.isolate_outputs(catalog)?;
+        Ok(candidate.binding)
     }
 
     pub(crate) fn compact_plan(
@@ -123,7 +90,6 @@ impl AnalyzedRegionCover {
         inputs: CompactPlanInputs<'_, '_>,
     ) -> Result<crate::RegionCoverPlan, crate::SynthError> {
         let CompactPlanInputs {
-            module,
             region,
             context,
             boundary_response,
@@ -133,11 +99,7 @@ impl AnalyzedRegionCover {
             timing_tags,
             regional_slice,
         } = inputs;
-        let binding =
-            PortableCoverBinding::capture(module, &self.lowered_binding(), regional_slice)?;
-        let mut payload = b"ORCP\x02".to_vec();
-        payload.extend_from_slice(&decision_key);
-        payload.extend_from_slice(&regional_slice.binding_layout_digest());
+        let mut payload = b"ORCP\x03".to_vec();
         payload.extend_from_slice(&(self.cover.cells.len() as u64).to_le_bytes());
         for (index, cell) in self.cover.cells.iter().enumerate() {
             let local = u32::try_from(index)
@@ -188,7 +150,6 @@ impl AnalyzedRegionCover {
             payload.push(kind);
             payload.extend_from_slice(&(index as u64).to_le_bytes());
         }
-        binding.encode(&mut payload);
         let local_cell_count = u32::try_from(self.cover.cells.len())
             .map_err(|_| crate::SynthError::capacity("regional cover cell count overflow"))?;
         let local_net_count = self.cover.cells.iter().try_fold(0u32, |count, cell| {
@@ -321,11 +282,8 @@ pub(crate) fn analyze_region_cover(
     };
     Ok(RegionCoverAnalysis::Covered(Box::new(
         AnalyzedRegionCover {
-            subject,
             inputs,
             outputs,
-            cuts,
-            truths,
             cover,
         },
     )))
@@ -351,8 +309,7 @@ fn select_subject_cover(
     let baseline = implementations.next().ok_or_else(|| {
         crate::SynthError::invariant("regional Boolean subject has no baseline implementation")
     })?;
-    let Some(mut outputs) = analyzed_outputs(module, request.roots, |value| baseline.node(value))?
-    else {
+    let Some(mut outputs) = analyzed_outputs(request.roots, |value| baseline.node(value))? else {
         return Ok(None);
     };
     let mut selected = selector
@@ -361,10 +318,9 @@ fn select_subject_cover(
     let mut selected_pass = baseline.pass();
     for implementation in implementations {
         let candidate_outputs =
-            analyzed_outputs(module, request.roots, |value| implementation.node(value))?
-                .ok_or_else(|| {
-                    crate::SynthError::invariant("AXM alternative has no analyzed outputs")
-                })?;
+            analyzed_outputs(request.roots, |value| implementation.node(value))?.ok_or_else(
+                || crate::SynthError::invariant("AXM alternative has no analyzed outputs"),
+            )?;
         let Some(candidate) = selector.select(&candidate_outputs, CoverSearch::Estimate)? else {
             crate::api::diagnostics::trace!(
                 crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
@@ -405,39 +361,29 @@ fn select_subject_cover(
 }
 
 fn analyzed_outputs(
-    module: &word::WordModule,
     roots: &[MappingRoot],
     mut node: impl FnMut(word::ValueId) -> Option<LogicNodeId>,
 ) -> Result<Option<Box<[AnalyzedRegionOutput]>>, crate::SynthError> {
-    let mut grouped = std::collections::BTreeMap::<LogicNodeId, Vec<word::ValueId>>::new();
+    let mut outputs = Vec::new();
     for &root in roots {
-        let Some(node) = node(root.value) else {
-            if requires_combinational_cover(module, root.value)? {
-                return Err(crate::SynthError::invariant(format!(
-                    "combinational regional root {:?} has no Boolean subject node",
-                    root.value
-                )));
-            }
+        if !root.requires_combinational_cover {
             continue;
+        }
+        let Some(node) = node(root.value) else {
+            return Err(crate::SynthError::invariant(format!(
+                "combinational regional root {:?} has no Boolean subject node",
+                root.value
+            )));
         };
-        grouped.entry(node).or_default().push(root.value);
+        outputs.push(AnalyzedRegionOutput {
+            node,
+            values: Box::new([root.value]),
+        });
     }
-    if grouped.is_empty() {
+    if outputs.is_empty() {
         return Ok(None);
     }
-    Ok(Some(
-        grouped
-            .into_iter()
-            .map(|(node, mut values)| {
-                values.sort_unstable();
-                values.dedup();
-                AnalyzedRegionOutput {
-                    node,
-                    values: values.into_boxed_slice(),
-                }
-            })
-            .collect(),
-    ))
+    Ok(Some(outputs.into_boxed_slice()))
 }
 
 struct CoverSelector<'a, 'request> {
@@ -552,6 +498,15 @@ impl CoverSelector<'_, '_> {
                 request.options.runtime,
             )?,
         };
+        let mut cover = cover;
+        if let Some(cover) = &mut cover {
+            cover.isolate_outputs(request.catalog).map_err(|error| {
+                crate::SynthError::mapping(format!(
+                    "{error}; {} frozen regional output obligations",
+                    outputs.len()
+                ))
+            })?;
+        }
         Ok(cover.map(|cover| RankedCover {
             rank: cover_rank(&cover, &required_times),
             cover,

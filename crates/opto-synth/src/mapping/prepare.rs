@@ -3,15 +3,30 @@
 
 use super::{SequentialCellCatalog, sequential, word};
 
+pub(crate) struct PrivateRegionPreparation<'a> {
+    pub(crate) module: &'a mut word::WordModule,
+    pub(crate) sequential_catalog: &'a SequentialCellCatalog,
+    pub(crate) clock_gating: Option<crate::ClockGatingStyle>,
+    pub(crate) clock_gating_catalog: &'a crate::mapping::clock_gating::ClockGatingCatalog,
+    pub(crate) target_mapping: bool,
+    pub(crate) timing_diagnostics: bool,
+    pub(crate) operation_regions: &'a [Option<crate::RegionRowId>],
+    pub(crate) ownership: &'a mut crate::regional::StructuralOwnershipProvenance,
+}
+
 pub(crate) fn prepare_private_region(
-    module: &mut word::WordModule,
-    sequential_catalog: &SequentialCellCatalog,
-    clock_gating: Option<crate::ClockGatingStyle>,
-    clock_gating_catalog: &crate::mapping::clock_gating::ClockGatingCatalog,
-    target_mapping: bool,
-    timing_diagnostics: bool,
-    operation_regions: Option<&[Option<crate::RegionRowId>]>,
+    request: PrivateRegionPreparation<'_>,
 ) -> Result<(), crate::SynthError> {
+    let PrivateRegionPreparation {
+        module,
+        sequential_catalog,
+        clock_gating,
+        clock_gating_catalog,
+        target_mapping,
+        timing_diagnostics,
+        operation_regions,
+        ownership,
+    } = request;
     let trace = crate::api::diagnostics::SynthTrace::new(timing_diagnostics);
     let mut stage_started = std::time::Instant::now();
     let mut finish_stage = |stage: &str| {
@@ -23,10 +38,10 @@ pub(crate) fn prepare_private_region(
         );
         stage_started = std::time::Instant::now();
     };
-    sequential::normalize_sequential_controls(module)?;
+    sequential::normalize_sequential_controls(module, ownership)?;
     finish_stage("normalize controls");
     if target_mapping {
-        sequential::lower_controls(module, sequential_catalog)?;
+        sequential::lower_controls(module, sequential_catalog, ownership)?;
         finish_stage("lower controls");
     }
     let gating_edges = |edge: word::Edge| {
@@ -37,17 +52,18 @@ pub(crate) fn prepare_private_region(
         })
     };
     if target_mapping {
-        sequential::recover_feedback_enables(module, sequential_catalog, &gating_edges)?;
+        sequential::recover_feedback_enables(module, sequential_catalog, &gating_edges, ownership)?;
         finish_stage("recover enables");
         if let Some(style) = clock_gating {
             crate::mapping::clock_gating::gate_register_clocks_in_regions(
                 module,
                 clock_gating_catalog,
                 style,
-                operation_regions,
+                Some(operation_regions),
+                ownership,
             )?;
             finish_stage("gate clocks");
-            sequential::expand_unsupported_enables(module, sequential_catalog)?;
+            sequential::expand_unsupported_enables(module, sequential_catalog, ownership)?;
             finish_stage("expand enables");
         }
     }

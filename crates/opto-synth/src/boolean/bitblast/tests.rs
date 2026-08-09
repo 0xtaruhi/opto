@@ -29,6 +29,64 @@ mod dynamic;
 mod operations;
 
 #[test]
+fn frozen_ownership_follows_static_signal_drivers() {
+    let mut module = word::WordModule::new("owned_connectivity");
+    let bit = word::WordType::bits(1).unwrap();
+    let input = module
+        .add_port(
+            "a",
+            word::PortDirection::Input,
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let input = module
+        .read_signal(
+            module.port(input).unwrap().signal,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let produced = module
+        .unary(word::UnaryOp::BitNot, input, word::SourceSpan::default())
+        .unwrap();
+    let first = module
+        .add_wire("first", bit, word::SourceSpan::default())
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(first),
+            produced,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let first = module
+        .read_signal(first, word::SourceSpan::default())
+        .unwrap();
+    let second = module
+        .add_wire("second", bit, word::SourceSpan::default())
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(second),
+            first,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let second = module
+        .read_signal(second, word::SourceSpan::default())
+        .unwrap();
+
+    let owner = crate::RegionRowId::from_index(0).unwrap();
+    let mut ownership = LoweredRegionOwnership::new(module.values().len());
+    ownership.set(produced, owner).unwrap();
+    ownership.infer_unowned(&module).unwrap();
+
+    assert_eq!(ownership.owner(first), Some(owner));
+    assert_eq!(ownership.owner(second), Some(owner));
+    assert_eq!(ownership.owner(input), None);
+}
+
+#[test]
 fn resolves_synthesis_x_constants_deterministically() {
     let mut module = word::WordModule::new("top");
     let ty = word::WordType::bits(1).unwrap();
@@ -104,6 +162,49 @@ fn regional_shell_cuts_owned_combinational_cones_without_rewriting_source_values
         module.value(connect.value).unwrap().kind,
         word::ValueKind::Signal(_)
     )));
+}
+
+#[test]
+fn regional_shell_freezes_full_domain_constant_bits() {
+    let mut module = word::WordModule::new("regional_constants");
+    let input = add_input(&mut module, "a", 4);
+    let input = read_port(&mut module, input);
+    let wide = module
+        .cast(
+            word::CastKind::ZeroExtend,
+            input,
+            word::WordType::bits(8).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let result = module
+        .binary(word::BinaryOp::Add, wide, wide, word::SourceSpan::default())
+        .unwrap();
+    add_output(&mut module, "y", 8, result);
+    let plan = crate::planning::operator::ArchitectureDecisions::for_module(&module).unwrap();
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::new(&module, &plan).unwrap();
+    let region = crate::RegionRowId::from_index(0).unwrap();
+    let owners = vec![Some(region); module.operations().len()];
+
+    let ownership = bitblast_module_with_regions(
+        &mut module,
+        &plan,
+        &mut provenance,
+        &owners,
+        &[],
+        GlobalBitblastScope::RegionalShell,
+    )
+    .unwrap();
+
+    let bits = ownership.lowered_bits(result).unwrap();
+    assert_eq!(bits.len(), 8);
+    for &bit in &bits[5..] {
+        let word::ValueKind::Constant(value) = &module.value(bit).unwrap().kind else {
+            panic!("proven upper result bit is not frozen as a constant");
+        };
+        assert_eq!(value.bit_lsb(0), Some(BitVal::Zero));
+    }
 }
 
 fn wrapping_add(left: u64, right: u64) -> u64 {

@@ -4,19 +4,31 @@
 use super::FsmPlan;
 use hashbrown::HashMap;
 use opto_ir::word;
+use std::ops::Range;
+
+pub(super) struct FsmMaterialization {
+    pub(super) operations: Range<usize>,
+    pub(super) source: word::OpId,
+}
 
 pub(super) fn materialize_plans(
     module: &mut word::WordModule,
     plans: &[FsmPlan],
-) -> Result<(), crate::SynthError> {
+) -> Result<Vec<FsmMaterialization>, crate::SynthError> {
     if plans.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
+    let mut materialized = Vec::with_capacity(plans.len());
     for plan in plans {
+        let start = module.operations().len();
         rewrite_candidate(module, plan)?;
+        materialized.push(FsmMaterialization {
+            operations: start..module.operations().len(),
+            source: plan.machine.register_operation,
+        });
     }
     module.validate().map_err(crate::SynthError::from)?;
-    Ok(())
+    Ok(materialized)
 }
 
 fn rewrite_candidate(

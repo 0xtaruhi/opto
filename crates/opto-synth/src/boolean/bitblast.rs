@@ -72,7 +72,7 @@ pub(crate) struct LoweredRegionOwnership {
 }
 
 impl LoweredRegionOwnership {
-    fn new(value_count: usize) -> Self {
+    pub(crate) fn new(value_count: usize) -> Self {
         Self {
             owners: vec![None; value_count],
             lowered_values: vec![None; value_count],
@@ -146,6 +146,7 @@ impl LoweredRegionOwnership {
     ) -> Result<(), crate::SynthError> {
         self.owners.resize(module.values().len(), None);
         let mut consumers = vec![Vec::new(); module.values().len()];
+        let signal_drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
         for operation in module.operations() {
             for input in crate::word::operation_inputs(&operation.kind) {
                 consumers[input.index()].push(operation.result);
@@ -170,6 +171,25 @@ impl LoweredRegionOwnership {
                 };
                 if adjacent.all(|candidate| candidate == owner) {
                     inferred.push((operation.result, owner));
+                }
+            }
+            for (index, value) in module.values().iter().enumerate() {
+                let value_id = word::ValueId::from_index(index).map_err(crate::SynthError::from)?;
+                if self.owner(value_id).is_some() {
+                    continue;
+                }
+                let word::ValueKind::Signal(reference) = value.kind else {
+                    continue;
+                };
+                let Some(drivers) = signal_drivers.resolve_reference(reference) else {
+                    continue;
+                };
+                let mut owners = drivers.into_iter().map(|(driver, _)| self.owner(driver));
+                let Some(Some(owner)) = owners.next() else {
+                    continue;
+                };
+                if owners.all(|candidate| candidate == Some(owner)) {
+                    inferred.push((value_id, owner));
                 }
             }
             if inferred.is_empty() {
@@ -226,6 +246,7 @@ pub(crate) fn bitblast_module_with_regions(
             "source operation ownership does not cover the lowering module",
         ));
     }
+    let frozen_semantics = freeze_regional_semantics(module, operation_regions, scope)?;
     let mut blaster = BitBlaster::new(
         module,
         BitBlasterRequest {
@@ -238,6 +259,7 @@ pub(crate) fn bitblast_module_with_regions(
             source_values: None,
             runtime: None,
             global_scope: scope,
+            frozen_semantics,
         },
     );
     for connect in connects {
@@ -294,6 +316,7 @@ pub(crate) fn bitblast_local_region_values(
             source_values: None,
             runtime: Some(runtime),
             global_scope: GlobalBitblastScope::Complete,
+            frozen_semantics: FrozenSubstrateSemantics::default(),
         },
     );
     for connect in connects {
@@ -309,6 +332,67 @@ pub(crate) fn bitblast_local_region_values(
         .lowered_owners
         .capture_lowered_values(&blaster.cache, &blaster.arena)?;
     Ok(blaster.lowered_owners)
+}
+
+type FrozenBitConstants = BTreeMap<word::ValueId, Box<[Option<BitVal>]>>;
+
+#[derive(Default)]
+struct FrozenSubstrateSemantics {
+    aliases: BTreeMap<word::ValueId, word::ValueId>,
+    constants: FrozenBitConstants,
+}
+
+fn freeze_regional_semantics(
+    module: &word::WordModule,
+    operation_regions: &[Option<crate::RegionRowId>],
+    scope: GlobalBitblastScope,
+) -> Result<FrozenSubstrateSemantics, crate::SynthError> {
+    if scope != GlobalBitblastScope::RegionalShell {
+        return Ok(FrozenSubstrateSemantics::default());
+    }
+    let semantics = crate::mapping::FullDomainRootSemantics::new(module)?;
+    let mut facts = word::KnownBitsAnalysis::new(module);
+    let mut aliases = BTreeMap::new();
+    let mut constants = BTreeMap::new();
+    for (index, operation) in module.operations().iter().enumerate() {
+        if operation_regions.get(index).copied().flatten().is_none()
+            || matches!(
+                operation.kind,
+                word::OpKind::Concat { .. }
+                    | word::OpKind::Extract { .. }
+                    | word::OpKind::Cast { .. }
+                    | word::OpKind::Register(_)
+                    | word::OpKind::Latch(_)
+            )
+        {
+            continue;
+        }
+        let canonical = semantics.canonical_root(operation.result)?;
+        if canonical != operation.result {
+            aliases.insert(operation.result, canonical);
+            continue;
+        }
+        let width = module
+            .value(operation.result)
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "regional constant proof references an unknown operation result",
+                )
+            })?
+            .ty
+            .width();
+        let bits = (0..width)
+            .map(|bit| match facts.bit(module, operation.result, bit) {
+                word::KnownBit::Zero => Some(BitVal::Zero),
+                word::KnownBit::One => Some(BitVal::One),
+                word::KnownBit::Unknown => None,
+            })
+            .collect::<Box<[_]>>();
+        if bits.iter().any(Option::is_some) {
+            constants.insert(operation.result, bits);
+        }
+    }
+    Ok(FrozenSubstrateSemantics { aliases, constants })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,6 +427,7 @@ pub(crate) struct BitBlaster<'a> {
     source_values: Option<&'a BTreeMap<word::ValueId, word::ValueId>>,
     runtime: Option<&'a opto_runtime::ExecutionContext>,
     global_scope: GlobalBitblastScope,
+    frozen_semantics: FrozenSubstrateSemantics,
 }
 
 struct BitBlasterRequest<'a> {
@@ -355,6 +440,7 @@ struct BitBlasterRequest<'a> {
     source_values: Option<&'a BTreeMap<word::ValueId, word::ValueId>>,
     runtime: Option<&'a opto_runtime::ExecutionContext>,
     global_scope: GlobalBitblastScope,
+    frozen_semantics: FrozenSubstrateSemantics,
 }
 
 #[derive(Clone, Copy)]
@@ -375,6 +461,7 @@ impl<'a> BitBlaster<'a> {
             source_values,
             runtime,
             global_scope,
+            frozen_semantics,
         } = request;
         let value_count = module.values().len();
         Self {
@@ -394,6 +481,7 @@ impl<'a> BitBlaster<'a> {
             source_values,
             runtime,
             global_scope,
+            frozen_semantics,
         }
     }
 

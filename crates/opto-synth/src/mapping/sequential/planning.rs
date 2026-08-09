@@ -10,6 +10,7 @@ pub(crate) fn recover_feedback_enables(
     module: &mut word::WordModule,
     sequential_catalog: &super::SequentialCellCatalog,
     gating_edges: &dyn Fn(word::Edge) -> bool,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let connected = register_targets(module)?;
 
@@ -38,7 +39,9 @@ pub(crate) fn recover_feedback_enables(
     }
 
     for (operation_id, mut register, target, source) in candidates {
+        let start = ownership.start(module)?;
         let q = read_target(module, &target, &source)?;
+        ownership.claim_since(module, start, &[operation_id])?;
         let mut budget = MAX_FEEDBACK_MUX_NODES;
         let Some(plan) = feedback_update_plan(module, register.d, q, &mut budget)? else {
             continue;
@@ -49,8 +52,10 @@ pub(crate) fn recover_feedback_enables(
         if feedback_enable_type(module, &plan.enable).is_none() {
             continue;
         }
+        let start = ownership.start(module)?;
         let enable = emit_feedback_enable(module, &plan.enable, &source)?;
         let data = emit_feedback_data(module, &plan.data, &source)?;
+        ownership.claim_since(module, start, &[operation_id])?;
         register.d = data;
         register.enable = Some(word::Enable {
             value: enable,
@@ -99,6 +104,7 @@ fn register_targets(
 pub(crate) fn expand_unsupported_enables(
     module: &mut word::WordModule,
     sequential_catalog: &super::SequentialCellCatalog,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let connected = register_targets(module)?;
     let mut candidates = Vec::new();
@@ -128,6 +134,7 @@ pub(crate) fn expand_unsupported_enables(
         ));
     }
     for (operation, mut register, enable, target, source) in candidates {
+        let start = ownership.start(module)?;
         let held = read_target(module, &target, &source)?;
         let (then_value, else_value) = if enable.active_high {
             (register.d, held)
@@ -137,6 +144,7 @@ pub(crate) fn expand_unsupported_enables(
         register.d = module
             .mux(enable.value, then_value, else_value, source.clone())
             .map_err(crate::SynthError::from)?;
+        ownership.claim_since(module, start, &[operation])?;
         register.enable = None;
         module
             .operation_mut(operation)
@@ -399,6 +407,7 @@ fn same_scalar_value(
 pub(crate) fn lower_controls(
     module: &mut word::WordModule,
     sequential_catalog: &super::SequentialCellCatalog,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let mut controlled = BTreeMap::<word::OpId, ControlledRegister>::new();
     for connect in module.connects() {
@@ -435,6 +444,7 @@ pub(crate) fn lower_controls(
     }
 
     for (operation_id, controlled) in controlled {
+        let start = ownership.start(module)?;
         let mut data = controlled.register.d;
         let asynchronous_resets =
             normalize_async_resets(module, &controlled.register.resets, &controlled.source)?;
@@ -521,12 +531,14 @@ pub(crate) fn lower_controls(
             resets: asynchronous_resets,
             ..controlled.register
         });
+        ownership.claim_since(module, start, &[operation_id])?;
     }
     Ok(())
 }
 
 pub(crate) fn normalize_sequential_controls(
     module: &mut word::WordModule,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let controls = module
         .operations()
@@ -546,6 +558,8 @@ pub(crate) fn normalize_sequential_controls(
         })
         .collect::<Vec<_>>();
     for (index, resets, source, latch) in controls {
+        let operation = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
+        let start = ownership.start(module)?;
         let async_count = resets
             .iter()
             .take_while(|reset| reset.kind == word::ResetKind::Async)
@@ -565,7 +579,6 @@ pub(crate) fn normalize_sequential_controls(
         }
         let asynchronous = normalize_async_resets(module, &resets[..async_count], &source)?;
         let synchronous = normalize_synchronous_resets(module, &resets[async_count..], &source)?;
-        let operation = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
         let stored = module
             .operation(operation)
             .ok_or_else(|| crate::SynthError::invariant("sequential operation disappeared"))?
@@ -628,6 +641,7 @@ pub(crate) fn normalize_sequential_controls(
                 ));
             }
         }
+        ownership.claim_since(module, start, &[operation])?;
     }
     Ok(())
 }
