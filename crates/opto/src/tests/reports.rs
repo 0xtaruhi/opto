@@ -141,6 +141,7 @@ fn report_timing_accepts_documented_delay_type_selectors() {
     for command in [
         "report_timing -delay min",
         "report_timing -delay_type min",
+        "report_timing -max_paths 2",
         "report_timing -significant_digits 6",
     ] {
         let err = runtime.eval(command).unwrap_err();
@@ -161,6 +162,51 @@ fn report_timing_accepts_documented_delay_type_selectors() {
         err.to_string()
             .contains("report_timing: -delay_type min_max is not implemented yet")
     );
+
+    let err = runtime.eval("report_timing -max_paths 0").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("report_timing: -max_paths must be greater than zero")
+    );
+}
+
+#[test]
+fn report_timing_reports_a_global_bounded_worst_path_set() {
+    let source = temp_script_path("report-timing-max-paths.sv");
+    std::fs::write(
+        &source,
+        "module top(input logic a, b, output logic y, z); assign y = a & b; assign z = a ^ b; endmodule\n",
+    )
+    .unwrap();
+    let mut runtime = Runtime::new(Session::new()).unwrap();
+    runtime.register_commands().unwrap();
+    runtime.eval(&test_target_setup()).unwrap();
+    runtime
+        .eval(&format!(
+            "read_hdl {}; elaborate top; synth",
+            tcl_path_word(&source)
+        ))
+        .unwrap();
+
+    let default = runtime.eval("report_timing").unwrap();
+    let expanded = runtime.eval("report_timing -max_paths 2").unwrap();
+    let repeated = runtime.eval("report_timing -max_paths 2").unwrap();
+    std::fs::remove_file(&source).unwrap();
+
+    let EvalResult::Complete(default) = default else {
+        panic!("report_timing unexpectedly exited")
+    };
+    let EvalResult::Complete(expanded) = expanded else {
+        panic!("report_timing -max_paths unexpectedly exited")
+    };
+    let EvalResult::Complete(repeated) = repeated else {
+        panic!("repeated report_timing -max_paths unexpectedly exited")
+    };
+    assert!(default.contains("Paths: 1"), "{default}");
+    assert!(expanded.contains("Paths: 2"), "{expanded}");
+    assert_eq!(expanded.matches("## Path ").count(), 2, "{expanded}");
+    assert_eq!(expanded.matches("Endpoint: ").count(), 2, "{expanded}");
+    assert_eq!(expanded, repeated);
 }
 
 #[test]

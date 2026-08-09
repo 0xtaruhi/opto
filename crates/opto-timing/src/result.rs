@@ -19,6 +19,8 @@ pub struct ReportTimingOptions {
     pub delay_type: DelayType,
     /// Explicit timing and electrical checks enabled in this analysis view.
     pub checks: crate::ScenarioCheckSet,
+    /// Maximum number of paths retained for the complete report.
+    pub max_paths: usize,
     /// Decimal significant digits used in text output.
     pub significant_digits: usize,
 }
@@ -30,6 +32,7 @@ impl Default for ReportTimingOptions {
             to: Vec::new(),
             delay_type: DelayType::Max,
             checks: crate::ScenarioCheckSet::ALL,
+            max_paths: 1,
             significant_digits: 3,
         }
     }
