@@ -59,9 +59,12 @@ impl AnalyzedRegionCover {
             &self.inputs,
             self.outputs.iter().map(|output| output.values.as_ref()),
         )?;
-        if candidate.output_widths.len() != self.outputs.len() {
+        if candidate.output_widths.len() != self.outputs.len()
+            || self.cover.outputs.len() != self.outputs.len()
+            || self.cover.output_costs.len() != self.outputs.len()
+        {
             return Err(crate::SynthError::invariant(
-                "regional owner bindings do not align with cover outputs",
+                "regional owner bindings and cover metadata do not align with cover outputs",
             ));
         }
         let mut outputs = Vec::with_capacity(candidate.binding.outputs.len());

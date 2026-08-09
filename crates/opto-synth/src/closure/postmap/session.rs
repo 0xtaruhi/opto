@@ -389,11 +389,15 @@ pub(super) fn evaluate_candidate(
     else {
         return Ok(CandidateDisposition::Stale);
     };
-    if !connectivity.preserves_affected(
+    let preserves_connectivity = match connectivity.preserves_affected(
         transaction.mapped(),
         library,
         transaction.mapped_edit().affected_nets(),
-    )? {
+    ) {
+        Ok(preserves) => preserves,
+        Err(error) => return transaction.abort(error, operation),
+    };
+    if !preserves_connectivity {
         transaction.rollback()?;
         return Ok(CandidateDisposition::Rejected);
     }

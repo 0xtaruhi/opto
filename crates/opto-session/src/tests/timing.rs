@@ -747,7 +747,7 @@ endmodule
 }
 
 #[test]
-fn hierarchical_timing_uses_cross_boundary_canonical_root() {
+fn hierarchical_timing_keeps_a_full_domain_artifact_across_the_boundary() {
     let dir = temp_dir("hierarchical-timing");
     let lib_path = dir.join("demo.lib");
     std::fs::write(
@@ -799,10 +799,10 @@ library (demo) {
     std::fs::remove_dir_all(dir).unwrap();
 
     assert!(!report.contains("u_child/U1"), "{report}");
-    assert!(report.contains("Data arrival time: 0.000"));
+    assert!(report.contains("Data arrival time: 0.400"), "{report}");
     assert!(area.contains("Number of ports: 2"), "{area}");
-    assert!(area.contains("Number of combinational cells: 0"), "{area}");
-    assert!(area.contains("Total cell area: 0.000000"));
+    assert!(area.contains("Number of combinational cells: 2"), "{area}");
+    assert!(area.contains("Total cell area: 2.000000"), "{area}");
     assert!(qor.contains("Timing paths: 0"), "{qor}");
     assert!(!qor.contains("Critical Path Length:"), "{qor}");
 }

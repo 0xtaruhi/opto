@@ -53,6 +53,7 @@ struct ObservableOutput {
 pub(crate) struct FrozenObservableConnectivity {
     boundary_nets: BTreeSet<NetId>,
     outputs: Box<[ObservableOutput]>,
+    static_driver_counts: Box<[u8]>,
     source_driver_pins: BTreeSet<PinId>,
 }
 
@@ -64,12 +65,19 @@ impl FrozenObservableConnectivity {
     ) -> Result<Self, crate::SynthError> {
         let mut boundary_nets = BTreeSet::new();
         let mut outputs = Vec::new();
+        let mut static_driver_counts = vec![0u8; mapped.net_slot_count()];
         for (index, port) in mapped.ports().iter().enumerate() {
             let id = PortId::from_index(index).map_err(crate::SynthError::from)?;
             let nets = mapped.port_nets(id).ok_or_else(|| {
                 crate::SynthError::invariant("mapped port has no frozen net binding")
             })?;
             boundary_nets.extend(nets.iter().copied());
+            if matches!(port.direction, PortDirection::Input | PortDirection::Inout) {
+                for &net in nets {
+                    static_driver_counts[net.index()] =
+                        static_driver_counts[net.index()].saturating_add(1);
+                }
+            }
             if port.direction == PortDirection::Output {
                 let name = mapped.port_name(id).unwrap_or("<unnamed>");
                 outputs.extend(nets.iter().enumerate().map(|(bit, &net)| ObservableOutput {
@@ -114,9 +122,13 @@ impl FrozenObservableConnectivity {
                 }
             }
         }
+        for &(net, _) in mapped.constant_drivers() {
+            static_driver_counts[net.index()] = static_driver_counts[net.index()].saturating_add(1);
+        }
         let frozen = Self {
             boundary_nets,
             outputs: outputs.into_boxed_slice(),
+            static_driver_counts: static_driver_counts.into_boxed_slice(),
             source_driver_pins,
         };
         frozen.validate(mapped, target_cells)?;
@@ -188,69 +200,49 @@ impl FrozenObservableConnectivity {
         target_cells: &opto_library::TargetCellSet,
         net: NetId,
     ) -> Result<u8, crate::SynthError> {
-        let mut count = 0u8;
-        for (index, port) in mapped.ports().iter().enumerate() {
-            if !matches!(port.direction, PortDirection::Input | PortDirection::Inout) {
+        let mut count = self
+            .static_driver_counts
+            .get(net.index())
+            .copied()
+            .ok_or_else(|| {
+                crate::SynthError::invariant("mapped boundary net exceeds connectivity freeze")
+            })?;
+        for pin in mapped.pins_on_net(net).into_iter().flatten() {
+            if self.source_driver_pins.contains(&pin) {
+                count = count.saturating_add(1);
                 continue;
             }
-            let id = PortId::from_index(index).map_err(crate::SynthError::from)?;
-            for _ in mapped
-                .port_nets(id)
-                .into_iter()
-                .flatten()
-                .filter(|&&candidate| candidate == net)
-            {
-                count = count.saturating_add(1);
-            }
-        }
-        for _ in mapped
-            .constant_drivers()
-            .iter()
-            .filter(|(candidate, _)| *candidate == net)
-        {
-            count = count.saturating_add(1);
-        }
-        for cell in mapped.cell_ids() {
+            let cell = mapped.pin_owner(pin).ok_or_else(|| {
+                crate::SynthError::invariant("mapped boundary pin has no live owner")
+            })?;
             let stored = mapped
                 .cell(cell)
                 .ok_or_else(|| crate::SynthError::invariant("mapped boundary cell is unknown"))?;
-            for pin in mapped.pin_ids(cell).into_iter().flatten() {
-                let connection = mapped.connection(pin).ok_or_else(|| {
-                    crate::SynthError::invariant("mapped driver cell has no pin binding")
-                })?;
-                if connection.signal != ConnectionSignal::Net(net) {
-                    continue;
-                }
-                if self.source_driver_pins.contains(&pin) {
-                    count = count.saturating_add(1);
-                    continue;
-                }
-                let Some(library_index) = stored.library_cell else {
-                    continue;
-                };
-                let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "mapped driver cell is absent from the target library",
-                    )
-                })?;
-                let library_pin = match connection.library_pin {
-                    Some(pin) => library_cell.pins().nth(pin as usize),
-                    None => mapped
-                        .pin_name(connection)
-                        .and_then(|name| library_cell.pins().find(|pin| pin.name() == name)),
-                }
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "mapped target-cell pin is absent from its target-library cell",
-                    )
-                })?;
-                if matches!(
-                    library_pin.direction(),
-                    opto_library::TargetPinDirection::Output
-                        | opto_library::TargetPinDirection::Inout
-                ) {
-                    count = count.saturating_add(1);
-                }
+            let Some(library_index) = stored.library_cell else {
+                continue;
+            };
+            let connection = mapped.connection(pin).ok_or_else(|| {
+                crate::SynthError::invariant("mapped driver cell has no pin binding")
+            })?;
+            let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
+                crate::SynthError::invariant("mapped driver cell is absent from the target library")
+            })?;
+            let library_pin = match connection.library_pin {
+                Some(pin) => library_cell.pins().nth(pin as usize),
+                None => mapped
+                    .pin_name(connection)
+                    .and_then(|name| library_cell.pins().find(|pin| pin.name() == name)),
+            }
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "mapped target-cell pin is absent from its target-library cell",
+                )
+            })?;
+            if matches!(
+                library_pin.direction(),
+                opto_library::TargetPinDirection::Output | opto_library::TargetPinDirection::Inout
+            ) {
+                count = count.saturating_add(1);
             }
         }
         Ok(count)

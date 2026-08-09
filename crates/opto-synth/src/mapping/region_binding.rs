@@ -395,6 +395,8 @@ fn bind_root_outputs(
             let bindings = local_to_sources
                 .entry(semantics.canonical_root(target)?)
                 .or_default();
+            // A frozen root endpoint supersedes private-shell producer handles;
+            // publishing both would drive the producer back into itself.
             bindings.retain(|binding| matches!(binding, RegionPlanValueBinding::SourceBit { .. }));
             bindings.push(RegionPlanValueBinding::SourceBit { value: source, bit });
         }

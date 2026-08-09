@@ -67,6 +67,7 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
     )
     .unwrap();
 
+    assert_eq!(candidate.output_widths.as_ref(), &[1]);
     assert_eq!(
         candidate.binding.inputs.as_ref(),
         &[RegionPlanValueBinding::SourceBit {
@@ -154,6 +155,7 @@ fn boundary_observation_never_becomes_a_cover_input_identity() {
     )
     .unwrap();
 
+    assert_eq!(candidate.output_widths.as_ref(), &[1]);
     assert_eq!(
         candidate.binding.inputs.as_ref(),
         &[RegionPlanValueBinding::SourceBit {
@@ -163,6 +165,53 @@ fn boundary_observation_never_becomes_a_cover_input_identity() {
     );
     assert_eq!(
         candidate.binding.outputs.as_ref(),
+        &[RegionPlanValueBinding::SourceBit {
+            value: source_root,
+            bit: 0,
+        }]
+    );
+}
+
+#[test]
+fn root_publication_replaces_the_private_memory_handle() {
+    let ty = word::WordType::bits(1).unwrap();
+    let span = word::SourceSpan::default();
+    let mut source = word::WordModule::new("source");
+    let source_root = source
+        .constant(
+            opto_ir::ConstBits::from_bin_str("0").unwrap(),
+            ty,
+            span.clone(),
+        )
+        .unwrap();
+    let mut local = word::WordModule::new("local");
+    let root_port = local
+        .add_port("root", word::PortDirection::Output, ty, span.clone())
+        .unwrap();
+    let root_signal = local.port(root_port).unwrap().signal;
+    let local_root = local
+        .constant(opto_ir::ConstBits::from_bin_str("0").unwrap(), ty, span)
+        .unwrap();
+    let memory = word::MemoryId::from_index(0).unwrap();
+    let memory_binding = RegionPlanValueBinding::MemoryOperationBit {
+        memory,
+        ordinal: 0,
+        bit: 0,
+    };
+    let mut outputs = BindingMap::from([(local_root, vec![memory_binding])]);
+
+    bind_root_outputs(
+        &source,
+        &local,
+        &std::collections::BTreeMap::from([(source_root, local_root)]),
+        &[(source_root, root_signal)],
+        &crate::boolean::bitblast::LoweredRegionOwnership::new(local.values().len()),
+        &mut outputs,
+    )
+    .unwrap();
+
+    assert_eq!(
+        outputs.get(&local_root).unwrap(),
         &[RegionPlanValueBinding::SourceBit {
             value: source_root,
             bit: 0,

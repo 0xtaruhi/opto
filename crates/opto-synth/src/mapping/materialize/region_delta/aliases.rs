@@ -8,6 +8,9 @@ use opto_ir::mapped::{ConnectionRef, NetId};
 use opto_ir::word;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MappedValueSignal {
     Net(NetId),
@@ -39,18 +42,21 @@ impl WordMappedSignals {
                 "mapped substrate observations have inconsistent lengths",
             ));
         }
-        let signals = values
-            .iter()
-            .copied()
-            .zip(nets.iter().copied())
-            .map(|(value, net)| {
-                let signal = match net {
-                    Some(net) => MappedValueSignal::Net(net),
-                    None => MappedValueSignal::Constant(scalar_constant(module, value)?),
-                };
-                Ok((value, signal))
-            })
-            .collect::<Result<BTreeMap<_, _>, crate::SynthError>>()?;
+        let mut signals = BTreeMap::new();
+        for (value, net) in values.iter().copied().zip(nets.iter().copied()) {
+            let signal = match net {
+                Some(net) => MappedValueSignal::Net(net),
+                None => MappedValueSignal::Constant(scalar_constant(module, value)?),
+            };
+            if signals
+                .insert(value, signal)
+                .is_some_and(|old| old != signal)
+            {
+                return Err(crate::SynthError::invariant(format!(
+                    "mapped substrate value {value:?} has conflicting observations"
+                )));
+            }
+        }
         Ok(Self { signals })
     }
 
@@ -86,7 +92,7 @@ fn scalar_constant(
     })?;
     let word::ValueKind::Constant(bits) = &stored.kind else {
         return Err(crate::SynthError::invariant(format!(
-            "non-constant substrate value {value:?} has no mapped net"
+            "substrate value {value:?} without a mapped net is not constant"
         )));
     };
     let [bit] = bits.as_slice() else {

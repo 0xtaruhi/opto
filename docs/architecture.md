@@ -310,6 +310,10 @@ substrate equivalence may come only from an explicit unique static connect, a
 globally exact pass-through, or a constant proved over the complete Word
 domain. A care set, truth-table reduction, or region-local rewrite is not
 connectivity evidence and cannot enter the substrate alias classes.
+An involution such as two logical or bitwise inversions is not an alias without
+an explicit two-state domain proof: `Z` may become `X` and cannot be recovered.
+When publication needs a physical identity and the target library has no
+buffer, the cover retains a two-inverter artifact instead of merging nets.
 Full-domain per-bit constant facts are captured before the regional shell
 mutates the Word graph. Proven bits enter substrate constant classes directly;
 unknown bits receive publication endpoints. A private cover may omit an

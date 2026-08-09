@@ -59,62 +59,12 @@ impl<'a> FullDomainRootSemantics<'a> {
                 word::ValueKind::Operation(operation) => self
                     .module
                     .operation(operation)
-                    .and_then(|operation| self.exact_operation_input(operation)),
-                word::ValueKind::Constant(_) => None,
-            };
-            match next {
-                Some(next) => current = next,
-                None => return Ok(current),
-            }
-        }
-    }
-
-    fn exact_operation_input(&self, operation: &word::Operation) -> Option<word::ValueId> {
-        if let Some(input) = scalar_projection_input(self.module, operation) {
-            return Some(input);
-        }
-        let word::OpKind::Unary { op, arg } = operation.kind else {
-            return None;
-        };
-        let inner = self.projection_terminal(arg)?;
-        let word::ValueKind::Operation(inner) = self.module.value(inner)?.kind else {
-            return None;
-        };
-        let word::OpKind::Unary {
-            op: inner_op,
-            arg: inner_arg,
-        } = self.module.operation(inner)?.kind
-        else {
-            return None;
-        };
-        (op == inner_op
-            && matches!(op, word::UnaryOp::LogicalNot | word::UnaryOp::BitNot)
-            && self.module.value(operation.result)?.ty == self.module.value(inner_arg)?.ty)
-            .then_some(inner_arg)
-    }
-
-    fn projection_terminal(&self, value: word::ValueId) -> Option<word::ValueId> {
-        let mut current = value;
-        let mut visited = BTreeSet::new();
-        loop {
-            if !visited.insert(current) {
-                return None;
-            }
-            let stored = self.module.value(current)?;
-            let next = match stored.kind {
-                word::ValueKind::Signal(reference) => {
-                    self.drivers
-                        .exact_reference_driver(self.module, reference, stored.ty)
-                }
-                word::ValueKind::Operation(operation) => self
-                    .module
-                    .operation(operation)
                     .and_then(|operation| scalar_projection_input(self.module, operation)),
                 word::ValueKind::Constant(_) => None,
             };
             match next {
                 Some(next) => current = next,
-                None => return Some(current),
+                None => return Ok(current),
             }
         }
     }
@@ -546,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_domain_involution_is_a_global_alias() {
+    fn involution_without_a_two_state_proof_is_not_a_global_alias() {
         let mut module = WordModule::new("involution");
         let input = module
             .add_port(
@@ -578,6 +528,7 @@ mod tests {
             .unwrap();
 
         let full_domain = FullDomainRootSemantics::new(&module).unwrap();
-        assert_eq!(full_domain.canonical_root(second).unwrap(), input);
+        assert_eq!(full_domain.canonical_root(second).unwrap(), second);
+        assert!(full_domain.requires_artifact(second).unwrap());
     }
 }

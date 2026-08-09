@@ -453,12 +453,12 @@ impl RegionArchitectureMaterializer<'_> {
             let bits = ownership
                 .lowered_bits(*local)
                 .map_or_else(|| vec![*local], <[word::ValueId]>::to_vec);
-            if !bits.is_empty()
-                && bits.iter().all(|&bit| {
-                    mapping_root_pair_key(&module, &local_semantics, bit)
-                        .is_ok_and(|key| substrate_outputs.contains(&key))
-                })
-            {
+            let mut all_outputs_are_substrate = !bits.is_empty();
+            for bit in bits {
+                let key = mapping_root_pair_key(&module, &local_semantics, bit)?;
+                all_outputs_are_substrate &= substrate_outputs.contains(&key);
+            }
+            if all_outputs_are_substrate {
                 root.requires_combinational_cover = false;
             }
         }

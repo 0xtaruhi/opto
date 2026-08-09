@@ -48,6 +48,11 @@ impl LibraryCover {
         &mut self,
         catalog: &CombinationalCellCatalog,
     ) -> Result<(), crate::SynthError> {
+        if self.outputs.len() != self.output_costs.len() {
+            return Err(crate::SynthError::invariant(
+                "cover outputs and costs have inconsistent lengths",
+            ));
+        }
         let mut uses = hashbrown::HashMap::new();
         for &source in &self.outputs {
             *uses.entry(source).or_insert(0usize) += 1;
@@ -61,10 +66,21 @@ impl LibraryCover {
         if !self.outputs.iter().any(requires_driver) {
             return Ok(());
         }
-        let truth = crate::boolean::logic::identity_truth();
-        let binding = catalog.best_binding_for_truth(truth).ok_or_else(|| {
-            crate::SynthError::mapping("target library cannot isolate regional output obligations")
-        })?;
+        let identity = crate::boolean::logic::identity_truth();
+        let inverter = crate::boolean::logic::inverter_truth();
+        let (truth, binding, stages) = catalog
+            .best_binding_for_truth(identity)
+            .map(|binding| (identity, binding, 1))
+            .or_else(|| {
+                catalog
+                    .best_binding_for_truth(inverter)
+                    .map(|binding| (inverter, binding, 2))
+            })
+            .ok_or_else(|| {
+                crate::SynthError::mapping(
+                    "target library cannot isolate regional output obligations",
+                )
+            })?;
         let mut cells = std::mem::take(&mut self.cells).into_vec();
         let mut outputs = std::mem::take(&mut self.outputs).into_vec();
         let mut output_costs = std::mem::take(&mut self.output_costs).into_vec();
@@ -73,19 +89,20 @@ impl LibraryCover {
             if !requires_driver(source) {
                 continue;
             }
-            let input = *source;
-            let cell = cells.len();
-            cells.push(LibraryCoverCell {
-                second_node: None,
-                binding: LibraryCoverBinding::Single(binding),
-                binding_identity: catalog.binding_identity(binding).into_boxed_slice(),
-                truth,
-                second_truth: None,
-                sources: Box::new([input]),
-            });
-            *source = LibraryCoverSource::Cell(cell);
-            self.total_area += cost.area;
-            output_costs[index] = output_costs[index].cell(cost);
+            for _ in 0..stages {
+                let cell = cells.len();
+                cells.push(LibraryCoverCell {
+                    second_node: None,
+                    binding: LibraryCoverBinding::Single(binding),
+                    binding_identity: catalog.binding_identity(binding).into_boxed_slice(),
+                    truth,
+                    second_truth: None,
+                    sources: Box::new([*source]),
+                });
+                *source = LibraryCoverSource::Cell(cell);
+                self.total_area += cost.area;
+                output_costs[index] = output_costs[index].cell(cost);
+            }
         }
         self.cells = cells.into_boxed_slice();
         self.outputs = outputs.into_boxed_slice();

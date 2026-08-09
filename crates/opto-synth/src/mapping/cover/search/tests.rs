@@ -11,6 +11,42 @@ fn cover_candidate_has_compact_arena_layout() {
     assert_eq!(std::mem::size_of::<Candidate>(), 16);
 }
 
+#[test]
+fn output_isolation_rejects_misaligned_costs() {
+    let mut cover = LibraryCover {
+        cells: Box::new([]),
+        outputs: Box::new([LibraryCoverSource::Input(0)]),
+        total_area: 0.0,
+        output_costs: Box::new([]),
+    };
+
+    let error = cover.isolate_outputs(&matcher(Vec::new())).unwrap_err();
+
+    assert!(error.to_string().contains("inconsistent lengths"));
+}
+
+#[test]
+fn output_isolation_keeps_an_artifact_without_a_buffer_cell() {
+    let catalog = matcher(vec![target_cell(
+        "INV",
+        0.6,
+        &[in_pin("A"), ("Y", TargetPinDirection::Output, Some("!A"))],
+    )]);
+    let mut cover = LibraryCover {
+        cells: Box::new([]),
+        outputs: Box::new([LibraryCoverSource::Input(0)]),
+        total_area: 0.0,
+        output_costs: Box::new([MappingCost::zero()]),
+    };
+
+    cover.isolate_outputs(&catalog).unwrap();
+
+    assert_eq!(cover.cells.len(), 2);
+    assert_eq!(cover.outputs.as_ref(), &[LibraryCoverSource::Cell(1)]);
+    assert!(!evaluate(&cover, 0, 0));
+    assert!(evaluate(&cover, 0, 1));
+}
+
 fn target_cell(
     name: &str,
     area: f64,
