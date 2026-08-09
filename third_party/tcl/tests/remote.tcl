@@ -9,7 +9,7 @@
 # See the file "license.terms" for information on usage and redistribution
 # of this file, and for a DISCLAIMER OF ALL WARRANTIES.
 
-# Initialize message delimitor
+# Initialize message delimiter
 
 # Initialize command array
 catch {unset command}
@@ -40,9 +40,9 @@ proc __readAndExecute__ {s} {
 
     set l [gets $s]
     if {[string compare $l "--Marker--Marker--Marker--"] == 0} {
-        puts $s [__doCommands__ $command($s) $s]
+	puts $s [__doCommands__ $command($s) $s]
 	puts $s "--Marker--Marker--Marker--"
-        set command($s) ""
+	set command($s) ""
 	return
     }
     if {[string compare $l ""] == 0} {
@@ -59,8 +59,8 @@ proc __readAndExecute__ {s} {
 	    puts "Server closing $s, eof from client"
 	}
 	close $s
-        unset command($s)
-        return
+	unset command($s)
+	return
     }
     append command($s) $l "\n"
 }

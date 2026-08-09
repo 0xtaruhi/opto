@@ -151,7 +151,7 @@ TestbignumobjCmd(
     int objc,			/* Argument count */
     Tcl_Obj *const objv[])	/* Argument vector */
 {
-    const char *const subcmds[] = {
+    static const char *const subcmds[] = {
 	"set", "get", "mult10", "div10", "iseven", "radixsize", NULL
     };
     enum options {
@@ -290,9 +290,9 @@ TestbignumobjCmd(
 	    return TCL_ERROR;
 	}
 	if (!Tcl_IsShared(varPtr[varIndex])) {
-	    Tcl_SetIntObj(varPtr[varIndex], mp_iszero(&bignumValue));
+	    Tcl_SetBooleanObj(varPtr[varIndex], mp_iszero(&bignumValue));
 	} else {
-	    SetVarToObj(varPtr, varIndex, Tcl_NewIntObj(mp_iszero(&bignumValue)));
+	    SetVarToObj(varPtr, varIndex, Tcl_NewBooleanObj(mp_iszero(&bignumValue)));
 	}
 	mp_clear(&bignumValue);
 	break;
@@ -624,7 +624,7 @@ TestindexobjCmd(
 
     /*
      * Tcl_GetIndexFromObj assumes that the table is statically-allocated so
-     * that its address is different for each index object. If we accidently
+     * that its address is different for each index object. If we accidentally
      * allocate a table at the same address as that cached in the index
      * object, clear out the object's cached state.
      */
@@ -876,7 +876,7 @@ TestlistobjCmd(
     Tcl_Obj *const objv[])	/* Argument objects */
 {
     /* Subcommands supported by this command */
-    const char* subcommands[] = {
+    static const char *const subcommands[] = {
 	"set",
 	"get",
 	"replace"
@@ -964,6 +964,28 @@ TestlistobjCmd(
  *
  *----------------------------------------------------------------------
  */
+
+static
+void
+HugeUpdateString(
+    Tcl_Obj *obj
+)
+{
+	(void)obj;
+    /* Always returns NULL, as an indication that
+     * room for its string representation cannot be allocated */
+
+	return;
+}
+
+static const Tcl_ObjType hugeType = {
+    "huge",			/* name */
+    NULL,			/* freeIntRepProc */
+    NULL,			/* dupIntRepProc */
+    HugeUpdateString,		/* updateStringProc */
+    NULL 			/* setFromAnyProc */
+};
+
 
 static int
 TestobjCmd(
@@ -1116,6 +1138,16 @@ TestobjCmd(
 	    return TCL_ERROR;
 	}
 	Tcl_SetObjResult(interp, Tcl_NewIntObj(varPtr[varIndex]->refCount));
+    } else if (strcmp(subCmd, "huge") == 0) {
+	Tcl_Obj *hugeObjPtr;
+	if (objc != 2) {
+	    goto wrongNumArgs;
+	}
+	hugeObjPtr = Tcl_NewObj();
+	hugeObjPtr->typePtr = &hugeType;
+	hugeObjPtr->length = INT_MAX - 1;
+	hugeObjPtr->bytes = NULL;
+	Tcl_SetObjResult(interp, hugeObjPtr);
     } else if (strcmp(subCmd, "type") == 0) {
 	if (objc != 3) {
 	    goto wrongNumArgs;
@@ -1144,7 +1176,7 @@ TestobjCmd(
     } else {
 	Tcl_AppendStringsToObj(Tcl_GetObjResult(interp),
 		"bad option \"", Tcl_GetString(objv[1]),
-		"\": must be assign, convert, duplicate, freeallvars, "
+		"\": must be assign, convert, duplicate, freeallvars, huge, "
 		"newobj, objcount, objtype, refcount, type, or types", NULL);
 	return TCL_ERROR;
     }
@@ -1184,7 +1216,7 @@ TeststringobjCmd(
     Tcl_Obj **varPtr;
     static const char *const options[] = {
 	"append", "appendstrings", "get", "get2", "length", "length2",
-	"set", "set2", "setlength", "maxchars", "getunicode",
+	"set", "set2", "setlength", "maxchars", "range", "getunicode",
 	"appendself", "appendself2", NULL
     };
 
@@ -1350,13 +1382,25 @@ TeststringobjCmd(
 	    }
 	    Tcl_SetIntObj(Tcl_GetObjResult(interp), length);
 	    break;
-	case 10:			/* getunicode */
+	case 10: {				/* range */
+	    int first, last;
+	    if (objc != 5) {
+		goto wrongNumArgs;
+	    }
+	    if ((Tcl_GetIntFromObj(interp, objv[3], &first) != TCL_OK)
+		    || (Tcl_GetIntFromObj(interp, objv[4], &last) != TCL_OK)) {
+		return TCL_ERROR;
+	    }
+	    Tcl_SetObjResult(interp, Tcl_GetRange(varPtr[varIndex], first, last));
+	    break;
+	}
+	case 11:			/* getunicode */
 	    if (objc != 3) {
 		goto wrongNumArgs;
 	    }
 	    Tcl_GetUnicodeFromObj(varPtr[varIndex], NULL);
 	    break;
-	case 11:			/* appendself */
+	case 12:			/* appendself */
 	    if (objc != 4) {
 		goto wrongNumArgs;
 	    }
@@ -1387,7 +1431,7 @@ TeststringobjCmd(
 	    Tcl_AppendToObj(varPtr[varIndex], string + i, length - i);
 	    Tcl_SetObjResult(interp, varPtr[varIndex]);
 	    break;
-	case 12:			/* appendself2 */
+	case 13:			/* appendself2 */
 	    if (objc != 4) {
 		goto wrongNumArgs;
 	    }
@@ -1523,7 +1567,7 @@ CheckIfVarUnset(
     if (varPtr[varIndex] == NULL) {
 	char buf[32 + TCL_INTEGER_SPACE];
 
-	sprintf(buf, "variable %d is unset (NULL)", varIndex);
+	snprintf(buf, sizeof(buf), "variable %d is unset (NULL)", varIndex);
 	Tcl_ResetResult(interp);
 	Tcl_AppendToObj(Tcl_GetObjResult(interp), buf, -1);
 	return 1;

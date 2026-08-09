@@ -164,10 +164,10 @@ def secret_violations(paths: List[Path]) -> List[str]:
             match = pattern.search(data)
             if match is None:
                 continue
-            line_number = data.count(b"\n", 0, match.start()) + 1
-            violations.append(
-                "{}:{}: {}".format(relative.as_posix(), line_number, label)
-            )
+            # Do not derive diagnostics from the matched secret bytes. The
+            # repository path and fixed pattern label identify the offending
+            # file without propagating sensitive input into CI logs.
+            violations.append("{}: {}".format(relative.as_posix(), label))
     return violations
 
 

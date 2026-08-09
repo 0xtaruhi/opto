@@ -131,11 +131,11 @@ contract epochs, and transactional post-map repair. Read the normative
 [RFC 0006](docs/rfcs/0006-region-parallel-synthesis.md), and the detailed
 [cutover record](docs/refactoring.md) before making architecture claims.
 
-The proposed replacement of the global front half with timing-driven
-partitioning and region-private optimization remains documented separately in
-[RFC 0007](docs/rfcs/0007-timing-driven-partitioning.md). An accepted RFC is
-not presented as implemented behavior until the architecture conformance
-matrix says so.
+The implemented timing-driven partitioning and region-private front half is
+documented in [RFC 0007](docs/rfcs/0007-timing-driven-partitioning.md). Its
+large-design runtime, memory, incremental, equivalence, and QoR qualification
+remains a future qualification target rather than a claimed result, as recorded by the
+architecture conformance matrix.
 
 ## What Opto is—and is not
 

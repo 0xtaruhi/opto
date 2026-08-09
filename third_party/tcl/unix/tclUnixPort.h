@@ -86,6 +86,9 @@ typedef off_t		Tcl_SeekOffset;
 #endif
 
 #ifdef __CYGWIN__
+#ifdef __cplusplus
+extern "C" {
+#endif
     /* Make some symbols available without including <windows.h> */
 #   define DWORD unsigned int
 #   define CP_UTF8 65001
@@ -95,21 +98,24 @@ typedef off_t		Tcl_SeekOffset;
 #   define SOCKET unsigned int
 #   define WSAEWOULDBLOCK 10035
     typedef unsigned short WCHAR;
-    __declspec(dllimport) extern __stdcall int GetModuleHandleExW(unsigned int, const char *, void *);
-    __declspec(dllimport) extern __stdcall int GetModuleFileNameW(void *, const char *, int);
-    __declspec(dllimport) extern __stdcall int WideCharToMultiByte(int, int, const void *, int,
+    __declspec(dllimport) extern int GetModuleHandleExW(unsigned int, const void *, void *);
+    __declspec(dllimport) extern int GetModuleFileNameW(void *, const void *, int);
+    __declspec(dllimport) extern int WideCharToMultiByte(int, int, const void *, int,
 	    char *, int, const char *, void *);
-    __declspec(dllimport) extern __stdcall int MultiByteToWideChar(int, int, const char *, int,
+    __declspec(dllimport) extern int MultiByteToWideChar(int, int, const char *, int,
 	    WCHAR *, int);
-    __declspec(dllimport) extern __stdcall void OutputDebugStringW(const WCHAR *);
-    __declspec(dllimport) extern __stdcall int IsDebuggerPresent(void);
-    __declspec(dllimport) extern __stdcall int GetLastError(void);
-    __declspec(dllimport) extern __stdcall int GetFileAttributesW(const WCHAR *);
-    __declspec(dllimport) extern __stdcall int SetFileAttributesW(const WCHAR *, int);
+    __declspec(dllimport) extern void OutputDebugStringW(const WCHAR *);
+    __declspec(dllimport) extern int IsDebuggerPresent(void);
+    __declspec(dllimport) extern int GetLastError(void);
+    __declspec(dllimport) extern int GetFileAttributesW(const WCHAR *);
+    __declspec(dllimport) extern int SetFileAttributesW(const WCHAR *, int);
     __declspec(dllimport) extern int cygwin_conv_path(int, const void *, void *, int);
 #   define timezone _timezone
     extern int TclOSstat(const char *name, void *statBuf);
     extern int TclOSlstat(const char *name, void *statBuf);
+#ifdef __cplusplus
+}
+#endif
 #elif defined(HAVE_STRUCT_STAT64) && !defined(__APPLE__)
 #   define TclOSstat(name, buf) stat64(name, (struct stat64 *)buf)
 #   define TclOSlstat(name,buf) lstat64(name, (struct stat64 *)buf)
@@ -500,7 +506,7 @@ extern int	gettimeofday(struct timeval *tp,
 
 /*
  *---------------------------------------------------------------------------
- * Not all systems declare the errno variable in errno.h. so this file does it
+ * Not all systems declare the errno variable in errno.h, so this file does it
  * explicitly. The list of system error messages also isn't generally declared
  * in a header file anywhere.
  *---------------------------------------------------------------------------
@@ -623,23 +629,13 @@ extern char **		environ;
 	    defined(HAVE_WEAK_IMPORT) && MAC_OS_X_VERSION_MIN_REQUIRED < 1050
 #	warning "Weak import of 64-bit CoreFoundation is not supported, will not run on Mac OS X < 10.5."
 #   endif
-
-/*
- *---------------------------------------------------------------------------
- * At present, using vfork() instead of fork() causes execve() to fail
- * intermittently on Darwin x86_64. rdar://4685553
- *---------------------------------------------------------------------------
- */
-
-#   if defined(__x86_64__) && !defined(FIXED_RDAR_4685553)
-#	undef USE_VFORK
-#   endif /* __x86_64__ */
-/* Workaround problems with vfork() when building with llvm-gcc-4.2 */
-#   if defined (__llvm__) && \
-	    (__GNUC__ > 4 || (__GNUC__ == 4 && (__GNUC_MINOR__ > 2 || \
-	    (__GNUC_MINOR__ == 2 && __GNUC_PATCHLEVEL__ > 0))))
-#	undef USE_VFORK
-#   endif /* __llvm__ */
+    /*
+     * For now, test exec-17.1 fails (I/O setup after closing stdout) with
+     * posix_spawnp(), but the classic implementation (based on fork()+execvp())
+     * works well under macOS.
+     */
+#   undef HAVE_POSIX_SPAWNP
+#   undef HAVE_VFORK
 #endif /* __APPLE__ */
 
 /*

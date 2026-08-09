@@ -28,9 +28,9 @@ AC_DEFUN([SC_PATH_TCLCONFIG], [
 	# we reset no_tcl in case something fails here
 	no_tcl=true
 	AC_ARG_WITH(tcl,
-	    AC_HELP_STRING([--with-tcl],
+	    AS_HELP_STRING([--with-tcl],
 		[directory containing tcl configuration (tclConfig.sh)]),
-	    with_tclconfig="${withval}")
+	    [with_tclconfig="${withval}"])
 	AC_MSG_CHECKING([for Tcl configuration])
 	AC_CACHE_VAL(ac_cv_c_tclconfig,[
 
@@ -146,9 +146,9 @@ AC_DEFUN([SC_PATH_TKCONFIG], [
 	# we reset no_tk in case something fails here
 	no_tk=true
 	AC_ARG_WITH(tk,
-	    AC_HELP_STRING([--with-tk],
+	    AS_HELP_STRING([--with-tk],
 		[directory containing tk configuration (tkConfig.sh)]),
-	    with_tkconfig="${withval}")
+	    [with_tkconfig="${withval}"])
 	AC_MSG_CHECKING([for Tk configuration])
 	AC_CACHE_VAL(ac_cv_c_tkconfig,[
 
@@ -258,10 +258,10 @@ AC_DEFUN([SC_LOAD_TCLCONFIG], [
     AC_MSG_CHECKING([for existence of ${TCL_BIN_DIR}/tclConfig.sh])
 
     if test -f "${TCL_BIN_DIR}/tclConfig.sh" ; then
-        AC_MSG_RESULT([loading])
+	AC_MSG_RESULT([loading])
 	. "${TCL_BIN_DIR}/tclConfig.sh"
     else
-        AC_MSG_RESULT([could not find ${TCL_BIN_DIR}/tclConfig.sh])
+	AC_MSG_RESULT([could not find ${TCL_BIN_DIR}/tclConfig.sh])
     fi
 
     #
@@ -274,9 +274,9 @@ AC_DEFUN([SC_LOAD_TCLCONFIG], [
     #
 
     if test -f $TCL_BIN_DIR/Makefile ; then
-        TCL_LIB_SPEC=${TCL_BUILD_LIB_SPEC}
-        TCL_STUB_LIB_SPEC=${TCL_BUILD_STUB_LIB_SPEC}
-        TCL_STUB_LIB_PATH=${TCL_BUILD_STUB_LIB_PATH}
+	TCL_LIB_SPEC=${TCL_BUILD_LIB_SPEC}
+	TCL_STUB_LIB_SPEC=${TCL_BUILD_STUB_LIB_SPEC}
+	TCL_STUB_LIB_PATH=${TCL_BUILD_STUB_LIB_PATH}
     fi
 
     #
@@ -326,10 +326,10 @@ AC_DEFUN([SC_LOAD_TKCONFIG], [
     AC_MSG_CHECKING([for existence of ${TK_BIN_DIR}/tkConfig.sh])
 
     if test -f "${TK_BIN_DIR}/tkConfig.sh" ; then
-        AC_MSG_RESULT([loading])
+	AC_MSG_RESULT([loading])
 	. "${TK_BIN_DIR}/tkConfig.sh"
     else
-        AC_MSG_RESULT([could not find ${TK_BIN_DIR}/tkConfig.sh])
+	AC_MSG_RESULT([could not find ${TK_BIN_DIR}/tkConfig.sh])
     fi
 
 
@@ -499,6 +499,7 @@ AC_DEFUN([SC_ENABLE_SYMBOLS], [
 #		CFLAGS_DEBUG
 #		CFLAGS_OPTIMIZE
 #		CFLAGS_WARNING
+#		CFLAGS_NOLTO
 #		LDFLAGS_DEBUG
 #		LDFLAGS_OPTIMIZE
 #		LDFLAGS_CONSOLE
@@ -552,24 +553,25 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 	AC_DEFINE(MODULE_SCOPE, [extern], [No need to mark inidividual symbols as hidden])
 
     AC_CHECK_PROG(CYGPATH, cygpath, cygpath -m, echo)
+    AC_CHECK_PROG(WINE, wine, wine,)
 
     SHLIB_SUFFIX=".dll"
 
     # MACHINE is IX86 for LINK, but this is used by the manifest,
-    # which requires x86|amd64|ia64.
+    # which requires x86|amd64|arm64|ia64.
     MACHINE="X86"
 
     if test "$GCC" = "yes"; then
 
       AC_CACHE_CHECK(for cross-compile version of gcc,
 	ac_cv_cross,
-	AC_TRY_COMPILE([
+	AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 	    #ifndef _WIN32
 		#error cross-compiler
 	    #endif
-	], [],
-	ac_cv_cross=no,
-	ac_cv_cross=yes)
+	]], [[]])],
+	[ac_cv_cross=no],
+	[ac_cv_cross=yes])
       )
 
       if test "$ac_cv_cross" = "yes"; then
@@ -580,6 +582,13 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 		AR="x86_64-w64-mingw32-ar"
 		RANLIB="x86_64-w64-mingw32-ranlib"
 		RC="x86_64-w64-mingw32-windres"
+	    ;;
+	    arm64|aarch64)
+		CC="aarch64-w64-mingw32-${CC}"
+		LD="aarch64-w64-mingw32-ld"
+		AR="aarch64-w64-mingw32-ar"
+		RANLIB="aarch64-w64-mingw32-ranlib"
+		RC="aarch64-w64-mingw32-windres"
 	    ;;
 	    *)
 		CC="i686-w64-mingw32-${CC}"
@@ -618,9 +627,9 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
     fi
 
     if test "$CYGPATH" = "echo"; then
-        DEPARG='"$<"'
+	DEPARG='"$<"'
     else
-        DEPARG='"$(shell $(CYGPATH) $<)"'
+	DEPARG='"$(shell $(CYGPATH) $<)"'
     fi
 
     # set various compiler flags depending on whether we are using gcc or cl
@@ -630,28 +639,30 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 	extra_ldflags="-pipe -static-libgcc"
 	AC_CACHE_CHECK(for mingw32 version of gcc,
 	    ac_cv_win32,
-	    AC_TRY_COMPILE([
+	    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 		#ifdef _WIN32
 		    #error win32
 		#endif
-	    ], [],
-	    ac_cv_win32=no,
-	    ac_cv_win32=yes)
+	    ]], [[]])],
+	    [ac_cv_win32=no],
+	    [ac_cv_win32=yes])
 	)
 	if test "$ac_cv_win32" != "yes"; then
 	    AC_MSG_ERROR([${CC} cannot produce win32 executables.])
+	fi
+	if test "$do64bit" != "arm64" -a "$do64bit" != "aarch64"; then
+	    extra_cflags="$extra_cflags -DHAVE_CPUID=1"
 	fi
 
 	hold_cflags=$CFLAGS; CFLAGS="$CFLAGS -mwindows -municode -Dmain=xxmain"
 	AC_CACHE_CHECK(for working -municode linker flag,
 	    ac_cv_municode,
-	AC_TRY_LINK([
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([[
 	#include <windows.h>
 	int APIENTRY wWinMain(HINSTANCE a, HINSTANCE b, LPWSTR c, int d) {return 0;}
-	],
-	[],
-	    ac_cv_municode=yes,
-	    ac_cv_municode=no)
+	]], [[]])],
+	    [ac_cv_municode=yes],
+	    [ac_cv_municode=no])
 	)
 	CFLAGS=$hold_cflags
 	if test "$ac_cv_municode" = "yes" ; then
@@ -659,6 +670,40 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 	else
 	    extra_cflags="$extra_cflags -DTCL_BROKEN_MAINARGS"
 	fi
+	hold_cflags=$CFLAGS; CFLAGS="$CFLAGS -fno-lto"
+	AC_CACHE_CHECK(for working -fno-lto,
+	    ac_cv_nolto,
+	AC_COMPILE_IFELSE([AC_LANG_PROGRAM([])],
+	    [ac_cv_nolto=yes],
+	    [ac_cv_nolto=no])
+	)
+	CFLAGS=$hold_cflags
+	if test "$ac_cv_nolto" = "yes" ; then
+	    CFLAGS_NOLTO="-fno-lto"
+	else
+	    CFLAGS_NOLTO=""
+	fi
+
+	AC_CACHE_CHECK([if the linker understands --disable-high-entropy-va],
+	    tcl_cv_ld_high_entropy, [
+	    hold_cflags=$CFLAGS; CFLAGS="$CFLAGS  -Wl,--disable-high-entropy-va"
+	    AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])],[tcl_cv_ld_high_entropy=yes],[tcl_cv_ld_high_entropy=no])
+	    CFLAGS=$hold_cflags])
+	if test $tcl_cv_ld_high_entropy = yes; then
+	    extra_ldflags="$extra_ldflags -Wl,--disable-high-entropy-va"
+	fi
+    fi
+
+    hold_cflags=$CFLAGS; CFLAGS="$CFLAGS -Wl,--enable-auto-image-base"
+    AC_CACHE_CHECK(for working --enable-auto-image-base,
+	ac_cv_enable_auto_image_base,
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([])],
+	[ac_cv_enable_auto_image_base=yes],
+	[ac_cv_enable_auto_image_base=no])
+    )
+    CFLAGS=$hold_cflags
+    if test "$ac_cv_enable_auto_image_base" = "yes" ; then
+	extra_ldflags="$extra_ldflags -Wl,--enable-auto-image-base"
     fi
 
     AC_MSG_CHECKING([compiler flags])
@@ -682,18 +727,18 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 
 	if test "${SHARED_BUILD}" = "0" ; then
 	    # static
-            AC_MSG_RESULT([using static flags])
+	    AC_MSG_RESULT([using static flags])
 	    runtime=
 	    LIBRARIES="\${STATIC_LIBRARIES}"
 	    EXESUFFIX="s\${DBGX}.exe"
 	else
 	    # dynamic
-            AC_MSG_RESULT([using shared flags])
+	    AC_MSG_RESULT([using shared flags])
 
 	    # ad-hoc check to see if CC supports -shared.
 	    if "${CC}" -shared 2>&1 | egrep ': -shared not supported' >/dev/null; then
 		AC_MSG_ERROR([${CC} does not support the -shared option.
-                You will need to upgrade to a newer version of the toolchain.])
+		You will need to upgrade to a newer version of the toolchain.])
 	    fi
 
 	    runtime=
@@ -758,43 +803,47 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 		MACHINE="AMD64" ; # assume AMD64 as default 64-bit build
 		AC_MSG_RESULT([   Using 64-bit $MACHINE mode])
 		;;
+	    arm64|aarch64)
+		MACHINE="ARM64"
+		AC_MSG_RESULT([   Using ARM64 $MACHINE mode])
+		;;
 	    ia64)
 		MACHINE="IA64"
-		AC_MSG_RESULT([   Using 64-bit $MACHINE mode])
+		AC_MSG_RESULT([   Using IA64 $MACHINE mode])
 		;;
 	    *)
-		AC_TRY_COMPILE([
+		AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 		    #ifndef _WIN64
 			#error 32-bit
 		    #endif
-		], [],
-			tcl_win_64bit=yes,
-			tcl_win_64bit=no
+		]], [[]])],
+			[tcl_win_64bit=yes],
+			[tcl_win_64bit=no]
 		)
 		if test "$tcl_win_64bit" = "yes" ; then
-			do64bit=amd64
-			MACHINE="AMD64"
-			AC_MSG_RESULT([   Using 64-bit $MACHINE mode])
+		    do64bit=amd64
+		    MACHINE="AMD64"
+		    AC_MSG_RESULT([   Using 64-bit $MACHINE mode])
 		fi
 		;;
 	esac
     else
 	if test "${SHARED_BUILD}" = "0" ; then
 	    # static
-            AC_MSG_RESULT([using static flags])
+	    AC_MSG_RESULT([using static flags])
 	    runtime=-MT
 	    LIBRARIES="\${STATIC_LIBRARIES}"
 	    EXESUFFIX="s\${DBGX}.exe"
 	else
 	    # dynamic
-            AC_MSG_RESULT([using shared flags])
+	    AC_MSG_RESULT([using shared flags])
 	    runtime=-MD
 	    # Add SHLIB_LD_LIBS to the Make rule, not here.
 	    LIBRARIES="\${SHARED_LIBRARIES}"
 	    EXESUFFIX="\${DBGX}.exe"
 	    case "x`echo \${VisualStudioVersion}`" in
 		x1[[4-9]]*)
-		    lflags="${lflags} -nodefaultlib:libucrt.lib"
+		    lflags="${lflags} -nodefaultlib:ucrt.lib"
 		    ;;
 		*)
 		    ;;
@@ -811,6 +860,9 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 	    case "$do64bit" in
 		amd64|x64|yes)
 		    MACHINE="AMD64" ; # assume AMD64 as default 64-bit build
+		    ;;
+		arm64|aarch64)
+		    MACHINE="ARM64"
 		    ;;
 		ia64)
 		    MACHINE="IA64"
@@ -832,8 +884,7 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 	if test "$do64bit" != "no" ; then
 	    RC="rc"
 	    CFLAGS_DEBUG="-nologo -Zi -Od ${runtime}d"
-	    # Do not use -O2 for Win64 - this has proved buggy in code gen.
-	    CFLAGS_OPTIMIZE="-nologo -O1 ${runtime}"
+	    CFLAGS_OPTIMIZE="-nologo -O2 ${runtime}"
 	    lflags="${lflags} -nologo -MACHINE:${MACHINE}"
 	    LINKBIN="link"
 	    # Avoid 'unresolved external symbol __security_cookie' errors.
@@ -853,7 +904,7 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 	if test "$doWince" != "no" ; then
 	    # Set defaults for common evc4/PPC2003 setup
 	    # Currently Tcl requires 300+, possibly 420+ for sockets
-	    CEVERSION=420; 		# could be 211 300 301 400 420 ...
+	    CEVERSION=420;	# could be 211 300 301 400 420 ...
 	    TARGETCPU=ARMV4;	# could be ARMV4 ARM MIPS SH3 X86 ...
 	    ARCH=ARM;		# could be ARM MIPS X86EM ...
 	    PLATFORM="Pocket PC 2003"; # or "Pocket PC 2002"
@@ -988,7 +1039,7 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
     if test "${GCC}" = "yes" ; then
 	AC_CACHE_CHECK(for SEH support in compiler,
 	    tcl_cv_seh,
-	AC_TRY_RUN([
+	AC_RUN_IFELSE([AC_LANG_SOURCE([[
 	    #define WIN32_LEAN_AND_MEAN
 	    #include <windows.h>
 	    #undef WIN32_LEAN_AND_MEAN
@@ -1003,10 +1054,10 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 		}
 		return 1;
 	    }
-	],
-	    tcl_cv_seh=yes,
-	    tcl_cv_seh=no,
-	    tcl_cv_seh=no)
+	]])],
+	    [tcl_cv_seh=yes],
+	    [tcl_cv_seh=no],
+	    [tcl_cv_seh=no])
 	)
 	if test "$tcl_cv_seh" = "no" ; then
 	    AC_DEFINE(HAVE_NO_SEH, 1,
@@ -1021,15 +1072,15 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 	#
 	AC_CACHE_CHECK(for EXCEPTION_DISPOSITION support in include files,
 	    tcl_cv_eh_disposition,
-	    AC_TRY_COMPILE([
+	    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 #	    define WIN32_LEAN_AND_MEAN
 #	    include <windows.h>
 #	    undef WIN32_LEAN_AND_MEAN
-	    ],[
+	    ]], [[
 		EXCEPTION_DISPOSITION x;
-	    ],
-		tcl_cv_eh_disposition=yes,
-		tcl_cv_eh_disposition=no)
+	    ]])],
+		[tcl_cv_eh_disposition=yes],
+		[tcl_cv_eh_disposition=no])
 	)
 	if test "$tcl_cv_eh_disposition" = "no" ; then
 	AC_DEFINE(EXCEPTION_DISPOSITION, int,
@@ -1042,18 +1093,18 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 
 	AC_CACHE_CHECK(for winnt.h that ignores VOID define,
 	    tcl_cv_winnt_ignore_void,
-	    AC_TRY_COMPILE([
+	    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 		#define VOID void
 		#define WIN32_LEAN_AND_MEAN
 		#include <windows.h>
 		#undef WIN32_LEAN_AND_MEAN
-	    ], [
+	    ]], [[
 		CHAR c;
 		SHORT s;
 		LONG l;
-	    ],
-        tcl_cv_winnt_ignore_void=yes,
-        tcl_cv_winnt_ignore_void=no)
+	    ]])],
+	    [tcl_cv_winnt_ignore_void=yes],
+	    [tcl_cv_winnt_ignore_void=no])
 	)
 	if test "$tcl_cv_winnt_ignore_void" = "yes" ; then
 	    AC_DEFINE(HAVE_WINNT_IGNORE_VOID, 1,
@@ -1066,13 +1117,12 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
 
 	AC_CACHE_CHECK(for cast to union support,
 	    tcl_cv_cast_to_union,
-	    AC_TRY_COMPILE([],
-	    [
+	    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[]], [[
 		  union foo { int i; double d; };
 		  union foo f = (union foo) (int) 0;
-	    ],
-	    tcl_cv_cast_to_union=yes,
-	    tcl_cv_cast_to_union=no)
+	    ]])],
+	    [tcl_cv_cast_to_union=yes],
+	    [tcl_cv_cast_to_union=no])
 	)
 	if test "$tcl_cv_cast_to_union" = "yes"; then
 	    AC_DEFINE(HAVE_CAST_TO_UNION, 1,
@@ -1085,6 +1135,7 @@ AC_DEFUN([SC_CONFIG_CFLAGS], [
     AC_SUBST(CFLAGS_DEBUG)
     AC_SUBST(CFLAGS_OPTIMIZE)
     AC_SUBST(CFLAGS_WARNING)
+    AC_SUBST(CFLAGS_NOLTO)
 ])
 
 #------------------------------------------------------------------------
@@ -1140,7 +1191,7 @@ AC_DEFUN([SC_WITH_TCL], [
 #	none
 #
 # Results
-#	Subst's the following values:
+#	Substitutes the following values:
 #		TCLSH_PROG
 #------------------------------------------------------------------------
 
@@ -1186,13 +1237,13 @@ AC_DEFUN([SC_PROG_TCLSH], [
 #	none
 #
 # Results
-#	Subst's the following values:
+#	Substitutes the following values:
 #		BUILD_TCLSH
 #------------------------------------------------------------------------
 
 AC_DEFUN([SC_BUILD_TCLSH], [
     AC_MSG_CHECKING([for tclsh in Tcl build directory])
-    BUILD_TCLSH=${TCL_BIN_DIR}/tclsh${TCL_MAJOR_VERSION}${TCL_MINOR_VERSION}${TCL_DBGX}${EXEEXT}
+    BUILD_TCLSH=${TCL_BIN_DIR}/tclsh${TCL_MAJOR_VERSION}${TCL_MINOR_VERSION}\${EXESUFFIX}
     AC_MSG_RESULT($BUILD_TCLSH)
     AC_SUBST(BUILD_TCLSH)
 ])
@@ -1243,7 +1294,7 @@ AC_DEFUN([SC_TCL_CFG_ENCODING], [
 AC_DEFUN([SC_EMBED_MANIFEST], [
     AC_MSG_CHECKING(whether to embed manifest)
     AC_ARG_ENABLE(embedded-manifest,
-	AC_HELP_STRING([--enable-embedded-manifest],
+	AS_HELP_STRING([--enable-embedded-manifest],
 		[embed manifest if possible (default: yes)]),
 	[embed_ok=$enableval], [embed_ok=yes])
 

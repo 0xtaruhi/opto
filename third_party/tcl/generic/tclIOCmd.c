@@ -139,7 +139,6 @@ Tcl_PutsObjCmd(
 	    chanObjPtr = objv[2];
 	    string = objv[3];
 	    break;
-#if TCL_MAJOR_VERSION < 9
 	} else if (strcmp(TclGetString(objv[3]), "nonewline") == 0) {
 	    /*
 	     * The code below provides backwards compatibility with an old
@@ -151,7 +150,6 @@ Tcl_PutsObjCmd(
 	    chanObjPtr = objv[1];
 	    string = objv[2];
 	    break;
-#endif
 	}
 	/* Fall through */
     default:			/* [puts] or
@@ -323,7 +321,7 @@ Tcl_GetsObjCmd(
     }
 
     TclChannelPreserve(chan);
-    linePtr = Tcl_NewObj();
+    TclNewObj(linePtr);
     lineLen = Tcl_GetsObj(chan, linePtr);
     if (lineLen < 0) {
 	if (!Tcl_Eof(chan) && !Tcl_InputBlocked(chan)) {
@@ -441,7 +439,6 @@ Tcl_ReadObjCmd(
     if (i < objc) {
 	if ((TclGetIntFromObj(interp, objv[i], &toRead) != TCL_OK)
 		|| (toRead < 0)) {
-#if TCL_MAJOR_VERSION < 9
 	    /*
 	     * The code below provides backwards compatibility with an old
 	     * form of the command that is no longer recommended or
@@ -450,20 +447,17 @@ Tcl_ReadObjCmd(
 	     */
 
 	    if (strcmp(TclGetString(objv[i]), "nonewline") != 0) {
-#endif
 		Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 			"expected non-negative integer but got \"%s\"",
 			TclGetString(objv[i])));
-		Tcl_SetErrorCode(interp, "TCL", "VALUE", "NUMBER", NULL);
+		Tcl_SetErrorCode(interp, "TCL", "VALUE", "NUMBER", (char *)NULL);
 		return TCL_ERROR;
-#if TCL_MAJOR_VERSION < 9
 	    }
 	    newline = 1;
-#endif
 	}
     }
 
-    resultPtr = Tcl_NewObj();
+    TclNewObj(resultPtr);
     Tcl_IncrRefCount(resultPtr);
     TclChannelPreserve(chan);
     charactersRead = Tcl_ReadChars(chan, resultPtr, toRead, 0);
@@ -954,7 +948,7 @@ Tcl_ExecObjCmd(
      */
 
     argc = objc - skip;
-    argv = TclStackAlloc(interp, (unsigned)(argc + 1) * sizeof(char *));
+    argv = (const char **)TclStackAlloc(interp, (unsigned)(argc + 1) * sizeof(char *));
 
     /*
      * Copy the string conversions of each (post option) object into the
@@ -991,7 +985,7 @@ Tcl_ExecObjCmd(
 	return TCL_OK;
     }
 
-    resultPtr = Tcl_NewObj();
+    TclNewObj(resultPtr);
     if (Tcl_GetChannelHandle(chan, TCL_READABLE, NULL) == TCL_OK) {
 	if (Tcl_ReadChars(chan, resultPtr, -1, 0) < 0) {
 	    /*
@@ -1049,7 +1043,7 @@ Tcl_ExecObjCmd(
  *
  * Side effects:
  *	Sets interp's result to boolean true or false depending on whether the
- *	preceeding input operation on the channel would have blocked.
+ *	preceding input operation on the channel would have blocked.
  *
  *---------------------------------------------------------------------------
  */
@@ -1175,7 +1169,7 @@ Tcl_OpenObjCmd(
 	} else {
 	    int flags = TCL_STDERR | TCL_ENFORCE_MODE;
 
-	    switch (mode & (O_RDONLY | O_WRONLY | O_RDWR)) {
+	    switch (mode & O_ACCMODE) {
 	    case O_RDONLY:
 		flags |= TCL_STDOUT;
 		break;
@@ -1232,13 +1226,13 @@ TcpAcceptCallbacksDeleteProc(
 				 * was registered. */
     Tcl_Interp *interp)		/* Interpreter being deleted - not used. */
 {
-    Tcl_HashTable *hTblPtr = clientData;
+    Tcl_HashTable *hTblPtr = (Tcl_HashTable *)clientData;
     Tcl_HashEntry *hPtr;
     Tcl_HashSearch hSearch;
 
     for (hPtr = Tcl_FirstHashEntry(hTblPtr, &hSearch);
 	    hPtr != NULL; hPtr = Tcl_NextHashEntry(&hSearch)) {
-	AcceptCallback *acceptCallbackPtr = Tcl_GetHashValue(hPtr);
+	AcceptCallback *acceptCallbackPtr = (AcceptCallback *)Tcl_GetHashValue(hPtr);
 
 	acceptCallbackPtr->interp = NULL;
     }
@@ -1280,10 +1274,10 @@ RegisterTcpServerInterpCleanup(
     Tcl_HashEntry *hPtr;	/* Entry for this record. */
     int isNew;			/* Is the entry new? */
 
-    hTblPtr = Tcl_GetAssocData(interp, "tclTCPAcceptCallbacks", NULL);
+    hTblPtr = (Tcl_HashTable *)Tcl_GetAssocData(interp, "tclTCPAcceptCallbacks", NULL);
 
     if (hTblPtr == NULL) {
-	hTblPtr = ckalloc(sizeof(Tcl_HashTable));
+	hTblPtr = (Tcl_HashTable *)ckalloc(sizeof(Tcl_HashTable));
 	Tcl_InitHashTable(hTblPtr, TCL_ONE_WORD_KEYS);
 	Tcl_SetAssocData(interp, "tclTCPAcceptCallbacks",
 		TcpAcceptCallbacksDeleteProc, hTblPtr);
@@ -1326,7 +1320,7 @@ UnregisterTcpServerInterpCleanupProc(
     Tcl_HashTable *hTblPtr;
     Tcl_HashEntry *hPtr;
 
-    hTblPtr = Tcl_GetAssocData(interp, "tclTCPAcceptCallbacks", NULL);
+    hTblPtr = (Tcl_HashTable *)Tcl_GetAssocData(interp, "tclTCPAcceptCallbacks", NULL);
     if (hTblPtr == NULL) {
 	return;
     }
@@ -1364,7 +1358,7 @@ AcceptCallbackProc(
     char *address,		/* Address of client that was accepted. */
     int port)			/* Port of client that was accepted. */
 {
-    AcceptCallback *acceptCallbackPtr = callbackData;
+    AcceptCallback *acceptCallbackPtr = (AcceptCallback *)callbackData;
 
     /*
      * Check if the callback is still valid; the interpreter may have gone
@@ -1392,7 +1386,7 @@ AcceptCallbackProc(
 	Tcl_RegisterChannel(NULL, chan);
 
 	result = Tcl_VarEval(interp, script, " ", Tcl_GetChannelName(chan),
-		" ", address, " ", portBuf, NULL);
+		" ", address, " ", portBuf, (char *)NULL);
 	if (result != TCL_OK) {
 	    Tcl_BackgroundException(interp, result);
 	    Tcl_UnregisterChannel(interp, chan);
@@ -1443,7 +1437,7 @@ TcpServerCloseProc(
     ClientData callbackData)	/* The data passed in the call to
 				 * Tcl_CreateCloseHandler. */
 {
-    AcceptCallback *acceptCallbackPtr = callbackData;
+    AcceptCallback *acceptCallbackPtr = (AcceptCallback *)callbackData;
 				/* The actual data. */
 
     if (acceptCallbackPtr->interp != NULL) {
@@ -1493,7 +1487,7 @@ Tcl_SocketObjCmd(
     }
 
     for (a = 1; a < objc; a++) {
-	const char *arg = Tcl_GetString(objv[a]);
+	const char *arg = TclGetString(objv[a]);
 
 	if (arg[0] != '-') {
 	    break;
@@ -1587,10 +1581,10 @@ Tcl_SocketObjCmd(
     }
 
     if (server) {
-	AcceptCallback *acceptCallbackPtr =
+	AcceptCallback *acceptCallbackPtr = (AcceptCallback *)
 		ckalloc(sizeof(AcceptCallback));
 	unsigned len = strlen(script) + 1;
-	char *copyScript = ckalloc(len);
+	char *copyScript = (char *)ckalloc(len);
 
 	memcpy(copyScript, script, len);
 	acceptCallbackPtr->script = copyScript;
@@ -1903,7 +1897,7 @@ ChanPipeObjCmd(
     channelNames[0] = Tcl_GetChannelName(rchan);
     channelNames[1] = Tcl_GetChannelName(wchan);
 
-    resultPtr = Tcl_NewObj();
+    TclNewObj(resultPtr);
     Tcl_ListObjAppendElement(NULL, resultPtr,
 	    Tcl_NewStringObj(channelNames[0], -1));
     Tcl_ListObjAppendElement(NULL, resultPtr,
@@ -2011,8 +2005,7 @@ TclInitChanCmd(
 	 * Can assume that reference counts are all incremented.
 	 */
 
-	Tcl_DictObjPut(NULL, mapObj, Tcl_NewStringObj(extras[i], -1),
-		Tcl_NewStringObj(extras[i+1], -1));
+	TclDictPutString(NULL, mapObj, extras[i], extras[i + 1]);
     }
     Tcl_SetEnsembleMappingDict(interp, ensemble, mapObj);
     return ensemble;

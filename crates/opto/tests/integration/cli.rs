@@ -130,7 +130,7 @@ fn embedded_tcl_reports_the_pinned_patchlevel_and_library() {
     assert!(output.status.success(), "{}", output_text(&output));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "8.6.11 opto:/tcl8.6 1\n"
+        "8.6.18 opto:/tcl8.6 1\n"
     );
 }
 

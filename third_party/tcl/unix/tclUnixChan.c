@@ -5,13 +5,14 @@
  *	and TCP sockets.
  *
  * Copyright (c) 1995-1997 Sun Microsystems, Inc.
- * Copyright (c) 1998-1999 by Scriptics Corporation.
+ * Copyright (c) 1998-1999 Scriptics Corporation.
  *
  * See the file "license.terms" for information on usage and redistribution
  * of this file, and for a DISCLAIMER OF ALL WARRANTIES.
  */
 
 #include "tclInt.h"	/* Internal definitions for Tcl. */
+#include "tclFileSystem.h"
 #include "tclIO.h"	/* To get Channel type declaration. */
 
 #undef SUPPORTS_TTY
@@ -83,13 +84,13 @@ typedef struct TtyAttrs {
     int stop;
 } TtyAttrs;
 
-#endif	/* !SUPPORTS_TTY */
+#endif	/* SUPPORTS_TTY */
 
 #define UNSUPPORTED_OPTION(detail) \
     if (interp) {							\
 	Tcl_SetObjResult(interp, Tcl_ObjPrintf(				\
 		"%s not supported for this platform", (detail)));	\
-	Tcl_SetErrorCode(interp, "TCL", "UNSUPPORTED", NULL);		\
+	Tcl_SetErrorCode(interp, "TCL", "UNSUPPORTED", (char *)NULL);		\
     }
 
 /*
@@ -137,22 +138,22 @@ static int		TtySetOptionProc(ClientData instanceData,
 
 static const Tcl_ChannelType fileChannelType = {
     "file",			/* Type name. */
-    TCL_CHANNEL_VERSION_5,	/* v5 channel */
-    FileCloseProc,		/* Close proc. */
-    FileInputProc,		/* Input proc. */
-    FileOutputProc,		/* Output proc. */
-    FileSeekProc,		/* Seek proc. */
+    TCL_CHANNEL_VERSION_5,
+    FileCloseProc,
+    FileInputProc,
+    FileOutputProc,
+    FileSeekProc,
     NULL,			/* Set option proc. */
     NULL,			/* Get option proc. */
-    FileWatchProc,		/* Initialize notifier. */
-    FileGetHandleProc,		/* Get OS handles out of channel. */
-    FileClose2Proc,			/* close2proc. */
-    FileBlockModeProc,		/* Set blocking or non-blocking mode.*/
-    NULL,			/* flush proc. */
-    NULL,			/* handler proc. */
-    FileWideSeekProc,		/* wide seek proc. */
-    NULL,
-    FileTruncateProc		/* truncate proc. */
+    FileWatchProc,
+    FileGetHandleProc,
+    FileClose2Proc,
+    FileBlockModeProc,
+    NULL,			/* Flush proc. */
+    NULL,			/* Bubbled event handler proc. */
+    FileWideSeekProc,
+    NULL,			/* Thread action proc. */
+    FileTruncateProc
 };
 
 #ifdef SUPPORTS_TTY
@@ -162,23 +163,23 @@ static const Tcl_ChannelType fileChannelType = {
  */
 
 static const Tcl_ChannelType ttyChannelType = {
-    "tty",			/* Type name. */
-    TCL_CHANNEL_VERSION_5,	/* v5 channel */
-    FileCloseProc,		/* Close proc. */
-    FileInputProc,		/* Input proc. */
-    FileOutputProc,		/* Output proc. */
+    "tty",
+    TCL_CHANNEL_VERSION_5,
+    FileCloseProc,
+    FileInputProc,
+    FileOutputProc,
     NULL,			/* Seek proc. */
-    TtySetOptionProc,		/* Set option proc. */
-    TtyGetOptionProc,		/* Get option proc. */
-    FileWatchProc,		/* Initialize notifier. */
-    FileGetHandleProc,		/* Get OS handles out of channel. */
-    FileClose2Proc,			/* close2proc. */
-    FileBlockModeProc,		/* Set blocking or non-blocking mode.*/
-    NULL,			/* flush proc. */
-    NULL,			/* handler proc. */
-    NULL,			/* wide seek proc. */
-    NULL,			/* thread action proc. */
-    NULL			/* truncate proc. */
+    TtySetOptionProc,
+    TtyGetOptionProc,
+    FileWatchProc,
+    FileGetHandleProc,
+    FileClose2Proc,
+    FileBlockModeProc,
+    NULL,			/* Flush proc. */
+    NULL,			/* Bubbled event handler proc. */
+    NULL,			/* Seek proc. */
+    NULL,			/* Thread action proc. */
+    NULL			/* Truncate proc. */
 };
 #endif	/* SUPPORTS_TTY */
 
@@ -205,7 +206,7 @@ FileBlockModeProc(
     int mode)			/* The mode to set. Can be TCL_MODE_BLOCKING
 				 * or TCL_MODE_NONBLOCKING. */
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
 
     if (TclUnixSetBlockingMode(fsPtr->fd, mode) < 0) {
 	return errno;
@@ -240,7 +241,7 @@ FileInputProc(
 				 * buffer? */
     int *errorCodePtr)		/* Where to store error code. */
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
     int bytesRead;		/* How many bytes were actually read from the
 				 * input device? */
 
@@ -253,12 +254,15 @@ FileInputProc(
      * nonblocking, the read will never block.
      */
 
-    bytesRead = read(fsPtr->fd, buf, (size_t) toRead);
-    if (bytesRead > -1) {
-	return bytesRead;
+    do {
+	bytesRead = read(fsPtr->fd, buf, toRead);
+    } while ((bytesRead < 0) && (errno == EINTR));
+
+    if (bytesRead < 0) {
+	*errorCodePtr = errno;
+	return -1;
     }
-    *errorCodePtr = errno;
-    return -1;
+    return bytesRead;
 }
 
 /*
@@ -286,7 +290,7 @@ FileOutputProc(
     int toWrite,		/* How many bytes to write? */
     int *errorCodePtr)		/* Where to store error code. */
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
     int written;
 
     *errorCodePtr = 0;
@@ -300,8 +304,8 @@ FileOutputProc(
 
 	return 0;
     }
-    written = write(fsPtr->fd, buf, (size_t) toWrite);
-    if (written > -1) {
+    written = write(fsPtr->fd, buf, toWrite);
+    if (written >= 0) {
 	return written;
     }
     *errorCodePtr = errno;
@@ -330,7 +334,7 @@ FileCloseProc(
     ClientData instanceData,	/* File state. */
     Tcl_Interp *interp)		/* For error reporting - unused. */
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
     int errorCode = 0;
 
     Tcl_DeleteFileHandler(fsPtr->fd);
@@ -387,7 +391,7 @@ FileSeekProc(
 				 * one of SEEK_START, SEEK_SET or SEEK_END. */
     int *errorCodePtr)		/* To store error code. */
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
     Tcl_WideInt oldLoc, newLoc;
 
     /*
@@ -448,7 +452,7 @@ FileWideSeekProc(
 				 * one of SEEK_START, SEEK_CUR or SEEK_END. */
     int *errorCodePtr)		/* To store error code. */
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
     Tcl_WideInt newLoc;
 
     newLoc = TclOSseek(fsPtr->fd, (Tcl_SeekOffset) offset, mode);
@@ -474,6 +478,20 @@ FileWideSeekProc(
  *----------------------------------------------------------------------
  */
 
+/*
+ * Bug ad5a57f2f271: Tcl_NotifyChannel is not a Tcl_FileProc,
+ * so do not pass it to directly to Tcl_CreateFileHandler.
+ * Instead, pass a wrapper which is a Tcl_FileProc.
+ */
+static void
+FileWatchNotifyChannelWrapper(
+    ClientData clientData,
+    int mask)
+{
+    Tcl_Channel channel = (Tcl_Channel)clientData;
+    Tcl_NotifyChannel(channel, mask);
+}
+
 static void
 FileWatchProc(
     ClientData instanceData,	/* The file state. */
@@ -481,18 +499,16 @@ FileWatchProc(
 				 * TCL_READABLE, TCL_WRITABLE and
 				 * TCL_EXCEPTION. */
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
 
     /*
-     * Make sure we only register for events that are valid on this file. Note
-     * that we are passing Tcl_NotifyChannel directly to Tcl_CreateFileHandler
-     * with the channel pointer as the client data.
+     * Make sure we only register for events that are valid on this file.
      */
 
     mask &= fsPtr->validMask;
     if (mask) {
 	Tcl_CreateFileHandler(fsPtr->fd, mask,
-		(Tcl_FileProc *) Tcl_NotifyChannel, fsPtr->channel);
+		FileWatchNotifyChannelWrapper, fsPtr->channel);
     } else {
 	Tcl_DeleteFileHandler(fsPtr->fd);
     }
@@ -522,7 +538,7 @@ FileGetHandleProc(
     int direction,		/* TCL_READABLE or TCL_WRITABLE */
     ClientData *handlePtr)	/* Where to store the handle. */
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
 
     if (direction & fsPtr->validMask) {
 	*handlePtr = INT2PTR(fsPtr->fd);
@@ -590,8 +606,8 @@ TtySetOptionProc(
     const char *optionName,	/* Which option to set? */
     const char *value)		/* New value for option. */
 {
-    FileState *fsPtr = instanceData;
-    unsigned int len, vlen;
+    FileState *fsPtr = (FileState *)instanceData;
+    size_t len, vlen;
     TtyAttrs tty;
     int argc;
     const char **argv;
@@ -617,7 +633,6 @@ TtySetOptionProc(
 	return TCL_OK;
     }
 
-
     /*
      * Option -handshake none|xonxoff|rtscts|dtrdsr
      */
@@ -632,20 +647,20 @@ TtySetOptionProc(
 #ifdef CRTSCTS
 	CLEAR_BITS(iostate.c_cflag, CRTSCTS);
 #endif /* CRTSCTS */
-	if (Tcl_UtfNcasecmp(value, "NONE", vlen) == 0) {
+	if (strncasecmp(value, "NONE", vlen) == 0) {
 	    /*
 	     * Leave all handshake options disabled.
 	     */
-	} else if (Tcl_UtfNcasecmp(value, "XONXOFF", vlen) == 0) {
+	} else if (strncasecmp(value, "XONXOFF", vlen) == 0) {
 	    SET_BITS(iostate.c_iflag, IXON | IXOFF | IXANY);
-	} else if (Tcl_UtfNcasecmp(value, "RTSCTS", vlen) == 0) {
+	} else if (strncasecmp(value, "RTSCTS", vlen) == 0) {
 #ifdef CRTSCTS
 	    SET_BITS(iostate.c_cflag, CRTSCTS);
 #else /* !CRTSTS */
 	    UNSUPPORTED_OPTION("-handshake RTSCTS");
 	    return TCL_ERROR;
 #endif /* CRTSCTS */
-	} else if (Tcl_UtfNcasecmp(value, "DTRDSR", vlen) == 0) {
+	} else if (strncasecmp(value, "DTRDSR", vlen) == 0) {
 	    UNSUPPORTED_OPTION("-handshake DTRDSR");
 	    return TCL_ERROR;
 	} else {
@@ -654,7 +669,7 @@ TtySetOptionProc(
 			"bad value for -handshake: must be one of"
 			" xonxoff, rtscts, dtrdsr or none", -1));
 		Tcl_SetErrorCode(interp, "TCL", "OPERATION", "FCONFIGURE",
-			"VALUE", NULL);
+			"VALUE", (char *)NULL);
 	    }
 	    return TCL_ERROR;
 	}
@@ -718,9 +733,11 @@ TtySetOptionProc(
     /*
      * Option -ttycontrol {DTR 1 RTS 0 BREAK 0}
      */
+
     if ((len > 4) && (strncmp(optionName, "-ttycontrol", len) == 0)) {
 #if defined(TIOCMGET) && defined(TIOCMSET)
-	int i, control, flag;
+	int control, flag;
+	int i;
 
 	if (Tcl_SplitList(interp, value, &argc, &argv) == TCL_ERROR) {
 	    return TCL_ERROR;
@@ -731,7 +748,7 @@ TtySetOptionProc(
 			"bad value for -ttycontrol: should be a list of"
 			" signal,value pairs", -1));
 		Tcl_SetErrorCode(interp, "TCL", "OPERATION", "FCONFIGURE",
-			"VALUE", NULL);
+			"VALUE", (char *)NULL);
 	    }
 	    ckfree(argv);
 	    return TCL_ERROR;
@@ -743,19 +760,19 @@ TtySetOptionProc(
 		ckfree(argv);
 		return TCL_ERROR;
 	    }
-	    if (Tcl_UtfNcasecmp(argv[i], "DTR", strlen(argv[i])) == 0) {
+	    if (strncasecmp(argv[i], "DTR", strlen(argv[i])) == 0) {
 		if (flag) {
 		    SET_BITS(control, TIOCM_DTR);
 		} else {
 		    CLEAR_BITS(control, TIOCM_DTR);
 		}
-	    } else if (Tcl_UtfNcasecmp(argv[i], "RTS", strlen(argv[i])) == 0) {
+	    } else if (strncasecmp(argv[i], "RTS", strlen(argv[i])) == 0) {
 		if (flag) {
 		    SET_BITS(control, TIOCM_RTS);
 		} else {
 		    CLEAR_BITS(control, TIOCM_RTS);
 		}
-	    } else if (Tcl_UtfNcasecmp(argv[i], "BREAK", strlen(argv[i])) == 0) {
+	    } else if (strncasecmp(argv[i], "BREAK", strlen(argv[i])) == 0) {
 #if defined(TIOCSBRK) && defined(TIOCCBRK)
 		if (flag) {
 		    ioctl(fsPtr->fd, TIOCSBRK, NULL);
@@ -773,7 +790,7 @@ TtySetOptionProc(
 			    "bad signal \"%s\" for -ttycontrol: must be"
 			    " DTR, RTS or BREAK", argv[i]));
 		    Tcl_SetErrorCode(interp, "TCL", "OPERATION", "FCONFIGURE",
-			"VALUE", NULL);
+			"VALUE", (char *)NULL);
 		}
 		ckfree(argv);
 		return TCL_ERROR;
@@ -817,8 +834,8 @@ TtyGetOptionProc(
     const char *optionName,	/* Option to get. */
     Tcl_DString *dsPtr)		/* Where to store value(s). */
 {
-    FileState *fsPtr = instanceData;
-    unsigned int len;
+    FileState *fsPtr = (FileState *)instanceData;
+    size_t len;
     char buf[3*TCL_INTEGER_SPACE + 16];
     int valid = 0;		/* Flag if valid option parsed. */
 
@@ -835,7 +852,7 @@ TtyGetOptionProc(
 
 	valid = 1;
 	TtyGetAttributes(fsPtr->fd, &tty);
-	sprintf(buf, "%d,%c,%d,%d", tty.baud, tty.parity, tty.data, tty.stop);
+	snprintf(buf, sizeof(buf), "%d,%c,%d,%d", tty.baud, tty.parity, tty.data, tty.stop);
 	Tcl_DStringAppendElement(dsPtr, buf);
     }
 
@@ -855,11 +872,11 @@ TtyGetOptionProc(
 	tcgetattr(fsPtr->fd, &iostate);
 	Tcl_DStringInit(&ds);
 
-	Tcl_ExternalToUtfDString(NULL, (char *) &iostate.c_cc[VSTART], 1, &ds);
+	Tcl_ExternalToUtfDString(NULL, (char *)&iostate.c_cc[VSTART], 1, &ds);
 	Tcl_DStringAppendElement(dsPtr, Tcl_DStringValue(&ds));
 	TclDStringClear(&ds);
 
-	Tcl_ExternalToUtfDString(NULL, (char *) &iostate.c_cc[VSTOP], 1, &ds);
+	Tcl_ExternalToUtfDString(NULL, (char *)&iostate.c_cc[VSTOP], 1, &ds);
 	Tcl_DStringAppendElement(dsPtr, Tcl_DStringValue(&ds));
 	Tcl_DStringFree(&ds);
     }
@@ -882,9 +899,9 @@ TtyGetOptionProc(
 	inBuffered = Tcl_InputBuffered(fsPtr->channel);
 	outBuffered = Tcl_OutputBuffered(fsPtr->channel);
 
-	sprintf(buf, "%d", inBuffered+inQueue);
+	snprintf(buf, sizeof(buf), "%d", inBuffered+inQueue);
 	Tcl_DStringAppendElement(dsPtr, buf);
-	sprintf(buf, "%d", outBuffered+outQueue);
+	snprintf(buf, sizeof(buf), "%d", outBuffered+outQueue);
 	Tcl_DStringAppendElement(dsPtr, buf);
     }
 
@@ -894,6 +911,7 @@ TtyGetOptionProc(
      * Option is readonly and returned by [fconfigure chan -ttystatus] but not
      * returned by unnamed [fconfigure chan].
      */
+
     if ((len > 4) && (strncmp(optionName, "-ttystatus", len) == 0)) {
 	int status;
 
@@ -906,12 +924,10 @@ TtyGetOptionProc(
     if (valid) {
 	return TCL_OK;
     }
-    return Tcl_BadChannelOption(interp, optionName, "mode"
-	    " queue ttystatus xchar"
-	    );
+    return Tcl_BadChannelOption(interp, optionName,
+	    "mode queue ttystatus xchar");
 }
 
-
 static const struct {int baud; speed_t speed;} speeds[] = {
 #ifdef B0
     {0, B0},
@@ -1035,7 +1051,7 @@ static const struct {int baud; speed_t speed;} speeds[] = {
 #endif
     {-1, 0}
 };
-
+
 /*
  *---------------------------------------------------------------------------
  *
@@ -1255,7 +1271,7 @@ TtyParseMode(
 	if (interp != NULL) {
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "%s: should be baud,parity,data,stop", bad));
-	    Tcl_SetErrorCode(interp, "TCL", "VALUE", "SERIALMODE", NULL);
+	    Tcl_SetErrorCode(interp, "TCL", "VALUE", "SERIALMODE", (char *)NULL);
 	}
 	return TCL_ERROR;
     }
@@ -1266,26 +1282,22 @@ TtyParseMode(
      *
      * We cannot if/else/endif the strchr arguments, it has to be the whole
      * function. On AIX this function is apparently a macro, and macros do
-     * not allow pre-processor directives in their arguments.
+     * not allow preprocessor directives in their arguments.
      */
 
-    if (
-#if defined(PAREXT)
-        strchr("noems", parity)
+#ifdef PAREXT
+#define PARITY_CHARS	"noems"
+#define PARITY_MSG	"n, o, e, m, or s"
 #else
-        strchr("noe", parity)
+#define PARITY_CHARS	"noe"
+#define PARITY_MSG	"n, o, or e"
 #endif /* PAREXT */
-                               == NULL) {
+
+    if (strchr(PARITY_CHARS, parity) == NULL) {
 	if (interp != NULL) {
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
-		    "%s parity: should be %s", bad,
-#if defined(PAREXT)
-		    "n, o, e, m, or s"
-#else
-		    "n, o, or e"
-#endif /* PAREXT */
-		    ));
-	    Tcl_SetErrorCode(interp, "TCL", "VALUE", "SERIALMODE", NULL);
+		    "%s parity: should be %s", bad, PARITY_MSG));
+	    Tcl_SetErrorCode(interp, "TCL", "VALUE", "SERIALMODE", (char *)NULL);
 	}
 	return TCL_ERROR;
     }
@@ -1294,7 +1306,7 @@ TtyParseMode(
 	if (interp != NULL) {
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "%s data: should be 5, 6, 7, or 8", bad));
-	    Tcl_SetErrorCode(interp, "TCL", "VALUE", "SERIALMODE", NULL);
+	    Tcl_SetErrorCode(interp, "TCL", "VALUE", "SERIALMODE", (char *)NULL);
 	}
 	return TCL_ERROR;
     }
@@ -1302,7 +1314,7 @@ TtyParseMode(
 	if (interp != NULL) {
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "%s stop: should be 1 or 2", bad));
-	    Tcl_SetErrorCode(interp, "TCL", "VALUE", "SERIALMODE", NULL);
+	    Tcl_SetErrorCode(interp, "TCL", "VALUE", "SERIALMODE", (char *)NULL);
 	}
 	return TCL_ERROR;
     }
@@ -1327,7 +1339,8 @@ TtyParseMode(
 
 static void
 TtyInit(
-    int fd)	/* Open file descriptor for serial port to be initialized. */
+    int fd)			/* Open file descriptor for serial port to be
+				 * initialized. */
 {
     struct termios iostate;
     tcgetattr(fd, &iostate);
@@ -1337,8 +1350,7 @@ TtyInit(
 	    || iostate.c_lflag != 0
 	    || iostate.c_cflag & CREAD
 	    || iostate.c_cc[VMIN] != 1
-	    || iostate.c_cc[VTIME] != 0)
-    {
+	    || iostate.c_cc[VTIME] != 0) {
 	iostate.c_iflag = IGNBRK;
 	iostate.c_oflag = 0;
 	iostate.c_lflag = 0;
@@ -1385,7 +1397,7 @@ TclpOpenFileChannel(
     char channelName[16 + TCL_INTEGER_SPACE];
     const Tcl_ChannelType *channelTypePtr;
 
-    switch (mode & (O_RDONLY | O_WRONLY | O_RDWR)) {
+    switch (mode & O_ACCMODE) {
     case O_RDONLY:
 	channelPermissions = TCL_READABLE;
 	break;
@@ -1404,12 +1416,32 @@ TclpOpenFileChannel(
 	return NULL;
     }
 
-    native = Tcl_FSGetNativePath(pathPtr);
+    native = (const char *)Tcl_FSGetNativePath(pathPtr);
     if (native == NULL) {
 	if (interp != (Tcl_Interp *) NULL) {
+	    /*
+	     * We need this just to ensure we return the correct error messages under
+	     * some circumstances (relative paths only), so because the normalization 
+	     * is very expensive, don't invoke it for native or absolute paths.
+         * Note: since paths starting with ~ are absolute, it also considers tilde expansion,
+         * (proper error message of tests *io-40.17 "tilde substitution in open")
+	     */
+	    if (
+		(
+		  (
+		    !TclFSCwdIsNative() &&
+		    (Tcl_FSGetPathType(pathPtr) != TCL_PATH_ABSOLUTE)
+		  ) ||
+		  (*TclGetString(pathPtr) == '~')  /* possible tilde expansion */
+		) &&
+		Tcl_FSGetNormalizedPath(interp, pathPtr) == NULL
+	    ) {
+		return NULL;
+	    }
+
 	    Tcl_AppendResult(interp, "couldn't open \"",
 	    TclGetString(pathPtr), "\": filename is invalid on this platform",
-	    NULL);
+	    (char *)NULL);
 	}
 	return NULL;
     }
@@ -1436,7 +1468,7 @@ TclpOpenFileChannel(
 
     fcntl(fd, F_SETFD, FD_CLOEXEC);
 
-    sprintf(channelName, "file%d", fd);
+    snprintf(channelName, sizeof(channelName), "file%d", fd);
 
 #ifdef SUPPORTS_TTY
     if (strcmp(native, "/dev/tty") != 0 && isatty(fd)) {
@@ -1464,7 +1496,7 @@ TclpOpenFileChannel(
 	channelTypePtr = &fileChannelType;
     }
 
-    fsPtr = ckalloc(sizeof(FileState));
+    fsPtr = (FileState *)ckalloc(sizeof(FileState));
     fsPtr->validMask = channelPermissions | TCL_EXCEPTION;
     fsPtr->fd = fd;
 
@@ -1480,8 +1512,8 @@ TclpOpenFileChannel(
 	 * reports that the serial port isn't working.
 	 */
 
-	if (Tcl_SetChannelOption(interp, fsPtr->channel, "-translation",
-		translation) != TCL_OK) {
+	if (Tcl_SetChannelOption(interp, fsPtr->channel,
+		"-translation", translation) != TCL_OK) {
 	    Tcl_Close(NULL, fsPtr->channel);
 	    return NULL;
 	}
@@ -1509,38 +1541,42 @@ TclpOpenFileChannel(
 Tcl_Channel
 Tcl_MakeFileChannel(
     ClientData handle,		/* OS level handle. */
-    int mode)			/* ORed combination of TCL_READABLE and
+    int mode)			/* OR'ed combination of TCL_READABLE and
 				 * TCL_WRITABLE to indicate file mode. */
 {
     FileState *fsPtr;
     char channelName[16 + TCL_INTEGER_SPACE];
     int fd = PTR2INT(handle);
     const Tcl_ChannelType *channelTypePtr;
-    struct sockaddr sockaddr;
-    socklen_t sockaddrLen = sizeof(sockaddr);
+    struct stat buf;
 
     if (mode == 0) {
 	return NULL;
     }
 
-    sockaddr.sa_family = AF_UNSPEC;
-
 #ifdef SUPPORTS_TTY
     if (isatty(fd)) {
 	channelTypePtr = &ttyChannelType;
-	sprintf(channelName, "serial%d", fd);
+	snprintf(channelName, sizeof(channelName), "serial%d", fd);
+	goto final;
     } else
 #endif /* SUPPORTS_TTY */
-    if ((getsockname(fd, (struct sockaddr *)&sockaddr, &sockaddrLen) == 0)
-	&& (sockaddrLen > 0)
-	&& (sockaddr.sa_family == AF_INET || sockaddr.sa_family == AF_INET6)) {
-	return TclpMakeTcpClientChannelMode(INT2PTR(fd), mode);
-    } else {
-	channelTypePtr = &fileChannelType;
-	sprintf(channelName, "file%d", fd);
-    }
+    if (fstat(fd, &buf) == 0 && S_ISSOCK(buf.st_mode)) {
+	struct sockaddr sockaddr;
+	socklen_t sockaddrLen = sizeof(sockaddr);
 
-    fsPtr = ckalloc(sizeof(FileState));
+	sockaddr.sa_family = AF_UNSPEC;
+	if ((getsockname(fd, (struct sockaddr *)&sockaddr, &sockaddrLen) == 0)
+		&& (sockaddrLen > 0)
+		&& (sockaddr.sa_family == AF_INET
+			|| sockaddr.sa_family == AF_INET6)) {
+	    return (Tcl_Channel)TclpMakeTcpClientChannelMode(INT2PTR(fd), mode);
+	}
+    }
+    channelTypePtr = &fileChannelType;
+    snprintf(channelName, sizeof(channelName), "file%d", fd);
+final:
+    fsPtr = (FileState *)ckalloc(sizeof(FileState));
     fsPtr->fd = fd;
     fsPtr->validMask = mode | TCL_EXCEPTION;
     fsPtr->channel = Tcl_CreateChannel(channelTypePtr, channelName,
@@ -1579,12 +1615,11 @@ TclpGetDefaultStdChannel(
      * Some #def's to make the code a little clearer!
      */
 
-#define ZERO_OFFSET	((Tcl_SeekOffset) 0)
 #define ERROR_OFFSET	((Tcl_SeekOffset) -1)
 
     switch (type) {
     case TCL_STDIN:
-	if ((TclOSseek(0, ZERO_OFFSET, SEEK_CUR) == ERROR_OFFSET)
+	if ((TclOSseek(0, 0, SEEK_CUR) == ERROR_OFFSET)
 		&& (errno == EBADF)) {
 	    return NULL;
 	}
@@ -1593,7 +1628,7 @@ TclpGetDefaultStdChannel(
 	bufMode = "line";
 	break;
     case TCL_STDOUT:
-	if ((TclOSseek(1, ZERO_OFFSET, SEEK_CUR) == ERROR_OFFSET)
+	if ((TclOSseek(1, 0, SEEK_CUR) == ERROR_OFFSET)
 		&& (errno == EBADF)) {
 	    return NULL;
 	}
@@ -1602,7 +1637,7 @@ TclpGetDefaultStdChannel(
 	bufMode = "line";
 	break;
     case TCL_STDERR:
-	if ((TclOSseek(2, ZERO_OFFSET, SEEK_CUR) == ERROR_OFFSET)
+	if ((TclOSseek(2, 0, SEEK_CUR) == ERROR_OFFSET)
 		&& (errno == EBADF)) {
 	    return NULL;
 	}
@@ -1615,7 +1650,6 @@ TclpGetDefaultStdChannel(
 	break;
     }
 
-#undef ZERO_OFFSET
 #undef ERROR_OFFSET
 
     channel = Tcl_MakeFileChannel(INT2PTR(fd), mode);
@@ -1685,13 +1719,13 @@ Tcl_GetOpenFile(
 	Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		"\"%s\" wasn't opened for writing", chanID));
 	Tcl_SetErrorCode(interp, "TCL", "VALUE", "CHANNEL", "NOT_WRITABLE",
-		NULL);
+		(char *)NULL);
 	return TCL_ERROR;
     } else if (!forWriting && !(chanMode & TCL_READABLE)) {
 	Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		"\"%s\" wasn't opened for reading", chanID));
 	Tcl_SetErrorCode(interp, "TCL", "VALUE", "CHANNEL", "NOT_READABLE",
-		NULL);
+		(char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1723,7 +1757,7 @@ Tcl_GetOpenFile(
 		Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 			"cannot get a FILE * for \"%s\"", chanID));
 		Tcl_SetErrorCode(interp, "TCL", "VALUE", "CHANNEL",
-			"FILE_FAILURE", NULL);
+			"FILE_FAILURE", (char *)NULL);
 		return TCL_ERROR;
 	    }
 	    *filePtr = f;
@@ -1734,7 +1768,7 @@ Tcl_GetOpenFile(
     Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 	    "\"%s\" cannot be used to get a FILE *", chanID));
     Tcl_SetErrorCode(interp, "TCL", "VALUE", "CHANNEL", "NO_DESCRIPTOR",
-	    NULL);
+	    (char *)NULL);
     return TCL_ERROR;
 }
 
@@ -1922,7 +1956,7 @@ FileTruncateProc(
     ClientData instanceData,
     Tcl_WideInt length)
 {
-    FileState *fsPtr = instanceData;
+    FileState *fsPtr = (FileState *)instanceData;
     int result;
 
 #ifdef HAVE_TYPE_OFF64_T

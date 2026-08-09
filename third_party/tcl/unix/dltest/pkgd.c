@@ -15,23 +15,6 @@
 #include "tcl.h"
 
 /*
- * TCL_STORAGE_CLASS is set unconditionally to DLLEXPORT because the
- * Pkgd_Init declaration is in the source file itself, which is only
- * accessed when we are building a library.
- */
-#undef TCL_STORAGE_CLASS
-#define TCL_STORAGE_CLASS DLLEXPORT
-
-/*
- * Prototypes for procedures defined later in this file:
- */
-
-static int    Pkgd_SubObjCmd(ClientData clientData,
-		Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-static int    Pkgd_UnsafeObjCmd(ClientData clientData,
-		Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-
-/*
  *----------------------------------------------------------------------
  *
  * Pkgd_SubObjCmd --
@@ -50,12 +33,13 @@ static int    Pkgd_UnsafeObjCmd(ClientData clientData,
 
 static int
 Pkgd_SubObjCmd(
-    ClientData dummy,		/* Not used. */
+    void *dummy,		/* Not used. */
     Tcl_Interp *interp,		/* Current interpreter. */
     int objc,			/* Number of arguments. */
     Tcl_Obj *const objv[])	/* Argument objects. */
 {
     int first, second;
+    (void)dummy;
 
     if (objc != 3) {
 	Tcl_WrongNumArgs(interp, 1, objv, "num num");
@@ -88,11 +72,15 @@ Pkgd_SubObjCmd(
 
 static int
 Pkgd_UnsafeObjCmd(
-    ClientData dummy,		/* Not used. */
+    void *dummy,		/* Not used. */
     Tcl_Interp *interp,		/* Current interpreter. */
     int objc,			/* Number of arguments. */
     Tcl_Obj *const objv[])	/* Argument objects. */
 {
+    (void)dummy;
+    (void)objc;
+    (void)objv;
+
     Tcl_SetObjResult(interp, Tcl_NewStringObj("unsafe command invoked", -1));
     return TCL_OK;
 }
@@ -114,17 +102,17 @@ Pkgd_UnsafeObjCmd(
  *----------------------------------------------------------------------
  */
 
-EXTERN int
+DLLEXPORT int
 Pkgd_Init(
     Tcl_Interp *interp)		/* Interpreter in which the package is to be
 				 * made available. */
 {
     int code;
 
-    if (Tcl_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+    if (Tcl_InitStubs(interp, "8.5-", 0) == NULL) {
 	return TCL_ERROR;
     }
-    code = Tcl_PkgProvide(interp, "Pkgd", "7.3");
+    code = Tcl_PkgProvide(interp, "pkgd", "7.3");
     if (code != TCL_OK) {
 	return code;
     }
@@ -151,17 +139,17 @@ Pkgd_Init(
  *----------------------------------------------------------------------
  */
 
-EXTERN int
+DLLEXPORT int
 Pkgd_SafeInit(
     Tcl_Interp *interp)		/* Interpreter in which the package is to be
 				 * made available. */
 {
     int code;
 
-    if (Tcl_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+    if (Tcl_InitStubs(interp, "8.5-", 0) == NULL) {
 	return TCL_ERROR;
     }
-    code = Tcl_PkgProvide(interp, "Pkgd", "7.3");
+    code = Tcl_PkgProvide(interp, "pkgd", "7.3");
     if (code != TCL_OK) {
 	return code;
     }

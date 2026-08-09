@@ -29,8 +29,10 @@
 # are on "Windows NT" or "Windows XP" or whatever.
 #
 # Machine specific
+# % amd64  -> x86_64
 # % arm*   -> arm
 # % sun4*  -> sparc
+# % ia32*  -> ix86
 # % intel  -> ix86
 # % i*86*  -> ix86
 # % Power* -> powerpc
@@ -71,6 +73,7 @@ proc ::platform::generic {} {
 	    set cpu sparc
 	}
 	intel -
+	ia32* -
 	i*86* {
 	    set cpu ix86
 	}
@@ -80,6 +83,7 @@ proc ::platform::generic {} {
 		set cpu ix86
 	    }
 	}
+	ppc -
 	"Power*" {
 	    set cpu powerpc
 	}
@@ -95,7 +99,7 @@ proc ::platform::generic {} {
 
     switch -glob -- $plat {
 	windows {
-	    if {$tcl_platform(platform) == "unix"} {
+	    if {$tcl_platform(platform) eq "unix"} {
 		set plat cygwin
 	    } else {
 		set plat win32
@@ -119,7 +123,12 @@ proc ::platform::generic {} {
 	    }
 	}
 	darwin {
-	    set plat macosx
+	    set major [lindex [split $tcl_platform(osVersion) .] 0]
+	    if {$major > 19} {
+		set plat macos
+	    } else {
+		set plat macosx
+	    }
 	    # Correctly identify the cpu when running as a 64bit
 	    # process on a machine with a 32bit kernel
 	    if {$cpu eq "ix86"} {
@@ -167,21 +176,23 @@ proc ::platform::identify {} {
     set id [generic]
     regexp {^([^-]+)-([^-]+)$} $id -> plat cpu
 
-    switch -- $plat {
+    switch -glob -- $plat {
 	solaris {
 	    regsub {^5} $tcl_platform(osVersion) 2 text
 	    append plat $text
 	    return "${plat}-${cpu}"
 	}
-	macosx {
+	macos* {
 	    set major [lindex [split $tcl_platform(osVersion) .] 0]
 	    if {$major > 19} {
-		incr major -20
-		append plat 11.$major
+		incr major
+		if {$major < 26} {
+		    incr major -10
+		}
+		append plat $major
 	    } else {
 		incr major -4
 		append plat 10.$major
-		return "${plat}-${cpu}"
 	    }
 	    return "${plat}-${cpu}"
 	}
@@ -212,27 +223,25 @@ proc ::platform::identify {} {
 	    # the necessary CPU code. If we can't we simply use the
 	    # hardwired fallback.
 
-	    switch -exact -- $tcl_platform(wordSize) {
+	    switch -- $tcl_platform(wordSize) {
 		4 {
 		    lappend bases /lib
-		    if {[catch {
-			exec dpkg-architecture -qDEB_HOST_MULTIARCH
-		    } res]} {
-			lappend bases /lib/i386-linux-gnu
-		    } else {
-			# dpkg-arch returns the full tripled, not just cpu.
+		    try {
+			set res [exec dpkg-architecture -qDEB_HOST_MULTIARCH]
+			# dpkg-arch returns the full triple, not just cpu.
 			lappend bases /lib/$res
+		    } on error {} {
+			lappend bases /lib/i386-linux-gnu
 		    }
 		}
 		8 {
 		    lappend bases /lib64
-		    if {[catch {
-			exec dpkg-architecture -qDEB_HOST_MULTIARCH
-		    } res]} {
-			lappend bases /lib/x86_64-linux-gnu
-		    } else {
-			# dpkg-arch returns the full tripled, not just cpu.
+		    try {
+			set res [exec dpkg-architecture -qDEB_HOST_MULTIARCH]
+			# dpkg-arch returns the full triple, not just cpu.
 			lappend bases /lib/$res
+		    } on error {} {
+			lappend bases /lib/x86_64-linux-gnu
 		    }
 		}
 		default {
@@ -260,18 +269,17 @@ proc ::platform::LibcVersion {base _->_ vv} {
 
     set libc [lindex $libclist 0]
 
-    # Try executing the library first. This should suceed
-    # for a glibc library, and return the version
-    # information.
+    # Try executing the library first. This should succeed
+    # for a glibc library, and return the version information.
 
-    if {![catch {
+    try {
 	set vdata [lindex [split [exec $libc] \n] 0]
-    }]} {
+    } on ok {} {
 	regexp {version ([0-9]+(\.[0-9]+)*)} $vdata -> v
-	foreach {major minor} [split $v .] break
+	lassign [split $v .] major minor
 	set v glibc${major}.${minor}
 	return 1
-    } else {
+    } on error {} {
 	# We had trouble executing the library. We are now
 	# inspecting its name to determine the version
 	# number. This code by Larry McVoy.
@@ -308,7 +316,7 @@ proc ::platform::patterns {id} {
 	solaris*-* {
 	    if {[regexp {solaris([^-]*)-(.*)} $id -> v cpu]} {
 		if {$v eq ""} {return $id}
-		foreach {major minor} [split $v .] break
+		lassign [split $v .] major minor
 		incr minor -1
 		for {set j $minor} {$j >= 6} {incr j -1} {
 		    lappend res solaris${major}.${j}-${cpu}
@@ -317,7 +325,7 @@ proc ::platform::patterns {id} {
 	}
 	linux*-* {
 	    if {[regexp {linux-glibc([^-]*)-(.*)} $id -> v cpu]} {
-		foreach {major minor} [split $v .] break
+		lassign [split $v .] major minor
 		incr minor -1
 		for {set j $minor} {$j >= 0} {incr j -1} {
 		    lappend res linux-glibc${major}.${j}-${cpu}
@@ -333,17 +341,18 @@ proc ::platform::patterns {id} {
 	macosx-ix86 {
 	    lappend res macosx-universal macosx-i386-x86_64
 	}
-	macosx*-*    {
+	macos*-*    {
 	    # 10.5+,11.0+
-	    if {[regexp {macosx([^-]*)-(.*)} $id -> v cpu]} {
+	    if {[regexp {macosx?([^-]*)-(.*)} $id -> v cpu]} {
 
+		lassign [split $v.15 .] major minor
 		switch -exact -- $cpu {
 		    ix86    {
 			lappend alt i386-x86_64
 			lappend alt universal
 		    }
 		    x86_64  {
-			if {[lindex [split $::tcl_platform(osVersion) .] 0] < 19} {
+			if {$major < 11 && $minor < 15} {
 			    set alt i386-x86_64
 			} else {
 			    set alt {}
@@ -356,34 +365,45 @@ proc ::platform::patterns {id} {
 		}
 
 		if {$v ne ""} {
-		    foreach {major minor} [split $v .] break
-
 		    set res {}
-		    if {$major eq 11} {
-			# Add 11.0 to 11.minor to patterns.
-			for {set j $minor} {$j >= 0} {incr j -1} {
-			    lappend res macosx${major}.${j}-${cpu}
-			    foreach a $alt {
-				lappend res macosx${major}.${j}-$a
-			    }
+		    while {$major > 10} {
+			# Add $major to patterns.
+			lappend res macos${major}-${cpu}
+			foreach a $alt {
+			    lappend res macos${major}-$a
 			}
-			set major 10
-			set minor 15
+			incr major -1
+			if {$major == 25} {
+			    set major 15
+			}
 		    }
-		    # Add 10.5 to 10.minor to patterns.
-		    for {set j $minor} {$j >= 5} {incr j -1} {
+		    # Add 10.9 to 10.minor to patterns.
+		    for {set j $minor} {$j >= 9} {incr j -1} {
 			if {$cpu ne "arm"} {
 			    lappend res macosx${major}.${j}-${cpu}
+			}
+			if {($cpu eq "x86_64") && ($j == 14) && ![package vsatisfies [package provide Tcl] 9.0-]} {
+			    set alt i386-x86_64
 			}
 			foreach a $alt {
 			    lappend res macosx${major}.${j}-$a
 			}
 		    }
-
-		    # Add unversioned patterns for 10.3/10.4 builds.
-		    lappend res macosx-${cpu}
-		    foreach a $alt {
-			lappend res macosx-$a
+		    if {![package vsatisfies [package provide Tcl] 9.0-]} {
+			# Continue up to 10.5.
+			for {} {$j >= 5} {incr j -1} {
+			    if {$cpu ne "arm"} {
+				lappend res macosx${major}.${j}-${cpu}
+			    }
+			    foreach a $alt {
+				lappend res macosx${major}.${j}-$a
+			    }
+			}
+			# Add unversioned patterns for 10.3/10.4 builds.
+			lappend res macosx-${cpu}
+			foreach a $alt {
+			    lappend res macosx-$a
+			}
 		    }
 		} else {
 		    # No version, just do unversioned patterns.
@@ -404,7 +424,7 @@ proc ::platform::patterns {id} {
 # ### ### ### ######### ######### #########
 ## Ready
 
-package provide platform 1.0.15
+package provide platform 1.1.0
 
 # ### ### ### ######### ######### #########
 ## Demo application

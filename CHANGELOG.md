@@ -42,6 +42,8 @@ All notable changes to Opto are documented here. The format follows
 
 ### Changed
 
+- The statically embedded Tcl runtime and standard library were updated from
+  8.6.11 to the unmodified upstream 8.6.18 source distribution.
 - Checkpoints and canonical fingerprints use the validated `opto-archive`
   rkyv format with an explicit little-endian, 64-bit-pointer schema; the
   unmaintained bincode dependency and its legacy decoder have been removed.

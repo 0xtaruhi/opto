@@ -35,7 +35,7 @@
  */
 
 #define RANDOM_INDEX(tablePtr, i) \
-    ((((i)*1103515245L) >> (tablePtr)->downShift) & (tablePtr)->mask)
+    ((((i)*1103515245UL) >> (tablePtr)->downShift) & (tablePtr)->mask)
 
 /*
  * Prototypes for the array hash key methods.
@@ -318,22 +318,41 @@ CreateHashEntry(
 
     if (typePtr->compareKeysProc) {
 	Tcl_CompareHashKeysProc *compareKeysProc = typePtr->compareKeysProc;
-
-	for (hPtr = tablePtr->buckets[index]; hPtr != NULL;
-		hPtr = hPtr->nextPtr) {
+	if (typePtr->flags & TCL_HASH_KEY_DIRECT_COMPARE) {
+	    for (hPtr = tablePtr->buckets[index]; hPtr != NULL;
+		    hPtr = hPtr->nextPtr) {
 #if TCL_HASH_KEY_STORE_HASH
-	    if (hash != PTR2UINT(hPtr->hash)) {
-		continue;
-	    }
-#endif
-	    /* if keys pointers or values are equal */
-	    if ((key == hPtr->key.oneWordValue)
-		|| compareKeysProc((void *) key, hPtr)
-	    ) {
-		if (newPtr) {
-		    *newPtr = 0;
+		if (hash != PTR2UINT(hPtr->hash)) {
+		    continue;
 		}
-		return hPtr;
+#endif
+		/* if keys pointers or values are equal */
+		if ((key == hPtr->key.oneWordValue)
+		    || compareKeysProc((void *) key, hPtr)
+		) {
+		    if (newPtr) {
+			*newPtr = 0;
+		    }
+		    return hPtr;
+		}
+	    }
+	} else { /* no direct compare - compare key addresses only */
+	    for (hPtr = tablePtr->buckets[index]; hPtr != NULL;
+		    hPtr = hPtr->nextPtr) {
+#if TCL_HASH_KEY_STORE_HASH
+		if (hash != PTR2UINT(hPtr->hash)) {
+		    continue;
+		}
+#endif
+		/* if needle pointer equals content pointer or values equal */
+		if ((key == hPtr->key.string)
+		    || compareKeysProc((void *) key, hPtr)
+		) {
+		    if (newPtr) {
+			*newPtr = 0;
+		    }
+		    return hPtr;
+		}
 	    }
 	}
     } else {
@@ -678,18 +697,18 @@ Tcl_HashStats(
      */
 
     result = ckalloc((NUM_COUNTERS * 60) + 300);
-    sprintf(result, "%d entries in table, %d buckets\n",
+    snprintf(result, 60, "%d entries in table, %d buckets\n",
 	    tablePtr->numEntries, tablePtr->numBuckets);
     p = result + strlen(result);
     for (i = 0; i < NUM_COUNTERS; i++) {
-	sprintf(p, "number of buckets with %d entries: %d\n",
+	snprintf(p, 60, "number of buckets with %d entries: %d\n",
 		i, count[i]);
 	p += strlen(p);
     }
-    sprintf(p, "number of buckets with %d or more entries: %d\n",
+    snprintf(p, 60, "number of buckets with %d or more entries: %d\n",
 	    NUM_COUNTERS, overflow);
     p += strlen(p);
-    sprintf(p, "average search distance for entry: %.1f", average);
+    snprintf(p, 60, "average search distance for entry: %.1f", average);
     return result;
 }
 
@@ -722,7 +741,7 @@ AllocArrayEntry(
 
     count = tablePtr->keyType;
 
-    size = sizeof(Tcl_HashEntry) + (count*sizeof(int)) - sizeof(hPtr->key);
+    size = TclOffset(Tcl_HashEntry, key) + count*sizeof(int);
     if (size < sizeof(Tcl_HashEntry)) {
 	size = sizeof(Tcl_HashEntry);
     }
@@ -839,7 +858,7 @@ AllocStringEntry(
 	allocsize = sizeof(hPtr->key);
     }
     hPtr = ckalloc(TclOffset(Tcl_HashEntry, key) + allocsize);
-    memset(hPtr, 0, sizeof(Tcl_HashEntry) + allocsize - sizeof(hPtr->key));
+    memset(hPtr, 0, TclOffset(Tcl_HashEntry, key) + allocsize);
     memcpy(hPtr->key.string, string, size);
     hPtr->clientData = 0;
     return hPtr;

@@ -113,7 +113,7 @@ TclpGetMicroseconds(void)
  * TclpGetClicks --
  *
  *	This procedure returns a value that represents the highest resolution
- *	clock available on the system. There are no garantees on what the
+ *	clock available on the system. There are no guarantees on what the
  *	resolution will be. In Tcl we will call this value a "click". The
  *	start time is also system dependent.
  *
@@ -136,7 +136,7 @@ TclpGetClicks(void)
 	Tcl_Time time;
 
 	tclGetTimeProcPtr(&time, tclTimeClientData);
-	now = time.sec*1000000 + time.usec;
+	now = ((unsigned long)(time.sec)*1000000UL) + (unsigned long)(time.usec);
     } else {
 	/*
 	 * A semi-NativeGetTime, specialized to clicks.
@@ -149,7 +149,7 @@ TclpGetClicks(void)
     Tcl_Time time;
 
     tclGetTimeProcPtr(&time, tclTimeClientData);
-    now = time.sec*1000000 + time.usec;
+    now = ((unsigned long)(time.sec)*1000000UL) + (unsigned long)(time.usec);
 #endif
 
     return now;
@@ -162,7 +162,7 @@ TclpGetClicks(void)
  * TclpGetWideClicks --
  *
  *	This procedure returns a WideInt value that represents the highest
- *	resolution clock available on the system. There are no garantees on
+ *	resolution clock available on the system. There are no guarantees on
  *	what the resolution will be. In Tcl we will call this value a "click".
  *	The start time is also system dependent.
  *
@@ -187,7 +187,7 @@ TclpGetWideClicks(void)
 	now = ((Tcl_WideInt)time.sec)*1000000 + time.usec;
     } else {
 #ifdef MAC_OSX_TCL
-	now = (Tcl_WideInt) (mach_absolute_time() & INT64_MAX);
+	now = (Tcl_WideInt)(mach_absolute_time() & INT64_MAX);
 #else
 #error Wide high-resolution clicks not implemented on this platform
 #endif

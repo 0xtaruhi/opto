@@ -7,7 +7,7 @@
 # If you edit this file, advance the revision number (and the epoch
 # if the new stubs are not backward compatible) in tclTomMathDecls.h
 #
-# Copyright (c) 2005 by Kevin B. Kenny.  All rights reserved.
+# Copyright © 2005 Kevin B. Kenny.  All rights reserved.
 #
 # See the file "license.terms" for information on usage and redistribution
 # of this file, and for a DISCLAIMER OF ALL WARRANTIES.
@@ -17,7 +17,6 @@ library tcl
 # Define the unsupported generic interfaces.
 
 interface tclTomMath
-# hooks {tclTomMathInt}
 scspec EXTERN
 
 # Declare each of the functions in the Tcl tommath interface
@@ -81,7 +80,7 @@ declare 18 {
     void TclBN_mp_exch(mp_int *a, mp_int *b)
 }
 declare 19 {
-    mp_err TclBN_mp_expt_d(const mp_int *a, unsigned int b, mp_int *c)
+    mp_err TclBN_mp_expt_d(const mp_int *a, int b, mp_int *c)
 }
 declare 20 {
     mp_err TclBN_mp_grow(mp_int *a, int size)
@@ -244,6 +243,14 @@ declare 69 {
 declare 70 {
     void TclBN_mp_set_ll(mp_int *a, Tcl_WideInt i)
 }
+declare 71 {
+    mp_err TclBN_mp_unpack(mp_int *rop, size_t count, mp_order order, size_t size,
+	    mp_endian endian, size_t nails, const void *op)
+}
+declare 72 {
+    mp_err TclBN_mp_pack(void *rop, size_t maxcount, size_t *written, mp_order order,
+	    size_t size, mp_endian endian, size_t nails, const mp_int *op)
+}
 
 # Added in libtommath 1.1.0
 declare 73 {
@@ -257,6 +264,9 @@ declare 75 {
 }
 declare 76 {
     mp_err TclBN_mp_signed_rsh(const mp_int *a, int b, mp_int *c)
+}
+declare 77 {
+    size_t TclBN_mp_pack_count(const mp_int *a, size_t nails, size_t size)
 }
 
 # Added in libtommath 1.2.0

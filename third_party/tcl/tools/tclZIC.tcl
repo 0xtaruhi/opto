@@ -3,14 +3,14 @@
 # tclZIC.tcl --
 #
 #	Take the time zone data source files from Arthur Olson's
-#	repository at elsie.nci.nih.gov, and prepare time zone
+#	repository at https://www.iana.org/time-zones, and prepare time zone
 #	information files for Tcl.
 #
 # Usage:
 #	tclsh tclZIC.tcl inputDir outputDir
 #
 # Parameters:
-#	inputDir - Directory (e.g., tzdata2003e) where Olson's source
+#	inputDir - Directory (e.g., tzdata2022a) where Olson's source
 #		   files are to be found.
 #	outputDir - Directory (e.g., ../library/tzdata) where
 #		    the time zone information files are to be placed.
@@ -1253,9 +1253,24 @@ proc writeZones {outDir} {
 	# Generate data for a zone
 
 	set data ""
+	set tzmapped {}
 	foreach {
 	    time offset dst name
 	} [processTimeZone $zoneName $zones($zoneName)] {
+	    if {$name eq "%z"} {
+		# map %z to pure offset zone (e. g. offset -7200 -> -0200):
+		set offmin [expr {abs($offset) / 60}]
+		set name [format "%+03d%02d" [expr {
+				($offset < 0 ? -1 : 1) * ($offmin / 60)
+			    }] [expr {
+				$offmin % 60
+			    }]
+			]
+		if {![dict exists $tzmapped $offset]} { # output once per offs
+		    puts "\tmap %z ($offset) -> $name"
+		    dict set tzmapped $offset $name
+		}
+	    }
 	    append data "\n    " [list [list $time $offset $dst $name]]
 	}
 	append data \n
@@ -1263,7 +1278,7 @@ proc writeZones {outDir} {
 	# Write the data to the information file
 
 	set f [open $fileName w]
-	fconfigure $f -translation lf
+	fconfigure $f -translation lf -encoding utf-8
 	puts $f "\# created by $::argv0 - do not edit"
 	puts $f ""
 	puts $f [list set TZData(:$zoneName) $data]
@@ -1316,7 +1331,7 @@ proc writeLinks {outDir} {
 	# Write the file
 
 	set f [open $fileName w]
-	fconfigure $f -translation lf
+	fconfigure $f -translation lf -encoding utf-8
 	puts $f "\# created by $::argv0 - do not edit"
 	puts $f $ifCmd
 	puts $f $setCmd

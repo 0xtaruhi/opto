@@ -13,23 +13,10 @@
 #undef STATIC_BUILD
 #include "tcl.h"
 
-/*
- * TCL_STORAGE_CLASS is set unconditionally to DLLEXPORT because the
- * Pkga_Init declaration is in the source file itself, which is only
- * accessed when we are building a library.
- */
-#undef TCL_STORAGE_CLASS
-#define TCL_STORAGE_CLASS DLLEXPORT
+#if TCL_MAJOR_VERSION < 9
+#   define Tcl_Size int
+#endif
 
-/*
- * Prototypes for procedures defined later in this file:
- */
-
-static int    Pkga_EqObjCmd(ClientData clientData,
-		Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-static int    Pkga_QuoteObjCmd(ClientData clientData,
-		Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-
 /*
  *----------------------------------------------------------------------
  *
@@ -50,14 +37,15 @@ static int    Pkga_QuoteObjCmd(ClientData clientData,
 
 static int
 Pkga_EqObjCmd(
-    ClientData dummy,		/* Not used. */
+    void *dummy,		/* Not used. */
     Tcl_Interp *interp,		/* Current interpreter. */
     int objc,			/* Number of arguments. */
     Tcl_Obj *const objv[])	/* Argument objects. */
 {
     int result;
     const char *str1, *str2;
-    int len1, len2;
+    Tcl_Size len1, len2;
+    (void)dummy;
 
     if (objc != 3) {
 	Tcl_WrongNumArgs(interp, 1, objv,  "string1 string2");
@@ -66,8 +54,10 @@ Pkga_EqObjCmd(
 
     str1 = Tcl_GetStringFromObj(objv[1], &len1);
     str2 = Tcl_GetStringFromObj(objv[2], &len2);
+    len1 = Tcl_NumUtfChars(str1, len1);
+    len2 = Tcl_NumUtfChars(str2, len2);
     if (len1 == len2) {
-	result = (Tcl_UtfNcmp(str1, str2, len1) == 0);
+	result = (Tcl_UtfNcmp(str1, str2, (size_t)len1) == 0);
     } else {
 	result = 0;
     }
@@ -94,11 +84,13 @@ Pkga_EqObjCmd(
 
 static int
 Pkga_QuoteObjCmd(
-    ClientData dummy,		/* Not used. */
+    void *dummy,		/* Not used. */
     Tcl_Interp *interp,		/* Current interpreter. */
     int objc,			/* Number of arguments. */
     Tcl_Obj *const objv[])	/* Argument strings. */
 {
+    (void)dummy;
+
     if (objc != 2) {
 	Tcl_WrongNumArgs(interp, 1, objv, "value");
 	return TCL_ERROR;
@@ -124,17 +116,17 @@ Pkga_QuoteObjCmd(
  *----------------------------------------------------------------------
  */
 
-EXTERN int
+DLLEXPORT int
 Pkga_Init(
     Tcl_Interp *interp)		/* Interpreter in which the package is to be
 				 * made available. */
 {
     int code;
 
-    if (Tcl_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+    if (Tcl_InitStubs(interp, "8.5-", 0) == NULL) {
 	return TCL_ERROR;
     }
-    code = Tcl_PkgProvide(interp, "Pkga", "1.0");
+    code = Tcl_PkgProvide(interp, "pkga", "1.0");
     if (code != TCL_OK) {
 	return code;
     }

@@ -4,7 +4,7 @@
  *	Contains the Unix-specific interpreter initialization functions.
  *
  * Copyright (c) 1995-1997 Sun Microsystems, Inc.
- * Copyright (c) 1999 by Scriptics Corporation.
+ * Copyright (c) 1999 Scriptics Corporation.
  * All rights reserved.
  */
 
@@ -36,50 +36,47 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#ifdef __clang__
-#pragma clang diagnostic ignored "-Wignored-attributes"
-#endif
-DLLIMPORT extern __stdcall unsigned char GetVersionExW(void *);
-DLLIMPORT extern __stdcall void *GetModuleHandleW(const void *);
-DLLIMPORT extern __stdcall void FreeLibrary(void *);
-DLLIMPORT extern __stdcall void *GetProcAddress(void *, const char *);
-DLLIMPORT extern __stdcall void GetSystemInfo(void *);
+DLLIMPORT extern unsigned char GetVersionExW(void *);
+DLLIMPORT extern void *GetModuleHandleW(const void *);
+DLLIMPORT extern void FreeLibrary(void *);
+DLLIMPORT extern void *GetProcAddress(void *, const char *);
+DLLIMPORT extern void GetSystemInfo(void *);
 #ifdef __cplusplus
 }
 #endif
 
-#define NUMPROCESSORS 11
+#define NUMPROCESSORS 15
 static const char *const processors[NUMPROCESSORS] = {
-    "intel", "mips", "alpha", "ppc", "shx", "arm", "ia64", "alpha64", "msil",
-    "amd64", "ia32_on_win64"
+    "i686", "mips", "alpha", "ppc", "shx", "arm", "ia64", "alpha64", "msil",
+    "x86_64", "ia32_on_win64", "neutral", "arm64", "arm32_on_win64", "ia32_on_arm64"
 };
 
 typedef struct {
-  union {
-    unsigned int  dwOemId;
-    struct {
-      int wProcessorArchitecture;
-      int wReserved;
+    union {
+	unsigned int  dwOemId;
+	struct {
+	    int wProcessorArchitecture;
+	    int wReserved;
+	};
     };
-  };
-  unsigned int     dwPageSize;
-  void *lpMinimumApplicationAddress;
-  void *lpMaximumApplicationAddress;
-  void *dwActiveProcessorMask;
-  unsigned int     dwNumberOfProcessors;
-  unsigned int     dwProcessorType;
-  unsigned int     dwAllocationGranularity;
-  int      wProcessorLevel;
-  int      wProcessorRevision;
+    unsigned int     dwPageSize;
+    void *lpMinimumApplicationAddress;
+    void *lpMaximumApplicationAddress;
+    void *dwActiveProcessorMask;
+    unsigned int     dwNumberOfProcessors;
+    unsigned int     dwProcessorType;
+    unsigned int     dwAllocationGranularity;
+    int      wProcessorLevel;
+    int      wProcessorRevision;
 } SYSTEM_INFO;
 
 typedef struct {
-  unsigned int dwOSVersionInfoSize;
-  unsigned int dwMajorVersion;
-  unsigned int dwMinorVersion;
-  unsigned int dwBuildNumber;
-  unsigned int dwPlatformId;
-  wchar_t szCSDVersion[128];
+    unsigned int dwOSVersionInfoSize;
+    unsigned int dwMajorVersion;
+    unsigned int dwMinorVersion;
+    unsigned int dwBuildNumber;
+    unsigned int dwPlatformId;
+    wchar_t szCSDVersion[128];
 } OSVERSIONINFOW;
 #endif
 
@@ -337,7 +334,6 @@ static int		MacOSXGetLibraryPath(Tcl_Interp *interp,
 MODULE_SCOPE long tclMacOSXDarwinRelease;
 long tclMacOSXDarwinRelease = 0;
 #endif
-
 
 /*
  *---------------------------------------------------------------------------
@@ -371,13 +367,13 @@ TclpInitPlatform(void)
      * Make sure, that the standard FDs exist. [Bug 772288]
      */
 
-    if (TclOSseek(0, (Tcl_SeekOffset) 0, SEEK_CUR) == -1 && errno == EBADF) {
+    if (TclOSseek(0, 0, SEEK_CUR) == -1 && errno == EBADF) {
 	open("/dev/null", O_RDONLY);
     }
-    if (TclOSseek(1, (Tcl_SeekOffset) 0, SEEK_CUR) == -1 && errno == EBADF) {
+    if (TclOSseek(1, 0, SEEK_CUR) == -1 && errno == EBADF) {
 	open("/dev/null", O_WRONLY);
     }
-    if (TclOSseek(2, (Tcl_SeekOffset) 0, SEEK_CUR) == -1 && errno == EBADF) {
+    if (TclOSseek(2, 0, SEEK_CUR) == -1 && errno == EBADF) {
 	open("/dev/null", O_WRONLY);
     }
 
@@ -479,12 +475,16 @@ TclpInitLibraryPath(
      * Look for the library relative to the TCL_LIBRARY env variable. If the
      * last dirname in the TCL_LIBRARY path does not match the last dirname in
      * the installLib variable, use the last dir name of installLib in
-     * addition to the orginal TCL_LIBRARY path.
+     * addition to the original TCL_LIBRARY path.
      */
 
     str = getenv("TCL_LIBRARY");			/* INTL: Native. */
-    Tcl_ExternalToUtfDString(NULL, str, -1, &buffer);
-    str = Tcl_DStringValue(&buffer);
+    if (str != NULL) {
+	Tcl_ExternalToUtfDString(NULL, str, -1, &buffer);
+	str = Tcl_DStringValue(&buffer);
+    } else {
+        Tcl_DStringInit(&buffer);
+    }
 
     if ((str != NULL) && (str[0] != '\0')) {
 	Tcl_DString ds;
@@ -500,7 +500,7 @@ TclpInitLibraryPath(
 	 * installed.
 	 */
 
-	sprintf(installLib, "lib/tcl%s", TCL_VERSION);
+	snprintf(installLib, sizeof(installLib), "lib/tcl%s", TCL_VERSION);
 
 	/*
 	 * If TCL_LIBRARY is set, search there.
@@ -600,17 +600,21 @@ SearchKnownEncodings(
     int left = 0;
     int right = sizeof(localeTable)/sizeof(LocaleTable);
 
+    /* Here, search for i in the interval left <= i < right. */
     while (left < right) {
 	int test = (left + right)/2;
 	int code = strcmp(localeTable[test].lang, encoding);
 
 	if (code == 0) {
+	    /* Found it at i == test.  */
 	    return localeTable[test].encoding;
 	}
 	if (code < 0) {
+	    /* Restrict the search to the interval test < i < right. */
 	    left = test+1;
 	} else {
-	    right = test-1;
+	    /* Restrict the search to the interval left <= i < test. */
+	    right = test;
 	}
     }
     return NULL;
@@ -792,7 +796,8 @@ TclpSetVariables(
     struct utsname name;
 #endif
     int unameOK;
-    Tcl_DString ds;
+    const char *p, *q;
+    Tcl_Obj *pkgListObj = Tcl_NewObj();
 
 #ifdef HAVE_COREFOUNDATION
     char tclLibPath[MAXPATHLEN + 1];
@@ -808,29 +813,20 @@ TclpSetVariables(
     if (MacOSXGetLibraryPath(interp, MAXPATHLEN, tclLibPath) == TCL_OK) {
 	const char *str;
 	CFBundleRef bundleRef;
+	Tcl_DString ds;
 
 	Tcl_SetVar2(interp, "tclDefaultLibrary", NULL, tclLibPath, TCL_GLOBAL_ONLY);
-	Tcl_SetVar2(interp, "tcl_pkgPath", NULL, tclLibPath, TCL_GLOBAL_ONLY);
-	Tcl_SetVar2(interp, "tcl_pkgPath", NULL, " ",
-		TCL_GLOBAL_ONLY | TCL_APPEND_VALUE);
-
+	Tcl_ListObjAppendElement(NULL, pkgListObj, Tcl_NewStringObj(tclLibPath, -1));
 	str = TclGetEnv("DYLD_FRAMEWORK_PATH", &ds);
 	if ((str != NULL) && (str[0] != '\0')) {
-	    char *p = Tcl_DStringValue(&ds);
-
-	    /*
-	     * Convert DYLD_FRAMEWORK_PATH from colon to space separated.
-	     */
-
-	    do {
-		if (*p == ':') {
-		    *p = ' ';
-		}
-	    } while (*p++);
-	    Tcl_SetVar2(interp, "tcl_pkgPath", NULL, Tcl_DStringValue(&ds),
-		    TCL_GLOBAL_ONLY | TCL_APPEND_VALUE);
-	    Tcl_SetVar2(interp, "tcl_pkgPath", NULL, " ",
-		    TCL_GLOBAL_ONLY | TCL_APPEND_VALUE);
+	    p = Tcl_DStringValue(&ds);
+	    while ((q = strchr(p, ':')) != NULL) {
+		Tcl_ListObjAppendElement(NULL, pkgListObj, Tcl_NewStringObj(p, q-p));
+		p = q+1;
+	    }
+	    if (*p) {
+		Tcl_ListObjAppendElement(NULL, pkgListObj, Tcl_NewStringObj(p, -1));
+	    }
 	    Tcl_DStringFree(&ds);
 	}
 	bundleRef = CFBundleGetMainBundle();
@@ -844,10 +840,7 @@ TclpSetVariables(
 			(unsigned char*) tclLibPath, MAXPATHLEN) &&
 			! TclOSstat(tclLibPath, &statBuf) &&
 			S_ISDIR(statBuf.st_mode)) {
-		    Tcl_SetVar2(interp, "tcl_pkgPath", NULL, tclLibPath,
-			    TCL_GLOBAL_ONLY | TCL_APPEND_VALUE);
-		    Tcl_SetVar2(interp, "tcl_pkgPath", NULL, " ",
-			    TCL_GLOBAL_ONLY | TCL_APPEND_VALUE);
+		    Tcl_ListObjAppendElement(NULL, pkgListObj, Tcl_NewStringObj(tclLibPath, -1));
 		}
 		CFRelease(frameworksURL);
 	    }
@@ -857,21 +850,22 @@ TclpSetVariables(
 			(unsigned char*) tclLibPath, MAXPATHLEN) &&
 			! TclOSstat(tclLibPath, &statBuf) &&
 			S_ISDIR(statBuf.st_mode)) {
-		    Tcl_SetVar2(interp, "tcl_pkgPath", NULL, tclLibPath,
-			    TCL_GLOBAL_ONLY | TCL_APPEND_VALUE);
-		    Tcl_SetVar2(interp, "tcl_pkgPath", NULL, " ",
-			    TCL_GLOBAL_ONLY | TCL_APPEND_VALUE);
+		    Tcl_ListObjAppendElement(NULL, pkgListObj, Tcl_NewStringObj(tclLibPath, -1));
 		}
 		CFRelease(frameworksURL);
 	    }
 	}
-	Tcl_SetVar2(interp, "tcl_pkgPath", NULL, pkgPath,
-		TCL_GLOBAL_ONLY | TCL_APPEND_VALUE);
-    } else
-#endif /* HAVE_COREFOUNDATION */
-    {
-	Tcl_SetVar2(interp, "tcl_pkgPath", NULL, pkgPath, TCL_GLOBAL_ONLY);
     }
+#endif /* HAVE_COREFOUNDATION */
+    p = pkgPath;
+    while ((q = strchr(p, ':')) != NULL) {
+	Tcl_ListObjAppendElement(NULL, pkgListObj, Tcl_NewStringObj(p, q-p));
+	p = q+1;
+    }
+    if (*p) {
+	Tcl_ListObjAppendElement(NULL, pkgListObj, Tcl_NewStringObj(p, -1));
+    }
+    Tcl_ObjSetVar2(interp, Tcl_NewStringObj("tcl_pkgPath", -1), NULL, pkgListObj, TCL_GLOBAL_ONLY);
 
 #ifdef DJGPP
     Tcl_SetVar2(interp, "tcl_platform", "platform", "dos", TCL_GLOBAL_ONLY);
@@ -884,8 +878,8 @@ TclpSetVariables(
 	unameOK = 1;
     if (!osInfoInitialized) {
 	void *handle = GetModuleHandleW(L"NTDLL");
-	int(__stdcall *getversion)(void *) =
-		(int(__stdcall *)(void *))GetProcAddress(handle, "RtlGetVersion");
+	int(*getversion)(void *) =
+		(int(*)(void *))GetProcAddress(handle, "RtlGetVersion");
 	osInfo.dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
 	if (!getversion || getversion(&osInfo)) {
 	    GetVersionExW(&osInfo);
@@ -895,9 +889,11 @@ TclpSetVariables(
 
     GetSystemInfo(&sysInfo);
 
-    Tcl_SetVar2(interp, "tcl_platform", "os",
-	    "Windows NT", TCL_GLOBAL_ONLY);
-    sprintf(buffer, "%d.%d", osInfo.dwMajorVersion, osInfo.dwMinorVersion);
+    if (osInfo.dwMajorVersion == 10 && osInfo.dwBuildNumber >= 22000) {
+	osInfo.dwMajorVersion = 11;
+    }
+    Tcl_SetVar2(interp, "tcl_platform", "os", "Windows NT", TCL_GLOBAL_ONLY);
+    snprintf(buffer, sizeof(buffer), "%d.%d", osInfo.dwMajorVersion, osInfo.dwMinorVersion);
     Tcl_SetVar2(interp, "tcl_platform", "osVersion", buffer, TCL_GLOBAL_ONLY);
     if (sysInfo.wProcessorArchitecture < NUMPROCESSORS) {
 	Tcl_SetVar2(interp, "tcl_platform", "machine",
@@ -908,6 +904,7 @@ TclpSetVariables(
 #elif !defined NO_UNAME
     if (uname(&name) >= 0) {
 	const char *native;
+	Tcl_DString ds;
 
 	unameOK = 1;
 
@@ -969,6 +966,7 @@ TclpSetVariables(
     {
 	struct passwd *pwEnt = TclpGetPwUid(getuid());
 	const char *user;
+	Tcl_DString ds;
 
 	if (pwEnt == NULL) {
 	    user = "";
@@ -994,7 +992,7 @@ TclpSetVariables(
  * TclpFindVariable --
  *
  *	Locate the entry in environ for a given name. On Unix this routine is
- *	case sensetive, on Windows this matches mixed case.
+ *	case sensitive, on Windows this matches mixed case.
  *
  * Results:
  *	The return value is the index in environ of an entry with the name

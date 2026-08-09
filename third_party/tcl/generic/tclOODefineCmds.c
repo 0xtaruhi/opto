@@ -451,7 +451,7 @@ RenameDeleteMethod(
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "method %s does not exist", TclGetString(fromPtr)));
 	    Tcl_SetErrorCode(interp, "TCL", "LOOKUP", "METHOD",
-		    TclGetString(fromPtr), NULL);
+		    TclGetString(fromPtr), (char *)NULL);
 	    return TCL_ERROR;
 	}
 	hPtr = Tcl_FindHashEntry(oPtr->methodsPtr, (char *) fromPtr);
@@ -465,14 +465,14 @@ RenameDeleteMethod(
 	    renameToSelf:
 		Tcl_SetObjResult(interp, Tcl_NewStringObj(
 			"cannot rename method to itself", -1));
-		Tcl_SetErrorCode(interp, "TCL", "OO", "RENAME_TO_SELF", NULL);
+		Tcl_SetErrorCode(interp, "TCL", "OO", "RENAME_TO_SELF", (char *)NULL);
 		return TCL_ERROR;
 	    } else if (!isNew) {
 	    renameToExisting:
 		Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 			"method called %s already exists",
 			TclGetString(toPtr)));
-		Tcl_SetErrorCode(interp, "TCL", "OO", "RENAME_OVER", NULL);
+		Tcl_SetErrorCode(interp, "TCL", "OO", "RENAME_OVER", (char *)NULL);
 		return TCL_ERROR;
 	    }
 	}
@@ -541,7 +541,7 @@ TclOOUnknownDefinition(
     if (objc < 2) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"bad call of unknown handler", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_UNKNOWN", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_UNKNOWN", (char *)NULL);
 	return TCL_ERROR;
     }
     if (TclOOGetDefineCmdContext(interp) == NULL) {
@@ -588,7 +588,7 @@ TclOOUnknownDefinition(
   noMatch:
     Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 	    "invalid command name \"%s\"", soughtStr));
-    Tcl_SetErrorCode(interp, "TCL", "LOOKUP", "COMMAND", soughtStr, NULL);
+    Tcl_SetErrorCode(interp, "TCL", "LOOKUP", "COMMAND", soughtStr, (char *)NULL);
     return TCL_ERROR;
 }
 
@@ -677,7 +677,7 @@ InitDefineContext(
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"cannot process definitions; support namespace deleted",
 		-1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -716,7 +716,7 @@ TclOOGetDefineCmdContext(
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"this command may only be called from within the context of"
 		" an ::oo::define or ::oo::objdefine command", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return NULL;
     }
     object = iPtr->varFramePtr->clientData;
@@ -724,7 +724,7 @@ TclOOGetDefineCmdContext(
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"this command cannot be called when the object has been"
 		" deleted", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return NULL;
     }
     return object;
@@ -766,7 +766,7 @@ GetClassInOuterContext(
     if (oPtr->classPtr == NULL) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(errMsg, -1));
 	Tcl_SetErrorCode(interp, "TCL", "LOOKUP", "CLASS",
-		TclGetString(className), NULL);
+		TclGetString(className), (char *)NULL);
 	return NULL;
     }
     return oPtr->classPtr;
@@ -850,8 +850,8 @@ MagicDefinitionInvoke(
      * comments above for why these contortions are necessary.
      */
 
-    objPtr = Tcl_NewObj();
-    obj2Ptr = Tcl_NewObj();
+    TclNewObj(objPtr);
+    TclNewObj(obj2Ptr);
     cmd = FindCommand(interp, objv[cmdIndex], nsPtr);
     if (cmd == NULL) {
 	/*
@@ -865,7 +865,7 @@ MagicDefinitionInvoke(
     Tcl_ListObjAppendElement(NULL, objPtr, obj2Ptr);
     /* TODO: overflow? */
     Tcl_ListObjReplace(NULL, objPtr, 1, 0, objc - offset, objv + offset);
-    Tcl_ListObjGetElements(NULL, objPtr, &dummy, &objs);
+    TclListObjGetElements(NULL, objPtr, &dummy, &objs);
 
     result = Tcl_EvalObjv(interp, objc - cmdIndex, objs, TCL_EVAL_INVOKE);
     if (isRoot) {
@@ -913,7 +913,7 @@ TclOODefineObjCmd(
 	Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		"%s does not refer to a class",TclGetString(objv[1])));
 	Tcl_SetErrorCode(interp, "TCL", "LOOKUP", "CLASS",
-		TclGetString(objv[1]), NULL);
+		TclGetString(objv[1]), (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1117,13 +1117,13 @@ TclOODefineClassObjCmd(
     if (oPtr->flags & ROOT_OBJECT) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"may not modify the class of the root object class", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
     if (oPtr->flags & ROOT_CLASS) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"may not modify the class of the class of classes", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1143,7 +1143,7 @@ TclOODefineClassObjCmd(
     if (oPtr == clsPtr->thisPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"may not change classes into an instance of themselves", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1293,7 +1293,7 @@ TclOODefineDeleteMethodObjCmd(
     if (!isInstanceDeleteMethod && !oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1417,7 +1417,7 @@ TclOODefineExportObjCmd(
     if (!isInstanceExport && !clsPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1509,7 +1509,7 @@ TclOODefineForwardObjCmd(
     if (!isInstanceForward && !oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
     isPublic = Tcl_StringMatch(TclGetString(objv[1]), PUBLIC_PATTERN)
@@ -1567,7 +1567,7 @@ TclOODefineMethodObjCmd(
     if (!isInstanceMethod && !oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
     isPublic = Tcl_StringMatch(TclGetString(objv[1]), PUBLIC_PATTERN)
@@ -1623,7 +1623,7 @@ TclOODefineRenameMethodObjCmd(
     if (!isInstanceRenameMethod && !oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1684,7 +1684,7 @@ TclOODefineUnexportObjCmd(
     if (!isInstanceUnexport && !clsPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1870,11 +1870,11 @@ ClassFilterGet(
     } else if (!oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
-    resultObj = Tcl_NewObj();
+    TclNewObj(resultObj);
     FOREACH(filterObj, oPtr->classPtr->filters) {
 	Tcl_ListObjAppendElement(NULL, resultObj, filterObj);
     }
@@ -1906,9 +1906,9 @@ ClassFilterSet(
     } else if (!oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
-    } else if (Tcl_ListObjGetElements(interp, objv[0], &filterc,
+    } else if (TclListObjGetElements(interp, objv[0], &filterc,
 	    &filterv) != TCL_OK) {
 	return TCL_ERROR;
     }
@@ -1950,11 +1950,11 @@ ClassMixinGet(
     } else if (!oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
-    resultObj = Tcl_NewObj();
+    TclNewObj(resultObj);
     FOREACH(mixinPtr, oPtr->classPtr->mixins) {
 	Tcl_ListObjAppendElement(NULL, resultObj,
 		TclOOObjectName(interp, mixinPtr->thisPtr));
@@ -1989,9 +1989,9 @@ ClassMixinSet(
     } else if (!oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
-    } else if (Tcl_ListObjGetElements(interp, objv[0], &mixinc,
+    } else if (TclListObjGetElements(interp, objv[0], &mixinc,
 	    &mixinv) != TCL_OK) {
 	return TCL_ERROR;
     }
@@ -2008,7 +2008,7 @@ ClassMixinSet(
 	if (TclOOIsReachable(oPtr->classPtr, mixins[i])) {
 	    Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		    "may not mix a class into itself", -1));
-	    Tcl_SetErrorCode(interp, "TCL", "OO", "SELF_MIXIN", NULL);
+	    Tcl_SetErrorCode(interp, "TCL", "OO", "SELF_MIXIN", (char *)NULL);
 	    goto freeAndError;
 	}
     }
@@ -2055,11 +2055,11 @@ ClassSuperGet(
     } else if (!oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
-    resultObj = Tcl_NewObj();
+    TclNewObj(resultObj);
     FOREACH(superPtr, oPtr->classPtr->superclasses) {
 	Tcl_ListObjAppendElement(NULL, resultObj,
 		TclOOObjectName(interp, superPtr->thisPtr));
@@ -2093,14 +2093,14 @@ ClassSuperSet(
     } else if (!oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     } else if (oPtr == oPtr->fPtr->objectCls->thisPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"may not modify the superclass of the root object", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
-    } else if (Tcl_ListObjGetElements(interp, objv[0], &superc,
+    } else if (TclListObjGetElements(interp, objv[0], &superc,
 	    &superv) != TCL_OK) {
 	return TCL_ERROR;
     }
@@ -2139,14 +2139,14 @@ ClassSuperSet(
 		    Tcl_SetObjResult(interp, Tcl_NewStringObj(
 			    "class should only be a direct superclass once",
 			    -1));
-		    Tcl_SetErrorCode(interp, "TCL", "OO", "REPETITIOUS",NULL);
+		    Tcl_SetErrorCode(interp, "TCL", "OO", "REPETITIOUS", (char *)NULL);
 		    goto failedAfterAlloc;
 		}
 	    }
 	    if (TclOOIsReachable(oPtr->classPtr, superclasses[i])) {
 		Tcl_SetObjResult(interp, Tcl_NewStringObj(
 			"attempt to form circular dependency graph", -1));
-		Tcl_SetErrorCode(interp, "TCL", "OO", "CIRCULARITY", NULL);
+		Tcl_SetErrorCode(interp, "TCL", "OO", "CIRCULARITY", (char *)NULL);
 	    failedAfterAlloc:
 		for (; i-- > 0 ;) {
 		    TclOODecrRefCount(superclasses[i]->thisPtr);
@@ -2220,11 +2220,11 @@ ClassVarsGet(
     } else if (!oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
     }
 
-    resultObj = Tcl_NewObj();
+    TclNewObj(resultObj);
     FOREACH(variableObj, oPtr->classPtr->variables) {
 	Tcl_ListObjAppendElement(NULL, resultObj, variableObj);
     }
@@ -2257,9 +2257,9 @@ ClassVarsSet(
     } else if (!oPtr->classPtr) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj(
 		"attempt to misuse API", -1));
-	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "OO", "MONKEY_BUSINESS", (char *)NULL);
 	return TCL_ERROR;
-    } else if (Tcl_ListObjGetElements(interp, objv[0], &varc,
+    } else if (TclListObjGetElements(interp, objv[0], &varc,
 	    &varv) != TCL_OK) {
 	return TCL_ERROR;
     }
@@ -2271,14 +2271,14 @@ ClassVarsSet(
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "invalid declared variable name \"%s\": must not %s",
 		    varName, "contain namespace separators"));
-	    Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_DECLVAR", NULL);
+	    Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_DECLVAR", (char *)NULL);
 	    return TCL_ERROR;
 	}
 	if (Tcl_StringMatch(varName, "*(*)")) {
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "invalid declared variable name \"%s\": must not %s",
 		    varName, "refer to an array element"));
-	    Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_DECLVAR", NULL);
+	    Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_DECLVAR", (char *)NULL);
 	    return TCL_ERROR;
 	}
     }
@@ -2360,7 +2360,7 @@ ObjFilterGet(
 	return TCL_ERROR;
     }
 
-    resultObj = Tcl_NewObj();
+    TclNewObj(resultObj);
     FOREACH(filterObj, oPtr->filters) {
 	Tcl_ListObjAppendElement(NULL, resultObj, filterObj);
     }
@@ -2388,7 +2388,7 @@ ObjFilterSet(
 	return TCL_ERROR;
     }
     objv += Tcl_ObjectContextSkippedArgs(context);
-    if (Tcl_ListObjGetElements(interp, objv[0], &filterc,
+    if (TclListObjGetElements(interp, objv[0], &filterc,
 	    &filterv) != TCL_OK) {
 	return TCL_ERROR;
     }
@@ -2428,7 +2428,7 @@ ObjMixinGet(
 	return TCL_ERROR;
     }
 
-    resultObj = Tcl_NewObj();
+    TclNewObj(resultObj);
     FOREACH(mixinPtr, oPtr->mixins) {
 	if (mixinPtr) {
 	    Tcl_ListObjAppendElement(NULL, resultObj,
@@ -2461,7 +2461,7 @@ ObjMixinSet(
 	return TCL_ERROR;
     }
     objv += Tcl_ObjectContextSkippedArgs(context);
-    if (Tcl_ListObjGetElements(interp, objv[0], &mixinc,
+    if (TclListObjGetElements(interp, objv[0], &mixinc,
 	    &mixinv) != TCL_OK) {
 	return TCL_ERROR;
     }
@@ -2512,7 +2512,7 @@ ObjVarsGet(
 	return TCL_ERROR;
     }
 
-    resultObj = Tcl_NewObj();
+    TclNewObj(resultObj);
     FOREACH(variableObj, oPtr->variables) {
 	Tcl_ListObjAppendElement(NULL, resultObj, variableObj);
     }
@@ -2540,7 +2540,7 @@ ObjVarsSet(
 	return TCL_ERROR;
     }
     objv += Tcl_ObjectContextSkippedArgs(context);
-    if (Tcl_ListObjGetElements(interp, objv[0], &varc,
+    if (TclListObjGetElements(interp, objv[0], &varc,
 	    &varv) != TCL_OK) {
 	return TCL_ERROR;
     }
@@ -2552,14 +2552,14 @@ ObjVarsSet(
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "invalid declared variable name \"%s\": must not %s",
 		    varName, "contain namespace separators"));
-	    Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_DECLVAR", NULL);
+	    Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_DECLVAR", (char *)NULL);
 	    return TCL_ERROR;
 	}
 	if (Tcl_StringMatch(varName, "*(*)")) {
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "invalid declared variable name \"%s\": must not %s",
 		    varName, "refer to an array element"));
-	    Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_DECLVAR", NULL);
+	    Tcl_SetErrorCode(interp, "TCL", "OO", "BAD_DECLVAR", (char *)NULL);
 	    return TCL_ERROR;
 	}
     }

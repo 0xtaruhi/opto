@@ -677,7 +677,7 @@ TclRegAbout(
      * well and Tcl has other limits that constrain things as well...
      */
 
-    resultObj = Tcl_NewObj();
+    TclNewObj(resultObj);
     Tcl_ListObjAppendElement(NULL, resultObj,
 	    Tcl_NewIntObj((int) regexpPtr->re.re_nsub));
 
@@ -730,9 +730,9 @@ TclRegError(
     p = (n > sizeof(buf)) ? "..." : "";
     Tcl_SetObjResult(interp, Tcl_ObjPrintf("%s%s%s", msg, buf, p));
 
-    sprintf(cbuf, "%d", status);
+    snprintf(cbuf, sizeof(cbuf), "%d", status);
     (void) TclReError(REG_ITOA, cbuf, sizeof(cbuf));
-    Tcl_SetErrorCode(interp, "REGEXP", cbuf, buf, NULL);
+    Tcl_SetErrorCode(interp, "REGEXP", cbuf, buf, (char *)NULL);
 }
 
 /*

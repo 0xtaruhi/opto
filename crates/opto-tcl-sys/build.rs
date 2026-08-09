@@ -13,7 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const TCL_VERSION: &str = "8.6.11";
+const TCL_VERSION: &str = "8.6.18";
 
 fn main() {
     let manifest_dir = PathBuf::from(required_env("CARGO_MANIFEST_DIR"));
@@ -146,7 +146,7 @@ fn build_tcl(
 }
 
 fn build_tcl_unix(source_dir: &Path, out_dir: &Path, target_os: &str, target: &str, host: &str) {
-    let build_dir = out_dir.join("tcl-build");
+    let build_dir = out_dir.join(format!("tcl-build-{TCL_VERSION}"));
     fs::create_dir_all(&build_dir).expect("failed to create Tcl build directory");
     let makefile = build_dir.join("Makefile");
     if !makefile.exists() {
@@ -159,7 +159,7 @@ fn build_tcl_unix(source_dir: &Path, out_dir: &Path, target_os: &str, target: &s
             .arg("--disable-symbols")
             .arg(format!(
                 "--prefix={}",
-                out_dir.join("tcl-install").display()
+                out_dir.join(format!("tcl-install-{TCL_VERSION}")).display()
             ));
         if target != host {
             command.arg(format!("--host={target}"));
@@ -190,8 +190,8 @@ fn build_tcl_unix(source_dir: &Path, out_dir: &Path, target_os: &str, target: &s
 }
 
 fn build_tcl_windows_msvc(source_dir: &Path, out_dir: &Path, target: &str) {
-    let build_dir = out_dir.join("tcl-build");
-    let install_dir = out_dir.join("tcl-install");
+    let build_dir = out_dir.join(format!("tcl-build-{TCL_VERSION}"));
+    let install_dir = out_dir.join(format!("tcl-install-{TCL_VERSION}"));
     fs::create_dir_all(&build_dir).expect("failed to create Tcl build directory");
     fs::create_dir_all(&install_dir).expect("failed to create Tcl install directory");
 

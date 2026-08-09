@@ -743,7 +743,7 @@ TclPathPart(
 		    (Tcl_FSGetPathType(pathPtr) == TCL_PATH_RELATIVE))) {
 		Tcl_ListObjIndex(NULL, splitPtr, splitElements-1, &resultPtr);
 	    } else {
-		resultPtr = Tcl_NewObj();
+		TclNewObj(resultPtr);
 	    }
 	} else {
 	    /*
@@ -781,7 +781,7 @@ GetExtension(
     tail = TclGetString(pathPtr);
     extension = TclGetExtension(tail);
     if (extension == NULL) {
-	ret = Tcl_NewObj();
+	TclNewObj(ret);
     } else {
 	ret = Tcl_NewStringObj(extension, -1);
     }
@@ -833,12 +833,12 @@ Tcl_FSJoinPath(
     int objc;
     Tcl_Obj **objv;
 
-    if (Tcl_ListObjLength(NULL, listObj, &objc) != TCL_OK) {
+    if (TclListObjLength(NULL, listObj, &objc) != TCL_OK) {
 	return NULL;
     }
 
     elements = ((elements >= 0) && (elements <= objc)) ? elements : objc;
-    Tcl_ListObjGetElements(NULL, listObj, &objc, &objv);
+    TclListObjGetElements(NULL, listObj, &objc, &objv);
     res = TclJoinPath(elements, objv, 0);
     return res;
 }
@@ -848,7 +848,7 @@ TclJoinPath(
     int elements,		/* Number of elements to use (-1 = all) */
     Tcl_Obj * const objv[],	/* Path elements to join */
     int forceRelative)		/* If non-zero, assume all more paths are
-				 * relative (e. g. simple normalization) */
+				 * relative (e.g. simple normalization) */
 {
     Tcl_Obj *res = NULL;
     int i;
@@ -857,7 +857,8 @@ TclJoinPath(
     assert ( elements >= 0 );
 
     if (elements == 0) {
-	return Tcl_NewObj();
+	TclNewObj(res);
+	return res;
     }
 
     assert ( elements > 0 );
@@ -902,7 +903,7 @@ TclJoinPath(
 		}
 
 		/*
-		 * If it doesn't begin with '.' and is a unix path or it a
+		 * If it doesn't begin with '.' and is a Unix path or it a
 		 * windows path without backslashes, then we can be very
 		 * efficient here. (In fact even a windows path with
 		 * backslashes can be joined efficiently, but the path object
@@ -1056,7 +1057,7 @@ TclJoinPath(
 
     noQuickReturn:
 	if (res == NULL) {
-	    res = Tcl_NewObj();
+	    TclNewObj(res);
 	    ptr = Tcl_GetStringFromObj(res, &length);
 	} else {
 	    ptr = Tcl_GetStringFromObj(res, &length);
@@ -1317,7 +1318,7 @@ TclNewFSPathObj(
 	return pathPtr;
     }
 
-    pathPtr = Tcl_NewObj();
+    TclNewObj(pathPtr);
     fsPathPtr = ckalloc(sizeof(FsPath));
 
     /*
@@ -1396,7 +1397,7 @@ AppendPath(
      * that use some character other than "/" as a path separator.  I know
      * of no evidence that such a foolish thing exists.  This solution was
      * chosen so that "JoinPath" operations that pass through either path
-     * intrep produce the same results; that is, bugward compatibility.  If
+     * internalrep produce the same results; that is, bugward compatibility.  If
      * we need to fix that bug here, it needs fixing in TclJoinPath() too.
      */
     bytes = Tcl_GetStringFromObj(tail, &numBytes);
@@ -1522,7 +1523,7 @@ MakePathFromNormalized(
 		    Tcl_SetObjResult(interp, Tcl_NewStringObj(
 			    "can't find object string representation", -1));
 		    Tcl_SetErrorCode(interp, "TCL", "VALUE", "PATH", "WTF",
-			    NULL);
+			    (char *)NULL);
 		}
 		return TCL_ERROR;
 	    }
@@ -2396,7 +2397,7 @@ SetFsPathFromAny(
 			    "couldn't find HOME environment variable to"
 			    " expand path", -1));
 		    Tcl_SetErrorCode(interp, "TCL", "VALUE", "PATH",
-			    "HOMELESS", NULL);
+			    "HOMELESS", (char *)NULL);
 		}
 		return TCL_ERROR;
 	    }
@@ -2421,7 +2422,7 @@ SetFsPathFromAny(
 		    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 			    "user \"%s\" doesn't exist", expandedUser));
 		    Tcl_SetErrorCode(interp, "TCL", "VALUE", "PATH", "NOUSER",
-			    NULL);
+			    (char *)NULL);
 		}
 		Tcl_DStringFree(&userName);
 		Tcl_DStringFree(&temp);
@@ -2448,7 +2449,7 @@ SetFsPathFromAny(
 		Tcl_Obj **objv;
 		Tcl_Obj *parts = TclpNativeSplitPath(pathPtr, NULL);
 
-		Tcl_ListObjGetElements(NULL, parts, &objc, &objv);
+		TclListObjGetElements(NULL, parts, &objc, &objv);
 
 		/*
 		 * Skip '~'. It's replaced by its expansion.

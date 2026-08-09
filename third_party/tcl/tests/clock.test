@@ -155,6 +155,9 @@ if {[namespace which -command ::tcl::unsupported::timerate] ne ""} {
 # clock-38
 #	Regression test to verify that changes in TZ work
 #	both east and west of Greenwich
+#
+# clock-68
+#	Leap seconds/minutes/hours
 
 
 # Note that all code between comments '# BEGIN' and '# END' is
@@ -280,9 +283,18 @@ test clock-1.4 "clock format - bad flag" {*}{
     -result {1 {bad option "-oops": must be -format, -gmt, -locale, or -timezone} {CLOCK badOption -oops}}
 }
 
-test clock-1.5 "clock format - bad timezone" {
-    list [catch {clock format 0 -format "%s" -timezone :NOWHERE} msg] $msg $::errorCode
-} {1 {time zone ":NOWHERE" not found} {CLOCK badTimeZone :NOWHERE}}
+test clock-1.5 "clock format - bad timezone (not found)" -body {
+    clock format 0 -format "%s" -timezone :NOWHERE
+} -returnCodes 1 -result {time zone ":NOWHERE" not found} -errorCode {CLOCK badTimeZone :NOWHERE}
+foreach tz [list {*}{
+  ../UNSAFEPATH/NOWHERE UNSAFEPATH/../GMT //UNSAFEPATH/NOWHERE
+  zipfs:/UNSAFEPATH/NOWHERE C:/UNSAFEPATH/NOWHERE
+  } [list $::tcl::clock::DataDir/GMT]
+] {
+test clock-1.5.1.$tz "clock format - bad timezone (not valid - unsafe path)" -body {
+    clock format 0 -format "%s" -timezone $tz
+} -returnCodes 1 -result "time zone \":$tz\" not valid" -errorCode [list CLOCK badTimeZone :$tz]
+}
 
 test clock-1.6 "clock format - gmt + timezone" {
     list [catch {clock format 0 -timezone :GMT -gmt true} msg] $msg $::errorCode
@@ -18600,6 +18612,20 @@ test clock-7.9 {Julian Day, two values} {
     clock scan {2440588 2440589} -format {%J %J} -gmt true
 } 86400
 
+test clock-7.10 {Julian Day, negative amount} {
+    # Note: %J does not accept negative input;
+    # add negative amounts to Julian day 0 instead
+    set s0 [clock scan 0 -format %J -gmt true]
+    set J0 [scan [clock format $s0 -format %J -gmt true] %lld]
+    set s0m1d [clock add $s0 -1 days -timezone :UTC]
+    set s0m24h [clock add $s0 -24 hours -timezone :UTC]
+    set J0m24h [scan [clock format $s0m24h -format %J -gmt true] %lld]
+    set s0m1s [clock add $s0 -1 seconds -timezone :UTC]
+    set J0m1s [scan [clock format $s0m1s -format %J -gmt true] %lld]
+    list $s0m1d $s0m24h $J0m24h $s0m1s $J0m1s $s0 $J0 \
+	[::tcl::mathop::== $s0m1d $s0m24h] [::tcl::mathop::== $J0m24h $J0m1s]
+} [list -210866889600 -210866889600 -1 -210866803201 -1 -210866803200 0 1 1]
+
 # BEGIN testcases8
 
 # Test parsing of ccyymmdd
@@ -35220,6 +35246,116 @@ test clock-30.25 {clock add seconds at DST conversion} {
 		-timezone EST05:00EDT04:00,M4.1.0/02:00,M10.5.0/02:00]
 } {2004-10-31 01:00:00 -0500}
 
+# the tests clock-30.26..-30.30 are missing in 8.6 (no weekday unit in clock add),
+# don't renumerate following tests to hold the numeration equal to 8.7+:
+test clock-30.31 {regression test - add no int overflow} {
+    list \
+      [list \
+	[clock add 0 1600000000 seconds 24856 days -gmt 1] \
+	[clock add 0 1600000000 seconds 815 months -gmt 1] \
+	[clock add 0 1600000000 seconds 69 years -gmt 1] \
+	[clock add 0 1600000000 seconds 596524 hours -gmt 1] \
+	[clock add 0 1600000000 seconds 35791395 minutes -gmt 1] \
+	[clock add 0 1600000000 seconds 0x7fffffff seconds -gmt 1]
+      ] \
+      [list \
+	[clock add 1600000000 24856 days -gmt 1] \
+	[clock add 1600000000 815 months -gmt 1] \
+	[clock add 1600000000 69 years -gmt 1] \
+	[clock add 1600000000 596524 hours -gmt 1] \
+	[clock add 1600000000 35791395 minutes -gmt 1] \
+	[clock add 1600000000 0x7fffffff seconds -gmt 1]
+      ]
+} [lrepeat 2 {3747558400 3743238400 3777452800 3747486400 3747483700 3747483647}]
+test clock-30.32 {regression test - add no int overflow} {
+    list \
+      [list \
+	[clock add 3777452800 -1600000000 seconds -24856 days -gmt 1] \
+	[clock add 3777452800 -1600000000 seconds -815 months -gmt 1] \
+	[clock add 3777452800 -1600000000 seconds -69 years -gmt 1] \
+	[clock add 3777452800 -1600000000 seconds -596524 hours -gmt 1] \
+	[clock add 3777452800 -1600000000 seconds -35791395 minutes -gmt 1] \
+	[clock add 3777452800 -1600000000 seconds -0x7fffffff seconds -gmt 1]
+      ] \
+      [list \
+	[clock add 2177452800 -24856 days -gmt 1] \
+	[clock add 2177452800 -815 months -gmt 1] \
+	[clock add 2177452800 -69 years -gmt 1] \
+	[clock add 2177452800 -596524 hours -gmt 1] \
+	[clock add 2177452800 -35791395 minutes -gmt 1] \
+	[clock add 2177452800 -0x7fffffff seconds -gmt 1]
+      ]
+} [lrepeat 2 {29894400 34214400 0 29966400 29969100 29969153}]
+test clock-30.33 {regression test - add with negative base (local seconds of the day, bug [482db1d796540e68])} {
+    list \
+      [list \
+	[clock add -631152000 27463 days 3000 seconds -timezone :CET] \
+	[clock add -631152000 902 months 10 days 3000 seconds -timezone :CET] \
+	[clock add -631152000 75 years 69 days 3000 seconds -timezone :CET] \
+	[clock add -631152000 659112 hours 3000 seconds -timezone :CET] \
+	[clock add -631152000 39546720 minutes 3000 seconds -timezone :CET] \
+	[clock add -631152000 2372806200 seconds -timezone :CET]
+      ] \
+      [list \
+	[clock add -631152000 27463 days 3000 seconds -gmt 1] \
+	[clock add -631152000 902 months 10 days 3000 seconds -gmt 1] \
+	[clock add -631152000 75 years 69 days 3000 seconds -gmt 1] \
+	[clock add -631152000 659112 hours 3000 seconds -gmt 1] \
+	[clock add -631152000 39546720 minutes 3000 seconds -gmt 1] \
+	[clock add -631152000 2372806200 seconds -gmt 1]
+      ]
+} [lrepeat 2 [lrepeat 6 [expr {-631152000 + 2372806200}]]]
+test clock-30.34 {regression test - clock add jump over DST hole with TZ (1 day != 24 hours, etc)} -body {
+    # time units (in opposite to date units) have to ignore DST hole (affects UTC only, so remain relative time),
+    # however date units have to jump over the DST hole with retaining of current local time.
+    proc test_add_dst {t args} {
+	set exp [lindex $args end]; set args [lreplace $args end end]
+	set tz [lindex $args end]
+	set v [clock format [clock add $t {*}$args] -format "%Y-%m-%d %H:%M:%S %Z" -timezone $tz]
+	if {$v ne $exp} {
+	    list "\"$v\" ne \"$exp\"" "    while testing \[clock format \[clock add $t $args\] -format \"%Y-%m-%d %H:%M:%S %Z\" -timezone $tz\]"
+	}
+    }
+    set t [clock scan "2024-03-31 01:59:59" -timezone :CET]; # 1 second before time switch CET/CEST
+    join [list \
+	{*}[test_add_dst $t -timezone :CET                         {2024-03-31 01:59:59 CET}] \
+	{*}[test_add_dst $t -1 month -timezone :CET                {2024-02-29 01:59:59 CET}] \
+	{*}[test_add_dst $t 1 second -1 month -timezone :CET       {2024-02-29 03:00:00 CET}] \
+	{*}[test_add_dst $t -1 day -timezone :CET                  {2024-03-30 01:59:59 CET}] \
+	{*}[test_add_dst $t 1 second -1 day -timezone :CET         {2024-03-30 03:00:00 CET}] \
+	{*}[test_add_dst $t 1 second -timezone :CET                {2024-03-31 03:00:00 CEST}] \
+	{*}[test_add_dst $t 1 day -timezone :CET                   {2024-04-01 01:59:59 CEST}] \
+	{*}[test_add_dst $t 24 hours -timezone :CET                {2024-04-01 02:59:59 CEST}] \
+	{*}[test_add_dst $t 1440 minutes -timezone :CET            {2024-04-01 02:59:59 CEST}] \
+	{*}[test_add_dst $t 86400 seconds -timezone :CET           {2024-04-01 02:59:59 CEST}] \
+	{*}[test_add_dst $t 1 second 1 day -timezone :CET          {2024-04-01 03:00:00 CEST}] \
+	{*}[test_add_dst $t 1 second 24 hours -timezone :CET       {2024-04-01 03:00:00 CEST}] \
+	{*}[test_add_dst $t 1 second 1440 minutes -timezone :CET   {2024-04-01 03:00:00 CEST}] \
+	{*}[test_add_dst $t 1 second 86400 seconds -timezone :CET  {2024-04-01 03:00:00 CEST}] \
+	{*}[test_add_dst $t 1 month -timezone :CET                 {2024-04-30 01:59:59 CEST}] \
+	{*}[test_add_dst $t 1 second 1 month -timezone :CET        {2024-04-30 03:00:00 CEST}] \
+	\
+	{*}[test_add_dst $t -timezone :GMT                         {2024-03-31 00:59:59 GMT}] \
+	{*}[test_add_dst $t -1 month -timezone :GMT                {2024-02-29 00:59:59 GMT}] \
+	{*}[test_add_dst $t 1 second -1 month -timezone :GMT       {2024-02-29 01:00:00 GMT}] \
+	{*}[test_add_dst $t -1 day -timezone :GMT                  {2024-03-30 00:59:59 GMT}] \
+	{*}[test_add_dst $t 1 second -1 day -timezone :GMT         {2024-03-30 01:00:00 GMT}] \
+	{*}[test_add_dst $t 1 second -timezone :GMT                {2024-03-31 01:00:00 GMT}] \
+	{*}[test_add_dst $t 1 day -timezone :GMT                   {2024-04-01 00:59:59 GMT}] \
+	{*}[test_add_dst $t 24 hours -timezone :GMT                {2024-04-01 00:59:59 GMT}] \
+	{*}[test_add_dst $t 1440 minutes -timezone :GMT            {2024-04-01 00:59:59 GMT}] \
+	{*}[test_add_dst $t 86400 seconds -timezone :GMT           {2024-04-01 00:59:59 GMT}] \
+	{*}[test_add_dst $t 1 second 1 day -timezone :GMT          {2024-04-01 01:00:00 GMT}] \
+	{*}[test_add_dst $t 1 second 24 hours -timezone :GMT       {2024-04-01 01:00:00 GMT}] \
+	{*}[test_add_dst $t 1 second 1440 minutes -timezone :GMT   {2024-04-01 01:00:00 GMT}] \
+	{*}[test_add_dst $t 1 second 86400 seconds -timezone :GMT  {2024-04-01 01:00:00 GMT}] \
+	{*}[test_add_dst $t 1 month -timezone :GMT                 {2024-04-30 00:59:59 GMT}] \
+	{*}[test_add_dst $t 1 second 1 month -timezone :GMT        {2024-04-30 01:00:00 GMT}] \
+      ] \n
+} -cleanup {
+    rename test_add_dst {}
+} -result {}
+
 test clock-31.1 {system locale} \
     -constraints win \
     -setup {
@@ -36047,7 +36183,7 @@ test clock-42.1 {regression test - %z in :localtime when west of Greenwich } \
     } \
     -result {-0500}
 
-# 43.1 was a bad test - mktime returning -1 is an error according to posix.
+# 43.1 was a bad test - mktime returning -1 is an error according to Posix.
 
 test clock-44.1 {regression test - time zone name containing hyphen } \
     -setup {
@@ -36069,11 +36205,18 @@ test clock-44.1 {regression test - time zone name containing hyphen } \
     } \
     -result {12:34:56-0500}
 
-test clock-45.1 {regression test - time zone containing only two digits} \
+test clock-44.2 {regression test - time zone containing only two digits} \
     -body {
 	clock scan 1985-04-12T10:15:30+04 -format %Y-%m-%dT%H:%M:%S%Z
     } \
     -result 482134530
+
+test clock-44.3 {regression test - spaces between some scan tokens are optional} \
+    -body {
+	list [clock scan {9 Apr 2024} -format {%d %b%Y} -gmt 1] \
+	     [clock scan {Tue, 9 Apr 2024 00:00:00 +0000} -format {%a, %d %b%Y %H:%M:%S %Z} -gmt 1]
+    } \
+    -result {1712620800 1712620800}
 
 test clock-46.1 {regression test - month zero} \
     -body {
@@ -36091,6 +36234,25 @@ test clock-46.4 {regression test - month thirteen} \
     -body {
 	clock scan 20041301
     } -result [clock scan 2005-01-01 -format %Y-%m-%d]
+
+test clock-46.5 {regression test - good time} \
+    -body {
+	# 12:01 apm are valid input strings...
+	list [clock scan "12:01 am" -base 0 -gmt 1] \
+	     [clock scan "12:01 pm" -base 0 -gmt 1]
+    } -result {60 43260}
+test clock-46.6 {freescan: regression test - bad time} \
+    -body {
+	# 13:00 am/pm are invalid input strings...
+	list [clock scan "13:00 am" -base 0 -gmt 1] \
+	     [clock scan "13:00 pm" -base 0 -gmt 1]
+    } -result {3600 46800}
+
+test clock-46.7 {regression test - switch day by large not-valid time, see bug [3ee8f1c2a785f4d8]} {
+    list [clock scan 23:59:59 -base 0 -gmt 1 -format %H:%M:%S] \
+	 [clock scan 24:00:00 -base 0 -gmt 1 -format %H:%M:%S] \
+	 [clock scan 48:00:00 -base 0 -gmt 1 -format %H:%M:%S]
+} {86399 86400 172800}
 
 test clock-47.1 {regression test - four-digit time} {
     clock scan 0012
@@ -36772,6 +36934,14 @@ test clock-57.1 {clock scan - abbreviated options} {
     clock scan 1970-01-01 -f %Y-%m-%d -g true
 } 0
 
+test clock-57.2 {clock scan - not -gmt and -timezone in the same call} {
+    catch {clock scan 1970-01-01 -format %Y-%m-%d -gmt true -timezone :Europe/Berlin}
+} 1
+
+test clock-57.3 {clock scan - not -g and -timezone in the same call} {
+    catch {clock scan 1970-01-01 -format %Y-%m-%d -g true -timezone :Europe/Berlin}
+} 1
+
 test clock-58.1 {clock l10n - Japanese localisation} {*}{
     -setup {
 	proc backslashify { string } {
@@ -36879,6 +37049,23 @@ test clock-59.1 {military time zones} {
     join $trouble \n
 } {}
 
+test clock-59.2 {correct time zone names, format and scan back, bug and regression [2c237beffbace823]} {
+    set result {}
+    foreach {base tz} {
+	 1700000000 "Etc/GMT-2"
+	 1700000000 "Etc/GMT+2"
+	 1301184000 "Europe/Kaliningrad"
+	  152632800 "Pacific/Chatham"
+	 -765317964 "America/Paramaribo"
+	-2337928528 "Australia/Eucla"
+    } {
+	set v [clock format $base -timezone $tz -format "%Y-%m-%d %H:%M:%S %Z"]
+	lappend result [expr {[set t [clock scan $v -format "%Y-%m-%d %H:%M:%S %Z" -timezone $tz]] == $base ? 1 : "0 ($t != $base for $v)"}]
+	lappend result [expr {[set t [clock scan $v -timezone $tz]] == $base ? 1 : "0 ($t != $base for $v)"}]
+    }
+    set result
+} [lrepeat 12 1]
+
 # case-insensitive matching of weekday and month names [Bug 1781282]
 
 test clock-60.1 {case insensitive weekday names} {
@@ -36984,6 +37171,15 @@ test clock-65.1 {clock add, bad option [Bug 2481670]} {*}{
     -result {bad option "-foo"*}
 }
 
+test clock-65.2 {clock add with both -timezone and -gmt} {*}{
+    -body {
+	clock add 0 1 year -timezone :CET -gmt true
+    }
+    -match glob
+    -returnCodes error
+    -result {cannot use -gmt and -timezone in same call}
+}
+
 test clock-66.1 {clock scan, no date, never-before-seen timezone} {*}{
     -setup {
 	::tcl::clock::ClearCaches
@@ -37032,6 +37228,30 @@ test clock-67.5 {Change scan %x output on global locale change [Bug 4a0c163d24]}
 } -cleanup {
     msgcat::mclocale $current
 } -result {1}
+
+test clock-68.1 {Leap second, minute, hour [f2b5f89c0d], regression test (no validity check)} -body {
+    set res {}
+    foreach {d i} {
+	"2012-06-30 23:59:60" 1341100800
+	"2012-06-30 23:60:00" 1341100800
+	"2012-06-30 24:00:00" 1341100800
+	"2012-06-29 23:59:60" 1341014400
+	"2012-05-30 23:59:60" 1338422400
+	"2012-05-30 23:60:60" 1338422460
+	"2012-05-30 24:00:60" 1338422460
+	"2012-05-30 24:60:00" 1338426000
+    } {
+	# check with free scan:
+	if {[set t [clock scan $d -gmt 1]] != $i} {
+	    lappend res "free-scan \"$d\" == $t, expected $i"
+	}
+	# check with formatted scan:
+	if {[set t [clock scan $d -gmt 1 -format "%Y-%m-%d %H:%M:%S"]] != $i} {
+	    lappend res "fmt-scan \"$d\" == $t, expected $i"
+	}
+    }
+    set res; # must be empty
+} -result {}
 
 # cleanup
 

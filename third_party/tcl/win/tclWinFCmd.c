@@ -56,7 +56,7 @@ static const int attributeArray[] = {FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDD
 
 const char *const tclpFileAttrStrings[] = {
 	"-archive", "-hidden", "-longname", "-readonly",
-	"-shortname", "-system", (char *) NULL
+	"-shortname", "-system", NULL
 };
 
 const TclFileAttrProcs tclpFileAttrProcs[] = {
@@ -145,8 +145,8 @@ TclpObjRenameFile(
     Tcl_Obj *srcPathPtr,
     Tcl_Obj *destPathPtr)
 {
-    return DoRenameFile(Tcl_FSGetNativePath(srcPathPtr),
-	    Tcl_FSGetNativePath(destPathPtr));
+    return DoRenameFile((WCHAR *)Tcl_FSGetNativePath(srcPathPtr),
+	    (WCHAR *)Tcl_FSGetNativePath(destPathPtr));
 }
 
 static int
@@ -267,7 +267,7 @@ DoRenameFile(
 #ifndef HAVE_NO_SEH
     __try {
 #endif
-	if ((*MoveFileW)(nativeSrc, nativeDst) != FALSE) {
+	if (MoveFileW(nativeSrc, nativeDst) != FALSE) {
 	    retval = TCL_OK;
 	}
 #ifndef HAVE_NO_SEH
@@ -534,8 +534,8 @@ TclpObjCopyFile(
     Tcl_Obj *srcPathPtr,
     Tcl_Obj *destPathPtr)
 {
-    return DoCopyFile(Tcl_FSGetNativePath(srcPathPtr),
-	    Tcl_FSGetNativePath(destPathPtr));
+    return DoCopyFile((WCHAR *)Tcl_FSGetNativePath(srcPathPtr),
+	    (WCHAR *)Tcl_FSGetNativePath(destPathPtr));
 }
 
 static int
@@ -749,7 +749,7 @@ TclpDeleteFile(
     const void *nativePath)	/* Pathname of file to be removed (native). */
 {
     DWORD attr;
-    const WCHAR *path = nativePath;
+    const WCHAR *path = (const WCHAR *)nativePath;
 
     /*
      * The DeleteFile API acts differently under Win95/98 and NT WRT NULL and
@@ -854,7 +854,7 @@ int
 TclpObjCreateDirectory(
     Tcl_Obj *pathPtr)
 {
-    return DoCreateDirectory(Tcl_FSGetNativePath(pathPtr));
+    return DoCreateDirectory((WCHAR *)Tcl_FSGetNativePath(pathPtr));
 }
 
 static int
@@ -877,7 +877,7 @@ DoCreateDirectory(
  *
  *	Recursively copies a directory. The target directory dst must not
  *	already exist. Note that this function does not merge two directory
- *	hierarchies, even if the target directory is an an empty directory.
+ *	hierarchies, even if the target directory is an empty directory.
  *
  * Results:
  *	If the directory was successfully copied, returns TCL_OK. Otherwise
@@ -906,10 +906,16 @@ TclpObjCopyDirectory(
     int ret;
 
     normSrcPtr = Tcl_FSGetNormalizedPath(NULL,srcPathPtr);
-    normDestPtr = Tcl_FSGetNormalizedPath(NULL,destPathPtr);
-    if ((normSrcPtr == NULL) || (normDestPtr == NULL)) {
+    if (normSrcPtr == NULL) {
 	return TCL_ERROR;
     }
+    if (normSrcPtr != srcPathPtr) { Tcl_IncrRefCount(normSrcPtr); }
+    normDestPtr = Tcl_FSGetNormalizedPath(NULL,destPathPtr);
+    if (normDestPtr == NULL) {
+	if (normSrcPtr != srcPathPtr) { Tcl_DecrRefCount(normSrcPtr); }
+	return TCL_ERROR;
+    }
+    if (normDestPtr != destPathPtr) { Tcl_IncrRefCount(normDestPtr); }
 
     Tcl_WinUtfToTChar(Tcl_GetString(normSrcPtr), -1, &srcString);
     Tcl_WinUtfToTChar(Tcl_GetString(normDestPtr), -1, &dstString);
@@ -925,11 +931,14 @@ TclpObjCopyDirectory(
 	} else if (!strcmp(Tcl_DStringValue(&ds), TclGetString(normDestPtr))) {
 	    *errorPtr = destPathPtr;
 	} else {
-	    *errorPtr = Tcl_NewStringObj(Tcl_DStringValue(&ds), -1);
+	    *errorPtr = TclDStringToObj(&ds);
 	}
 	Tcl_DStringFree(&ds);
 	Tcl_IncrRefCount(*errorPtr);
     }
+
+    if (normSrcPtr != srcPathPtr) { Tcl_DecrRefCount(normSrcPtr); }
+    if (normDestPtr != destPathPtr) { Tcl_DecrRefCount(normDestPtr); }
     return ret;
 }
 
@@ -984,11 +993,12 @@ TclpObjRemoveDirectory(
 	if (normPtr == NULL) {
 	    return TCL_ERROR;
 	}
+	if (normPtr != pathPtr) { Tcl_IncrRefCount(normPtr); }
 	Tcl_WinUtfToTChar(Tcl_GetString(normPtr), -1, &native);
 	ret = DoRemoveDirectory(&native, recursive, &ds);
 	Tcl_DStringFree(&native);
     } else {
-	ret = DoRemoveJustDirectory(Tcl_FSGetNativePath(pathPtr), 0, &ds);
+	ret = DoRemoveJustDirectory((WCHAR *)Tcl_FSGetNativePath(pathPtr), 0, &ds);
     }
 
     if (ret != TCL_OK) {
@@ -1003,6 +1013,7 @@ TclpObjRemoveDirectory(
 	}
 	Tcl_DStringFree(&ds);
     }
+    if (normPtr && normPtr != pathPtr) { Tcl_DecrRefCount(normPtr); }
 
     return ret;
 }
@@ -1506,7 +1517,7 @@ GetWinFileAttributes(
     const WCHAR *nativeName;
     int attr;
 
-    nativeName = Tcl_FSGetNativePath(fileName);
+    nativeName = (WCHAR *)Tcl_FSGetNativePath(fileName);
     result = GetFileAttributesW(nativeName);
 
     if (result == 0xFFFFFFFF) {
@@ -1833,7 +1844,7 @@ SetWinFileAttributes(
     int yesNo, result;
     const WCHAR *nativeName;
 
-    nativeName = Tcl_FSGetNativePath(fileName);
+    nativeName = (WCHAR *)Tcl_FSGetNativePath(fileName);
     fileAttributes = old = GetFileAttributesW(nativeName);
 
     if (fileAttributes == 0xFFFFFFFF) {
