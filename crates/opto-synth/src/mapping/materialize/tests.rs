@@ -106,6 +106,121 @@ fn lowers_scalar_signedness_casts_as_wire_aliases() {
         .port_nets(opto_ir::mapped::PortId::from_index(1).unwrap())
         .unwrap()[0];
     assert_eq!(input_net, output_net);
+    validate_observable_drivers(
+        &mapped,
+        &opto_library::TargetCellSet::default(),
+        &crate::ReferencePortMap::new(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn publication_rejects_an_undriven_observable_output() {
+    let mut module = word::WordModule::new("undriven_output");
+    module
+        .add_port(
+            "y",
+            word::PortDirection::Output,
+            word::WordType::bits(1).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let source_instances = source_provenance(&module);
+    let mapped = build_test_substrate(
+        &module,
+        &SynthesisOptions {
+            target_cells: opto_library::TargetCellSet::default(),
+        },
+        &BTreeSet::new(),
+        &crate::ReferencePortMap::new(),
+        &source_instances,
+        opto_ir::RevisionId::INITIAL,
+    )
+    .unwrap()
+    .netlist;
+
+    let error = validate_observable_drivers(
+        &mapped,
+        &opto_library::TargetCellSet::default(),
+        &crate::ReferencePortMap::new(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("output 'y[0]' has no physical driver")
+    );
+}
+
+#[test]
+fn publication_resolves_a_target_output_pin_by_name_without_a_dense_pin_id() {
+    let target_cells: opto_library::TargetCellSet = vec![cell(
+        "BUF",
+        false,
+        opto_library::TargetCellUsage::default(),
+        true,
+    )]
+    .into();
+    let mut builder =
+        MappedBuilder::new("pin_name_fallback", opto_ir::RevisionId::INITIAL).unwrap();
+    let net = builder.add_net(Some("y")).unwrap();
+    builder
+        .add_port("y", PortDirection::Output, &[net])
+        .unwrap();
+    builder
+        .add_cell(
+            "U1",
+            "BUF",
+            Some(0),
+            &[("Y".to_string(), None, ConnectionSignal::Net(net))],
+        )
+        .unwrap();
+    let mapped = builder.freeze().unwrap();
+
+    validate_observable_drivers(&mapped, &target_cells, &crate::ReferencePortMap::new()).unwrap();
+}
+
+#[test]
+fn frozen_connectivity_rejects_a_postmap_edit_that_orphans_an_output() {
+    let target_cells: opto_library::TargetCellSet = vec![cell(
+        "BUF",
+        false,
+        opto_library::TargetCellUsage::default(),
+        true,
+    )]
+    .into();
+    let mut builder = MappedBuilder::new("frozen_output", opto_ir::RevisionId::INITIAL).unwrap();
+    let net = builder.add_net(Some("y")).unwrap();
+    builder
+        .add_port("y", PortDirection::Output, &[net])
+        .unwrap();
+    let driver = builder
+        .add_cell(
+            "U1",
+            "BUF",
+            Some(0),
+            &[("Y".to_string(), None, ConnectionSignal::Net(net))],
+        )
+        .unwrap();
+    let mut mapped = builder.freeze().unwrap();
+    let connectivity = FrozenObservableConnectivity::capture(
+        &mapped,
+        &target_cells,
+        &crate::ReferencePortMap::new(),
+    )
+    .unwrap();
+    let snapshot = mapped.snapshot_region([driver], [net]).unwrap();
+    let mut delta = opto_ir::mapped::RegionDelta::new(snapshot);
+    delta.remove_cell(driver).unwrap();
+    let edit = mapped.apply_region_delta(delta).unwrap();
+
+    assert!(
+        !connectivity
+            .preserves_affected(&mapped, &target_cells, edit.affected_nets())
+            .unwrap()
+    );
+    mapped.rollback_region_delta(edit).unwrap();
+    connectivity.validate(&mapped, &target_cells).unwrap();
 }
 
 #[test]

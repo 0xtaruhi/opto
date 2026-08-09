@@ -16,7 +16,6 @@ mod connectivity;
 mod semantic;
 mod work;
 use connectivity::{ConnectivityIndex, InputOperations};
-pub(crate) use semantic::value_keys as semantic_value_keys;
 use work::{is_state, memory_read_inputs, memory_work, memory_write_inputs, operation_work};
 
 const OPERATION_ANCHOR_DOMAIN: &[u8] = b"opto/operation-anchor/v1\0";
@@ -155,6 +154,22 @@ pub(crate) fn build(
     module: &word::WordModule,
     policy: RegionPartitionPolicy,
 ) -> Result<SynthesisRegionGraph, crate::SynthError> {
+    build_inner(module, policy, None)
+}
+
+pub(crate) fn build_with_ownership(
+    module: &word::WordModule,
+    policy: RegionPartitionPolicy,
+    ownership: &crate::regional::StructuralOwnershipProvenance,
+) -> Result<SynthesisRegionGraph, crate::SynthError> {
+    build_inner(module, policy, Some(ownership))
+}
+
+fn build_inner(
+    module: &word::WordModule,
+    policy: RegionPartitionPolicy,
+    ownership: Option<&crate::regional::StructuralOwnershipProvenance>,
+) -> Result<SynthesisRegionGraph, crate::SynthError> {
     if policy.target_work == 0 {
         return Err(crate::SynthError::invariant(
             "region target work must be nonzero",
@@ -164,6 +179,9 @@ pub(crate) fn build(
     let value_keys = semantic::value_keys(module)?;
     let anchors = operation_anchors(module)?;
     let mut regions = partition_operations(module, &anchors, &drivers, policy)?;
+    if let Some(ownership) = ownership {
+        merge_ownership_claims(module, ownership, &mut regions)?;
+    }
     append_memory_regions(module, &mut regions)?;
     let mut operation_owner = vec![None; module.operations().len()];
     let mut memory_owner = vec![None; module.memories().len()];
@@ -194,6 +212,95 @@ pub(crate) fn build(
         memory_owner,
         anchors.into_vec(),
     )
+}
+
+fn merge_ownership_claims(
+    module: &word::WordModule,
+    ownership: &crate::regional::StructuralOwnershipProvenance,
+    regions: &mut Vec<TempRegion>,
+) -> Result<(), crate::SynthError> {
+    if ownership.len() != module.operations().len() {
+        return Err(crate::SynthError::invariant(
+            "final partition received incomplete structural ownership provenance",
+        ));
+    }
+    let mut operation_regions = vec![None; module.operations().len()];
+    for (region, contents) in regions.iter().enumerate() {
+        for operation in &contents.operations {
+            operation_regions[operation.index()] = Some(region);
+        }
+    }
+    let mut parents = (0..regions.len()).collect::<Vec<_>>();
+    let mut owner_regions = BTreeMap::new();
+    for (index, region) in operation_regions.iter().copied().enumerate() {
+        let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+        let Some(owner) = ownership.owner(operation) else {
+            continue;
+        };
+        let Some(region) = region else {
+            continue;
+        };
+        if let Some(previous) = owner_regions.insert(owner, region) {
+            union_region_claims(&mut parents, region, previous);
+        }
+    }
+    if parents
+        .iter()
+        .enumerate()
+        .all(|(index, &parent)| index == parent)
+    {
+        return Ok(());
+    }
+    for index in 0..parents.len() {
+        let root = find_region_claim(&mut parents, index);
+        parents[index] = root;
+    }
+    let mut merged = BTreeMap::<usize, TempRegion>::new();
+    for (index, region) in std::mem::take(regions).into_iter().enumerate() {
+        let root = parents[index];
+        match merged.entry(root) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(region);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let target = entry.get_mut();
+                target.operations.extend(region.operations);
+                target.operations.sort_unstable();
+                target.work = target.work.saturating_add(region.work);
+                target.delay = target.delay.saturating_add(region.delay);
+                target.wiring = target.wiring.saturating_add(region.wiring);
+                target.anchor = target.anchor.min(region.anchor);
+                if region.kind == SynthesisRegionKind::State {
+                    target.kind = SynthesisRegionKind::State;
+                }
+            }
+        }
+    }
+    *regions = merged.into_values().collect();
+    Ok(())
+}
+
+fn find_region_claim(parents: &mut [usize], mut region: usize) -> usize {
+    while parents[region] != region {
+        let parent = parents[region];
+        parents[region] = parents[parent];
+        region = parents[region];
+    }
+    region
+}
+
+fn union_region_claims(parents: &mut [usize], left: usize, right: usize) {
+    let left = find_region_claim(parents, left);
+    let right = find_region_claim(parents, right);
+    if left == right {
+        return;
+    }
+    let (root, child) = if left < right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    parents[child] = root;
 }
 
 fn partition_operations(

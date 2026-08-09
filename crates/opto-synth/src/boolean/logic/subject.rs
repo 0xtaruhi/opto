@@ -190,6 +190,7 @@ impl RegionLogicImplementation {
 
 struct LogicNetworkBuilder<'a> {
     module: &'a word::WordModule,
+    drivers: crate::word::signal_driver::SignalDriverIndex,
     network: LogicGraph,
     nodes: HashMap<word::ValueId, Option<LogicNodeId>>,
     input_index: HashMap<u64, u32>,
@@ -217,6 +218,7 @@ impl<'a> LogicNetworkBuilder<'a> {
         }
         Ok(Self {
             module,
+            drivers: crate::word::signal_driver::SignalDriverIndex::new(module)?,
             network: LogicGraph::new(),
             nodes: HashMap::new(),
             input_index: HashMap::new(),
@@ -267,14 +269,26 @@ impl<'a> LogicNetworkBuilder<'a> {
             if stored.ty.width() != 1 {
                 continue;
             }
-            let word::ValueKind::Operation(operation) = stored.kind else {
-                continue;
+            let dependencies = match stored.kind {
+                word::ValueKind::Signal(reference) => self
+                    .drivers
+                    .scalar_driver(self.module, reference)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                word::ValueKind::Operation(operation) => {
+                    let operation = self.module.operation(operation).ok_or_else(|| {
+                        crate::SynthError::invariant(format!(
+                            "unknown RTL operation for {current:?}"
+                        ))
+                    })?;
+                    scalar_operation_operands(&operation.kind)
+                        .into_iter()
+                        .flatten()
+                        .collect()
+                }
+                word::ValueKind::Constant(_) => Vec::new(),
             };
-            let operation = self.module.operation(operation).ok_or_else(|| {
-                crate::SynthError::invariant(format!("unknown RTL operation for {current:?}"))
-            })?;
-            let inputs = scalar_operation_operands(&operation.kind);
-            for input in inputs.into_iter().flatten().rev() {
+            for input in dependencies.into_iter().rev() {
                 if !self.nodes.contains_key(&input) {
                     self.pending.push((input, false));
                 }
@@ -298,7 +312,8 @@ pub(crate) fn subject_leaves(
     module: &word::WordModule,
     roots: &[word::ValueId],
     boundary_inputs: &[word::ValueId],
-) -> Vec<word::ValueId> {
+) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    let drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
     let boundary = boundary_inputs
         .iter()
         .copied()
@@ -322,8 +337,12 @@ pub(crate) fn subject_leaves(
             continue;
         }
         match &stored.kind {
-            word::ValueKind::Signal(_) => {
-                leaves.insert(value);
+            word::ValueKind::Signal(reference) => {
+                if let Some(driver) = drivers.scalar_driver(module, *reference) {
+                    pending.push(driver);
+                } else {
+                    leaves.insert(value);
+                }
             }
             word::ValueKind::Constant(_) => {}
             word::ValueKind::Operation(operation) => {
@@ -340,7 +359,7 @@ pub(crate) fn subject_leaves(
             }
         }
     }
-    leaves.into_iter().collect()
+    Ok(leaves.into_iter().collect())
 }
 
 /// The operands a scalar logic operation decomposes into.
@@ -381,7 +400,13 @@ impl LogicNetworkBuilder<'_> {
             return Ok(None);
         }
         let base = match stored.kind.clone() {
-            word::ValueKind::Signal(reference) => self.input(reference).map(Some),
+            word::ValueKind::Signal(reference) => {
+                if let Some(driver) = self.drivers.scalar_driver(self.module, reference) {
+                    self.resolved(driver)
+                } else {
+                    self.input(reference).map(Some)
+                }
+            }
             word::ValueKind::Constant(bits) => {
                 Ok(logic_constant(&bits).map(LogicGraph::constant).or_else(|| {
                     self.undefined_scalar(value)
@@ -649,6 +674,62 @@ mod tests {
 
         assert_eq!(graph.inputs().len(), 1);
         assert_eq!(graph.node(first), graph.node(second));
+    }
+
+    #[test]
+    fn region_owned_signal_driver_is_logic_not_an_interface_input() {
+        let mut module = word::WordModule::new("owned_connect");
+        let ty = word::WordType::bits(1).unwrap();
+        let [select, left, right] = ["select", "left", "right"].map(|name| {
+            let port = module
+                .add_port(
+                    name,
+                    word::PortDirection::Input,
+                    ty,
+                    word::SourceSpan::default(),
+                )
+                .unwrap();
+            module
+                .read_signal(
+                    module.port(port).unwrap().signal,
+                    word::SourceSpan::default(),
+                )
+                .unwrap()
+        });
+        let selected = module
+            .mux(select, left, right, word::SourceSpan::default())
+            .unwrap();
+        let wire = module
+            .add_wire("selected", ty, word::SourceSpan::default())
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(wire),
+                selected,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let root = module
+            .read_signal(wire, word::SourceSpan::default())
+            .unwrap();
+
+        let graph = RegionLogicGraph::new_cached(
+            &module,
+            &[root],
+            &[None],
+            RegionLogicOptions {
+                optimize: false,
+                config: crate::SynthesisConfig::default(),
+                runtime: crate::test_runtime(),
+                incremental: None,
+                boundary_inputs: &[select, left, right],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(graph.inputs().len(), 3);
+        assert!(graph.node(root).is_some());
+        assert!(!graph.inputs().contains(&root));
     }
 
     #[test]

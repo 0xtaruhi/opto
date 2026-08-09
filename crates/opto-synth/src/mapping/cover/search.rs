@@ -13,7 +13,7 @@ use opto_runtime::ExecutionContext;
 
 const DONT_CARE_FILL_CAP: u32 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LibraryCoverSource {
     Constant(bool),
     Input(usize),

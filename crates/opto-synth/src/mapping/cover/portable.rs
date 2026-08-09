@@ -1,12 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Portable target-cover payloads and revision-local binding reconstruction.
+//! Portable target-cover payloads.
 
 use super::{LibraryCoverBinding, LibraryCoverSource};
 use crate::boolean::logic::MAX_MATCH_INPUTS;
-use crate::mapping::{RegionPlanBinding, RegionPlanValueBinding};
-use opto_ir::word;
 
 #[derive(Debug)]
 pub(crate) struct PortableCoverCell {
@@ -19,17 +17,8 @@ pub(crate) struct PortableCoverCell {
 
 #[derive(Debug)]
 pub(crate) struct PortableCover {
-    decision_key: [u8; 32],
-    layout_digest: [u8; 32],
     cells: Box<[PortableCoverCell]>,
     outputs: Box<[LibraryCoverSource]>,
-    binding: PortableCoverBinding,
-}
-
-#[derive(Debug)]
-pub(crate) struct PortableCoverBinding {
-    inputs: Box<[u32]>,
-    outputs: Box<[Box<[u32]>]>,
 }
 
 impl PortableCover {
@@ -40,114 +29,6 @@ impl PortableCover {
     pub(crate) fn outputs(&self) -> &[LibraryCoverSource] {
         &self.outputs
     }
-
-    fn reconstruct_binding(
-        &self,
-        slice: &super::super::logic_partition::RegionLogicSlice,
-    ) -> Result<RegionPlanBinding, crate::SynthError> {
-        let inputs = self
-            .binding
-            .inputs
-            .iter()
-            .map(|&index| {
-                slice
-                    .binding_input(index)
-                    .map(RegionPlanValueBinding::Lowered)
-                    .ok_or_else(|| {
-                        crate::SynthError::invariant(
-                            "regional cover input binding is outside the canonical slice",
-                        )
-                    })
-            })
-            .collect::<Result<_, _>>()?;
-        let outputs = self
-            .binding
-            .outputs
-            .iter()
-            .map(|indices| {
-                indices
-                    .iter()
-                    .map(|&index| {
-                        slice
-                            .binding_root(index)
-                            .map(RegionPlanValueBinding::Lowered)
-                            .ok_or_else(|| {
-                                crate::SynthError::invariant(
-                                    "regional cover output binding is outside the canonical slice",
-                                )
-                            })
-                    })
-                    .collect::<Result<_, _>>()
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(RegionPlanBinding { inputs, outputs })
-    }
-}
-
-impl PortableCoverBinding {
-    pub(crate) fn capture(
-        module: &word::WordModule,
-        binding: &RegionPlanBinding,
-        slice: &super::super::logic_partition::RegionLogicSlice,
-    ) -> Result<Self, crate::SynthError> {
-        let locate = |value| {
-            slice.input_binding_ordinal(module, value).ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "target cover input is absent from its canonical slice",
-                )
-            })
-        };
-        let inputs = binding
-            .inputs
-            .iter()
-            .map(|binding| lowered_index(*binding, locate))
-            .collect::<Result<_, _>>()?;
-        let outputs = binding
-            .outputs
-            .iter()
-            .map(|bindings| {
-                bindings
-                    .iter()
-                    .map(|binding| {
-                        lowered_index(*binding, |value| {
-                            slice.root_binding_ordinal(value).ok_or_else(|| {
-                                crate::SynthError::invariant(
-                                    "target cover output is absent from its canonical slice",
-                                )
-                            })
-                        })
-                    })
-                    .collect::<Result<Box<[_]>, _>>()
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Self { inputs, outputs })
-    }
-
-    pub(crate) fn encode(&self, payload: &mut Vec<u8>) {
-        payload.extend_from_slice(&(self.inputs.len() as u64).to_le_bytes());
-        for &index in &self.inputs {
-            payload.extend_from_slice(&index.to_le_bytes());
-        }
-        payload.extend_from_slice(&(self.outputs.len() as u64).to_le_bytes());
-        for indices in &self.outputs {
-            payload.extend_from_slice(&(indices.len() as u64).to_le_bytes());
-            for &index in indices {
-                payload.extend_from_slice(&index.to_le_bytes());
-            }
-        }
-    }
-}
-
-fn lowered_index(
-    binding: RegionPlanValueBinding,
-    locate: impl FnOnce(word::ValueId) -> Result<u32, crate::SynthError>,
-) -> Result<u32, crate::SynthError> {
-    let RegionPlanValueBinding::Lowered(value) = binding else {
-        return Err(crate::SynthError::invariant(
-            "target cover binding is not lowered",
-        ));
-    };
-    locate(value)
 }
 
 impl PortableCoverCell {
@@ -198,13 +79,11 @@ impl PortableCoverCell {
 
 pub(crate) fn decode(payload: &[u8]) -> Result<PortableCover, crate::SynthError> {
     let mut reader = PlanPayloadReader::new(payload, "regional cover-plan");
-    if reader.read_array::<5>()? != *b"ORCP\x02" {
+    if reader.read_array::<5>()? != *b"ORCP\x03" {
         return Err(crate::SynthError::invariant(
             "regional cover-plan payload has an unknown ABI",
         ));
     }
-    let decision_key = reader.read_array::<32>()?;
-    let layout_digest = reader.read_array::<32>()?;
     let cell_count = reader.read_count("regional cover-plan cell count", 31)?;
     let mut cells = Vec::with_capacity(cell_count);
     for index in 0..cell_count {
@@ -251,186 +130,15 @@ pub(crate) fn decode(payload: &[u8]) -> Result<PortableCover, crate::SynthError>
     let outputs = (0..output_count)
         .map(|_| reader.read_source())
         .collect::<Result<_, _>>()?;
-    let input_count = reader.read_count("regional cover input binding count", 4)?;
-    let inputs = (0..input_count)
-        .map(|_| reader.read_u32())
-        .collect::<Result<_, _>>()?;
-    let output_binding_count = reader.read_count("regional cover output binding count", 8)?;
-    if output_binding_count != output_count {
-        return Err(crate::SynthError::invariant(
-            "regional cover output topology and binding counts differ",
-        ));
-    }
-    let binding_outputs = (0..output_binding_count)
-        .map(|_| {
-            let count = reader.read_count("regional cover output binding width", 4)?;
-            (0..count)
-                .map(|_| reader.read_u32())
-                .collect::<Result<_, _>>()
-        })
-        .collect::<Result<_, _>>()?;
     if !reader.is_empty() {
         return Err(crate::SynthError::invariant(
             "regional cover-plan payload has trailing bytes",
         ));
     }
     Ok(PortableCover {
-        decision_key,
-        layout_digest,
         cells: cells.into_boxed_slice(),
         outputs,
-        binding: PortableCoverBinding {
-            inputs,
-            outputs: binding_outputs,
-        },
     })
-}
-
-pub(crate) fn reconstruct_binding(
-    module: &word::WordModule,
-    plan: &crate::RegionCoverPlan,
-    slice: &super::super::logic_partition::RegionLogicSlice,
-    decision_key: [u8; 32],
-) -> Result<RegionPlanBinding, crate::SynthError> {
-    if plan.payload().is_empty() {
-        if plan.local_cell_count() != 0
-            || plan.local_net_count() != 0
-            || plan.local_pin_count() != 0
-            || plan.cost().cell_count != 0
-            || !plan.implementation_cells().is_empty()
-            || plan.cost().stable_plan_key != empty_plan_key(plan.region(), decision_key)
-        {
-            return Err(crate::SynthError::invariant(
-                "empty regional cover plan failed identity reconstruction",
-            ));
-        }
-        if slice.roots().iter().try_fold(false, |requires, root| {
-            super::super::roots::requires_combinational_cover(module, root.value)
-                .map(|current| requires || current)
-        })? {
-            return Err(crate::SynthError::invariant(
-                "empty regional cover plan omits canonical combinational logic",
-            ));
-        }
-        return Ok(RegionPlanBinding::empty());
-    }
-
-    let cover = decode(plan.payload())?;
-    if cover.decision_key != decision_key {
-        return Err(crate::SynthError::invariant(
-            "regional cover plan belongs to a different construction decision",
-        ));
-    }
-    if cover.layout_digest != slice.binding_layout_digest() {
-        return Err(crate::SynthError::invariant(
-            "regional cover plan belongs to a different stable binding layout",
-        ));
-    }
-    if cover.cells.len() != plan.local_cell_count() as usize
-        || cover.cells.len() != plan.cost().cell_count as usize
-        || cover.outputs.len() != cover.binding.outputs.len()
-    {
-        return Err(crate::SynthError::invariant(
-            "regional cover plan shape failed reconstruction",
-        ));
-    }
-    let net_count = cover.cells.iter().try_fold(0u32, |count, cell| {
-        count
-            .checked_add(if cell.second_truth.is_some() { 2 } else { 1 })
-            .ok_or_else(|| crate::SynthError::capacity("regional cover net count"))
-    })?;
-    if net_count != plan.local_net_count() {
-        return Err(crate::SynthError::invariant(
-            "regional cover plan net count failed reconstruction",
-        ));
-    }
-    for (index, cell) in cover.cells.iter().enumerate() {
-        if cell.joint != cell.second_truth.is_some() {
-            return Err(crate::SynthError::invariant(
-                "regional cover cell output shape disagrees with its binding kind",
-            ));
-        }
-        validate_sources(
-            &cell.sources,
-            cover.binding.inputs.len(),
-            &cover.cells,
-            index,
-        )?;
-    }
-    validate_sources(
-        &cover.outputs,
-        cover.binding.inputs.len(),
-        &cover.cells,
-        cover.cells.len(),
-    )?;
-    reject_duplicate_rows(&cover.binding)?;
-    if plan.cost().stable_plan_key
-        != stable_plan_key(
-            plan.region(),
-            decision_key,
-            plan.payload(),
-            plan.implementation_cells(),
-        )
-    {
-        return Err(crate::SynthError::invariant(
-            "regional cover plan stable identity failed reconstruction",
-        ));
-    }
-    cover.reconstruct_binding(slice)
-}
-
-fn validate_sources(
-    sources: &[LibraryCoverSource],
-    input_count: usize,
-    cells: &[PortableCoverCell],
-    available_cells: usize,
-) -> Result<(), crate::SynthError> {
-    for &source in sources {
-        let valid = match source {
-            LibraryCoverSource::Constant(_) => true,
-            LibraryCoverSource::Input(index) => index < input_count,
-            LibraryCoverSource::Cell(index) => index < available_cells,
-            LibraryCoverSource::CellSecond(index) => {
-                index < available_cells
-                    && cells
-                        .get(index)
-                        .is_some_and(|cell| cell.second_truth.is_some())
-            }
-        };
-        if !valid {
-            return Err(crate::SynthError::invariant(
-                "regional cover plan source failed topology reconstruction",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn reject_duplicate_rows(binding: &PortableCoverBinding) -> Result<(), crate::SynthError> {
-    let mut inputs = binding.inputs.to_vec();
-    inputs.sort_unstable();
-    if inputs.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(crate::SynthError::invariant(
-            "regional cover input binding contains duplicate canonical rows",
-        ));
-    }
-    if binding.outputs.iter().any(|rows| rows.is_empty()) {
-        return Err(crate::SynthError::invariant(
-            "regional cover output binding contains an empty group",
-        ));
-    }
-    let mut outputs = binding
-        .outputs
-        .iter()
-        .flat_map(|rows| rows.iter().copied())
-        .collect::<Vec<_>>();
-    outputs.sort_unstable();
-    if outputs.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(crate::SynthError::invariant(
-            "regional cover output binding contains duplicate canonical rows",
-        ));
-    }
-    Ok(())
 }
 
 pub(crate) fn empty_plan_key(region: crate::RegionAnchorId, decision_key: [u8; 32]) -> [u8; 32] {

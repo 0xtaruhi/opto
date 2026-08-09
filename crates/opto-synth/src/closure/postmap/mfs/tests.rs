@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    CellFunction, DriverIndex, ResynthesisObjective, cell_functions, closed_dying_cone,
-    optimization_boundary_nets, region_boundary_nets, resynthesis_cells, sorted_candidate_nets,
+    CellFunction, DriverIndex, OptimizationContext, ResynthesisObjective, cell_functions,
+    closed_dying_cone, optimization_boundary_nets, optimization_candidate, region_boundary_nets,
+    resynthesis_cells, sorted_candidate_nets,
 };
 use hashbrown::{HashMap, HashSet};
 use opto_ir::mapped::{
@@ -175,6 +176,64 @@ fn hierarchy_anchors_partition_regions_without_blocking_optimization() {
     assert!(!optimization.contains(&hierarchy));
     assert!(regions.contains(&input));
     assert!(regions.contains(&hierarchy));
+}
+
+#[test]
+fn output_boundary_identity_blocks_wire_replacement() {
+    let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+    let input = builder.add_net(Some("input")).unwrap();
+    let output = builder.add_net(Some("output")).unwrap();
+    let consumed = builder.add_net(Some("consumed")).unwrap();
+    builder
+        .add_port("input", PortDirection::Input, &[input])
+        .unwrap();
+    builder
+        .add_port("output", PortDirection::Output, &[output])
+        .unwrap();
+    let driver = builder
+        .add_cell(
+            "driver",
+            "BUF",
+            None,
+            &[
+                ("A0".to_string(), None, ConnectionSignal::Net(input)),
+                ("Z".to_string(), None, ConnectionSignal::Net(output)),
+            ],
+        )
+        .unwrap();
+    builder
+        .add_cell(
+            "consumer",
+            "BUF",
+            None,
+            &[
+                ("A0".to_string(), None, ConnectionSignal::Net(output)),
+                ("Z".to_string(), None, ConnectionSignal::Net(consumed)),
+            ],
+        )
+        .unwrap();
+    let mapped = builder.freeze().unwrap();
+    let functions = HashMap::from([function("BUF", 1, 0b10)]);
+    let resynthesis = resynthesis_cells(&functions, ResynthesisObjective::Area);
+    let drivers = DriverIndex::build(&mapped, &functions);
+    let boundary = optimization_boundary_nets(&mapped);
+    let implementations = crate::ImplementationDb::empty(mapped.cell_slot_count());
+
+    assert!(
+        optimization_candidate(
+            OptimizationContext {
+                mapped: &mapped,
+                implementations: &implementations,
+                functions: &functions,
+                resynthesis: &resynthesis,
+                drivers: &drivers,
+                boundary: &boundary,
+                diagnostics: false,
+            },
+            driver,
+        )
+        .is_none()
+    );
 }
 
 #[test]

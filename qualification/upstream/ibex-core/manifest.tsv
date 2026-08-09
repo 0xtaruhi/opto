@@ -1,6 +1,7 @@
 # repository_commit
 c6edaa4060b1a3cd27fda928058db4f0ee3d24bd
 # relative_path	sha256
+vendor/lowrisc_ip/ip/prim/rtl/prim_cipher_pkg.sv	9cd66bdbc64020e3fe1f14a5baee30a93609b7887a9d21df7991929087b0973f
 vendor/lowrisc_ip/ip/prim/rtl/prim_assert.sv	d717d5dbcba3b5aa8a731ef9f8af18b036b49edef282f0a43a51f5ad2dd9bb40
 vendor/lowrisc_ip/dv/sv/dv_utils/dv_fcov_macros.svh	d8d02ae47a12d78f611e15e4ab6e14775b55a0bdbb0815f36fbe8ddb242984ae
 rtl/ibex_pkg.sv	d4e240442dab1080a7cc3a7c63368ad7f725e560fa8397ff05410242c67dabb8

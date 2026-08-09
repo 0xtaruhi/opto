@@ -75,6 +75,7 @@ pub(crate) struct PostmapRequest<'a> {
     pub(crate) policy: SynthesisPolicy,
     pub(crate) runtime: &'a ExecutionContext,
     pub(crate) power_evaluator: std::sync::Arc<dyn crate::SynthesisPowerEvaluator>,
+    pub(crate) connectivity: &'a crate::mapping::materialize::FrozenObservableConnectivity,
 }
 
 pub(crate) fn optimize_mapped_netlist(
@@ -93,6 +94,7 @@ pub(crate) fn optimize_mapped_netlist(
         policy,
         runtime,
         power_evaluator,
+        connectivity,
     } = request;
     let preparation = match timing {
         Some(timing) => optimize_timing(
@@ -107,6 +109,7 @@ pub(crate) fn optimize_mapped_netlist(
                 policy,
                 runtime,
                 power_evaluator: power_evaluator.clone(),
+                connectivity,
             },
             config,
             observer,
@@ -130,6 +133,7 @@ pub(crate) fn optimize_mapped_netlist(
             policy,
             runtime,
             power_evaluator,
+            connectivity,
         },
         config,
         observer,
@@ -163,6 +167,7 @@ fn optimize_timing(
         policy,
         runtime,
         power_evaluator,
+        connectivity,
     } = request;
     let mut session = TimingOptimizationSession::start(TimingOptimizationRequest {
         mapped,
@@ -174,6 +179,7 @@ fn optimize_timing(
         scenarios,
         runtime,
         power_evaluator,
+        connectivity,
         diagnostics,
         observer,
     })?;

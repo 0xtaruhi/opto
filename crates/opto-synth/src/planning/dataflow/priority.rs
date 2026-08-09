@@ -35,6 +35,7 @@ struct PriorityNode {
 pub(super) struct GeneratedOperations<Scope> {
     pub(super) range: Range<usize>,
     pub(super) scope: Scope,
+    pub(super) sources: Box<[word::OpId]>,
 }
 
 pub(super) struct RebalanceResult<Scope> {
@@ -110,9 +111,20 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
         let start = module.operations().len();
         let replacement = build_chain(module, chain)?;
         let end = module.operations().len();
+        let sources = chain
+            .nodes
+            .iter()
+            .filter_map(
+                |&value| match module.value(value).map(|value| &value.kind) {
+                    Some(word::ValueKind::Operation(operation)) => Some(*operation),
+                    Some(word::ValueKind::Signal(_) | word::ValueKind::Constant(_)) | None => None,
+                },
+            )
+            .collect();
         generated.push(GeneratedOperations {
             range: start..end,
             scope: *scope,
+            sources,
         });
         replacements.push((chain.connect, replacement));
     }

@@ -56,7 +56,8 @@ pub(crate) fn gate_register_clocks(
     catalog: &ClockGatingCatalog,
     style: ClockGatingStyle,
 ) -> Result<ClockGatingSummary, crate::SynthError> {
-    gate_register_clocks_in_regions(module, catalog, style, None)
+    let mut ownership = crate::regional::StructuralOwnershipProvenance::global(module);
+    gate_register_clocks_in_regions(module, catalog, style, None, &mut ownership)
 }
 
 pub(super) fn gate_register_clocks_in_regions(
@@ -64,6 +65,7 @@ pub(super) fn gate_register_clocks_in_regions(
     catalog: &ClockGatingCatalog,
     style: ClockGatingStyle,
     operation_regions: Option<&[Option<crate::RegionRowId>]>,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<ClockGatingSummary, crate::SynthError> {
     let mut summary = ClockGatingSummary::default();
     if !catalog.gates_any_edge() || style.minimum_bitwidth == 0 {
@@ -122,6 +124,7 @@ pub(super) fn gate_register_clocks_in_regions(
             continue;
         };
         let source = members[0].source.clone();
+        let start = ownership.start(module)?;
         let enable = if key.active_high {
             key.enable
         } else {
@@ -174,6 +177,11 @@ pub(super) fn gate_register_clocks_in_regions(
         module
             .add_instance(instance, cell.cell_name, connections, source.clone())
             .map_err(crate::SynthError::from)?;
+        let sources = members
+            .iter()
+            .map(|member| member.operation)
+            .collect::<Vec<_>>();
+        ownership.claim_since(module, start, &sources)?;
         for member in &members {
             let operation = module.operation_mut(member.operation).ok_or_else(|| {
                 crate::SynthError::invariant(format!(

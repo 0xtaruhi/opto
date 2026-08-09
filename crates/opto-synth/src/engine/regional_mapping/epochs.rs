@@ -8,11 +8,9 @@
 
 use super::{
     BestMapping, CombinationalCellCatalog, MappedCellSource, MappedObjective, MappedRegionArtifact,
-    MappedRegionFootprint, MeasuredEpoch, REGIONAL_COMPACT_TASK_DOMAIN, REGIONAL_COVER_TASK_DOMAIN,
-    RegionPlanBinding, RegionalIr, RegionalMappedState, RegionalMapper, RegionalMappingOutcome,
-    RegionalPlans, SynthesisProgress, Task, TaskKey, WordMappedSignals,
-    boundary_observation_values, cover, empty_region_plan, materialize, regional_boundary_aliases,
-    resolve_boundary_nets, word,
+    MappedRegionFootprint, MeasuredEpoch, RegionalIr, RegionalMappedState, RegionalMapper,
+    RegionalMappingOutcome, RegionalPlans, SynthesisProgress, WordMappedSignals,
+    boundary_observation_values, materialize, resolve_boundary_nets,
 };
 use crate::mapping::MappedOutput;
 use opto_ir::mapped::{CellId, RegionDelta};
@@ -96,7 +94,7 @@ impl RegionalMapper<'_> {
                                 )
                             })
                             .collect::<Vec<_>>();
-                        self.remap_rows(ir, state, &changed, epoch)?;
+                        self.refresh_contracts(state, &changed)?;
                         let topology_changed = previous
                             .into_iter()
                             .filter_map(|(index, payload, binding)| {
@@ -172,12 +170,6 @@ impl RegionalMapper<'_> {
         ir: &mut RegionalIr<'_>,
         plans: &RegionalPlans,
     ) -> Result<RegionalMappedState, crate::SynthError> {
-        let (boundary_aliases, suppressed_aliases) = regional_boundary_aliases(
-            ir.module,
-            &plans.plans,
-            &plans.bindings,
-            ir.region_ownership,
-        )?;
         let boundary_values = boundary_observation_values(self.regions, ir.region_ownership)?;
         let mut observed_values =
             materialize::region_delta::regional_binding_values(&plans.bindings).into_vec();
@@ -201,15 +193,9 @@ impl RegionalMapper<'_> {
             source_instances: self.config.source_instances,
             base_revision: self.config.base_revision,
             observed_values: &observed_values,
-            boundary_aliases: &boundary_aliases,
         })?;
-        let signals = WordMappedSignals::from_observations_with_aliases(
-            ir.module,
-            &observed_values,
-            &observed_nets,
-            &boundary_aliases,
-            &suppressed_aliases,
-        )?;
+        let signals =
+            WordMappedSignals::from_observations(ir.module, &observed_values, &observed_nets)?;
         let boundary_nets = resolve_boundary_nets(&signals, &boundary_values)?;
         let substrate_cell_count = substrate_sources.len();
         let mut cell_sources = vec![None; netlist.cell_slot_count()];
@@ -692,14 +678,11 @@ impl RegionalMapper<'_> {
         changed
     }
 
-    /// Reprojects contracts and remaps only the rows whose contracts moved.
-    /// The frozen Word topology and every clean slice remain untouched.
-    fn remap_rows(
+    /// Rebinds measured contracts without reopening frozen regional topology.
+    fn refresh_contracts(
         &self,
-        ir: &RegionalIr<'_>,
         state: &mut RegionalPlans,
         dirty: &[crate::RegionRowId],
-        epoch: u32,
     ) -> Result<(), crate::SynthError> {
         let contexts = dirty
             .iter()
@@ -709,50 +692,17 @@ impl RegionalMapper<'_> {
                     .map(|context| (row, context))
             })
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
-        state.partition.update_contracts(&state.contracts, dirty)?;
         for (row, context) in contexts {
             state.contexts[row.index()] = context;
         }
-        if state.analyses.is_none() {
-            for &row in dirty {
-                let index = row.index();
-                state.plans[index] = state.plans[index].clone().with_context_and_contracts(
-                    state.contexts[index],
-                    state.contracts.contracts(row).to_vec(),
-                );
-            }
-            return Ok(());
-        }
-        let retained = {
-            let analyses = state.analyses.as_mut().ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "target regional mapping has no retained cover-analysis state",
-                )
-            })?;
-            dirty
-                .iter()
-                .map(|row| {
-                    let index = row.index();
-                    (
-                        index,
-                        std::mem::replace(
-                            &mut analyses[index],
-                            cover::RegionCoverAnalysis::NoCombinationalLogic,
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let analyzed = self.analyze_rows(ir, state, retained)?;
-        if let Some(analyses) = state.analyses.as_mut() {
-            for (row, analysis) in analyzed {
-                analyses[row] = analysis;
-            }
-        }
-        let label = format!("regional_remap.epoch[{epoch}]");
-        for (index, plan, binding) in self.compact_plans(ir.module, state, dirty, &label)? {
+        for &row in dirty {
+            let index = row.index();
+            let plan = state.plans[index].clone().with_context_and_contracts(
+                state.contexts[index],
+                state.contracts.contracts(row).to_vec(),
+            );
+            state.journal_compacted_plan(index, &plan)?;
             state.plans[index] = plan;
-            state.bindings[index] = binding;
         }
         Ok(())
     }
@@ -791,144 +741,6 @@ impl RegionalMapper<'_> {
             self.config.effort,
             &predecessors,
         ))
-    }
-
-    /// Covers the requested rows in parallel, reselecting from a retained
-    /// analysis when the row was already covered in an earlier epoch.
-    pub(super) fn analyze_rows(
-        &self,
-        ir: &RegionalIr<'_>,
-        state: &RegionalPlans,
-        rows: Vec<(usize, cover::RegionCoverAnalysis)>,
-    ) -> Result<Vec<(usize, cover::RegionCoverAnalysis)>, crate::SynthError> {
-        let tasks: Vec<_> = rows
-            .into_iter()
-            .map(|(row, analysis)| {
-                Task::new(
-                    TaskKey::new(REGIONAL_COVER_TASK_DOMAIN, row as u64),
-                    (row, analysis),
-                )
-                .with_estimated_work(self.regions.regions()[row].estimated_work())
-            })
-            .collect();
-        let module: &word::WordModule = ir.module;
-        self.runtime
-            .map_ordered_composite(tasks, |(row, retained), regional_runtime| {
-                let region = self.regions.regions()[row];
-                let slice = state.partition.slice(region.row());
-                let trace = self.trace.and(!slice.roots().is_empty());
-                crate::api::diagnostics::trace!(
-                    trace,
-                    "regional_cover.start",
-                    "row={row} roots={} estimated_work={} nested_lanes={}",
-                    slice.roots().len(),
-                    region.estimated_work(),
-                    regional_runtime.parallelism(),
-                );
-                let _profile = trace.span(|| {
-                    format!(
-                        "initial_mapping.region[{row}].cover_analysis roots={} \
-                         estimated_work={}",
-                        slice.roots().len(),
-                        region.estimated_work(),
-                    )
-                });
-                let request = cover::RegionCoverRequest {
-                    roots: slice.roots(),
-                    timing: self.config.timing,
-                    port_bindings: self.config.port_bindings,
-                    catalog: self.combinational_catalog(),
-                    options: crate::boolean::logic::RegionLogicOptions {
-                        optimize: self.combinational_catalog().can_invert(),
-                        config: self.config.mapping_context.config,
-                        runtime: regional_runtime,
-                        incremental: Some(crate::boolean::logic::RewriteIncremental::new(
-                            self.config.rewrite_recipes,
-                            self.config.incremental_metrics,
-                        )),
-                        boundary_inputs: slice.inputs(),
-                    },
-                    regional_slice: slice,
-                };
-                let analysis = match retained {
-                    cover::RegionCoverAnalysis::Covered(analysis) => {
-                        analysis.reselect(module, request)?
-                    }
-                    cover::RegionCoverAnalysis::NoCombinationalLogic => {
-                        cover::analyze_region_cover(module, request)?
-                    }
-                };
-                Ok((row, analysis))
-            })
-    }
-
-    /// Compacts the retained analysis of each requested row into a portable
-    /// plan and its lowered binding.
-    pub(super) fn compact_plans(
-        &self,
-        module: &word::WordModule,
-        state: &mut RegionalPlans,
-        rows: &[crate::RegionRowId],
-        label: &str,
-    ) -> Result<Vec<(usize, crate::RegionCoverPlan, RegionPlanBinding)>, crate::SynthError> {
-        let compacted = {
-            let analyses = state.analyses.as_ref().ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "target regional mapping has no retained cover-analysis state",
-                )
-            })?;
-            let tasks = rows
-                .iter()
-                .copied()
-                .map(|row| {
-                    Task::new(
-                        TaskKey::new(REGIONAL_COMPACT_TASK_DOMAIN, row.index() as u64),
-                        row,
-                    )
-                })
-                .collect();
-            self.runtime.map_ordered(tasks, |row| {
-                let index = row.index();
-                let region = self.regions.region(row).ok_or_else(|| {
-                    crate::SynthError::invariant("regional plan row is out of range")
-                })?;
-                let _profile = self
-                    .trace
-                    .and(analyses[index].is_covered())
-                    .span(|| format!("{label}.region[{index}].plan_compaction"));
-                let plan = match &analyses[index] {
-                    cover::RegionCoverAnalysis::Covered(covered_analysis) => covered_analysis
-                        .compact_plan(cover::CompactPlanInputs {
-                            module,
-                            region,
-                            context: state.contexts[index],
-                            boundary_response: state.contracts.contracts(row),
-                            decision_key: self.decision_keys[index],
-                            catalog: self.combinational_catalog(),
-                            response_models: &self.response_models,
-                            timing_tags: state.contracts.timing_tags(),
-                            regional_slice: state.partition.slice(row),
-                        })?,
-                    cover::RegionCoverAnalysis::NoCombinationalLogic => empty_region_plan(
-                        region,
-                        state.contexts[index],
-                        &state.contracts,
-                        self.decision_keys[index],
-                    )?,
-                };
-                let binding = cover::reconstruct_plan_binding(
-                    module,
-                    &plan,
-                    state.partition.slice(row),
-                    self.decision_keys[index],
-                )?;
-                Ok::<_, crate::SynthError>((index, plan, binding))
-            })?
-        };
-        for (row, plan, _) in &compacted {
-            state.journal_compacted_plan(*row, plan)?;
-        }
-        Ok(compacted)
     }
 }
 

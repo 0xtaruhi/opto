@@ -51,6 +51,10 @@ implementation architecture.
 - A semantic operation has one authoritative owner at every stage.
 - Stable identities and dense row identities are different types.
 - Cross-region dataflow is represented by explicit typed ports.
+- Global connectivity, boundary identity, and publication obligations freeze
+  before region-local Boolean optimization or cover.
+- A regional artifact may read the global substrate but may never merge,
+  redirect, or drive an equivalence class that it imports.
 - Analysis is read-only parallel work; mutation and publication are
   deterministic.
 - Workers never allocate final global IDs, names, or user-visible UIDs.
@@ -291,6 +295,31 @@ not run here. After the owned structural stage,
 - architecture-independent delay, logic, and wiring estimates;
 - local and contextual fingerprints.
 
+`StructuralOwnershipProvenance` is the write authority during structural
+preparation. Initial operations carry their frozen owner atom; every transform
+must claim each generated operation from an exact source set with one common
+atom. The final graph consumes those claims and verifies that it did not split
+a frozen owner. Ownership is not a preparation-side lookup that later
+partitioning may discard: it survives operation replacement, final partition,
+private-IR construction, plan binding, artifact publication, and provenance.
+Published objects use exactly three owner classes: global substrate, one
+region, or one directed boundary edge.
+
+The same freeze seals full-domain connectivity and boundary identity. Global
+substrate equivalence may come only from an explicit unique static connect, a
+globally exact pass-through, or a constant proved over the complete Word
+domain. A care set, truth-table reduction, or region-local rewrite is not
+connectivity evidence and cannot enter the substrate alias classes.
+An involution such as two logical or bitwise inversions is not an alias without
+an explicit two-state domain proof: `Z` may become `X` and cannot be recovered.
+When publication needs a physical identity and the target library has no
+buffer, the cover retains a two-inverter artifact instead of merging nets.
+Full-domain per-bit constant facts are captured before the regional shell
+mutates the Word graph. Proven bits enter substrate constant classes directly;
+unknown bits receive publication endpoints. A private cover may omit an
+artifact for one of those frozen constants, but a private pass-through never
+creates a substrate alias or weakens a source-level publication obligation.
+
 State and output roots claim their fan-in cones. Size truncation promotes a
 frontier operation to a seed; shared fan-in receives one owner. A fixed number
 of mutually nominated, critical-edge local matching rounds coarsens adjacent
@@ -396,8 +425,18 @@ Multi-operand additive regions retain carry-save reduction and independently
 choose Wallace or Dadda schedules according to the local objective. Fused
 multiply-accumulate and related arithmetic recipes follow the same private
 catalog path. The worker returns one portable `RegionCoverPlan` plus explicit
-source and boundary bindings; it never writes another region's arena.
-
+input and owner-output bindings; it never writes another region's arena.
+Boundary observations and publication roots are distinct frozen identities.
+An observation preserves the contract endpoint in the private Word import but
+never enters the cover-input binding namespace. Its exact global producer is
+the publication root, so a local simplification cannot reinterpret an owned
+output as an imported copy of itself.
+Before private optimization, each observable root receives a full-domain
+publication obligation from the source Word graph. If that graph does not
+prove the root to be a constant, an imported projection, or an already-owned
+state artifact, the plan must retain a combinational artifact even when its
+local care set reduces the function to a constant or pass-through. Local cover
+may simplify the implementation, but it cannot weaken this frozen obligation.
 ### 5. Publish Deterministically
 
 The coordinator reconstructs region artifacts in stable region order. The
@@ -405,6 +444,15 @@ scalar shell preserves ports, state, memories, source provenance, and boundary
 wiring. Sequential endpoint reconstruction uses the same normalization rules
 but includes region ownership in clock-gating bank keys, so publication cannot
 create a cross-region sharing opportunity.
+
+The scalar shell is substrate, not a second cover input. Private plans and
+their bindings cross lowering together and are the only regional publication
+source. No epoch repartitions the shell or attempts to rediscover private logic
+from its endpoints. Plan inputs may resolve to frozen substrate nets; plan
+outputs are owner write obligations. If an implementation output resolves to
+the same substrate class as one of its inputs, publication keeps the required
+cell on an artifact-local net and does not write that imported class. This is a
+write-permission rule, not an alias-conflict repair heuristic.
 
 ### 6. Allocate Workers Without Oversubscription
 
@@ -431,7 +479,9 @@ and static boundary aliases once. It then:
 3. prepares independent sequential and regional mapped artifacts;
 4. appends the first generation in one checked `RegionDelta`;
 5. records one stable footprint and explicit region/provenance owner per artifact;
-6. creates one sparse MMMC owner service over the complete generation.
+6. freezes observable port-net identity and retained source-pin direction for
+   the complete mapped generation;
+7. creates one sparse MMMC owner service over the complete generation.
 
 No worker allocates final IDs with atomics. A dirty region is replaced through a
 new delta that tombstones only its previous footprint and appends new slots;
@@ -443,18 +493,23 @@ that explicit read/write set.
 
 The committed generation is evaluated by authoritative global timing and power.
 Measured boundary responses may reallocate contracts and mark dirty regions.
-For target mode, the existing canonical regional analysis is refreshed or
-reused and its retained cover is selected again under the new contract. Frozen
-topology and boundary-bit rows are retained; only the dirty slice's contract
-projection is recomputed. The construction vector does not change and a second
-architecture portfolio is not created. Clean slices, analyses, and plans remain
-untouched.
+An epoch updates the dirty plans' explicit contract and context rows, then
+replaces only those plans' owned footprints. It does not reopen private cover,
+repartition the scalar shell, rebuild binding identity, or change the frozen
+topology. Clean plans and footprints remain untouched. A future incremental
+re-cover feature must retain the complete frozen private IR and consume the
+same explicit ownership and binding provenance; reconstructing it from the
+global shell is forbidden.
 
 There is one MMMC fact source, but acceptance authority is deliberately scoped
 to its decision domain. Initial mapping has one total `MappedObjective` used
 only to retain or restore an epoch checkpoint from boundary-contract metrics.
-Post-map has one transaction gate that compares full-design STA/DRC and
-physical metrics before commit or rollback. These are not competing global
+Post-map has one transaction gate that first rejects any edit that removes a
+frozen boundary net or changes the unique driver of an affected observable
+output, then compares full-design STA/DRC and physical metrics before commit or
+rollback. The connectivity check is incremental over the transaction's exact
+affected-net set; the complete frozen contract is revalidated at publication.
+These are not competing global
 objectives: boundary legality is not full-design DRC, managed implementation
 cost is not the count of every live substrate cell, and an epoch tie requires a
 stable key while a no-change post-map candidate is rejected. Sharing a nominal
@@ -470,6 +525,11 @@ After post-map consumes the shared timing service, the publication barrier
 consumes the sole mutable mapped owner, completes every fallible validation,
 capacity, revision, and generation step, then repacks live cell/net slots
 exactly once with forward read/write cursors over the existing typed arenas.
+Before repacking, every observable output bit must have exactly one physical
+driver derived from a top-level input, explicit constant, target-library output
+pin, or retained-instance output contract. Missing and multiply driven outputs
+are invariant failures, so incomplete regional publication cannot escape as a
+successful gate netlist.
 Port, retained-design, constant-driver, external-net, cell, pin-owner, and
 intrusive-adjacency references cross the same compact `u32` translation, and
 `ImplementationDb` receives the matching cell remap. Publication neither
@@ -515,6 +575,13 @@ Post-map is one large stage, but its internal topology order is mandatory:
 7. bounded MFS, compatible sizing, and pin swapping run on that topology;
    each sizing frontier is one atomic replacement forest and critical pin
    permutations are one atomic pin-swap forest, not per-cell STA searches.
+
+All seven steps consume the same frozen observable-connectivity contract.
+Boundary nets remain stable identities: MFS may replace the cell driving an
+output net, but a constant/wire reduction cannot rewire internal consumers and
+discard that output net. Candidate generation prunes that form, while the
+shared transaction gate remains the authoritative defense for every post-map
+pass.
 
 This topology order runs whenever an MMMC timing owner exists, whether or not
 the scenario has explicit optimization constraints. Constraints add
@@ -725,11 +792,11 @@ by the synchronous checkpoint field wrapper and rejects nested streams, while
 ordinary `WordModule`, `ProcModule`, and `RtlModule` serde remains
 self-contained and unchanged.
 
-A target `RegionCoverPlan` stores its binding as ordinals in the canonical
-regional slice. A cache hit validates the complete portable plan and rebuilds
-revision-local bindings from the current slice; it does not rerun Boolean
-rewrite, cut enumeration, cover selection, response measurement, or plan
-compaction. A mixed generation analyzes only rows without a retained plan.
+A target `RegionCoverPlan` stores only its portable cell topology. Input and
+owner-output bindings are a separate frozen object carried with the plan
+through global lowering and publication. A cache record is accepted only after
+the current private source semantics reconstruct the same topology and binding
+obligations; cached topology never supplies connectivity or ownership proof.
 
 Scheduling chunks are not cache identities. An unrelated edit preserves clean
 regions; a local edit replaces only the affected connected region set.

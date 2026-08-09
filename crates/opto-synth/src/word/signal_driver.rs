@@ -136,6 +136,22 @@ impl SignalDriverIndex {
         Some(bits)
     }
 
+    /// Resolves an exact scalar signal read to its scalar driving value.
+    pub(crate) fn scalar_driver(
+        &self,
+        module: &word::WordModule,
+        reference: word::SignalRef,
+    ) -> Option<word::ValueId> {
+        let resolved = self.resolve_reference(reference)?;
+        let [(driver, 0)] = resolved.as_slice() else {
+            return None;
+        };
+        module
+            .value(*driver)
+            .is_some_and(|stored| stored.ty.width() == 1)
+            .then_some(*driver)
+    }
+
     /// The distinct driver values feeding `reference`, in first-use order, or
     /// `None` when the reference is unresolved.
     pub(crate) fn reference_drivers(
@@ -149,6 +165,27 @@ impl SignalDriverIndex {
             }
         }
         Some(drivers)
+    }
+
+    /// Resolves a reference that is a complete, ordered projection of one
+    /// equal-typed driver value.
+    pub(crate) fn exact_reference_driver(
+        &self,
+        module: &word::WordModule,
+        reference: word::SignalRef,
+        ty: word::WordType,
+    ) -> Option<word::ValueId> {
+        let bits = self.resolve_reference(reference)?;
+        let &(driver, _) = bits.first()?;
+        bits.iter()
+            .enumerate()
+            .all(|(offset, &(candidate, bit))| {
+                candidate == driver && usize::try_from(bit).ok() == Some(offset)
+            })
+            .then(|| module.value(driver))
+            .flatten()
+            .filter(|value| value.ty == ty)
+            .map(|_| driver)
     }
 }
 

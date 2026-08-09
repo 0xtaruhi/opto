@@ -8,14 +8,12 @@ use crate::artifact::{MappedCellSource, provenance::ProvenanceBuilder};
 use crate::mapping::library::CombinationalCellCatalog;
 use crate::mapping::materialize::region_delta::{
     MappedRegionArtifact, MappedRegionFootprint, MappedValueSignal, WordMappedSignals,
-    regional_boundary_aliases,
 };
 use crate::mapping::{
-    self, MappingConfig, RegionPlanBinding, RegionalMappingSeed, cover, logic_partition,
-    mapping_roots, materialize,
+    self, MappingConfig, RegionPlanBinding, RegionalMappingSeed, cover, materialize,
 };
 use opto_ir::word;
-use opto_runtime::{ExecutionContext, Task, TaskKey};
+use opto_runtime::ExecutionContext;
 
 mod census;
 mod epochs;
@@ -39,8 +37,6 @@ pub(crate) struct RegionalPlanJournalRecord {
 }
 
 type BoundaryValueObservation = ([u8; 32], Box<[word::ValueId]>);
-const REGIONAL_COVER_TASK_DOMAIN: u32 = 0x5245_434f;
-const REGIONAL_COMPACT_TASK_DOMAIN: u32 = 0x5243_4d50;
 
 pub(crate) struct RegionalMappingRequest<'a> {
     pub(crate) module: &'a word::WordModule,
@@ -58,7 +54,6 @@ pub(crate) struct RegionalMappingRequest<'a> {
 /// Read-only context shared by every regional mapping epoch.
 struct RegionalMapper<'a> {
     regions: &'a crate::SynthesisRegionGraph,
-    decision_keys: &'a [[u8; 32]],
     response_models: cover::CoverResponseModels<'a>,
     config: MappingConfig<'a>,
     runtime: &'a ExecutionContext,
@@ -77,9 +72,6 @@ struct RegionalIr<'a> {
 struct RegionalPlans {
     contracts: crate::regional::RegionContractSet,
     contexts: Vec<crate::RegionContextKey>,
-    partition: logic_partition::RegionalLogicPartition,
-    /// Retained cover analyses for contract-driven remapping.
-    analyses: Option<Vec<cover::RegionCoverAnalysis>>,
     plans: Vec<crate::RegionCoverPlan>,
     bindings: Vec<RegionPlanBinding>,
     plan_journal: std::collections::BTreeMap<
@@ -159,24 +151,6 @@ struct MeasuredEpoch {
     global_dynamic_power: Option<f64>,
 }
 
-fn observe_stage<T>(
-    observer: &mut dyn FnMut(SynthesisProgress),
-    stage: crate::StageId,
-    operation: impl FnOnce() -> Result<T, crate::SynthError>,
-) -> Result<T, crate::SynthError> {
-    observer(SynthesisProgress::started(stage));
-    match operation() {
-        Ok(output) => {
-            observer(SynthesisProgress::completed(stage));
-            Ok(output)
-        }
-        Err(error) => {
-            observer(SynthesisProgress::failed(stage));
-            Err(error)
-        }
-    }
-}
-
 pub(crate) fn map_mapping_library_cells(
     request: RegionalMappingRequest<'_>,
     runtime: &ExecutionContext,
@@ -209,25 +183,8 @@ pub(crate) fn map_mapping_library_cells(
     let trace =
         crate::api::diagnostics::SynthTrace::timing(config.mapping_context.config.diagnostics);
     let contracts = contracts.clone();
-    let partition = observe_stage(
-        observer,
-        crate::StageId::new("regional_mapping.partition"),
-        || {
-            let _profile = trace.span(|| "initial_mapping.regional_partition".to_string());
-            let roots = mapping_roots(ir.module, config.timing, config.port_bindings)?;
-            let partition = logic_partition::RegionalLogicPartition::build(
-                ir.module,
-                regions,
-                ir.region_ownership,
-                &contracts,
-                &roots,
-            )?;
-            Ok(partition)
-        },
-    )?;
     let mapper = RegionalMapper {
         regions,
-        decision_keys: region_decision_keys,
         response_models: cover::CoverResponseModels::new(config.scenarios),
         boundary_repairs,
         config,
@@ -237,8 +194,6 @@ pub(crate) fn map_mapping_library_cells(
     let mut state = RegionalPlans {
         contracts,
         contexts: region_contexts.to_vec(),
-        partition,
-        analyses: None,
         plans: Vec::new(),
         bindings: Vec::new(),
         plan_journal: std::collections::BTreeMap::new(),
@@ -312,39 +267,4 @@ fn boundary_observation_values(
         }
     }
     Ok(values.into_iter().collect())
-}
-
-pub(super) fn empty_region_plan(
-    region: crate::SynthesisRegion,
-    context: crate::RegionContextKey,
-    contracts: &crate::regional::RegionContractSet,
-    decision_key: [u8; 32],
-) -> Result<crate::RegionCoverPlan, crate::SynthError> {
-    let zero = crate::FiniteValue::new(0.0)
-        .map_err(|error| crate::SynthError::invariant(error.to_string()))?;
-    Ok(crate::RegionCoverPlan::new(
-        crate::RegionPlanIdentity {
-            region: region.id(),
-            revision: region.revision(),
-            context_key: context,
-        },
-        crate::RegionPlanCost {
-            legal: true,
-            worst_normalized_violation: zero,
-            minimum_slack: zero,
-            total_negative_slack: zero,
-            area: zero,
-            leakage_power: None,
-            dynamic_power: None,
-            cell_count: 0,
-            stable_plan_key: cover::empty_plan_key(region.id(), decision_key),
-        },
-        crate::RegionPlanSize {
-            local_net_count: 0,
-            local_cell_count: 0,
-            local_pin_count: 0,
-        },
-        contracts.contracts(region.row()).to_vec(),
-        Vec::new(),
-    ))
 }

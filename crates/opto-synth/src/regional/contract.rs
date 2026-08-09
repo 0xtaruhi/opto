@@ -205,8 +205,7 @@ impl RegionContractSet {
     /// widens the required time of the rows the coordinator marked dirty.
     ///
     /// Updates in place and returns the rows whose contracts actually changed;
-    /// unchanged rows keep their existing contracts, so a later epoch reuses
-    /// their retained cover.
+    /// unchanged rows keep their frozen plan and footprint.
     pub(crate) fn reallocate_dirty(
         &mut self,
         dirty: &[crate::RegionRowId],

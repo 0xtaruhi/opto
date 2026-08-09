@@ -31,6 +31,9 @@ pub(super) fn finalize(
         .mapped
         .assign_publication_net_names(crate::mapping::is_synthetic_net_name, "n")
         .map_err(crate::SynthError::from)?;
+    optimized
+        .connectivity
+        .validate(&optimized.mapped, &optimized.options.target_cells)?;
     let (mapped, cell_remap) = optimized
         .mapped
         .finalize_for_publication()

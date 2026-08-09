@@ -34,9 +34,9 @@ pub(crate) use materialize::MappedOutput;
 #[cfg(test)]
 pub(crate) use materialize::build_test_substrate;
 pub(crate) use region_binding::{
-    CandidateBindingInputs, RegionPlanBinding, RegionPlanValueBinding, build_candidate_binding,
+    CandidateBindingInputs, RegionPlanBinding, build_candidate_binding,
 };
-pub(crate) use roots::mapping_roots;
+pub(crate) use roots::FullDomainRootSemantics;
 use sequential::SequentialCellCatalog;
 
 pub(crate) enum RegionalMappingSeed {
@@ -96,26 +96,25 @@ impl TargetMappingContext {
         clock_gating: Option<ClockGatingStyle>,
         target_mapping: bool,
         operation_regions: &[Option<crate::RegionRowId>],
+        ownership: &mut crate::regional::StructuralOwnershipProvenance,
     ) -> Result<(), crate::SynthError> {
-        prepare::prepare_private_region(
+        prepare::prepare_private_region(prepare::PrivateRegionPreparation {
             module,
-            &self.sequential_catalog,
+            sequential_catalog: &self.sequential_catalog,
             clock_gating,
-            &self.clock_gating_catalog,
+            clock_gating_catalog: &self.clock_gating_catalog,
             target_mapping,
-            self.config.diagnostics.timing,
-            Some(operation_regions),
-        )
+            timing_diagnostics: self.config.diagnostics.timing,
+            operation_regions,
+            ownership,
+        })
     }
 }
 
 pub(crate) struct MappingConfig<'a> {
     pub(crate) options: &'a SynthesisOptions,
-    pub(crate) timing: &'a opto_timing::TimingContext,
     pub(crate) port_bindings: &'a opto_timing::PortBindings,
     pub(crate) mapping_context: &'a TargetMappingContext,
-    pub(crate) rewrite_recipes: &'a crate::boolean::logic::RewriteRecipeCache,
-    pub(crate) incremental_metrics: &'a crate::incremental::IncrementalRunMetrics,
     pub(crate) scenarios: &'a opto_timing::ScenarioSet,
     pub(crate) object_bindings: std::sync::Arc<opto_timing::TimingObjectBindings>,
     pub(crate) effort: crate::SynthesisEffort,

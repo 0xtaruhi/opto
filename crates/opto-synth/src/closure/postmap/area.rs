@@ -27,6 +27,7 @@ pub(super) fn optimize(
         timing,
         fanout_load_profile: _,
         power_evaluator,
+        connectivity,
     } = request;
     let mut timing = timing;
     let closure = timing
@@ -53,6 +54,7 @@ pub(super) fn optimize(
         physical,
         replacements: 0,
         observer,
+        connectivity,
     };
     let mut cleanup_dirty = std::collections::HashSet::new();
     let phase_started = std::time::Instant::now();
@@ -294,6 +296,7 @@ struct AreaOptimizationSession<'a> {
     physical: PhysicalObjective,
     replacements: usize,
     observer: &'a mut dyn FnMut(SynthesisProgress),
+    connectivity: &'a crate::mapping::materialize::FrozenObservableConnectivity,
 }
 
 impl AreaOptimizationSession<'_> {
@@ -328,6 +331,7 @@ impl AreaOptimizationSession<'_> {
                     design_rule_summary: closure.design_rule_summary,
                 }),
                 operation: "post-map cleanup transaction",
+                connectivity: self.connectivity,
             },
             candidate,
         )?;

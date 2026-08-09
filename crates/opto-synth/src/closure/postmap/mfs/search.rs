@@ -42,6 +42,9 @@ impl WireReplacementSearch<'_> {
     }
 
     fn constant_or_wire(&self) -> Option<PostmapCandidate> {
+        if self.boundary.contains(&self.out_net) {
+            return None;
+        }
         let constant = if self
             .out_bits
             .iter()

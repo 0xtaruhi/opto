@@ -28,6 +28,13 @@ pub(crate) fn inverter_truth() -> TruthTable {
     }
 }
 
+pub(crate) fn identity_truth() -> TruthTable {
+    TruthTable {
+        input_count: 1,
+        bits: 0b10,
+    }
+}
+
 pub(crate) const MAX_MATCH_INPUTS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

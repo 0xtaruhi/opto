@@ -89,7 +89,8 @@ pub(crate) enum FsmObjective {
 
 pub(crate) fn optimize_derived_fsms_in_regions(
     module: &mut word::WordModule,
-    operation_regions: &[Option<crate::RegionRowId>],
+    operation_regions: &mut Vec<Option<crate::RegionRowId>>,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
     timing: &opto_timing::TimingContext,
     port_bindings: &opto_timing::PortBindings,
     runtime: &opto_runtime::ExecutionContext,
@@ -109,7 +110,24 @@ pub(crate) fn optimize_derived_fsms_in_regions(
     let plans = plan_catalog(catalog, |machine| {
         machine_objective(module, machine, timing, port_bindings)
     })?;
-    materialize_plans(module, &plans)?;
+    for materialized in materialize_plans(module, &plans)? {
+        if materialized.operations.start != operation_regions.len() {
+            return Err(crate::SynthError::invariant(
+                "FSM ownership does not align with generated operations",
+            ));
+        }
+        let owner = operation_regions
+            .get(materialized.source.index())
+            .copied()
+            .flatten();
+        ownership.claim_range(
+            module,
+            materialized.operations.start,
+            materialized.operations.end,
+            &[materialized.source],
+        )?;
+        operation_regions.resize(materialized.operations.end, owner);
+    }
     Ok(plans.len())
 }
 
@@ -137,7 +155,7 @@ fn optimize_with_objective(
 ) -> Result<usize, crate::SynthError> {
     let catalog = derive_catalog(module, crate::test_runtime())?;
     let plans = plan_catalog(catalog, |_| objective)?;
-    materialize_plans(module, &plans)?;
+    let _ = materialize_plans(module, &plans)?;
     module.compact_netlist().map_err(crate::SynthError::from)?;
     module.validate().map_err(crate::SynthError::from)?;
     Ok(plans.len())

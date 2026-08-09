@@ -71,7 +71,7 @@ path-exception arbitration rule.
 | Boundary identity | Complete | Whole protected equivalence classes and ownership rules survive canonicalization |
 | Regional mapping | Complete | Canonical regional slices are analyzed and covered against Liberty in keyed parallel tasks |
 | Worker allocation | Complete | Deterministic weighted allocation gives inner lanes only to dominating regions |
-| Feedback | Complete | Dirty regions reuse/refresh their canonical analysis and reselect the cover under new contracts |
+| Feedback | Complete | Dirty regions rebind explicit contracts and replace frozen owned footprints without reopening cover |
 | Mapped commit | Complete | Direct artifacts replace stable footprints transactionally |
 | Mapped ownership | Complete | Global, single-region, or exact driver-to-sink boundary-edge atoms with stable reverse footprints |
 | Post-map | Complete | Design-rule, fanout, sizing, and MFS changes use measured transactional evaluation |
@@ -153,14 +153,13 @@ Target regions independently perform:
 - exact sparse boundary response measurement;
 - compact portable plan serialization.
 
-`AnalyzedRegionCover` owns the reusable analysis. `RegionCoverPlan` owns only
-the selected portable topology, costs, stable identity, boundary response, and
-implementation-cell summary. Its target payload also stores input and output
-ordinals relative to the canonical regional slice, never revision-local Word
-IDs. A cache hit restores and validates that payload, rebuilds its binding from
-the current slice, and skips Boolean rewrite, cut enumeration, cover selection,
-response measurement, and plan compaction. Only rows without a retained plan
-run the full regional analysis.
+`AnalyzedRegionCover` is task-local. `RegionCoverPlan` owns only the selected
+portable topology, costs, stable identity, boundary response, and
+implementation-cell summary. Input and owner-output bindings are frozen beside
+the plan and survive global lowering as explicit provenance. A cache hit is
+accepted only when current private source semantics reconstruct the same
+topology and binding obligations; a cached payload is never connectivity or
+ownership evidence.
 
 Feedback does not reopen architecture search. When contracts change, only
 dirty regions refresh or reuse their analysis and compact a new selected cover
@@ -186,6 +185,11 @@ matches the plans. Later epochs replace only dirty footprints.
 The mapped-generation boundary now publishes a compact generation-stamped
 fanout/load profile before post-map begins. It contains complete sink counts,
 fanout loads, and mapped-pin capacitances without retaining copied sink lists.
+The same handoff freezes every top-level port net and the resolved output pins
+of retained source instances. Every speculative post-map transaction checks
+only its affected boundary nets before QoR evaluation; deleting a boundary net
+or orphaning/multiply driving an observable output rejects the transaction.
+Publication revalidates the complete frozen contract.
 
 Post-map evaluates changes against real mapped timing in a fixed semantic
 order: whole-net HFNS and electrical legalization, global STA refresh,

@@ -266,6 +266,10 @@ impl BitBlaster<'_> {
         ty: word::WordType,
         source: &word::SourceSpan,
     ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+        if let Some(alias) = self.frozen_semantics.aliases.get(&original).copied() {
+            let span = self.value(alias)?;
+            return Ok((0..span.len()).map(|bit| self.bit(span, bit)).collect());
+        }
         let signal = self
             .module
             .add_generated_wire(ty, source.clone())
@@ -283,7 +287,21 @@ impl BitBlaster<'_> {
                 ));
             }
         };
-        let bits = self.signal_bits(endpoint, reference, source)?;
+        let frozen = self.frozen_semantics.constants.get(&original).cloned();
+        let endpoint_bits = self.signal_bits(endpoint, reference, source)?;
+        let mut bits = Vec::with_capacity(endpoint_bits.len());
+        for (index, endpoint) in endpoint_bits.into_iter().enumerate() {
+            let bit = match frozen
+                .as_deref()
+                .and_then(|bits| bits.get(index))
+                .copied()
+                .flatten()
+            {
+                Some(bit) => self.constant(bit, ty.state(), source)?,
+                None => endpoint,
+            };
+            bits.push(bit);
+        }
         for &bit in &bits {
             self.provenance.copy_value_origin(original, bit)?;
         }

@@ -2,38 +2,172 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::word;
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MappingRoot {
     pub(crate) value: word::ValueId,
     pub(crate) required_time: Option<f64>,
     pub(crate) output_load: Option<f64>,
+    pub(crate) requires_combinational_cover: bool,
 }
 
-pub(crate) fn requires_combinational_cover(
-    module: &word::WordModule,
-    value: word::ValueId,
-) -> Result<bool, crate::SynthError> {
-    let stored = module
-        .value(value)
-        .ok_or_else(|| crate::SynthError::invariant(format!("unknown mapping root {value:?}")))?;
-    if stored.ty.width() != 1 {
-        return Err(crate::SynthError::invariant(format!(
-            "non-scalar mapping root {value:?} reached regional Boolean mapping"
-        )));
+/// Full-Word publication proof frozen before any region-local simplification.
+pub(crate) struct FullDomainRootSemantics<'a> {
+    module: &'a word::WordModule,
+    drivers: crate::word::signal_driver::SignalDriverIndex,
+}
+
+impl<'a> FullDomainRootSemantics<'a> {
+    pub(crate) fn new(module: &'a word::WordModule) -> Result<Self, crate::SynthError> {
+        Ok(Self {
+            module,
+            drivers: crate::word::signal_driver::SignalDriverIndex::new(module)?,
+        })
     }
-    let word::ValueKind::Operation(operation) = stored.kind else {
-        return Ok(true);
-    };
-    let operation = module.operation(operation).ok_or_else(|| {
-        crate::SynthError::invariant(format!("unknown mapping-root operation {operation:?}"))
-    })?;
-    Ok(!matches!(
-        operation.kind,
-        word::OpKind::Register(_) | word::OpKind::Latch(_)
-    ))
+
+    pub(crate) fn requires_artifact(
+        &self,
+        value: word::ValueId,
+    ) -> Result<bool, crate::SynthError> {
+        self.prove(value, &mut BTreeSet::new())
+    }
+
+    pub(crate) fn canonical_root(
+        &self,
+        value: word::ValueId,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let mut current = value;
+        let mut visited = BTreeSet::new();
+        loop {
+            if !visited.insert(current) {
+                return Err(crate::SynthError::invariant(
+                    "publication identity contains an exact-alias cycle",
+                ));
+            }
+            let stored = self.module.value(current).ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "publication identity references an unknown source value",
+                )
+            })?;
+            let next = match stored.kind {
+                word::ValueKind::Signal(reference) => {
+                    self.drivers
+                        .exact_reference_driver(self.module, reference, stored.ty)
+                }
+                word::ValueKind::Operation(operation) => self
+                    .module
+                    .operation(operation)
+                    .and_then(|operation| scalar_projection_input(self.module, operation)),
+                word::ValueKind::Constant(_) => None,
+            };
+            match next {
+                Some(next) => current = next,
+                None => return Ok(current),
+            }
+        }
+    }
+
+    fn prove(
+        &self,
+        value: word::ValueId,
+        active: &mut BTreeSet<word::ValueId>,
+    ) -> Result<bool, crate::SynthError> {
+        if !active.insert(value) {
+            return Err(crate::SynthError::invariant(
+                "publication connectivity contains a cycle",
+            ));
+        }
+        let stored = self.module.value(value).ok_or_else(|| {
+            crate::SynthError::invariant(format!("unknown publication root {value:?}"))
+        })?;
+        let result = match stored.kind {
+            word::ValueKind::Constant(_) => false,
+            word::ValueKind::Signal(reference) => match self.drivers.reference_drivers(reference) {
+                Some(drivers) if !drivers.is_empty() => {
+                    let mut required = false;
+                    for driver in drivers {
+                        required |= self.prove(driver, active)?;
+                    }
+                    required
+                }
+                _ => {
+                    let imported_port =
+                        self.module.signal(reference.signal).is_some_and(|signal| {
+                            let word::SignalKind::Port(port) = signal.kind else {
+                                return false;
+                            };
+                            self.module.port(port).is_some_and(|port| {
+                                matches!(
+                                    port.direction,
+                                    word::PortDirection::Input | word::PortDirection::Inout
+                                )
+                            })
+                        });
+                    !imported_port
+                }
+            },
+            word::ValueKind::Operation(operation) => {
+                let operation = self.module.operation(operation).ok_or_else(|| {
+                    crate::SynthError::invariant("publication root operation is unknown")
+                })?;
+                match &operation.kind {
+                    word::OpKind::Register(_)
+                    | word::OpKind::Latch(_)
+                    | word::OpKind::Cast { .. }
+                    | word::OpKind::Extract { .. }
+                    | word::OpKind::Concat { .. } => false,
+                    word::OpKind::Unary { .. }
+                    | word::OpKind::Binary { .. }
+                    | word::OpKind::Mux { .. }
+                    | word::OpKind::DynamicExtract { .. }
+                    | word::OpKind::DynamicInsert { .. } => true,
+                }
+            }
+        };
+        active.remove(&value);
+        Ok(result)
+    }
+}
+
+/// Returns the input of a globally exact scalar pass-through operation.
+pub(crate) fn scalar_projection_input(
+    module: &word::WordModule,
+    operation: &word::Operation,
+) -> Option<word::ValueId> {
+    let result = module.value(operation.result)?;
+    if result.ty.width() != 1 {
+        return None;
+    }
+    match &operation.kind {
+        word::OpKind::Cast { value, .. }
+            if module
+                .value(*value)
+                .is_some_and(|value| value.ty.width() == 1) =>
+        {
+            Some(*value)
+        }
+        word::OpKind::Extract { value, lsb, .. }
+            if *lsb == 0
+                && module
+                    .value(*value)
+                    .is_some_and(|value| value.ty.width() == 1) =>
+        {
+            Some(*value)
+        }
+        word::OpKind::Concat { parts } if parts.len() == 1 => Some(parts[0]),
+        word::OpKind::Unary { .. }
+        | word::OpKind::Binary { .. }
+        | word::OpKind::Mux { .. }
+        | word::OpKind::Register(_)
+        | word::OpKind::Latch(_)
+        | word::OpKind::Extract { .. }
+        | word::OpKind::DynamicExtract { .. }
+        | word::OpKind::DynamicInsert { .. }
+        | word::OpKind::Cast { .. }
+        | word::OpKind::Concat { .. } => None,
+    }
 }
 
 pub(crate) fn mapping_roots(
@@ -57,6 +191,7 @@ pub(crate) fn mapping_roots(
                 value: connect.value,
                 required_time: endpoint_required,
                 output_load,
+                requires_combinational_cover: false,
             });
             continue;
         };
@@ -71,6 +206,7 @@ pub(crate) fn mapping_roots(
                 value: register.d,
                 required_time,
                 output_load: None,
+                requires_combinational_cover: false,
             });
             roots.push(timed_root(register.clock, global_required));
             if let Some(enable) = register.enable {
@@ -85,6 +221,7 @@ pub(crate) fn mapping_roots(
                 value: latch.d,
                 required_time: global_required,
                 output_load: None,
+                requires_combinational_cover: false,
             });
             roots.push(timed_root(latch.enable.value, global_required));
             for reset in &latch.resets {
@@ -96,6 +233,7 @@ pub(crate) fn mapping_roots(
                 value: connect.value,
                 required_time: endpoint_required,
                 output_load,
+                requires_combinational_cover: false,
             });
         }
     }
@@ -140,6 +278,7 @@ pub(crate) fn merge_by_value(roots: Vec<MappingRoot>) -> Vec<MappingRoot> {
                     (Some(current), Some(other)) => Some(current + other),
                     (current, other) => current.or(other),
                 };
+                current.requires_combinational_cover |= root.requires_combinational_cover;
             }
         }
     }
@@ -155,6 +294,7 @@ fn timed_root(value: word::ValueId, required_time: Option<f64>) -> MappingRoot {
         value,
         required_time,
         output_load: None,
+        requires_combinational_cover: false,
     }
 }
 
@@ -216,6 +356,7 @@ pub(crate) fn scalar_value_parts(
 mod tests {
     use super::*;
     use opto_ir::word::{LValue, PortDirection, SourceSpan, WordModule, WordType};
+    use std::num::NonZeroU32;
 
     #[test]
     fn output_roots_keep_endpoint_specific_budget_and_load() {
@@ -265,5 +406,129 @@ mod tests {
         assert_eq!(roots[0].value, value);
         assert_eq!(roots[0].required_time, Some(0.8));
         assert_eq!(roots[0].output_load, Some(0.02));
+    }
+
+    #[test]
+    fn signal_wrapped_combinational_root_requires_artifact() {
+        let mut module = WordModule::new("wrapped_mux");
+        let bit = WordType::bits(1).unwrap();
+        let inputs = ["select", "a", "b"].map(|name| {
+            module
+                .add_port(name, PortDirection::Input, bit, SourceSpan::default())
+                .unwrap()
+        });
+        let [select, a, b] = inputs.map(|port| {
+            module
+                .read_signal(module.port(port).unwrap().signal, SourceSpan::default())
+                .unwrap()
+        });
+        let selected = module.mux(select, a, b, SourceSpan::default()).unwrap();
+        let internal = module
+            .add_wire("selected", bit, SourceSpan::default())
+            .unwrap();
+        module
+            .connect(LValue::signal(internal), selected, SourceSpan::default())
+            .unwrap();
+        let wrapped = module.read_signal(internal, SourceSpan::default()).unwrap();
+
+        let full_domain = FullDomainRootSemantics::new(&module).unwrap();
+        assert!(full_domain.requires_artifact(wrapped).unwrap());
+        assert!(!full_domain.requires_artifact(a).unwrap());
+
+        let undriven = module
+            .add_wire("undriven", bit, SourceSpan::default())
+            .unwrap();
+        let undriven = module.read_signal(undriven, SourceSpan::default()).unwrap();
+        let full_domain = FullDomainRootSemantics::new(&module).unwrap();
+        assert!(full_domain.requires_artifact(undriven).unwrap());
+    }
+
+    #[test]
+    fn memory_read_is_a_publication_obligation() {
+        let mut module = WordModule::new("memory_root");
+        let address_port = module
+            .add_port(
+                "address",
+                PortDirection::Input,
+                WordType::bits(1).unwrap(),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let address = module
+            .read_signal(
+                module.port(address_port).unwrap().signal,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let memory = module
+            .add_memory(
+                "memory",
+                WordType::bits(1).unwrap(),
+                NonZeroU32::new(2).unwrap(),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let data = module
+            .add_wire(
+                "read_data",
+                WordType::bits(1).unwrap(),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .add_memory_read_port(word::MemoryReadPort {
+                memory,
+                address,
+                data,
+                timing: word::MemoryReadTiming::Asynchronous,
+                read_during_write: word::ReadDuringWrite::OldData,
+                source: SourceSpan::default(),
+            })
+            .unwrap();
+        let read = module.read_signal(data, SourceSpan::default()).unwrap();
+        let packed = module
+            .concat(vec![read, read], SourceSpan::default())
+            .unwrap();
+
+        let full_domain = FullDomainRootSemantics::new(&module).unwrap();
+        assert!(full_domain.requires_artifact(read).unwrap());
+        assert!(!full_domain.requires_artifact(packed).unwrap());
+    }
+
+    #[test]
+    fn involution_without_a_two_state_proof_is_not_a_global_alias() {
+        let mut module = WordModule::new("involution");
+        let input = module
+            .add_port(
+                "input",
+                PortDirection::Input,
+                WordType::bits(1).unwrap(),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let input = module
+            .read_signal(module.port(input).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let first = module
+            .unary(word::UnaryOp::BitNot, input, SourceSpan::default())
+            .unwrap();
+        let boundary = module
+            .add_wire(
+                "boundary",
+                WordType::bits(1).unwrap(),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(LValue::signal(boundary), first, SourceSpan::default())
+            .unwrap();
+        let boundary = module.read_signal(boundary, SourceSpan::default()).unwrap();
+        let second = module
+            .unary(word::UnaryOp::BitNot, boundary, SourceSpan::default())
+            .unwrap();
+
+        let full_domain = FullDomainRootSemantics::new(&module).unwrap();
+        assert_eq!(full_domain.canonical_root(second).unwrap(), second);
+        assert!(full_domain.requires_artifact(second).unwrap());
     }
 }

@@ -581,6 +581,7 @@ struct MappedState {
     environment: SynthesisEnvironment,
     ledger: SynthesisLedger,
     mapped: opto_ir::mapped::MappedNetlist,
+    connectivity: crate::mapping::materialize::FrozenObservableConnectivity,
     fanout_load_profile: crate::closure::postmap::MappedFanoutLoadProfile,
     implementations: ImplementationDb,
     boundary_repair_schema: crate::regional::BoundaryRepairSchema,
@@ -592,6 +593,7 @@ struct FinalizableState {
     options: SynthesisOptions,
     ledger: SynthesisLedger,
     mapped: opto_ir::mapped::MappedNetlist,
+    connectivity: crate::mapping::materialize::FrozenObservableConnectivity,
     implementations: ImplementationDb,
     timing: Option<crate::TimingSummary>,
     incremental_reuse: crate::incremental::IncrementalReuseMetrics,
@@ -745,11 +747,8 @@ fn map_initial_logic(
             boundary_repairs: &boundary_repairs,
             config: MappingConfig {
                 options: &lowered.environment.options,
-                timing: lowered.environment.primary_scenario().constraints(),
                 port_bindings: &lowered.environment.port_bindings,
                 mapping_context: &lowered.mapping_context,
-                rewrite_recipes: &execution.engine.rewrite_recipes,
-                incremental_metrics: &lowered.environment.incremental_metrics,
                 scenarios: &lowered.environment.scenarios,
                 object_bindings: Arc::clone(&lowered.environment.object_bindings),
                 effort: lowered.environment.effort,
@@ -800,6 +799,11 @@ fn build_mapped_artifact(
         netlist,
         cell_sources,
     } = mapped;
+    let connectivity = crate::mapping::materialize::FrozenObservableConnectivity::capture(
+        &netlist,
+        &lowered.environment.options.target_cells,
+        &lowered.environment.reference_ports,
+    )?;
     let implementations = lowered.provenance.finish(
         &lowered.regions,
         &lowered.synthesized,
@@ -823,6 +827,7 @@ fn build_mapped_artifact(
         environment: lowered.environment,
         ledger,
         mapped: netlist,
+        connectivity,
         fanout_load_profile,
         implementations,
         boundary_repair_schema,
@@ -844,6 +849,7 @@ impl MappedState {
             options: self.environment.options,
             ledger: self.ledger,
             mapped: self.mapped,
+            connectivity: self.connectivity,
             implementations: self.implementations,
             timing,
             operator_manifest: self.operator_manifest,
@@ -869,6 +875,7 @@ fn optimize_postmap(
             policy: mapped.environment.effort.policy(),
             runtime: execution.runtime,
             power_evaluator: Arc::clone(&mapped.environment.power_evaluator),
+            connectivity: &mapped.connectivity,
         },
         execution.engine.config,
         &mut *execution.observer,

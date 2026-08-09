@@ -18,7 +18,7 @@ impl RegionalMapper<'_> {
         let RegionalMappingSeed::Private { plans, bindings } = seed;
         if plans.len() != rows || bindings.len() != rows {
             return Err(crate::SynthError::invariant(
-                "private regional topology does not align with the region graph",
+                "frozen regional topology does not align with the region graph",
             ));
         }
         state.plans = plans.to_vec();
