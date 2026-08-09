@@ -42,10 +42,10 @@ All notable changes to Opto are documented here. The format follows
 
 ### Changed
 
-- Public QoR area and cell baselines now record the accepted generic
-  priority-rebalance trade-offs from #3 instead of retaining pre-cutover
-  values. The add256 peak-RSS gate now uses a 256 MiB absolute ceiling for the
-  current embedded frontend and runtime.
+- Public and extended QoR area, timing, cell-count, and cell-composition
+  baselines now record the accepted generic priority-rebalance trade-offs from
+  #3 instead of retaining pre-cutover values. The add256 peak-RSS gate now uses
+  a 256 MiB absolute ceiling for the current embedded frontend and runtime.
 - The statically embedded Tcl runtime and standard library were updated from
   8.6.11 to the unmodified upstream 8.6.18 source distribution.
 - Checkpoints and canonical fingerprints use the validated `opto-archive`
