@@ -41,6 +41,7 @@ jobs:
 
   dependency-policy:
     name: Dependency policy
+    if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -54,6 +55,7 @@ jobs:
 
   rust:
     name: Rust quality gates (${{ matrix.name }})
+    if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:

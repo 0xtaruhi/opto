@@ -425,7 +425,7 @@ TclFileDeleteCmd(
     if (result != TCL_OK) {
 	if (errfile == NULL) {
 	    /*
-	     * We try to accomodate poor error results from our Tcl_FS calls.
+	     * We try to accommodate poor error results from our Tcl_FS calls.
 	     */
 
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
@@ -1006,7 +1006,7 @@ TclFileAttrsCmd(
 	 * Use objStrings as a list object.
 	 */
 
-	if (Tcl_ListObjLength(interp, objStrings, &numObjStrings) != TCL_OK) {
+	if (TclListObjLength(interp, objStrings, &numObjStrings) != TCL_OK) {
 	    goto end;
 	}
 	attributeStringsAllocated = (const char **)
@@ -1080,7 +1080,7 @@ TclFileAttrsCmd(
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "bad option \"%s\", there are no file attributes in this"
 		    " filesystem", TclGetString(objv[0])));
-	    Tcl_SetErrorCode(interp, "TCL","OPERATION","FATTR","NONE", NULL);
+	    Tcl_SetErrorCode(interp, "TCL","OPERATION","FATTR","NONE", (char *)NULL);
 	    goto end;
 	}
 
@@ -1107,7 +1107,7 @@ TclFileAttrsCmd(
 	    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 		    "bad option \"%s\", there are no file attributes in this"
 		    " filesystem", TclGetString(objv[0])));
-	    Tcl_SetErrorCode(interp, "TCL","OPERATION","FATTR","NONE", NULL);
+	    Tcl_SetErrorCode(interp, "TCL","OPERATION","FATTR","NONE", (char *)NULL);
 	    goto end;
 	}
 
@@ -1123,7 +1123,7 @@ TclFileAttrsCmd(
 		Tcl_SetObjResult(interp, Tcl_ObjPrintf(
 			"value for \"%s\" missing", TclGetString(objv[i])));
 		Tcl_SetErrorCode(interp, "TCL", "OPERATION", "FATTR",
-			"NOVALUE", NULL);
+			"NOVALUE", (char *)NULL);
 		goto end;
 	    }
 	    if (Tcl_FSFileAttrsSet(interp, index, filePtr,
@@ -1226,7 +1226,7 @@ TclFileLinkCmd(
 	if (contents == NULL) {
 	    /*
 	     * We handle three common error cases specially, and for all other
-	     * errors, we use the standard posix error message.
+	     * errors, we use the standard Posix error message.
 	     */
 
 	    if (errno == EEXIST) {

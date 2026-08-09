@@ -4,7 +4,7 @@
  *	This file contains the method call chain management code for the
  *	object-system core.
  *
- * Copyright (c) 2005-2012 by Donal K. Fellows
+ * Copyright (c) 2005-2012 Donal K. Fellows
  *
  * See the file "license.terms" for information on usage and redistribution of
  * this file, and for a DISCLAIMER OF ALL WARRANTIES.
@@ -52,7 +52,7 @@ struct ChainBuilder {
 static void		AddClassFiltersToCallContext(Object *const oPtr,
 			    Class *clsPtr, struct ChainBuilder *const cbPtr,
 			    Tcl_HashTable *const doneFilters, int flags);
-static void		AddClassMethodNames(Class *clsPtr, const int flags,
+static void		AddClassMethodNames(Class *clsPtr, int flags,
 			    Tcl_HashTable *const namesPtr,
 			    Tcl_HashTable *const examinedClassesPtr);
 static inline void	AddMethodToCallChain(Method *const mPtr,
@@ -90,6 +90,7 @@ static const Tcl_ObjType methodNameType = {
     NULL,
     NULL
 };
+
 
 /*
  * ----------------------------------------------------------------------
@@ -247,7 +248,7 @@ FreeMethodNameRep(
 
 int
 TclOOInvokeContext(
-    ClientData clientData,	/* The method call context. */
+    void *clientData,	/* The method call context. */
     Tcl_Interp *interp,		/* Interpreter for error reporting, and many
 				 * other sorts of context handling (e.g.,
 				 * commands, variables) depending on method
@@ -255,7 +256,7 @@ TclOOInvokeContext(
     int objc,			/* The number of arguments. */
     Tcl_Obj *const objv[])	/* The arguments as actually seen. */
 {
-    CallContext *const contextPtr = clientData;
+    CallContext *const contextPtr = (CallContext *)clientData;
     Method *const mPtr = contextPtr->callPtr->chain[contextPtr->index].mPtr;
     const int isFilter =
 	    contextPtr->callPtr->chain[contextPtr->index].isFilter;
@@ -316,11 +317,11 @@ TclOOInvokeContext(
 
 static int
 SetFilterFlags(
-    ClientData data[],
+    void *data[],
     Tcl_Interp *interp,
     int result)
 {
-    CallContext *contextPtr = data[0];
+    CallContext *contextPtr = (CallContext *)data[0];
 
     contextPtr->oPtr->flags |= FILTER_HANDLING;
     return result;
@@ -328,11 +329,11 @@ SetFilterFlags(
 
 static int
 ResetFilterFlags(
-    ClientData data[],
+    void *data[],
     Tcl_Interp *interp,
     int result)
 {
-    CallContext *contextPtr = data[0];
+    CallContext *contextPtr = (CallContext *)data[0];
 
     contextPtr->oPtr->flags &= ~FILTER_HANDLING;
     return result;
@@ -340,11 +341,11 @@ ResetFilterFlags(
 
 static int
 FinalizeMethodRefs(
-    ClientData data[],
+    void *data[],
     Tcl_Interp *interp,
     int result)
 {
-    CallContext *contextPtr = data[0];
+    CallContext *contextPtr = (CallContext *)data[0];
     int i;
 
     for (i = 0 ; i < contextPtr->callPtr->numChain ; i++) {
@@ -543,7 +544,7 @@ TclOOGetSortedClassMethodList(
 	 * heavily sorted when it is long enough to matter.
 	 */
 
-	strings = ckalloc(sizeof(char *) * names.numEntries);
+	strings = (const char **)ckalloc(sizeof(char *) * names.numEntries);
 	FOREACH_HASH(namePtr, isWanted, &names) {
 	    if (!(flags & PUBLIC_METHOD) || (PTR2INT(isWanted) & IN_LIST)) {
 		if (PTR2INT(isWanted) & NO_IMPLEMENTATION) {
@@ -584,7 +585,7 @@ CmpStr(
     const char **strPtr1 = (const char **) ptr1;
     const char **strPtr2 = (const char **) ptr2;
 
-    return TclpUtfNcmp2(*strPtr1, *strPtr2, strlen(*strPtr1) + 1);
+    return TclUtfNcmp2(*strPtr1, *strPtr2, strlen(*strPtr1) + 1);
 }
 
 /*
@@ -602,7 +603,7 @@ CmpStr(
 static void
 AddClassMethodNames(
     Class *clsPtr,		/* Class to get method names from. */
-    const int flags,		/* Whether we are interested in just the
+    int flags,		/* Whether we are interested in just the
 				 * public method names. */
     Tcl_HashTable *const namesPtr,
 				/* Reference to the hash table to put the
@@ -726,7 +727,7 @@ AddSimpleChainToCallContext(
 		(char *) methodNameObj);
 
 	if (hPtr != NULL) {
-	    Method *mPtr = Tcl_GetHashValue(hPtr);
+	    Method *mPtr = (Method *)Tcl_GetHashValue(hPtr);
 
 	    if (flags & PUBLIC_METHOD) {
 		if (!(mPtr->flags & PUBLIC_METHOD)) {
@@ -750,10 +751,13 @@ AddSimpleChainToCallContext(
 	if (oPtr->methodsPtr) {
 	    hPtr = Tcl_FindHashEntry(oPtr->methodsPtr, (char*) methodNameObj);
 	    if (hPtr != NULL) {
-		AddMethodToCallChain(Tcl_GetHashValue(hPtr), cbPtr,
+		AddMethodToCallChain((Method *)Tcl_GetHashValue(hPtr), cbPtr,
 			doneFilters, filterDecl, flags);
 	    }
 	}
+    }
+    if (!oPtr->selfCls) {
+	return;
     }
     AddSimpleClassChainToCallContext(oPtr->selfCls, methodNameObj, cbPtr,
 	    doneFilters, flags, filterDecl);
@@ -861,11 +865,11 @@ AddMethodToCallChain(
 
     if (callPtr->numChain == CALL_CHAIN_STATIC_SIZE) {
 	callPtr->chain =
-		ckalloc(sizeof(struct MInvoke) * (callPtr->numChain + 1));
+		(struct MInvoke *)ckalloc(sizeof(struct MInvoke) * (callPtr->numChain + 1));
 	memcpy(callPtr->chain, callPtr->staticChain,
 		sizeof(struct MInvoke) * callPtr->numChain);
     } else if (callPtr->numChain > CALL_CHAIN_STATIC_SIZE) {
-	callPtr->chain = ckrealloc(callPtr->chain,
+	callPtr->chain = (struct MInvoke *)ckrealloc(callPtr->chain,
 		sizeof(struct MInvoke) * (callPtr->numChain + 1));
     }
     callPtr->chain[i].mPtr = mPtr;
@@ -890,15 +894,28 @@ InitCallChain(
     Object *oPtr,
     int flags)
 {
+    /*
+     * Note that it's possible to end up with a NULL oPtr->selfCls here if
+     * there is a call into stereotypical object after it has finished running
+     * its destructor phase. Such things can't be cached for a long time so the
+     * epoch can be bogus. [Bug 7842f33a5c]
+     */
+
     callPtr->flags = flags &
 	    (PUBLIC_METHOD | PRIVATE_METHOD | SPECIAL | FILTER_HANDLING);
     if (oPtr->flags & USE_CLASS_CACHE) {
-	oPtr = oPtr->selfCls->thisPtr;
+	oPtr = (oPtr->selfCls ? oPtr->selfCls->thisPtr : NULL);
 	callPtr->flags |= USE_CLASS_CACHE;
     }
-    callPtr->epoch = oPtr->fPtr->epoch;
-    callPtr->objectCreationEpoch = oPtr->creationEpoch;
-    callPtr->objectEpoch = oPtr->epoch;
+    if (oPtr) {
+	callPtr->epoch = oPtr->fPtr->epoch;
+	callPtr->objectCreationEpoch = oPtr->creationEpoch;
+	callPtr->objectEpoch = oPtr->epoch;
+    } else {
+	callPtr->epoch = 0;
+	callPtr->objectCreationEpoch = 0;
+	callPtr->objectEpoch = 0;
+    }
     callPtr->refCount = 1;
     callPtr->numChain = 0;
     callPtr->chain = callPtr->staticChain;
@@ -908,12 +925,13 @@ InitCallChain(
  * ----------------------------------------------------------------------
  *
  * IsStillValid --
+ *
  *	Calculates whether the given call chain can be used for executing a
  *	method for the given object. The condition on a chain from a cached
  *	location being reusable is:
  *	- Refers to the same object (same creation epoch), and
  *	- Still across the same class structure (same global epoch), and
- *	- Still across the same object strucutre (same local epoch), and
+ *	- Still across the same object structure (same local epoch), and
  *	- No public/private/filter magic leakage (same flags, modulo the fact
  *	  that a public chain will satisfy a non-public call).
  *
@@ -928,6 +946,13 @@ IsStillValid(
     int mask)
 {
     if ((oPtr->flags & USE_CLASS_CACHE)) {
+	/*
+	 * If the object is in a weird state (due to stereotype tricks) then
+	 * just declare the cache invalid. [Bug 7842f33a5c]
+	 */
+	if (!oPtr->selfCls) {
+	    return 0;
+	}
 	oPtr = oPtr->selfCls->thisPtr;
 	flags |= USE_CLASS_CACHE;
     }
@@ -966,7 +991,8 @@ TclOOGetCallContext(
     CallContext *contextPtr;
     CallChain *callPtr;
     struct ChainBuilder cb;
-    int i, count, doFilters;
+    int i, count;
+    int doFilters;
     Tcl_HashEntry *hPtr;
     Tcl_HashTable doneFilters;
 
@@ -1009,7 +1035,7 @@ TclOOGetCallContext(
 	const int reuseMask = ((flags & PUBLIC_METHOD) ? ~0 : ~PUBLIC_METHOD);
 
 	if (cacheInThisObj->typePtr == &methodNameType) {
-	    callPtr = cacheInThisObj->internalRep.twoPtrValue.ptr1;
+	    callPtr = (CallChain *)cacheInThisObj->internalRep.twoPtrValue.ptr1;
 	    if (IsStillValid(callPtr, oPtr, flags, reuseMask)) {
 		callPtr->refCount++;
 		goto returnContext;
@@ -1017,8 +1043,16 @@ TclOOGetCallContext(
 	    FreeMethodNameRep(cacheInThisObj);
 	}
 
-	if (oPtr->flags & USE_CLASS_CACHE) {
-	    if (oPtr->selfCls->classChainCache != NULL) {
+	/*
+	 * Note that it's possible to end up with a NULL oPtr->selfCls here if
+	 * there is a call into stereotypical object after it has finished
+	 * running its destructor phase. It's quite a tangle, but at that
+	 * point, we simply can't get stereotypes from the cache.
+	 * [Bug 7842f33a5c]
+	 */
+
+	if (oPtr->flags & USE_CLASS_CACHE && oPtr->selfCls) {
+	    if (oPtr->selfCls->classChainCache) {
 		hPtr = Tcl_FindHashEntry(oPtr->selfCls->classChainCache,
 			(char *) methodNameObj);
 	    } else {
@@ -1034,7 +1068,7 @@ TclOOGetCallContext(
 	}
 
 	if (hPtr != NULL && Tcl_GetHashValue(hPtr) != NULL) {
-	    callPtr = Tcl_GetHashValue(hPtr);
+	    callPtr = (CallChain *)Tcl_GetHashValue(hPtr);
 	    if (IsStillValid(callPtr, oPtr, flags, reuseMask)) {
 		callPtr->refCount++;
 		goto returnContext;
@@ -1046,7 +1080,7 @@ TclOOGetCallContext(
 	doFilters = 1;
     }
 
-    callPtr = ckalloc(sizeof(CallChain));
+    callPtr = (CallChain *)ckalloc(sizeof(CallChain));
     InitCallChain(callPtr, oPtr, flags);
 
     cb.callChainPtr = callPtr;
@@ -1143,7 +1177,7 @@ TclOOGetCallContext(
 	    if (oPtr->flags & USE_CLASS_CACHE) {
 		if (oPtr->selfCls->classChainCache == NULL) {
 		    oPtr->selfCls->classChainCache =
-			    ckalloc(sizeof(Tcl_HashTable));
+			    (Tcl_HashTable *)ckalloc(sizeof(Tcl_HashTable));
 
 		    Tcl_InitObjHashTable(oPtr->selfCls->classChainCache);
 		}
@@ -1151,7 +1185,7 @@ TclOOGetCallContext(
 			(char *) methodNameObj, &i);
 	    } else {
 		if (oPtr->chainCache == NULL) {
-		    oPtr->chainCache = ckalloc(sizeof(Tcl_HashTable));
+		    oPtr->chainCache = (Tcl_HashTable *)ckalloc(sizeof(Tcl_HashTable));
 
 		    Tcl_InitObjHashTable(oPtr->chainCache);
 		}
@@ -1177,7 +1211,7 @@ TclOOGetCallContext(
     }
 
   returnContext:
-    contextPtr = TclStackAlloc(oPtr->fPtr->interp, sizeof(CallContext));
+    contextPtr = (CallContext *)TclStackAlloc(oPtr->fPtr->interp, sizeof(CallContext));
     contextPtr->oPtr = oPtr;
 
     /*
@@ -1223,6 +1257,17 @@ TclOOGetStereotypeCallChain(
     Object obj;
 
     /*
+     * Note that it's possible to end up with a NULL clsPtr here if there is
+     * a call into stereotypical object after it has finished running its
+     * destructor phase. It's quite a tangle, but at that point, we simply
+     * can't get stereotypes. [Bug 7842f33a5c]
+     */
+
+    if (clsPtr == NULL) {
+	return NULL;
+    }
+
+    /*
      * Synthesize a temporary stereotypical object so that we can use existing
      * machinery to produce the stereotypical call chain.
      */
@@ -1247,7 +1292,7 @@ TclOOGetStereotypeCallChain(
 	    const int reuseMask =
 		    ((flags & PUBLIC_METHOD) ? ~0 : ~PUBLIC_METHOD);
 
-	    callPtr = Tcl_GetHashValue(hPtr);
+	    callPtr = (CallChain *)Tcl_GetHashValue(hPtr);
 	    if (IsStillValid(callPtr, &obj, flags, reuseMask)) {
 		callPtr->refCount++;
 		return callPtr;
@@ -1259,7 +1304,7 @@ TclOOGetStereotypeCallChain(
 	hPtr = NULL;
     }
 
-    callPtr = ckalloc(sizeof(CallChain));
+    callPtr = (CallChain *)ckalloc(sizeof(CallChain));
     memset(callPtr, 0, sizeof(CallChain));
     callPtr->flags = flags & (PUBLIC_METHOD|PRIVATE_METHOD|FILTER_HANDLING);
     callPtr->epoch = fPtr->epoch;
@@ -1296,7 +1341,7 @@ TclOOGetStereotypeCallChain(
     /*
      * Check to see if the method has no implementation. If so, we probably
      * need to add in a call to the unknown method. Otherwise, set up the
-     * cacheing of the method implementation (if relevant).
+     * caching of the method implementation (if relevant).
      */
 
     if (count == callPtr->numChain) {
@@ -1313,7 +1358,7 @@ TclOOGetStereotypeCallChain(
     } else {
 	if (hPtr == NULL) {
 	    if (clsPtr->classChainCache == NULL) {
-		clsPtr->classChainCache = ckalloc(sizeof(Tcl_HashTable));
+		clsPtr->classChainCache = (Tcl_HashTable *)ckalloc(sizeof(Tcl_HashTable));
 		Tcl_InitObjHashTable(clsPtr->classChainCache);
 	    }
 	    hPtr = Tcl_CreateHashEntry(clsPtr->classChainCache,
@@ -1350,7 +1395,8 @@ AddClassFiltersToCallContext(
     int flags)			/* Whether we've gone along a mixin link
 				 * yet. */
 {
-    int i, clearedFlags =
+    int i;
+    int clearedFlags =
 	    flags & ~(TRAVERSED_MIXIN|OBJECT_MIXIN|BUILDING_MIXINS);
     Class *superPtr, *mixinPtr;
     Tcl_Obj *filterObj;
@@ -1444,9 +1490,16 @@ AddSimpleClassChainToCallContext(
      *
      * Note that mixins must be processed before the main class hierarchy.
      * [Bug 1998221]
+     *
+     * Note also that it's possible to end up with a null classPtr here if
+     * there is a call into stereotypical object after it has finished running
+     * its destructor phase. [Bug 7842f33a5c]
      */
 
   tailRecurse:
+    if (classPtr == NULL) {
+	return;
+    }
     FOREACH(superPtr, classPtr->mixins) {
 	AddSimpleClassChainToCallContext(superPtr, methodNameObj, cbPtr,
 		doneFilters, flags|TRAVERSED_MIXIN, filterDecl);
@@ -1463,7 +1516,7 @@ AddSimpleClassChainToCallContext(
 		(char *) methodNameObj);
 
 	if (hPtr != NULL) {
-	    Method *mPtr = Tcl_GetHashValue(hPtr);
+	    Method *mPtr = (Method *)Tcl_GetHashValue(hPtr);
 
 	    if (!(flags & KNOWN_STATE)) {
 		if (flags & PUBLIC_METHOD) {
@@ -1489,6 +1542,7 @@ AddSimpleClassChainToCallContext(
 	    AddSimpleClassChainToCallContext(superPtr, methodNameObj, cbPtr,
 		    doneFilters, flags, filterDecl);
 	}
+	/* FALLTHRU */
     case 0:
 	return;
     }
@@ -1538,20 +1592,18 @@ TclOORenderCallChain(
      * method (or "object" if it is declared on the instance).
      */
 
-    objv = TclStackAlloc(interp, callPtr->numChain * sizeof(Tcl_Obj *));
+    objv = (Tcl_Obj **)TclStackAlloc(interp, callPtr->numChain * sizeof(Tcl_Obj *));
     for (i = 0 ; i < callPtr->numChain ; i++) {
 	struct MInvoke *miPtr = &callPtr->chain[i];
 
-	descObjs[0] = miPtr->isFilter
-		? filterLiteral
-		: callPtr->flags & OO_UNKNOWN_METHOD
-			? fPtr->unknownMethodNameObj
-			: methodLiteral;
-	descObjs[1] = callPtr->flags & CONSTRUCTOR
-		? fPtr->constructorName
-		: callPtr->flags & DESTRUCTOR
-			? fPtr->destructorName
-			: miPtr->mPtr->namePtr;
+	descObjs[0] =
+	    miPtr->isFilter ? filterLiteral :
+	    callPtr->flags & OO_UNKNOWN_METHOD ? fPtr->unknownMethodNameObj :
+		    methodLiteral;
+	descObjs[1] =
+	    callPtr->flags & CONSTRUCTOR ? fPtr->constructorName :
+	    callPtr->flags & DESTRUCTOR ? fPtr->destructorName :
+		    miPtr->mPtr->namePtr;
 	descObjs[2] = miPtr->mPtr->declaringClassPtr
 		? Tcl_GetObjectName(interp,
 			(Tcl_Object) miPtr->mPtr->declaringClassPtr->thisPtr)

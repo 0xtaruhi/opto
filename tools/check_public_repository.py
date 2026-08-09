@@ -151,24 +151,20 @@ def path_violations(paths: List[Path]) -> List[str]:
     return violations
 
 
-def secret_violations(paths: List[Path]) -> List[str]:
-    violations = []
+def contains_secret(paths: List[Path]) -> bool:
     for path in paths:
         relative = path.relative_to(ROOT)
         if relative == SELF:
             continue
         data = path.read_bytes()
-        for label, pattern, scan_third_party in SECRET_PATTERNS:
+        for _label, pattern, scan_third_party in SECRET_PATTERNS:
             if not scan_third_party and relative.parts[:1] == ("third_party",):
                 continue
             match = pattern.search(data)
             if match is None:
                 continue
-            line_number = data.count(b"\n", 0, match.start()) + 1
-            violations.append(
-                "{}:{}: {}".format(relative.as_posix(), line_number, label)
-            )
-    return violations
+            return True
+    return False
 
 
 def text_violations(paths: List[Path]) -> List[str]:
@@ -196,13 +192,16 @@ def text_violations(paths: List[Path]) -> List[str]:
 
 def main() -> int:
     paths = public_files()
-    violations = (
-        path_violations(paths) + text_violations(paths) + secret_violations(paths)
-    )
-    if violations:
+    violations = path_violations(paths) + text_violations(paths)
+    secret_found = contains_secret(paths)
+    if violations or secret_found:
         print("Public repository policy violations:", file=sys.stderr)
         for violation in violations:
             print("  {}".format(violation), file=sys.stderr)
+        if secret_found:
+            # Keep all secret-derived data, including its location and count,
+            # out of logs that may be visible to untrusted pull requests.
+            print("  secret-like credential content detected", file=sys.stderr)
         return 1
     print("Public repository policy passed.")
     return 0

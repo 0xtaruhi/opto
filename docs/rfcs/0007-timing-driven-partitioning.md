@@ -6,7 +6,7 @@
 - Status: accepted
 - Implementation: production architecture and phase 0-5 code cutover complete;
   large-design runtime, incremental, equivalence, and QoR qualification remains
-  a release gate rather than a claimed result
+  a future qualification target rather than a claimed result
 - Author: Zhengyi Zhang
 - Date: 2026-08-03
 

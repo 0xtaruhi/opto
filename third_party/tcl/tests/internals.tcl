@@ -2,7 +2,7 @@
 #
 # Source this file in the related tests to include from tcl-tests:
 #
-#   source [file join [file dirname [info script]] internals.tcl]
+#   source -encoding utf-8 [file join [file dirname [info script]] internals.tcl]
 #
 # Copyright (c) 2020 Sergey G. Brester (sebres).
 #
@@ -21,7 +21,7 @@ namespace path ::tcltest
 # Options:
 #	-addmem - set additional memory limit (in bytes) as difference (extra memory needed to run a test)
 #	-maxmem - set absolute maximum address space limit (in bytes)
-# 
+#
 proc testWithLimit args {
     set body [lindex $args end]
     array set in [lrange $args 0 end-1]
@@ -36,7 +36,7 @@ proc testWithLimit args {
 	# with limited address space:
 	if {[info exists in(-addmem)] || [info exists in(-maxmem)]} {
 	    if {[info exists in(-addmem)]} {
-		# as differnce to normal usage, so try to retrieve current memory usage:
+		# as difference to normal usage, so try to retrieve current memory usage:
 		if {[catch {
 		    # using ps (vsz is in KB):
 		    incr in(-addmem) [expr {[lindex [exec ps -hq $ppid -o vsz] end] * 1024}]
@@ -45,7 +45,7 @@ proc testWithLimit args {
 		    incr in(-addmem) 20000000
 		    # + size of locale-archive (may be up to 100MB):
 		    incr in(-addmem) [expr {
-			[file exists /usr/lib/locale/locale-archive] ? 
+			[file exists /usr/lib/locale/locale-archive] ?
 			[file size /usr/lib/locale/locale-archive] : 0
 		    }]
 		}

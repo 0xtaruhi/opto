@@ -29,7 +29,7 @@ jobs:
     steps:
       - name: Restore pinned Yosys installation
         id: yosys-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: /tmp/opto-yosys
           key: linux-x64-yosys-a0fbe6e13311d4909938c63eeb28b6c730467e6c-v1
@@ -231,7 +231,13 @@ jobs:
         if: steps.previous.outputs.available == 'true'
         run: |
           critcmp base head
-          critcmp --threshold 25 base head > "$RUNNER_TEMP/critcmp.txt"
+          if ! critcmp --threshold 25 base head > "$RUNNER_TEMP/critcmp.txt" 2>&1; then
+            if grep -Fq 'no benchmark comparisons to show' "$RUNNER_TEMP/critcmp.txt"; then
+              exit 0
+            fi
+            cat "$RUNNER_TEMP/critcmp.txt"
+            exit 1
+          fi
           if grep -qE '\+[0-9]+\.[0-9]+%' "$RUNNER_TEMP/critcmp.txt"; then
             echo "::error::a synthesis benchmark regressed by more than 25%"
             cat "$RUNNER_TEMP/critcmp.txt"

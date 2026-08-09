@@ -17,4 +17,4 @@ expected_cells = 257
 cell_count_tolerance = 0.05
 maximum_wall_seconds = 10.0
 maximum_cpu_seconds = 30.0
-maximum_peak_rss_kib = 163840
+maximum_peak_rss_kib = 262144

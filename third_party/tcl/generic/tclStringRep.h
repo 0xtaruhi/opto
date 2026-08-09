@@ -56,7 +56,7 @@ typedef struct String {
 				 * the UTF string (minus 1 byte for the
 				 * termination char). */
     int maxChars;		/* Max number of chars that can fit in the
-				 * space allocated for the unicode array. */
+				 * space allocated for the Unicode array. */
     int hasUnicode;		/* Boolean determining whether the string has
 				 * a Unicode representation. */
     Tcl_UniChar unicode[TCLFLEXARRAY];	/* The array of Unicode chars. The actual size
@@ -65,9 +65,9 @@ typedef struct String {
 } String;
 
 #define STRING_MAXCHARS \
-    (int)(((size_t)UINT_MAX - 1 - TclOffset(String, unicode))/sizeof(Tcl_UniChar))
+    (int)(((size_t)UINT_MAX - TclOffset(String, unicode))/sizeof(Tcl_UniChar) - 1)
 #define STRING_SIZE(numChars) \
-    (TclOffset(String, unicode) + ((numChars + 1) * sizeof(Tcl_UniChar)))
+    (TclOffset(String, unicode) + sizeof(Tcl_UniChar) + ((numChars) * sizeof(Tcl_UniChar)))
 #define stringCheckLimits(numChars) \
     do {								\
 	if ((numChars) < 0 || (numChars) > STRING_MAXCHARS) {		\

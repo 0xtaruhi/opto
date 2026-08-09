@@ -37,13 +37,17 @@
 #include "tclInt.h"
 
 /*
- * Bison generates several labels that happen to be unused. MS Visual C++
- * doesn't like that, and complains. Tell it to shut up.
+ * Bison generates several labels that happen to be unused. Several compilers
+ * don't like that, and complain. Simply disable the warning to silence them.
  */
 
 #ifdef _MSC_VER
 #pragma warning( disable : 4102 )
-#endif /* _MSC_VER */
+#elif defined (__clang__) && (__clang_major__ > 14)
+#pragma clang diagnostic ignored "-Wunused-but-set-variable"
+#elif (__GNUC__)  && ((__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ > 5)))
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#endif
 
 /*
  * Meridian: am, pm, or 24-hour style.
@@ -136,9 +140,8 @@ typedef struct DateInfo {
 
 #define TM_YEAR_BASE	1900
 
-#define HOUR(x)		((int) (60 * x))
-#define SECSPERDAY	(24L * 60L * 60L)
-#define IsLeapYear(x)	((x % 4 == 0) && (x % 100 != 0 || x % 400 == 0))
+#define HOUR(x)		((60 * (int)(x)))
+#define IsLeapYear(x)	(((x) % 4 == 0) && ((x) % 100 != 0 || (x) % 400 == 0))
 
 /*
  * An entry in the lexical lookup table.
@@ -172,9 +175,9 @@ typedef enum _DSTMODE {
  */
 
 static int		LookupWord(YYSTYPE* yylvalPtr, char *buff);
- static void		TclDateerror(YYLTYPE* location,
+static void		TclDateerror(YYLTYPE* location,
 				     DateInfo* info, const char *s);
- static int		TclDatelex(YYSTYPE* yylvalPtr, YYLTYPE* location,
+static int		TclDatelex(YYSTYPE* yylvalPtr, YYLTYPE* location,
 				   DateInfo* info);
 static time_t		ToSeconds(time_t Hours, time_t Minutes,
 			    time_t Seconds, MERIDIAN Meridian);
@@ -423,7 +426,7 @@ trek	: tSTARDATE tUNUMBER '.' tUNUMBER {
 	    yyDay  = 1;
 	    yyMonth = 1;
 	    yyRelDay += (($2%1000)*(365 + IsLeapYear(yyYear)))/1000;
-	    yyRelSeconds += $4 * 144 * 60;
+	    yyRelSeconds += $4 * (Tcl_WideInt)(144 * 60);
 	}
 	;
 
@@ -563,20 +566,6 @@ static const TABLE OtherTable[] = {
     { "last",		tUNUMBER,	-1 },
     { "this",		tSEC_UNIT,	0 },
     { "next",		tNEXT,		1 },
-#if 0
-    { "first",		tUNUMBER,	1 },
-    { "second",		tUNUMBER,	2 },
-    { "third",		tUNUMBER,	3 },
-    { "fourth",		tUNUMBER,	4 },
-    { "fifth",		tUNUMBER,	5 },
-    { "sixth",		tUNUMBER,	6 },
-    { "seventh",	tUNUMBER,	7 },
-    { "eighth",		tUNUMBER,	8 },
-    { "ninth",		tUNUMBER,	9 },
-    { "tenth",		tUNUMBER,	10 },
-    { "eleventh",	tUNUMBER,	11 },
-    { "twelfth",	tUNUMBER,	12 },
-#endif
     { "ago",		tAGO,		1 },
     { "epoch",		tEPOCH,		0 },
     { "stardate",	tSTARDATE,	0 },
@@ -618,6 +607,8 @@ static const TABLE TimezoneTable[] = {
     { "pdt",	tDAYZONE,  HOUR( 8) },	    /* Pacific Daylight */
     { "yst",	tZONE,	   HOUR( 9) },	    /* Yukon Standard */
     { "ydt",	tDAYZONE,  HOUR( 9) },	    /* Yukon Daylight */
+    { "akst",	tZONE,	   HOUR( 9) },	    /* Alaska Standard */
+    { "akdt",	tDAYZONE,  HOUR( 9) },	    /* Alaska Daylight */
     { "hst",	tZONE,	   HOUR(10) },	    /* Hawaii Standard */
     { "hdt",	tDAYZONE,  HOUR(10) },	    /* Hawaii Daylight */
     { "cat",	tZONE,	   HOUR(10) },	    /* Central Alaska */
@@ -641,7 +632,7 @@ static const TABLE TimezoneTable[] = {
     { "ist",	tZONE,	  -HOUR(11/2) },    /* Indian Standard */
     { "zp6",	tZONE,	  -HOUR( 6) },	    /* USSR Zone 5 */
 #if	0
-    /* For completeness.  NST is also Newfoundland Stanard, nad SST is
+    /* For completeness.  NST is also Newfoundland Standard, and SST is
      * also Swedish Summer. */
     { "nst",	tZONE,	  -HOUR(13/2) },    /* North Sumatra */
     { "sst",	tZONE,	  -HOUR( 7) },	    /* South Sumatra, USSR Zone 6 */
@@ -736,27 +727,15 @@ ToSeconds(
     time_t Seconds,
     MERIDIAN Meridian)
 {
-    if (Minutes < 0 || Minutes > 59 || Seconds < 0 || Seconds > 59) {
-	return -1;
-    }
     switch (Meridian) {
     case MER24:
-	if (Hours < 0 || Hours > 23) {
-	    return -1;
-	}
-	return (Hours * 60L + Minutes) * 60L + Seconds;
+	return (Hours * 60 + Minutes) * 60 + Seconds;
     case MERam:
-	if (Hours < 1 || Hours > 12) {
-	    return -1;
-	}
-	return ((Hours % 12) * 60L + Minutes) * 60L + Seconds;
+	return ((Hours % 12) * 60 + Minutes) * 60 + Seconds;
     case MERpm:
-	if (Hours < 1 || Hours > 12) {
-	    return -1;
-	}
-	return (((Hours % 12) + 12) * 60L + Minutes) * 60L + Seconds;
+	return (((Hours % 12) + 12) * 60 + Minutes) * 60 + Seconds;
     }
-    return -1;			/* Should never be reached */
+    return -1;                  /* Should never be reached */
 }
 
 static int
@@ -961,7 +940,7 @@ int
 TclClockOldscanObjCmd(
     void *dummy,		/* Unused */
     Tcl_Interp *interp,		/* Tcl interpreter */
-    int objc,			/* Count of paraneters */
+    int objc,			/* Count of parameters */
     Tcl_Obj *const *objv)	/* Parameters */
 {
     Tcl_Obj *result, *resultElement;
@@ -977,7 +956,7 @@ TclClockOldscanObjCmd(
 	return TCL_ERROR;
     }
 
-    yyInput = Tcl_GetString( objv[1] );
+    yyInput = TclGetString(objv[1]);
     dateInfo.dateStart = yyInput;
 
     yyHaveDate = 0;
@@ -1011,12 +990,12 @@ TclClockOldscanObjCmd(
     if (status == 1) {
 	Tcl_SetObjResult(interp, dateInfo.messages);
 	Tcl_DecrRefCount(dateInfo.messages);
-	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "PARSE", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "PARSE", (char *)NULL);
 	return TCL_ERROR;
     } else if (status == 2) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj("memory exhausted", -1));
 	Tcl_DecrRefCount(dateInfo.messages);
-	Tcl_SetErrorCode(interp, "TCL", "MEMORY", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "MEMORY", (char *)NULL);
 	return TCL_ERROR;
     } else if (status != 0) {
 	Tcl_SetObjResult(interp, Tcl_NewStringObj("Unknown status returned "
@@ -1024,7 +1003,7 @@ TclClockOldscanObjCmd(
 						  "report this error as a "
 						  "bug in Tcl.", -1));
 	Tcl_DecrRefCount(dateInfo.messages);
-	Tcl_SetErrorCode(interp, "TCL", "BUG", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "BUG", (char *)NULL);
 	return TCL_ERROR;
     }
     Tcl_DecrRefCount(dateInfo.messages);
@@ -1032,31 +1011,31 @@ TclClockOldscanObjCmd(
     if (yyHaveDate > 1) {
 	Tcl_SetObjResult(interp,
 		Tcl_NewStringObj("more than one date in string", -1));
-	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", (char *)NULL);
 	return TCL_ERROR;
     }
     if (yyHaveTime > 1) {
 	Tcl_SetObjResult(interp,
 		Tcl_NewStringObj("more than one time of day in string", -1));
-	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", (char *)NULL);
 	return TCL_ERROR;
     }
     if (yyHaveZone > 1) {
 	Tcl_SetObjResult(interp,
 		Tcl_NewStringObj("more than one time zone in string", -1));
-	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", (char *)NULL);
 	return TCL_ERROR;
     }
     if (yyHaveDay > 1) {
 	Tcl_SetObjResult(interp,
 		Tcl_NewStringObj("more than one weekday in string", -1));
-	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", (char *)NULL);
 	return TCL_ERROR;
     }
     if (yyHaveOrdinalMonth > 1) {
 	Tcl_SetObjResult(interp,
 		Tcl_NewStringObj("more than one ordinal month in string", -1));
-	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", NULL);
+	Tcl_SetErrorCode(interp, "TCL", "VALUE", "DATE", "MULTIPLE", (char *)NULL);
 	return TCL_ERROR;
     }
 
@@ -1095,11 +1074,11 @@ TclClockOldscanObjCmd(
 	Tcl_ListObjAppendElement(interp, resultElement,
 		Tcl_NewIntObj((int) yyRelDay));
 	Tcl_ListObjAppendElement(interp, resultElement,
-		Tcl_NewIntObj((int) yyRelSeconds));
+		Tcl_NewWideIntObj(yyRelSeconds));
     }
     Tcl_ListObjAppendElement(interp, result, resultElement);
 
-    TcNewObj(resultElement);
+    TclNewObj(resultElement);
     if (yyHaveDay && !yyHaveDate) {
 	Tcl_ListObjAppendElement(interp, resultElement,
 		Tcl_NewIntObj((int) yyDayOrdinal));

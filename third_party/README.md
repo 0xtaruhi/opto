@@ -13,8 +13,11 @@ third_party/fmt/    https://github.com/fmtlib/fmt.git
 ```
 
 Their upstream license texts are retained as `third_party/slang/LICENSE` and
-`third_party/fmt/LICENSE`. Tcl 8.6.11 is vendored under `third_party/tcl`; its
-license is retained as `third_party/tcl/license.terms`.
+`third_party/fmt/LICENSE`. The official Tcl 8.6.18 source distribution is
+vendored without local patches under `third_party/tcl`; its license is retained
+as `third_party/tcl/license.terms`. The imported release asset is
+`tcl8.6.18-src.tar.gz` from `tcltk/tcl` with SHA-256
+`14f9af32b1767ff718477a8f974ad03c34341097e6b43f4ce54644ee974e268e`.
 
 Rules:
 

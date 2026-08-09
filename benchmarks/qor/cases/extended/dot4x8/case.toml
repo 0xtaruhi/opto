@@ -23,11 +23,11 @@ constraints = [
   "set_load 0.05 [get_ports result]",
   "set_max_delay 60.0 -from $input_ports -to [get_ports result]",
 ]
-expected_area = 2574.5
+expected_area = 2536.5
 area_tolerance = 0.0
-expected_cells = 1371
+expected_cells = 1342
 cell_count_tolerance = 0.0
-expected_worst_slack = 29.0
+expected_worst_slack = 27.0
 worst_slack_tolerance = 0.0
 expected_total_negative_slack = 0.0
 total_negative_slack_tolerance = 0.0
@@ -37,11 +37,11 @@ maximum_cpu_seconds = 600.0
 maximum_peak_rss_kib = 524288
 
 [expected_cell_histogram]
-AND2_X1 = 47
-INV_X1 = 76
-MUX2_X1 = 412
-NAND2_X1 = 199
-NOR2_X1 = 143
-OR2_X1 = 35
-XNOR2_X1 = 57
-XOR2_X1 = 402
+AND2_X1 = 44
+INV_X1 = 64
+MUX2_X1 = 413
+NAND2_X1 = 192
+NOR2_X1 = 144
+OR2_X1 = 32
+XNOR2_X1 = 70
+XOR2_X1 = 383

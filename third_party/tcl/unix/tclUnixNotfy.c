@@ -236,31 +236,31 @@ typedef struct {
     const void *lpszClassName;
 } WNDCLASSW;
 
-extern void __stdcall	CloseHandle(void *);
-extern void *__stdcall	CreateEventW(void *, unsigned char, unsigned char,
+extern void 	CloseHandle(void *);
+extern void *	CreateEventW(void *, unsigned char, unsigned char,
 			    void *);
-extern void * __stdcall	CreateWindowExW(void *, const void *, const void *,
+extern void * 	CreateWindowExW(void *, const void *, const void *,
 			    unsigned int, int, int, int, int, void *, void *, void *, void *);
-extern unsigned int __stdcall	DefWindowProcW(void *, int, void *, void *);
-extern unsigned char __stdcall	DestroyWindow(void *);
-extern int __stdcall	DispatchMessageW(const MSG *);
-extern unsigned char __stdcall	GetMessageW(MSG *, void *, int, int);
-extern void __stdcall	MsgWaitForMultipleObjects(unsigned int, void *,
+extern unsigned int 	DefWindowProcW(void *, int, void *, void *);
+extern unsigned char 	DestroyWindow(void *);
+extern int 	DispatchMessageW(const MSG *);
+extern unsigned char 	GetMessageW(MSG *, void *, int, int);
+extern void 	MsgWaitForMultipleObjects(unsigned int, void *,
 			    unsigned char, unsigned int, unsigned int);
-extern unsigned char __stdcall	PeekMessageW(MSG *, void *, int, int, int);
-extern unsigned char __stdcall	PostMessageW(void *, unsigned int, void *,
+extern unsigned char 	PeekMessageW(MSG *, void *, int, int, int);
+extern unsigned char 	PostMessageW(void *, unsigned int, void *,
 				    void *);
-extern void __stdcall	PostQuitMessage(int);
-extern void *__stdcall	RegisterClassW(const WNDCLASSW *);
-extern unsigned char __stdcall	ResetEvent(void *);
-extern unsigned char __stdcall	TranslateMessage(const MSG *);
+extern void 	PostQuitMessage(int);
+extern void *	RegisterClassW(const WNDCLASSW *);
+extern unsigned char 	ResetEvent(void *);
+extern unsigned char 	TranslateMessage(const MSG *);
 
 /*
  * Threaded-cygwin specific constants and functions in this file:
  */
 
 static const wchar_t *NotfyClassName = L"TclNotifier";
-static unsigned int __stdcall	NotifierProc(void *hwnd, unsigned int message,
+static unsigned int 	NotifierProc(void *hwnd, unsigned int message,
 			    void *wParam, void *lParam);
 #endif /* TCL_THREADS && __CYGWIN__ */
 
@@ -814,7 +814,7 @@ FileHandlerEventProc(
 
 #if defined(TCL_THREADS) && defined(__CYGWIN__)
 
-static unsigned int __stdcall
+static unsigned int
 NotifierProc(
     void *hwnd,
     unsigned int message,
@@ -1452,7 +1452,7 @@ AtForkChild(void)
 
 	    /*
 	     * The tsdPtr from before the fork is copied as well.  But since
-	     * we are paranoic, we don't trust its condvar and reset it.
+	     * we are paranoiac, we don't trust its condvar and reset it.
 	     */
 #ifdef __CYGWIN__
 	    DestroyWindow(tsdPtr->hwnd);
@@ -1483,6 +1483,8 @@ AtForkChild(void)
 
 #endif /* TCL_THREADS */
 
+#else
+TCL_MAC_EMPTY_FILE(unix_tclUnixNotfy_c)
 #endif /* !HAVE_COREFOUNDATION */
 
 /*

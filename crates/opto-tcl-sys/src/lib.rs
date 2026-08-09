@@ -35,7 +35,7 @@ use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 /// Patch level of the embedded Tcl runtime.
-pub const TCL_PATCH_LEVEL: &str = "8.6.11";
+pub const TCL_PATCH_LEVEL: &str = "8.6.18";
 /// Virtual filesystem path containing the embedded Tcl standard library.
 pub const TCL_LIBRARY_PATH: &str = "opto:/tcl8.6";
 

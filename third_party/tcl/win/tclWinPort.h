@@ -355,6 +355,9 @@ typedef DWORD_PTR * PDWORD_PTR;
 #ifndef R_OK
 #    define R_OK 04
 #endif
+#ifndef O_ACCMODE
+#    define O_ACCMODE (O_RDONLY | O_WRONLY | O_RDWR)
+#endif
 
 /*
  * Define macros to query file type bits, if they're not already
@@ -486,14 +489,15 @@ typedef DWORD_PTR * PDWORD_PTR;
  * (_MSC_VER is 1200 for VC6, 1300 or 1310 for vc7.net, 1400 for 8.0)
  */
 #if defined(_MSC_VER)
+#   pragma warning(disable:4090) /* see: https://developercommunity.visualstudio.com/t/c-compiler-incorrect-propagation-of-const-qualifie/390711 */
 #   pragma warning(disable:4146)
 #   pragma warning(disable:4244)
+#   pragma warning(disable:4550)
 #   if _MSC_VER >= 1400
 #	pragma warning(disable:4267)
 #	pragma warning(disable:4996)
 #   endif
 #endif
-
 /*
  *---------------------------------------------------------------------------
  * The following macros and declarations represent the interface between

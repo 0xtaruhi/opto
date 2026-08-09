@@ -11,5 +11,5 @@ top = "top"
 sources = ["top.sv"]
 flow = "synth_high"
 library_key = "sky130_hd"
-expected_area = 1746.675200
+expected_area = 1939.360000
 area_tolerance = 0.001

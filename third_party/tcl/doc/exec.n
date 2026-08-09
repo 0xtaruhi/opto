@@ -22,6 +22,10 @@ of one or more subprocesses to execute.
 The arguments take the form of a standard shell pipeline
 where each \fIarg\fR becomes one word of a command, and
 each distinct command becomes a subprocess.
+The result of the command is the standard output of the final subprocess in
+the pipeline, interpreted using the system \fBencoding\fR; to use any other
+encoding (especially including binary data), the pipeline must be
+\fBopen\fRed, configured and read explicitly.
 .PP
 If the initial arguments to \fBexec\fR start with \fB\-\fR then
 they are treated as command-line switches and are not part
@@ -230,6 +234,44 @@ processor (\fBcmd.exe /c\fR), because this causes truncation of command-line
 (also the argument chain) on the first newline character.
 But it works properly with an executable (using CommandLineToArgv, etc).
 .PP
+\fBArgument quoting\fR
+.RS
+The arguments of the \fBexec\fR command are mapped to the arguments of the called
+program. Additional quote characters (\fB"\fR) are automatically  added around
+arguments if expected. Special characters are escaped by inserting backslash
+characters.
+.PP
+The MS-Windows environment does execute programs mentioned in the arguments and
+called batch files (conspec) replace environment variables, which may have side
+effects (vulnerabilities) or break any already existing quoting (for example,
+if the environment variable contains a special character like a \fB"\fR).
+Examples are:
+.CS
+% exec my-echo.cmd {test&whoami}
+  test
+  mylogin
+% exec my-echo.cmd "ENV X:%X%"
+  ENV X: CONTENT OF X
+.CE
+The following formatting is automatically performed on any
+argument item to avoid subprogram execution:
+Any special character argument containing a special character (\fB&\fR, \fB|\fR,
+\fB^\fR, \fB<\fR, \fB>\fR, \fB!\fR, \fB(\fR, \fB)\fR, \fB(\fR, \fB%\fR)
+is automatically enclosed in quotes (\fB"\fR). Any data quote is escaped by
+insertion of backslash characters.
+.PP
+The automatic resolving of environment variables using "\fB%var%\fR" is critical,
+but has more use than danger and is not escaped.
+.PP
+TCL 8.6.10 refined this quoting by adding quoting for data quotes and individual
+quoting of "\fB%\fR".
+This may break present scripts which rely on the replacement functionality of
+environment variables.
+Thus, the individual quoting of "\fB%\fR" was removed in TCL 8.6.14, as environment
+variables are seen more helpful than a problem.
+A solution with command parameters is envisaged for a future release of TCL.
+.RE
+.PP
 The Tk console text widget does not provide real standard IO capabilities.
 Under Tk, when redirecting from standard input, all applications will see an
 immediate end-of-file; information redirected to standard output or standard
@@ -298,7 +340,7 @@ the caller must prepend the desired command with
 because built-in commands are not implemented using executables.
 .RE
 .TP
-\fBUnix\fR (including Mac OS X)
+\fBUnix\fR (including macOS)
 .
 The \fBexec\fR command is fully functional and works as described.
 .SH "UNIX EXAMPLES"
@@ -413,7 +455,9 @@ With the file \fIcmp.bat\fR looking something like:
 .CS
 @gcc %*
 .CE
+.PP
 or like another variant using single parameters:
+.PP
 .CS
 @gcc %1 %2 %3 %4 %5 %6 %7 %8 %9
 .CE

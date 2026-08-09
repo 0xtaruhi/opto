@@ -109,7 +109,7 @@ proof targets, and deferred proof targets. Its 53 deferrals are exact
 path/design pairs with reviewed reasons in `upstream/yosys/proof.toml`; a new
 or renamed deferral fails instead of silently reducing proof coverage. Neither
 baseline can be satisfied by losing one old case while gaining an unrelated
-new one. Thirteen capability gaps and 27 non-hardware exclusions are also
-enumerated with reasons in `upstream/yosys/audit.toml`. Updating a hash or
-classification requires reviewing the mismatch report and the pinned upstream
-license/inventory again.
+new one. One required rejection and 27 non-hardware exclusions are also
+enumerated with reasons in `upstream/yosys/audit.toml`; there is no remaining
+required-compilation capability gap. Updating a hash or classification requires
+reviewing the mismatch report and the pinned upstream license/inventory again.

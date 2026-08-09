@@ -4,6 +4,8 @@
 name: Extended synthesis qualification
 
 on:
+  schedule:
+    - cron: "41 3 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -27,7 +29,7 @@ jobs:
     steps:
       - name: Restore pinned Yosys installation
         id: yosys-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: /tmp/opto-yosys
           key: linux-x64-yosys-a0fbe6e13311d4909938c63eeb28b6c730467e6c-v1
@@ -139,16 +141,6 @@ jobs:
     needs: yosys-toolchain
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    concurrency:
-      group: pages
-      cancel-in-progress: true
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out Opto and pinned dependencies
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -219,11 +211,13 @@ jobs:
           key: ${{ runner.os }}-qor-history-${{ github.run_id }}
 
       - name: Install mdBook
+        if: github.ref_name == github.event.repository.default_branch
         uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
           tool: mdbook
 
       - name: Build documentation and API reference
+        if: github.ref_name == github.event.repository.default_branch
         env:
           RUSTDOCFLAGS: --cfg docsrs
         run: |
@@ -232,17 +226,11 @@ jobs:
           cp -R target/doc target/book/api
           cp -R .qor-dashboard/dashboard target/book/qor
 
-      - name: Configure Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-
       - name: Upload Pages artifact
+        if: github.ref_name == github.event.repository.default_branch
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: target/book
-
-      - name: Deploy documentation and QoR dashboard
-        id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
 
       - name: Upload QoR provenance and diagnostics
         if: always()
@@ -252,3 +240,25 @@ jobs:
           path: |
             ${{ runner.temp }}/opto-regression/qor-public
             ${{ runner.temp }}/opto-regression/qor-extended
+
+  deploy-pages:
+    name: Deploy documentation and QoR dashboard
+    if: github.ref_name == github.event.repository.default_branch
+    needs: public-qor
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Deploy documentation and QoR dashboard
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

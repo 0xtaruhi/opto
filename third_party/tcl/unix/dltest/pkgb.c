@@ -13,18 +13,13 @@
 
 #undef STATIC_BUILD
 #include "tcl.h"
+#if defined(_WIN32) && defined(_MSC_VER)
+#   define snprintf _snprintf
+#endif
+#if TCL_MAJOR_VERSION < 9
+#   define Tcl_Size int
+#endif
 
-/*
- * Prototypes for procedures defined later in this file:
- */
-
-static int    Pkgb_SubObjCmd(ClientData clientData,
-		Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-static int    Pkgb_UnsafeObjCmd(ClientData clientData,
-		Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-static int    Pkgb_DemoObjCmd(ClientData clientData,
-		Tcl_Interp *interp, int objc, Tcl_Obj *const objv[]);
-
 /*
  *----------------------------------------------------------------------
  *
@@ -42,18 +37,15 @@ static int    Pkgb_DemoObjCmd(ClientData clientData,
  *----------------------------------------------------------------------
  */
 
-#ifndef Tcl_GetErrorLine
-#   define Tcl_GetErrorLine(interp) ((interp)->errorLine)
-#endif
-
 static int
 Pkgb_SubObjCmd(
-    ClientData dummy,		/* Not used. */
+    void *dummy,		/* Not used. */
     Tcl_Interp *interp,		/* Current interpreter. */
     int objc,			/* Number of arguments. */
     Tcl_Obj *const objv[])	/* Argument objects. */
 {
     int first, second;
+    (void)dummy;
 
     if (objc != 3) {
 	Tcl_WrongNumArgs(interp, 1, objv, "num num");
@@ -62,8 +54,8 @@ Pkgb_SubObjCmd(
     if ((Tcl_GetIntFromObj(interp, objv[1], &first) != TCL_OK)
 	    || (Tcl_GetIntFromObj(interp, objv[2], &second) != TCL_OK)) {
 	char buf[TCL_INTEGER_SPACE];
-	sprintf(buf, "%d", Tcl_GetErrorLine(interp));
-	Tcl_AppendResult(interp, " in line: ", buf, NULL);
+	snprintf(buf, sizeof(buf), "%d", Tcl_GetErrorLine(interp));
+	Tcl_AppendResult(interp, " in line: ", buf, (char *)NULL);
 	return TCL_ERROR;
     }
     Tcl_SetObjResult(interp, Tcl_NewIntObj(first - second));
@@ -89,31 +81,38 @@ Pkgb_SubObjCmd(
 
 static int
 Pkgb_UnsafeObjCmd(
-    ClientData dummy,		/* Not used. */
+    void *dummy,		/* Not used. */
     Tcl_Interp *interp,		/* Current interpreter. */
     int objc,			/* Number of arguments. */
     Tcl_Obj *const objv[])	/* Argument objects. */
 {
+    (void)dummy;
+    (void)objc;
+    (void)objv;
+
     return Tcl_EvalEx(interp, "list unsafe command invoked", -1, TCL_EVAL_GLOBAL);
 }
 
 static int
 Pkgb_DemoObjCmd(
-    ClientData dummy,		/* Not used. */
+    void *dummy,		/* Not used. */
     Tcl_Interp *interp,		/* Current interpreter. */
     int objc,			/* Number of arguments. */
     Tcl_Obj *const objv[])	/* Argument objects. */
 {
-#if (TCL_MAJOR_VERSION > 8) || (TCL_MINOR_VERSION > 4)
-    Tcl_Obj *first;
+    Tcl_WideInt numChars;
+    int result;
+    (void)dummy;
 
-    if (Tcl_ListObjIndex(NULL, Tcl_GetEncodingSearchPath(), 0, &first)
-	    == TCL_OK) {
-	Tcl_SetObjResult(interp, first);
+    if (objc != 4) {
+	Tcl_WrongNumArgs(interp, 1, objv, "arg1 arg2 num");
+	return TCL_ERROR;
     }
-#else
-    Tcl_SetObjResult(interp, Tcl_NewStringObj(Tcl_GetDefaultEncodingDir(), -1));
-#endif
+    if (Tcl_GetWideIntFromObj(interp, objv[3], &numChars) != TCL_OK) {
+	return TCL_ERROR;
+    }
+    result = Tcl_UtfNcmp(Tcl_GetString(objv[1]), Tcl_GetString(objv[2]), (size_t)numChars);
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(result));
     return TCL_OK;
 }
 
@@ -141,10 +140,10 @@ Pkgb_Init(
 {
     int code;
 
-    if (Tcl_InitStubs(interp, "8.5-", 0) == NULL) {
+    if (Tcl_InitStubs(interp, "8.6-", 0) == NULL) {
 	return TCL_ERROR;
     }
-    code = Tcl_PkgProvide(interp, "Pkgb", "2.3");
+    code = Tcl_PkgProvide(interp, "pkgb", "2.3");
     if (code != TCL_OK) {
 	return code;
     }
@@ -178,10 +177,10 @@ Pkgb_SafeInit(
 {
     int code;
 
-    if (Tcl_InitStubs(interp, "8.5-", 0) == NULL) {
+    if (Tcl_InitStubs(interp, "8.6-", 0) == NULL) {
 	return TCL_ERROR;
     }
-    code = Tcl_PkgProvide(interp, "Pkgb", "2.3");
+    code = Tcl_PkgProvide(interp, "pkgb", "2.3");
     if (code != TCL_OK) {
 	return code;
     }

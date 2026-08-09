@@ -97,17 +97,17 @@ static TimeInfo timeInfo = {
     (HANDLE) NULL,
     (HANDLE) NULL,
 #ifdef HAVE_CAST_TO_UNION
-    (LARGE_INTEGER) (Tcl_WideInt) 0,
-    (ULARGE_INTEGER) (DWORDLONG) 0,
-    (LARGE_INTEGER) (Tcl_WideInt) 0,
-    (LARGE_INTEGER) (Tcl_WideInt) 0,
-    (LARGE_INTEGER) (Tcl_WideInt) 0,
+    (LARGE_INTEGER) (Tcl_WideInt)0,
+    (ULARGE_INTEGER) (DWORDLONG)0,
+    (LARGE_INTEGER) (Tcl_WideInt)0,
+    (LARGE_INTEGER) (Tcl_WideInt)0,
+    (LARGE_INTEGER) (Tcl_WideInt)0,
 #else
-    {0, 0},
-    {0, 0},
-    {0, 0},
-    {0, 0},
-    {0, 0},
+    {{0, 0}},
+    {{0, 0}},
+    {{0, 0}},
+    {{0, 0}},
+    {{0, 0}},
 #endif
     { 0 },
     { 0 },
@@ -120,7 +120,8 @@ static TimeInfo timeInfo = {
  */
 static struct {
     int initialized;		/* 1 if initialized, 0 otherwise */
-    int perfCounter;		/* 1 if performance counter usable for wide clicks */
+    int perfCounter;		/* 1 if performance counter usable for wide
+				 * clicks */
     double microsecsScale;	/* Denominator scale between clock / microsecs */
 } wideClick = {0, 0, 0.0};
 
@@ -224,7 +225,7 @@ TclpGetClicks(void)
 	Tcl_Time now;		/* Current Tcl time */
 
 	tclGetTimeProcPtr(&now, tclTimeClientData);	/* Tcl_GetTime inlined */
-	return (unsigned long)(now.sec * 1000000) + now.usec;
+	return ((unsigned long)(now.sec)*1000000UL) + (unsigned long)(now.usec);
     }
 }
 
@@ -464,7 +465,6 @@ NativeGetMicroseconds(void)
     if (!timeInfo.initialized) {
 	TclpInitLock();
 	if (!timeInfo.initialized) {
-
 	    timeInfo.posixEpoch.LowPart = 0xD53E8000;
 	    timeInfo.posixEpoch.HighPart = 0x019DB1DE;
 
@@ -506,7 +506,7 @@ NativeGetMicroseconds(void)
 		     * && timeInfo.nominalFreq.QuadPart != (Tcl_WideInt)1193182
 		     * && timeInfo.nominalFreq.QuadPart != (Tcl_WideInt)3579545
 		     */
-		    && timeInfo.nominalFreq.QuadPart > (Tcl_WideInt) 15000000){
+		    && timeInfo.nominalFreq.QuadPart > 15000000){
 		/*
 		 * As an exception, if every logical processor on the system
 		 * is on the same chip, we use the performance counter anyway,
@@ -595,8 +595,12 @@ NativeGetMicroseconds(void)
 	/*
 	 * If calibration cycle occurred after we get curCounter
 	 */
+
 	if (curCounter.QuadPart <= perfCounterLastCall) {
-	    /* Calibrated file-time is saved from posix in 100-ns ticks */
+	    /*
+	     * Calibrated file-time is saved from Posix in 100-ns ticks
+	     */
+
 	    return fileTimeLastCall / 10;
 	}
 
@@ -613,7 +617,7 @@ NativeGetMicroseconds(void)
 	if (curCounter.QuadPart - perfCounterLastCall <
 		11 * curCounterFreq * timeInfo.calibrationInterv / 10
 	) {
-	    /* Calibrated file-time is saved from posix in 100-ns ticks */
+	    /* Calibrated file-time is saved from Posix in 100-ns ticks */
 	    return NativeCalc100NsTicks(fileTimeLastCall,
 		perfCounterLastCall, curCounterFreq, curCounter.QuadPart) / 10;
 	}
@@ -750,7 +754,7 @@ TclpGetDate(
 	 */
 
 	/*
-	 * Hm, Borland's localtime manages to return NULL under certain
+	 * Hmm, Borland's localtime manages to return NULL under certain
 	 * circumstances (e.g. wintime.test, test 1.2). Nobody tests for this,
 	 * since 'localtime' isn't supposed to do this, possibly leading to
 	 * crashes.
@@ -981,7 +985,7 @@ CalibrationThread(
     QueryPerformanceFrequency(&timeInfo.curCounterFreq);
     timeInfo.fileTimeLastCall.LowPart = curFileTime.dwLowDateTime;
     timeInfo.fileTimeLastCall.HighPart = curFileTime.dwHighDateTime;
-    /* Calibrated file-time will be saved from posix in 100-ns ticks */
+    /* Calibrated file-time will be saved from Posix in 100-ns ticks */
     timeInfo.fileTimeLastCall.QuadPart -= timeInfo.posixEpoch.QuadPart;
 
     ResetCounterSamples(timeInfo.fileTimeLastCall.QuadPart,
@@ -1011,7 +1015,6 @@ CalibrationThread(
 	UpdateTimeEachSecond();
     }
 
-    /* lint */
     return (DWORD) 0;
 }
 
@@ -1042,7 +1045,8 @@ UpdateTimeEachSecond(void)
 				/* Current value returned from
 				 * QueryPerformanceCounter. */
     FILETIME curSysTime;	/* Current system time. */
-    static LARGE_INTEGER lastFileTime; /* File time of the previous calibration */
+    static LARGE_INTEGER lastFileTime;
+				/* File time of the previous calibration */
     LARGE_INTEGER curFileTime;	/* File time at the time this callback was
 				 * scheduled. */
     Tcl_WideInt estFreq;	/* Estimated perf counter frequency. */
@@ -1054,7 +1058,7 @@ UpdateTimeEachSecond(void)
 				 * step over 1 second. */
 
     /*
-     * Sample performance counter and system time (from posix epoch).
+     * Sample performance counter and system time (from Posix epoch).
      */
 
     GetSystemTimeAsFileTime(&curSysTime);
@@ -1074,7 +1078,7 @@ UpdateTimeEachSecond(void)
     lastFileTime.QuadPart = curFileTime.QuadPart;
 
     /*
-     * We devide by timeInfo.curCounterFreq.QuadPart in several places. That
+     * We divide by timeInfo.curCounterFreq.QuadPart in several places. That
      * value should always be positive on a correctly functioning system. But
      * it is good to be defensive about such matters. So if something goes
      * wrong and the value does goes to zero, we clear the
@@ -1314,7 +1318,7 @@ AccumulateSample(
 	estFreq = 10000000 * (perfCounter - workPCSample)
 		/ (fileTime - workFTSample);
 	timeInfo.perfCounterSample[timeInfo.sampleNo] = perfCounter;
-	timeInfo.fileTimeSample[timeInfo.sampleNo] = (Tcl_WideInt) fileTime;
+	timeInfo.fileTimeSample[timeInfo.sampleNo] = fileTime;
 
 	/*
 	 * Advance the sample number.
