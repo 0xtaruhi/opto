@@ -580,7 +580,7 @@ impl RegionArchitectureMaterializer<'_> {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("regional_optimization.region[{row}].dataflow")
             });
-            crate::planning::dataflow::optimize_combinational_dataflow(&mut module)?
+            crate::planning::dataflow::canonicalize_combinational_dataflow(&mut module)?
         };
         remap_private_values(
             &local_changes,
@@ -590,7 +590,7 @@ impl RegionArchitectureMaterializer<'_> {
         );
         if crate::planning::operator::share_muxed_arithmetic(&mut module)? != 0 {
             let local_changes =
-                crate::planning::dataflow::optimize_combinational_dataflow(&mut module)?;
+                crate::planning::dataflow::canonicalize_combinational_dataflow(&mut module)?;
             remap_private_values(
                 &local_changes,
                 &mut source_to_local,

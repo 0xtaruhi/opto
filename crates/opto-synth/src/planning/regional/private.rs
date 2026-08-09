@@ -30,9 +30,8 @@ pub(crate) fn optimize_structure(
         runtime,
     )?;
     inherit_generated_owners(module, &mut owners, "FSM optimization")?;
-    crate::planning::dataflow::rebalance_priority_muxes_in_regions(module, &mut owners)?;
     let canonical_values =
-        crate::planning::dataflow::optimize_owned_combinational_dataflow(module, &owners)?;
+        crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut owners)?;
     crate::planning::dataflow::share_equivalent_sequential_values_by(
         module,
         runtime,

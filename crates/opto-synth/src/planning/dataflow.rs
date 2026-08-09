@@ -239,10 +239,20 @@ impl DataflowChanges {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn optimize_combinational_dataflow(
     module: &mut word::WordModule,
+) -> Result<(), crate::SynthError> {
+    canonicalize_combinational_dataflow(module)?;
+    if priority::rebalance_constant_priority_muxes(module)? {
+        canonicalize_combinational_dataflow(module)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn canonicalize_combinational_dataflow(
+    module: &mut word::WordModule,
 ) -> Result<DataflowChanges, crate::SynthError> {
-    priority::rebalance_constant_priority_muxes(module)?;
     optimize_combinational_dataflow_by(module, |_, _| true)
 }
 
@@ -386,6 +396,15 @@ pub(crate) fn rebalance_priority_muxes_in_regions(
         ));
     }
     Ok(result.changed)
+}
+
+pub(crate) fn optimize_owned_priority_dataflow(
+    module: &mut word::WordModule,
+    owners: &mut Vec<Option<crate::RegionRowId>>,
+) -> Result<DataflowChanges, crate::SynthError> {
+    optimize_owned_combinational_dataflow(module, owners)?;
+    rebalance_priority_muxes_in_regions(module, owners)?;
+    optimize_owned_combinational_dataflow(module, owners)
 }
 
 pub(crate) fn optimize_combinational_dataflow_by(

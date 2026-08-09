@@ -42,6 +42,7 @@ pub(super) struct RebalanceResult<Scope> {
     pub(super) generated: Vec<GeneratedOperations<Scope>>,
 }
 
+#[cfg(test)]
 pub(super) fn rebalance_constant_priority_muxes(
     module: &mut word::WordModule,
 ) -> Result<bool, crate::SynthError> {
