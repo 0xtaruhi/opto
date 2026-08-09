@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: Native production sources
+
+paths:
+  - crates/opto-slang-sys/native
+  - third_party/fmt/include
+  - third_party/slang/include
+  - third_party/slang/source
+  - third_party/tcl/compat
+  - third_party/tcl/generic
+  - third_party/tcl/libtommath
+  - third_party/tcl/macosx
+  - third_party/tcl/unix
+  - third_party/tcl/win

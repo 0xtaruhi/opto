@@ -231,8 +231,8 @@ jobs:
         if: steps.previous.outputs.available == 'true'
         run: |
           critcmp base head
-          if ! critcmp --threshold 25 base head > "$RUNNER_TEMP/critcmp.txt"; then
-            if grep -Fxq 'no benchmark comparisons to show' "$RUNNER_TEMP/critcmp.txt"; then
+          if ! critcmp --threshold 25 base head > "$RUNNER_TEMP/critcmp.txt" 2>&1; then
+            if grep -Fq 'no benchmark comparisons to show' "$RUNNER_TEMP/critcmp.txt"; then
               exit 0
             fi
             cat "$RUNNER_TEMP/critcmp.txt"

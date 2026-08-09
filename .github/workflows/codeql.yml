@@ -31,8 +31,6 @@ jobs:
         include:
           - language: actions
             build-mode: none
-          - language: c-cpp
-            build-mode: manual
           - language: python
             build-mode: none
           - language: rust
@@ -43,19 +41,31 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install latest stable Rust
-        if: matrix.build-mode == 'manual'
-        run: rustup toolchain install stable --profile minimal
-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
-      - name: Build production C and C++ sources
-        if: matrix.build-mode == 'manual'
-        run: cargo check --verbose -p opto-slang-sys -p opto-tcl-sys --locked
+      - name: Analyze
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+
+  analyze-native:
+    name: Analyze (c-cpp)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository and pinned dependencies
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        with:
+          languages: c-cpp
+          build-mode: none
+          config-file: ./.github/codeql/native.yml
 
       - name: Analyze
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
