@@ -219,7 +219,10 @@ fn analyze_propagation(
     options: &ReportTimingOptions,
     propagation: &PropagationState,
 ) -> Result<PropagationAnalysis, crate::TimingError> {
-    let mut best = BTreeMap::new();
+    if options.max_paths == 0 {
+        return Err(crate::TimingAnalysisError::InvalidMaxPaths.into());
+    }
+    let mut best = Vec::new();
     let mut endpoint_slacks = EndpointSlacks::default();
     let paths = propagation
         .paths
@@ -246,7 +249,7 @@ fn analyze_propagation(
         Err(crate::TimingAnalysisError::NoTimingPaths.into())
     } else {
         Ok(PropagationAnalysis {
-            paths: best.into_values().collect(),
+            paths: best,
             endpoint_slacks,
         })
     }

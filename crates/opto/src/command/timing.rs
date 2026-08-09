@@ -84,7 +84,7 @@ pub(crate) struct ReportTimingArgs<'a> {
         }
     )]
     delay: Vec<TclOption<'a>>,
-    #[arg(long = "-max_paths", value_hint = ValueHint::Suggested(&["1"]))]
+    #[arg(long = "-max_paths", value_hint = ValueHint::Suggested(&["1", "10"]))]
     max_paths: Vec<usize>,
     #[arg(long = "-significant_digits")]
     significant_digits: Vec<usize>,
@@ -827,11 +827,12 @@ fn report_timing_command(
         };
     }
     for max_paths in args.max_paths {
-        if max_paths != 1 {
-            return Err(crate::ShellError::command(format!(
-                "report_timing: -max_paths {max_paths} is not implemented yet"
-            )));
+        if max_paths == 0 {
+            return Err(crate::ShellError::command(
+                "report_timing: -max_paths must be greater than zero",
+            ));
         }
+        options.max_paths = max_paths;
     }
     for digits in args.significant_digits {
         if digits > 13 {

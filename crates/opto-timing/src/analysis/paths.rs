@@ -11,7 +11,7 @@ use super::*;
 )]
 pub(super) fn collect_output_candidates(
     inputs: &CandidateInputs<'_, '_>,
-    best: &mut BTreeMap<PathGroupKey, TimingAnalysis>,
+    best: &mut Vec<TimingAnalysis>,
     endpoint_slacks: &mut EndpointSlacks,
 ) -> Result<(), crate::TimingError> {
     let timing = inputs.timing;
@@ -79,15 +79,18 @@ pub(super) fn collect_output_candidates(
                     DelayType::Max => left.min(right),
                     DelayType::Min => left.max(right),
                 });
-                let group = PathGroupKey::Default;
                 let slack = required.map(|required| match options.delay_type {
                     DelayType::Max => required - candidate_delay,
                     DelayType::Min => candidate_delay - required,
                 });
                 endpoint_slacks.record(EndpointKey::Port(port.id), slack);
-                if best.get(&group).is_some_and(|current| {
-                    !scalar_path_is_worse(slack, candidate_delay, options.delay_type, current)
-                }) {
+                if !candidate_may_rank(
+                    best,
+                    slack,
+                    candidate_delay,
+                    options.delay_type,
+                    options.max_paths,
+                ) {
                     continue;
                 }
                 let mut materialized = arrival.materialize(paths, origins)?;
@@ -123,7 +126,7 @@ pub(super) fn collect_output_candidates(
                     time_borrowed: None,
                     significant_digits: options.significant_digits,
                 };
-                select_worse_group_path(best, group, candidate);
+                select_report_path(best, candidate, options.max_paths);
             }
         }
     }
@@ -137,7 +140,7 @@ pub(super) fn collect_output_candidates(
 )]
 pub(super) fn collect_timing_check_candidates(
     inputs: &CandidateInputs<'_, '_>,
-    best: &mut BTreeMap<PathGroupKey, TimingAnalysis>,
+    best: &mut Vec<TimingAnalysis>,
     endpoint_slacks: &mut EndpointSlacks,
 ) -> Result<(), crate::TimingError> {
     let timing = inputs.timing;
@@ -239,15 +242,13 @@ pub(super) fn collect_timing_check_candidates(
                                 ),
                                 slack,
                             );
-                            let group = PathGroupKey::Clock(clock.name.clone());
-                            if best.get(&group).is_some_and(|current| {
-                                !scalar_path_is_worse(
-                                    slack,
-                                    sink_arrival,
-                                    options.delay_type,
-                                    current,
-                                )
-                            }) {
+                            if !candidate_may_rank(
+                                best,
+                                slack,
+                                sink_arrival,
+                                options.delay_type,
+                                options.max_paths,
+                            ) {
                                 continue;
                             }
                             let requirement = match check_kind {
@@ -327,7 +328,7 @@ pub(super) fn collect_timing_check_candidates(
                                 time_borrowed,
                                 significant_digits: options.significant_digits,
                             };
-                            select_worse_group_path(best, group, candidate);
+                            select_report_path(best, candidate, options.max_paths);
                         }
                     }
                 }
@@ -344,7 +345,7 @@ pub(super) fn collect_timing_check_candidates(
 )]
 pub(super) fn collect_pulse_width_candidates(
     inputs: &CandidateInputs<'_, '_>,
-    best: &mut BTreeMap<PathGroupKey, TimingAnalysis>,
+    best: &mut Vec<TimingAnalysis>,
     endpoint_slacks: &mut EndpointSlacks,
 ) {
     if !inputs.options.checks.pulse_width {
@@ -423,7 +424,6 @@ pub(super) fn collect_pulse_width_candidates(
                         ),
                         Some(slack),
                     );
-                    let group = PathGroupKey::Clock(clock.name.clone());
                     let candidate = TimingAnalysis {
                         design: inputs.design.name().to_string(),
                         library: library_metadata(inputs.library),
@@ -465,17 +465,16 @@ pub(super) fn collect_pulse_width_candidates(
                         time_borrowed: None,
                         significant_digits: inputs.options.significant_digits,
                     };
-                    if best.get(&group).is_some_and(|current| {
-                        !scalar_path_is_worse(
-                            candidate.slack(),
-                            candidate.arrival(),
-                            DelayType::Min,
-                            current,
-                        )
-                    }) {
+                    if !candidate_may_rank(
+                        best,
+                        candidate.slack(),
+                        candidate.arrival(),
+                        DelayType::Min,
+                        inputs.options.max_paths,
+                    ) {
                         continue;
                     }
-                    select_worse_group_path(best, group, candidate);
+                    select_report_path(best, candidate, inputs.options.max_paths);
                 }
             }
         }
@@ -578,25 +577,28 @@ fn append_sink_delay(
     });
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum PathGroupKey {
-    Clock(String),
-    Default,
+fn candidate_may_rank(
+    best: &[TimingAnalysis],
+    candidate_slack: Option<f64>,
+    candidate_delay: f64,
+    delay_type: DelayType,
+    max_paths: usize,
+) -> bool {
+    best.len() < max_paths
+        || best.last().is_some_and(|cutoff_path| {
+            scalar_path_is_worse(candidate_slack, candidate_delay, delay_type, cutoff_path)
+        })
 }
 
-pub(super) fn select_worse_group_path(
-    best: &mut BTreeMap<PathGroupKey, TimingAnalysis>,
-    group: PathGroupKey,
-    candidate: TimingAnalysis,
-) {
-    match best.entry(group) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(candidate);
-        }
-        std::collections::btree_map::Entry::Occupied(mut entry) => {
-            if path_is_worse(&candidate, entry.get()) {
-                entry.insert(candidate);
-            }
+fn select_report_path(best: &mut Vec<TimingAnalysis>, candidate: TimingAnalysis, max_paths: usize) {
+    let position = best
+        .iter()
+        .position(|current| path_is_worse(&candidate, current))
+        .unwrap_or(best.len());
+    if position < max_paths {
+        best.insert(position, candidate);
+        if best.len() > max_paths {
+            best.pop();
         }
     }
 }

@@ -412,6 +412,9 @@ pub enum TimingModelError {
 #[derive(Debug, Error)]
 /// Failure while propagating, ordering, or reporting timing paths.
 pub enum TimingAnalysisError {
+    /// A timing report requested no paths.
+    #[error("report_timing: max_paths must be greater than zero")]
+    InvalidMaxPaths,
     /// No Liberty propagation arcs exist in the analyzed design.
     #[error("report_timing: no Liberty timing arcs found")]
     NoLibertyTimingArcs,

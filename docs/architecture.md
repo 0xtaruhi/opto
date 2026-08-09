@@ -545,8 +545,9 @@ legality work or change its ownership.
 
 Timing consumes the sealed mapped generation and exact target timing arcs.
 `report_timing` is a real mapped-path report: it resolves `-from`/`-to`
-collections, supports max/min delay selection, and prints launch/capture
-objects, pin-by-pin typed increments, requirements, slack, and
+collections, supports max/min delay selection and a bounded global worst-path
+count through `-max_paths`, and prints launch/capture objects, pin-by-pin typed
+increments, requirements, slack, and
 unconstrained-path status. Interconnect steps retain fanout, load, resistance,
 wire delay, annotated parasitic delay, and derate, so a QoR failure can be
 assigned to a cell arc, wire model, or boundary model before optimization is

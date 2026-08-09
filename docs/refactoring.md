@@ -248,11 +248,11 @@ supported command surface includes:
 
 - `-from` and `-to` collections;
 - `-delay max|min` and the documented `-delay_type` spelling;
-- one requested path through `-max_paths 1`;
+- a bounded global worst-path count through `-max_paths` (default 1);
 - `-significant_digits`;
 - full path output.
 
-Unsupported `min_max`, multi-path, or alternate path formats return explicit
+Unsupported `min_max` or alternate path formats return explicit
 “not implemented” diagnostics rather than silently approximating behavior.
 
 ## Deleted Practices

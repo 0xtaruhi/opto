@@ -276,16 +276,47 @@ fn preserves_independent_launch_contexts_through_reconvergence() {
     ));
     let model = crate::test_timing_model(&design, &library);
     let paths = analyze_timing_paths(&timing, &model, &ReportTimingOptions::default()).unwrap();
+    let expanded = analyze_timing_paths(
+        &timing,
+        &model,
+        &ReportTimingOptions {
+            max_paths: 2,
+            ..ReportTimingOptions::default()
+        },
+    )
+    .unwrap();
     let analysis = analyze_timing(&timing, &model, &ReportTimingOptions::default()).unwrap();
 
-    assert_eq!(paths.len(), 2);
-    assert_eq!(paths[0].path_group.as_deref(), Some("clk"));
-    assert_eq!(paths[1].path_group, None);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(expanded.len(), 2);
+    for pair in expanded.windows(2) {
+        assert!(!super::paths::path_is_worse(&pair[1], &pair[0]));
+    }
     assert_eq!(analysis.startpoint(), "d");
     assert_eq!(analysis.endpoint(), "z");
     assert!((analysis.arrival() - 0.2).abs() < 1e-12);
     assert_eq!(analysis.required(), Some(0.1));
     assert!((analysis.slack().unwrap() + 0.1).abs() < 1e-12);
+}
+
+#[test]
+fn report_path_limit_is_global_and_must_be_positive() {
+    let (timing, design, library) = sequential_fixture();
+    let error = analyze_timing_paths(
+        &timing,
+        &crate::test_timing_model(&design, &library),
+        &ReportTimingOptions {
+            max_paths: 0,
+            ..ReportTimingOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("report_timing: max_paths must be greater than zero")
+    );
 }
 
 #[test]
