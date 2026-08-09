@@ -55,7 +55,7 @@ jobs:
 
       - name: Build production C and C++ sources
         if: matrix.build-mode == 'manual'
-        run: cargo check -p opto-slang-sys -p opto-tcl-sys --locked
+        run: cargo check --verbose -p opto-slang-sys -p opto-tcl-sys --locked
 
       - name: Analyze
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
