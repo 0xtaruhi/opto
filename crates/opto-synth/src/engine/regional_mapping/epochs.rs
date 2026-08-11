@@ -51,7 +51,7 @@ impl RegionalMapper<'_> {
                     .span(|| format!("initial_mapping.epoch[{epoch}].snapshot"));
                 (state.plans.clone(), state.bindings.clone())
             };
-            let measured = self.measure_epoch(state, &mapped, &plans, epoch)?;
+            let measured = self.measure_epoch(state, &mut mapped, &plans, epoch)?;
             let census = mapped.implementation_census.as_ref().ok_or_else(|| {
                 crate::SynthError::invariant("mapped implementation census was not initialized")
             })?;
@@ -62,6 +62,7 @@ impl RegionalMapper<'_> {
                 census.managed_leakage(),
                 census.managed_cell_count,
                 census.static_key,
+                measured.timing_quality,
             )?;
             let current_is_best = best
                 .as_ref()
@@ -141,11 +142,20 @@ impl RegionalMapper<'_> {
                     let boundary_repair_schema =
                         crate::regional::BoundaryRepairSchema::new(self.regions, &state.plans)?;
                     self.restore_boundary_repairs(ir, &boundary_repair_schema, &mut mapped)?;
-                    observer(SynthesisProgress::candidate(
-                        crate::OptimizationPhase::TechnologyMapping,
-                        best.objective.area.get(),
-                        mapped.netlist.cell_count(),
-                    ));
+                    match mapped.timing.as_mut() {
+                        Some(timing) => observer(SynthesisProgress::timing_candidate(
+                            crate::OptimizationPhase::TechnologyMapping,
+                            best.objective.area.get(),
+                            mapped.netlist.cell_count(),
+                            &timing.metrics()?.analysis,
+                            coordinator.completed_epochs(),
+                        )),
+                        None => observer(SynthesisProgress::candidate(
+                            crate::OptimizationPhase::TechnologyMapping,
+                            best.objective.area.get(),
+                            mapped.netlist.cell_count(),
+                        )),
+                    }
                     let (mapped, timing) = mapped.finish()?;
                     return Ok(RegionalMappingOutcome {
                         plans: best.plans,
@@ -264,7 +274,7 @@ impl RegionalMapper<'_> {
     fn measure_epoch(
         &self,
         state: &RegionalPlans,
-        mapped: &RegionalMappedState,
+        mapped: &mut RegionalMappedState,
         plans: &[crate::RegionCoverPlan],
         epoch: u32,
     ) -> Result<MeasuredEpoch, crate::SynthError> {
@@ -272,7 +282,7 @@ impl RegionalMapper<'_> {
             let _profile = self
                 .trace
                 .span(|| format!("initial_mapping.epoch[{epoch}].boundary_measurement"));
-            match &mapped.timing {
+            match mapped.timing.as_ref() {
                 Some(timing) => crate::closure::measure_global_boundaries(
                     crate::closure::GlobalBoundaryRequest {
                         timing,
@@ -287,9 +297,15 @@ impl RegionalMapper<'_> {
                 None => (plans.to_vec(), None),
             }
         };
+        let timing_quality = mapped
+            .timing
+            .as_mut()
+            .map(|timing| timing.metrics().map(|metrics| metrics.analysis))
+            .transpose()?;
         Ok(MeasuredEpoch {
             plans,
             global_dynamic_power,
+            timing_quality,
         })
     }
 

@@ -3,13 +3,21 @@
 
 use super::{
     BTreeSet, CellCost, MappedCell, MappedInputConnection, MappedOutputConnection, MappingCost,
-    Ordering, TargetCellRef, TargetPinDirection, TargetPinRef, TargetSequentialRef, word,
+    Ordering, TargetCellRef, TargetPinDirection, TargetPinRef, TargetSequentialRef,
+    TargetTimingType, TimingCheckKind, TimingEdge, word,
 };
 use crate::planning::mapping_policy::compare_cell_cost;
 use smallvec::{SmallVec, smallvec};
 
 pub(crate) type AsyncControls = SmallVec<[AsyncControl; 1]>;
 pub(crate) type AsyncResetRequests = SmallVec<[AsyncResetRequest; 2]>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct SequentialTiming {
+    pub(crate) clock_to_q: Option<f64>,
+    pub(crate) output_transition: Option<f64>,
+    pub(crate) setup: Option<f64>,
+}
 
 /// The reset controls and outputs every sequential cell shape shares.
 #[derive(Clone, Copy)]
@@ -66,6 +74,7 @@ pub(crate) struct SequentialCell {
     pub(crate) resets: AsyncControls,
     pub(crate) edge: word::Edge,
     pub(crate) cost: CellCost,
+    pub(crate) timing: SequentialTiming,
 }
 
 impl SequentialCell {
@@ -127,6 +136,7 @@ pub(crate) struct SequentialEnableCell {
     pub(crate) resets: AsyncControls,
     pub(crate) edge: word::Edge,
     pub(crate) cost: CellCost,
+    pub(crate) timing: SequentialTiming,
 }
 
 impl SequentialEnableCell {
@@ -562,6 +572,54 @@ pub(crate) fn cell_cost(
         delay,
         transition,
         input_capacitance,
+    }
+}
+
+pub(crate) fn sequential_timing(
+    cell: TargetCellRef<'_>,
+    data_pin: &str,
+    clock_pin: &str,
+    output_pin: TargetPinRef<'_>,
+    edge: word::Edge,
+) -> SequentialTiming {
+    let clock_edge = match edge {
+        word::Edge::Pos => TimingEdge::Rise,
+        word::Edge::Neg => TimingEdge::Fall,
+    };
+    let mut timing = SequentialTiming::default();
+    for arc in output_pin.timing_arcs().filter(|arc| {
+        arc.related_pin() == clock_pin
+            && arc.timing_type() == TargetTimingType::ClockToQ(clock_edge)
+    }) {
+        timing.clock_to_q = max_optional(timing.clock_to_q, arc.default_delay());
+        timing.output_transition = max_optional(timing.output_transition, arc.default_transition());
+    }
+    if let Some(pin) = cell.pins().find(|pin| pin.name() == data_pin) {
+        for arc in pin.timing_arcs().filter(|arc| {
+            arc.related_pin() == clock_pin
+                && arc.timing_type()
+                    == TargetTimingType::Check {
+                        kind: TimingCheckKind::Setup,
+                        clock_edge,
+                    }
+        }) {
+            let constraint = max_optional(
+                arc.rise_constraint()
+                    .and_then(opto_library::LookupTable::default_value),
+                arc.fall_constraint()
+                    .and_then(opto_library::LookupTable::default_value),
+            );
+            timing.setup = max_optional(timing.setup, constraint);
+        }
+    }
+    timing
+}
+
+fn max_optional(left: Option<f64>, right: Option<f64>) -> Option<f64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 

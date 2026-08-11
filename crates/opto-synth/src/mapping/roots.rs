@@ -174,6 +174,7 @@ pub(crate) fn mapping_roots(
     module: &word::WordModule,
     timing: &opto_timing::TimingContext,
     port_bindings: &opto_timing::PortBindings,
+    sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
 ) -> Result<Vec<MappingRoot>, crate::SynthError> {
     let mut roots = Vec::new();
     let global_required = timing.minimum_synthesis_delay();
@@ -199,9 +200,15 @@ pub(crate) fn mapping_roots(
             crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
         })?;
         if let word::OpKind::Register(register) = &operation.kind {
-            let required_time = timing_port_for_value(module, register.clock, port_bindings)
+            let mut required_time = timing_port_for_value(module, register.clock, port_bindings)
                 .and_then(|port| timing.minimum_clock_period_on(port))
                 .or(global_required);
+            if let (Some(required), Some(setup)) = (
+                required_time,
+                sequential_timing.and_then(|projection| projection.setup(connect.value)),
+            ) {
+                required_time = Some(required - setup);
+            }
             roots.push(MappingRoot {
                 value: register.d,
                 required_time,
@@ -401,7 +408,7 @@ mod tests {
         timing.set_load(0.02, &[output_port]).unwrap();
         let port_bindings = opto_timing::PortBindings::new([input_port, output_port]);
 
-        let roots = mapping_roots(&module, &timing, &port_bindings).unwrap();
+        let roots = mapping_roots(&module, &timing, &port_bindings, None).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].value, value);
         assert_eq!(roots[0].required_time, Some(0.8));

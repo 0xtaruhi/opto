@@ -34,6 +34,186 @@ fn cell(name: &str, area: f64) -> opto_library::TargetCell {
     }
 }
 
+fn timed_dff() -> opto_library::TargetCell {
+    let pin =
+        |name: &str,
+         direction: opto_library::TargetPinDirection,
+         function: Option<&str>,
+         timing_arcs: Vec<opto_library::TargetTimingArc>| opto_library::TargetPin {
+            name: name.to_string(),
+            direction,
+            function: function
+                .map(|function| opto_library::BooleanFunction::parse(function).unwrap()),
+            three_state: None,
+            capacitance: None,
+            rise_capacitance: None,
+            fall_capacitance: None,
+            receiver_capacitance: None,
+            fanout_load: None,
+            next_state_type: None,
+            timing_arcs,
+            clock_gate_role: None,
+        };
+    let scalar_delay = opto_library::ArcDelayModel::Nldm(opto_library::NldmTimingModel::new(
+        Some(opto_library::LookupTable::scalar(0.3)),
+        Some(opto_library::LookupTable::scalar(0.3)),
+        Some(opto_library::LookupTable::scalar(0.04)),
+        Some(opto_library::LookupTable::scalar(0.04)),
+    ));
+    opto_library::TargetCell {
+        name: "DFF".to_string(),
+        area: Some(1.0),
+        dont_use: false,
+        usage: opto_library::TargetCellUsage::default(),
+        pins: vec![
+            pin(
+                "D",
+                opto_library::TargetPinDirection::Input,
+                None,
+                vec![opto_library::TargetTimingArc {
+                    related_pin: "CP".to_string(),
+                    timing_type: opto_library::TargetTimingType::Check {
+                        kind: opto_library::TimingCheckKind::Setup,
+                        clock_edge: opto_library::TimingEdge::Rise,
+                    },
+                    timing_sense: opto_library::TimingSense::NonUnate,
+                    delay_model: None,
+                    rise_constraint: Some(opto_library::LookupTable::scalar(0.2)),
+                    fall_constraint: Some(opto_library::LookupTable::scalar(0.2)),
+                }],
+            ),
+            pin(
+                "CP",
+                opto_library::TargetPinDirection::Input,
+                None,
+                Vec::new(),
+            ),
+            pin(
+                "Q",
+                opto_library::TargetPinDirection::Output,
+                Some("IQ"),
+                vec![opto_library::TargetTimingArc {
+                    related_pin: "CP".to_string(),
+                    timing_type: opto_library::TargetTimingType::ClockToQ(
+                        opto_library::TimingEdge::Rise,
+                    ),
+                    timing_sense: opto_library::TimingSense::PositiveUnate,
+                    delay_model: Some(scalar_delay),
+                    rise_constraint: None,
+                    fall_constraint: None,
+                }],
+            ),
+        ],
+        sequential: vec![opto_library::TargetSequential {
+            kind: opto_library::TargetSequentialKind::FlipFlop,
+            state_variables: vec!["IQ".to_string()],
+            clocked_on: Some(opto_library::BooleanFunction::parse("CP").unwrap()),
+            next_state: Some(opto_library::BooleanFunction::parse("D").unwrap()),
+            enable: None,
+            clear: None,
+            preset: None,
+        }],
+        clock_gate: None,
+        memory: None,
+    }
+}
+
+#[test]
+fn technology_mapping_progress_uses_final_register_to_register_timing() {
+    let mut module = word::WordModule::new("registered_path");
+    let bit = word::WordType::bits(1).unwrap();
+    let clock_port = module
+        .add_port("clk", word::PortDirection::Input, bit, test_span())
+        .unwrap();
+    let output_port = module
+        .add_port("q", word::PortDirection::Output, bit, test_span())
+        .unwrap();
+    let clock = module
+        .read_signal(module.port(clock_port).unwrap().signal, test_span())
+        .unwrap();
+    let zero = module
+        .constant(
+            opto_ir::ConstBits::from_bin_str("0").unwrap(),
+            bit,
+            test_span(),
+        )
+        .unwrap();
+    let first = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: zero,
+                clock,
+                edge: word::Edge::Pos,
+                enable: None,
+                resets: Vec::new(),
+            },
+            test_span(),
+        )
+        .unwrap();
+    let second = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: first,
+                clock,
+                edge: word::Edge::Pos,
+                enable: None,
+                resets: Vec::new(),
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(module.port(output_port).unwrap().signal),
+            second,
+            test_span(),
+        )
+        .unwrap();
+
+    let dff = timed_dff();
+    let mut request = SynthesisRequest::unconstrained(
+        structural(module),
+        SynthesisOptions {
+            target_cells: vec![dff.clone()].into(),
+        },
+    );
+    let clock_id = opto_timing::PortId::from_uid(opto_core::ObjectUid::from_raw(2).unwrap());
+    let mut timing = opto_timing::TimingContext::new();
+    timing
+        .create_clock(
+            opto_timing::ClockId::from_uid(opto_core::ObjectUid::from_raw(4).unwrap()),
+            opto_timing::ClockSpec::new("clk", 0.4, vec![clock_id], None).unwrap(),
+        )
+        .unwrap();
+    request.scenarios = ScenarioSet::single(
+        Arc::new(timing),
+        Arc::new(opto_timing::TimingLibrary {
+            cells: vec![dff].into(),
+            ..opto_timing::TimingLibrary::default()
+        }),
+        opto_timing::Parasitics::default(),
+    );
+    let mut mapping_progress = None;
+    let result = SynthesisEngine::new()
+        .synthesize(request, crate::test_runtime(), &mut |progress| {
+            if progress.optimization == Some(crate::OptimizationPhase::TechnologyMapping) {
+                mapping_progress = Some(progress);
+            }
+        })
+        .unwrap();
+    let progress = mapping_progress.expect("technology mapping emitted no candidate progress");
+    let final_timing = result
+        .timing()
+        .expect("registered path has no timing summary");
+
+    assert!((progress.worst_slack.unwrap() + 0.1).abs() < 1e-12);
+    assert_eq!(progress.worst_slack, final_timing.slack);
+    assert_eq!(progress.total_negative_slack, Some(final_timing.tns));
+    assert_eq!(progress.violations, Some(final_timing.violating_paths));
+}
+
 fn target_options() -> SynthesisOptions {
     SynthesisOptions {
         target_cells: vec![cell("UNUSED", 1.0)].into(),

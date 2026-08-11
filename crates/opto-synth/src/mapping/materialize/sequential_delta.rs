@@ -13,8 +13,7 @@ use super::target_pin_id;
 use crate::artifact::MappedCellSource;
 use crate::mapping::MappedCell;
 use crate::mapping::library::CombinationalCellCatalog;
-use crate::mapping::sequential::{AsyncResetRequest, SequentialCellCatalog};
-use crate::planning::mapping_policy::CellCost;
+use crate::mapping::sequential::{SelectedRegisterCell, SequentialCellCatalog};
 use opto_ir::mapped::{
     AppliedRegionDelta, CellId, CellSpec, ConnectionRef, NetId, RegionDelta, TempCellId, TempNetId,
 };
@@ -260,8 +259,6 @@ impl<'a> ArtifactBuilder<'a> {
         owner: crate::RegionAnchorId,
         register: &word::RegisterOp,
     ) -> Result<(), crate::SynthError> {
-        require_async_resets(&register.resets, "register")?;
-        let reset_requests = reset_requests(context.module, &register.resets)?;
         let output = require_output(context.mapped_values, result)?;
         let source = MappedCellSource::Value {
             value: result,
@@ -269,19 +266,16 @@ impl<'a> ArtifactBuilder<'a> {
         };
         if let Some(enable) = register.enable {
             let enable_signal = context.mapped_values.require(enable.value)?;
-            let inverter_cost = inverter_cost(enable_signal, context.combinational_catalog);
-            let cell = context
-                .sequential_catalog
-                .best_enable(
-                    register.edge,
-                    &reset_requests,
-                    enable.active_high,
-                    false,
-                    inverter_cost,
-                )
-                .ok_or_else(|| {
-                    crate::SynthError::mapping("target library has no compatible enabled DFF")
-                })?;
+            let SelectedRegisterCell::Enabled(cell) = context.sequential_catalog.select_register(
+                context.module,
+                register,
+                context.combinational_catalog,
+            )?
+            else {
+                return Err(crate::SynthError::invariant(
+                    "enabled register selected a simple DFF",
+                ));
+            };
             let enable_signal = self.adapt_enable(
                 operation_id,
                 enable.value,
@@ -312,10 +306,16 @@ impl<'a> ArtifactBuilder<'a> {
                 source,
             );
         }
-        let cell = context
-            .sequential_catalog
-            .best(register.edge, &reset_requests, false, None)
-            .ok_or_else(|| crate::SynthError::mapping("target library has no compatible DFF"))?;
+        let SelectedRegisterCell::Simple(cell) = context.sequential_catalog.select_register(
+            context.module,
+            register,
+            context.combinational_catalog,
+        )?
+        else {
+            return Err(crate::SynthError::invariant(
+                "simple register selected an enabled DFF",
+            ));
+        };
         let mapped = cell.mapped_cell(
             register.d,
             register.clock,
@@ -339,8 +339,8 @@ impl<'a> ArtifactBuilder<'a> {
         owner: crate::RegionAnchorId,
         latch: &word::LatchOp,
     ) -> Result<(), crate::SynthError> {
-        require_async_resets(&latch.resets, "latch")?;
-        let reset_requests = reset_requests(context.module, &latch.resets)?;
+        let reset_requests =
+            crate::mapping::sequential::async_reset_requests(context.module, &latch.resets)?;
         let enable_signal = context.mapped_values.require(latch.enable.value)?;
         let cell = context
             .sequential_catalog
@@ -348,7 +348,11 @@ impl<'a> ArtifactBuilder<'a> {
                 &reset_requests,
                 latch.enable.active_high,
                 false,
-                inverter_cost(enable_signal, context.combinational_catalog),
+                crate::mapping::sequential::enable_inverter_cost(
+                    context.module,
+                    latch.enable.value,
+                    context.combinational_catalog,
+                ),
             )
             .ok_or_else(|| crate::SynthError::mapping("target library has no compatible latch"))?;
         let enable_signal = self.adapt_enable(
@@ -584,64 +588,6 @@ fn require_output(
             "sequential output resolved to a constant substrate signal",
         )),
     }
-}
-
-fn reset_requests(
-    module: &word::WordModule,
-    resets: &[word::Reset],
-) -> Result<Vec<AsyncResetRequest>, crate::SynthError> {
-    resets
-        .iter()
-        .map(|reset| {
-            let stored = module.value(reset.reset_value).ok_or_else(|| {
-                crate::SynthError::invariant("asynchronous reset value disappeared")
-            })?;
-            let word::ValueKind::Constant(bits) = &stored.kind else {
-                return Err(crate::SynthError::invariant(
-                    "asynchronous reset value is not constant",
-                ));
-            };
-            let reset_value = crate::boolean::logic::logic_constant(bits).ok_or_else(|| {
-                crate::SynthError::invariant("asynchronous reset value is not a two-state scalar")
-            })?;
-            Ok(AsyncResetRequest {
-                active_high: reset.active_high,
-                reset_value,
-            })
-        })
-        .collect()
-}
-
-fn require_async_resets(resets: &[word::Reset], element: &str) -> Result<(), crate::SynthError> {
-    if resets
-        .iter()
-        .any(|reset| reset.kind != word::ResetKind::Async)
-    {
-        return Err(crate::SynthError::invariant(format!(
-            "synchronous reset reached library {element} materialization"
-        )));
-    }
-    Ok(())
-}
-
-fn inverter_cost(
-    signal: MappedValueSignal,
-    catalog: &CombinationalCellCatalog,
-) -> Option<CellCost> {
-    if matches!(signal, MappedValueSignal::Constant(_)) {
-        return Some(CellCost {
-            area: 0.0,
-            delay: 0.0,
-            transition: 0.0,
-            input_capacitance: 0.0,
-        });
-    }
-    let signature = crate::boolean::logic::LogicSignature {
-        inputs: crate::boolean::logic::LogicInputs::from_indices(1)
-            .expect("one inverter input fits a logic signature"),
-        truth: crate::boolean::logic::inverter_truth(),
-    };
-    catalog.best_cost_for_signature(&signature)
 }
 
 fn override_at(overrides: &[(usize, ArtifactSignal)], index: usize) -> Option<ArtifactSignal> {

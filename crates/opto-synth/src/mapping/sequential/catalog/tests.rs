@@ -5,6 +5,117 @@ use super::*;
 use crate::{TargetPin, TargetSequential};
 
 #[test]
+fn projects_selected_flip_flop_timing_onto_register_boundaries() {
+    let mut dff = flip_flop("DFF", 1.0, "CP");
+    dff.pins[0].timing_arcs.push(crate::TargetTimingArc {
+        related_pin: "CP".to_string(),
+        timing_type: TargetTimingType::Check {
+            kind: TimingCheckKind::Setup,
+            clock_edge: TimingEdge::Rise,
+        },
+        timing_sense: opto_library::TimingSense::NonUnate,
+        delay_model: None,
+        rise_constraint: Some(opto_library::LookupTable::scalar(0.2)),
+        fall_constraint: Some(opto_library::LookupTable::scalar(0.15)),
+    });
+    dff.pins[2].timing_arcs.push(crate::TargetTimingArc {
+        related_pin: "CP".to_string(),
+        timing_type: TargetTimingType::ClockToQ(TimingEdge::Rise),
+        timing_sense: opto_library::TimingSense::PositiveUnate,
+        delay_model: Some(opto_library::ArcDelayModel::Nldm(
+            opto_library::NldmTimingModel::new(
+                Some(opto_library::LookupTable::scalar(0.3)),
+                Some(opto_library::LookupTable::scalar(0.25)),
+                Some(opto_library::LookupTable::scalar(0.04)),
+                Some(opto_library::LookupTable::scalar(0.03)),
+            ),
+        )),
+        rise_constraint: None,
+        fall_constraint: None,
+    });
+    let catalog = SequentialCellCatalog::new(&SynthesisOptions {
+        target_cells: vec![dff].into(),
+    });
+    let combinational = crate::mapping::library::CombinationalCellCatalog::default();
+    let mut module = word::WordModule::new("top");
+    let bit = word::WordType::bits(1).unwrap();
+    let source = word::SourceSpan::default();
+    let clock_port = module
+        .add_port("clk", word::PortDirection::Input, bit, source.clone())
+        .unwrap();
+    let output_port = module
+        .add_port("q", word::PortDirection::Output, bit, source.clone())
+        .unwrap();
+    let data = module
+        .constant(
+            opto_ir::ConstBits::from_bin_str("0").unwrap(),
+            bit,
+            source.clone(),
+        )
+        .unwrap();
+    let clock = module
+        .read_signal(module.port(clock_port).unwrap().signal, source.clone())
+        .unwrap();
+    let result = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: data,
+                clock,
+                edge: word::Edge::Pos,
+                enable: None,
+                resets: Vec::new(),
+            },
+            source.clone(),
+        )
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(module.port(output_port).unwrap().signal),
+            result,
+            source,
+        )
+        .unwrap();
+
+    let projection = SequentialTimingProjection::build(&module, &catalog, &combinational).unwrap();
+    assert_eq!(projection.clock_to_q(result), Some(0.3));
+    assert_eq!(projection.output_transition(result), Some(0.04));
+    assert_eq!(projection.setup(result), Some(0.2));
+    let uncharacterized = SequentialCellCatalog::new(&SynthesisOptions {
+        target_cells: vec![flip_flop("DFF", 1.0, "CP")].into(),
+    });
+    let absent =
+        SequentialTimingProjection::build(&module, &uncharacterized, &combinational).unwrap();
+    assert_eq!(absent.clock_to_q(result), None);
+    assert_eq!(absent.output_transition(result), None);
+    assert_eq!(absent.setup(result), None);
+
+    let clock_id = opto_timing::PortId::from_uid(opto_core::ObjectUid::from_raw(2).unwrap());
+    let output_id = opto_timing::PortId::from_uid(opto_core::ObjectUid::from_raw(3).unwrap());
+    let mut timing = opto_timing::TimingContext::new();
+    timing
+        .create_clock(
+            opto_timing::ClockId::from_uid(opto_core::ObjectUid::from_raw(4).unwrap()),
+            opto_timing::ClockSpec::new("clk", 1.0, vec![clock_id], None).unwrap(),
+        )
+        .unwrap();
+    let roots = crate::mapping::roots::mapping_roots(
+        &module,
+        &timing,
+        &opto_timing::PortBindings::new([clock_id, output_id]),
+        Some(&projection),
+    )
+    .unwrap();
+    assert_eq!(
+        roots
+            .iter()
+            .find(|root| root.value == data)
+            .and_then(|root| root.required_time),
+        Some(0.8)
+    );
+}
+
+#[test]
 fn recognizes_enable_flip_flops_in_either_polarity() {
     let mut active_high = flip_flop("EDFF", 3.0, "CP");
     active_high

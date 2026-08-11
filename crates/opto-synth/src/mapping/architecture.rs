@@ -116,7 +116,7 @@ pub(crate) fn prepare_regional_architectures(
         ));
     }
     let semantics = super::roots::FullDomainRootSemantics::new(source)?;
-    let mut roots = mapping_roots(source, config.timing, config.port_bindings)?;
+    let mut roots = mapping_roots(source, config.timing, config.port_bindings, None)?;
     for root in &mut roots {
         root.requires_combinational_cover = semantics.requires_artifact(root.value)?;
     }
@@ -462,7 +462,17 @@ impl RegionArchitectureMaterializer<'_> {
                 root.requires_combinational_cover = false;
             }
         }
-        for mut root in mapping_roots(&module, self.config.timing, &empty_port_bindings)? {
+        let sequential_timing = super::sequential::SequentialTimingProjection::build(
+            &module,
+            &self.config.mapping_context.sequential_catalog,
+            &self.config.mapping_context.combinational_catalog,
+        )?;
+        for mut root in mapping_roots(
+            &module,
+            self.config.timing,
+            &empty_port_bindings,
+            Some(&sequential_timing),
+        )? {
             let key = mapping_root_pair_key(&module, &local_semantics, root.value)?;
             root.requires_combinational_cover =
                 local_semantics.requires_artifact(root.value)? && !substrate_outputs.contains(&key);
@@ -470,7 +480,7 @@ impl RegionArchitectureMaterializer<'_> {
         }
         let root_pairs = merge_mapping_root_pairs(&module, &local_semantics, root_pairs)?;
         let decision_key = vector.stable_key();
-        let slice = super::logic_partition::RegionLogicSlice::build_candidate(
+        let mut slice = super::logic_partition::RegionLogicSlice::build_candidate(
             &module,
             region.id(),
             decision_key,
@@ -479,6 +489,7 @@ impl RegionArchitectureMaterializer<'_> {
             self.contracts.contracts(region.row()),
             &root_pairs,
         )?;
+        slice.project_sequential_timing(&sequential_timing);
         let analysis = super::cover::analyze_region_cover(
             &module,
             super::cover::RegionCoverRequest {
