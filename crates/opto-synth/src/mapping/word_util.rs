@@ -77,6 +77,27 @@ pub(crate) fn add_generated_wire_value(
         .map_err(crate::SynthError::from)
 }
 
+pub(crate) fn add_generated_boundary_value(
+    generated_names: &mut GeneratedNames,
+    module: &mut word::WordModule,
+    value: word::ValueId,
+    source: &word::SourceSpan,
+) -> Result<word::ValueId, crate::SynthError> {
+    let ty = module
+        .value(value)
+        .ok_or_else(|| crate::SynthError::invariant("boundary source value is unknown"))?
+        .ty;
+    let signal = module
+        .add_wire(generated_names.wire()?, ty, source.clone())
+        .map_err(crate::SynthError::from)?;
+    module
+        .connect(word::LValue::signal(signal), value, source.clone())
+        .map_err(crate::SynthError::from)?;
+    module
+        .read_signal(signal, source.clone())
+        .map_err(crate::SynthError::from)
+}
+
 pub(crate) fn live_operation_mask(
     module: &word::WordModule,
     observed_values: &[word::ValueId],

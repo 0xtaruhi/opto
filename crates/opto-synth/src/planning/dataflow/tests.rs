@@ -512,6 +512,37 @@ fn folds_variable_extract_from_a_known_zero_aggregate() {
 }
 
 #[test]
+fn folds_variable_extract_with_a_known_invalid_offset() {
+    let mut module = word::WordModule::new("dynamic_invalid_offset");
+    let data_ty = word::WordType::new(64, false, LogicStateKind::FourState).unwrap();
+    let offset_ty = word::WordType::new(7, false, LogicStateKind::FourState).unwrap();
+    let data = module
+        .constant(
+            ConstBits::from_bin_str(&"1".repeat(64)).unwrap(),
+            data_ty,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let offset = module
+        .constant(
+            ConstBits::from_bin_str("1000000").unwrap(),
+            offset_ty,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let extracted = module
+        .dynamic_extract(data, offset, 1, word::SourceSpan::default())
+        .unwrap();
+
+    optimize_combinational_dataflow(&mut module).unwrap();
+
+    assert!(matches!(
+        module.value(extracted).map(|stored| &stored.kind),
+        Some(word::ValueKind::Constant(bits)) if bits == &ConstBits::from_bin_str("0").unwrap()
+    ));
+}
+
+#[test]
 fn preserves_alias_connect_when_its_driver_follows_an_operation_use() {
     let mut module = word::WordModule::new("top");
     let bit = word::WordType::new(1, false, LogicStateKind::FourState).unwrap();

@@ -409,6 +409,7 @@ pub(crate) fn lower_controls(
     sequential_catalog: &super::SequentialCellCatalog,
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
+    let mut generated_names = crate::mapping::word_util::GeneratedNames::new(module)?;
     let mut controlled = Vec::new();
     let mut direct_targets = register_targets(module)?;
     let observability = crate::word::uses::netlist_observability(module)?;
@@ -484,7 +485,12 @@ pub(crate) fn lower_controls(
             if let Some(enable) = controlled.register.enable {
                 let q = match &controlled.target {
                     Some(target) => read_target(module, target, &controlled.source)?,
-                    None => controlled.result,
+                    None => crate::mapping::word_util::add_generated_boundary_value(
+                        &mut generated_names,
+                        module,
+                        controlled.result,
+                        &controlled.source,
+                    )?,
                 };
                 data = if enable.active_high {
                     module.mux(enable.value, data, q, controlled.source.clone())

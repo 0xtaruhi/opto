@@ -3,6 +3,19 @@
 
 use super::*;
 
+fn mux_target_cell(area: f64) -> TargetCell {
+    target_cell(
+        "MUX2",
+        area,
+        &[
+            ("I0", TargetPinDirection::Input, None),
+            ("I1", TargetPinDirection::Input, None),
+            ("S", TargetPinDirection::Input, None),
+            ("Z", TargetPinDirection::Output, Some("(!S*I0)+(S*I1)")),
+        ],
+    )
+}
+
 #[test]
 fn regional_target_mapping_is_deterministic_across_worker_counts() {
     fn synthesize_with_threads(max_threads: usize) -> String {
@@ -179,20 +192,7 @@ fn synthesize_rejects_dual_output_dff_more_expensive_than_inverter() {
 fn synthesize_maps_semantic_clock_enable_to_mux_and_dff() {
     let mut module = module_with_enable_flop_process();
     let options = SynthesisOptions {
-        target_cells: vec![
-            simple_dff_target_cell(),
-            target_cell(
-                "MUX2",
-                1.0,
-                &[
-                    ("I0", TargetPinDirection::Input, None),
-                    ("I1", TargetPinDirection::Input, None),
-                    ("S", TargetPinDirection::Input, None),
-                    ("Z", TargetPinDirection::Output, Some("(!S*I0)+(S*I1)")),
-                ],
-            ),
-        ]
-        .into(),
+        target_cells: vec![simple_dff_target_cell(), mux_target_cell(1.0)].into(),
     };
 
     let report = synthesize_test_module(&mut module, options).unwrap();
@@ -217,16 +217,7 @@ fn synthesize_maps_semantic_clock_enable_to_an_enable_dff_pin() {
         target_cells: vec![
             simple_dff_target_cell(),
             enable_dff_target_cell(),
-            target_cell(
-                "MUX2",
-                1.0,
-                &[
-                    ("I0", TargetPinDirection::Input, None),
-                    ("I1", TargetPinDirection::Input, None),
-                    ("S", TargetPinDirection::Input, None),
-                    ("Z", TargetPinDirection::Output, Some("(!S*I0)+(S*I1)")),
-                ],
-            ),
+            mux_target_cell(1.0),
         ]
         .into(),
     };
@@ -284,16 +275,7 @@ fn synthesize_composes_sync_reset_with_a_retained_enable_pin() {
                     ("Z", TargetPinDirection::Output, Some("D*!R")),
                 ],
             ),
-            target_cell(
-                "MUX2",
-                1.0,
-                &[
-                    ("I0", TargetPinDirection::Input, None),
-                    ("I1", TargetPinDirection::Input, None),
-                    ("S", TargetPinDirection::Input, None),
-                    ("Z", TargetPinDirection::Output, Some("(!S*I0)+(S*I1)")),
-                ],
-            ),
+            mux_target_cell(1.0),
             target_cell(
                 "INV",
                 0.5,
@@ -364,16 +346,7 @@ fn synthesize_assigns_input_phases_across_register_control_logic() {
     let options = SynthesisOptions {
         target_cells: vec![
             simple_dff_target_cell(),
-            target_cell(
-                "MUX2",
-                2.0,
-                &[
-                    ("I0", TargetPinDirection::Input, None),
-                    ("I1", TargetPinDirection::Input, None),
-                    ("S", TargetPinDirection::Input, None),
-                    ("Z", TargetPinDirection::Output, Some("(!S*I0)+(S*I1)")),
-                ],
-            ),
+            mux_target_cell(2.0),
             target_cell(
                 "MUX2N",
                 1.0,
@@ -448,7 +421,7 @@ fn synthesize_bitblasts_vector_flop_to_target_dffs() {
 #[test]
 fn synthesize_preserves_reconstructed_state_and_controls() {
     let mut module = WordModule::new("top");
-    let inputs = ["clk", "reset", "d0", "d1"].map(|name| {
+    let inputs = ["clk", "reset", "enable", "d0", "d1"].map(|name| {
         module
             .add_port(name, PortDirection::Input, bit(), test_span())
             .unwrap()
@@ -461,11 +434,31 @@ fn synthesize_preserves_reconstructed_state_and_controls() {
             test_span(),
         )
         .unwrap();
-    let [clock, reset, d0, d1] = inputs.map(|port| read_port(&mut module, port));
+    let [clock, reset, enable, d0, d1] = inputs.map(|port| read_port(&mut module, port));
     let zero = module
         .constant(ConstBits::from_bin_str("0").unwrap(), bit(), test_span())
         .unwrap();
-    let states = [d0, d1].map(|d| {
+    let states = [
+        (
+            d0,
+            Some(word::Enable {
+                value: enable,
+                active_high: true,
+            }),
+            Vec::new(),
+        ),
+        (
+            d1,
+            None,
+            vec![word::Reset {
+                kind: word::ResetKind::Sync,
+                value: reset,
+                active_high: true,
+                reset_value: zero,
+            }],
+        ),
+    ]
+    .map(|(d, enable, resets)| {
         module
             .register(
                 word::RegisterOp {
@@ -473,13 +466,8 @@ fn synthesize_preserves_reconstructed_state_and_controls() {
                     d,
                     clock,
                     edge: Edge::Pos,
-                    enable: None,
-                    resets: vec![word::Reset {
-                        kind: word::ResetKind::Sync,
-                        value: reset,
-                        active_high: true,
-                        reset_value: zero,
-                    }],
+                    enable,
+                    resets,
                 },
                 test_span(),
             )
@@ -502,14 +490,23 @@ fn synthesize_preserves_reconstructed_state_and_controls() {
     let report = synthesize_test_module(
         &mut module,
         SynthesisOptions {
-            target_cells: vec![simple_dff_target_cell(), reset_gate].into(),
+            target_cells: vec![simple_dff_target_cell(), reset_gate, mux_target_cell(1.0)].into(),
         },
     )
     .unwrap();
     let text = report.mapped_verilog();
 
     assert_eq!(text.matches("  DFD1 ").count(), 2, "{text}");
-    assert_eq!(text.matches("  ANR2 ").count(), 2, "{text}");
+    assert_eq!(text.matches("  ANR2 ").count(), 1, "{text}");
+    assert_eq!(text.matches("  MUX2 ").count(), 1, "{text}");
+    assert!(
+        text.contains("MUX2 U2(.I0(q[0]), .I1(d0), .S(enable), .Z(n1));"),
+        "{text}"
+    );
+    assert!(
+        text.contains("DFD1 q_reg_0_(.D(n1), .CP(clk), .Q(q[0]));"),
+        "{text}"
+    );
 }
 
 #[test]
