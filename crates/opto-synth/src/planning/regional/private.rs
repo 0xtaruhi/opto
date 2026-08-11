@@ -15,6 +15,7 @@ pub(crate) fn optimize_structure(
     runtime: &opto_runtime::ExecutionContext,
 ) -> Result<crate::SynthesisRegionGraph, crate::SynthError> {
     crate::planning::dataflow::coalesce_static_wire_drivers(module)?;
+    crate::planning::dataflow::resolve_static_connect_aliases(module)?;
     let provisional = crate::regional::region_graph::partition::build(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),

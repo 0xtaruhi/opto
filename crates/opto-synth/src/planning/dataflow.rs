@@ -256,6 +256,14 @@ pub(crate) fn canonicalize_combinational_dataflow(
     optimize_combinational_dataflow_by(module, |_, _| true)
 }
 
+pub(crate) fn resolve_static_connect_aliases(
+    module: &mut word::WordModule,
+) -> Result<DataflowChanges, crate::SynthError> {
+    let drivers = DriverIndex::build(module)?;
+    let resolved_values = resolve_connect_aliases(module, &drivers)?;
+    apply_representatives(module, &drivers, resolved_values, |_, _| true)
+}
+
 pub(crate) fn optimize_owned_combinational_dataflow(
     module: &mut word::WordModule,
     owners: &[Option<crate::RegionRowId>],
@@ -410,20 +418,33 @@ pub(crate) fn optimize_owned_priority_dataflow(
 
 pub(crate) fn optimize_combinational_dataflow_by(
     module: &mut word::WordModule,
-    mut permit_equivalence: impl FnMut(word::ValueId, word::ValueId) -> bool,
+    permit_equivalence: impl FnMut(word::ValueId, word::ValueId) -> bool,
 ) -> Result<DataflowChanges, crate::SynthError> {
     let drivers = DriverIndex::build(module)?;
-    let mut resolver = AliasResolver::new(module, &drivers);
+    let mut resolved_values = resolve_connect_aliases(module, &drivers)?;
+    canonicalize_values(module, &mut resolved_values)?;
+    apply_representatives(module, &drivers, resolved_values, permit_equivalence)
+}
 
-    let mut resolved_values = (0..module.values().len())
+fn resolve_connect_aliases(
+    module: &word::WordModule,
+    drivers: &DriverIndex,
+) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    let mut resolver = AliasResolver::new(module, drivers);
+    (0..module.values().len())
         .map(|index| {
             let value = word::ValueId::from_index(index).map_err(crate::SynthError::Word)?;
             resolver.resolve(value)
         })
-        .collect::<Result<Vec<_>, crate::SynthError>>()?;
-    drop(resolver);
+        .collect()
+}
 
-    canonicalize_values(module, &mut resolved_values)?;
+fn apply_representatives(
+    module: &mut word::WordModule,
+    drivers: &DriverIndex,
+    mut resolved_values: Vec<word::ValueId>,
+    mut permit_equivalence: impl FnMut(word::ValueId, word::ValueId) -> bool,
+) -> Result<DataflowChanges, crate::SynthError> {
     // Permission is defined over the terminal representative. Checking an
     // intermediate alias can otherwise approve an equivalence whose transitive
     // target belongs to a different hard synthesis region.
@@ -435,7 +456,7 @@ pub(crate) fn optimize_combinational_dataflow_by(
         }
     }
     close_representatives(&mut resolved_values)?;
-    let read_bits = read_signal_bits(module, &drivers, &resolved_values)?;
+    let read_bits = read_signal_bits(module, drivers, &resolved_values)?;
     let removable_connects = module
         .connects()
         .iter()
@@ -550,31 +571,33 @@ impl DriverIndex {
             .map(|signal| vec![Driver::None; signal.ty.width() as usize])
             .collect::<Vec<_>>();
         for connect in module.connects() {
-            let Some(bit) = scalar_target(module, &connect.target)? else {
-                continue;
-            };
             let value = module.value(connect.value).ok_or_else(|| {
                 crate::SynthError::invariant(format!(
                     "connect references unknown value {:?}",
                     connect.value
                 ))
             })?;
-            if value.ty.width() != 1 {
-                continue;
+            let bits = static_target_bits(module, &connect.target)?;
+            if value.ty.width() as usize != bits.len() {
+                return Err(crate::SynthError::invariant(
+                    "static connect driver width does not match its target",
+                ));
             }
-            let slot = rows
-                .get_mut(bit.signal.index())
-                .and_then(|row| row.get_mut(bit.bit as usize))
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(format!(
-                        "connect target references out-of-range signal bit {:?}[{}]",
-                        bit.signal, bit.bit
-                    ))
-                })?;
-            *slot = match *slot {
-                Driver::None => Driver::Unique(connect.value),
-                Driver::Unique(_) | Driver::Multiple => Driver::Multiple,
-            };
+            for bit in bits {
+                let slot = rows
+                    .get_mut(connect.target.signal.index())
+                    .and_then(|row| row.get_mut(bit as usize))
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(format!(
+                            "connect target references out-of-range signal bit {:?}[{bit}]",
+                            connect.target.signal
+                        ))
+                    })?;
+                *slot = match *slot {
+                    Driver::None => Driver::Unique(connect.value),
+                    Driver::Unique(_) | Driver::Multiple => Driver::Multiple,
+                };
+            }
         }
         let by_bit = PackedRows::try_from_rows(rows)
             .map_err(|error| crate::SynthError::capacity(error.to_string()))?;
@@ -657,14 +680,21 @@ impl DriverIndex {
         connect: &word::Connect,
         read_bits: &ReadSignalBits,
     ) -> Result<bool, crate::SynthError> {
-        let Some(bit) = scalar_target(module, &connect.target)? else {
-            return Ok(false);
-        };
-        if self.unique(bit).is_none() || read_bits.contains(self, bit) {
+        let bits = static_target_bits(module, &connect.target)?;
+        if bits.clone().any(|bit| {
+            let bit = SignalBit {
+                signal: connect.target.signal,
+                bit,
+            };
+            self.unique(bit).is_none() || read_bits.contains(self, bit)
+        }) {
             return Ok(false);
         }
-        let signal = module.signal(bit.signal).ok_or_else(|| {
-            crate::SynthError::invariant(format!("connect targets unknown signal {:?}", bit.signal))
+        let signal = module.signal(connect.target.signal).ok_or_else(|| {
+            crate::SynthError::invariant(format!(
+                "connect targets unknown signal {:?}",
+                connect.target.signal
+            ))
         })?;
         if signal.kind != word::SignalKind::Wire {
             return Ok(false);
@@ -767,10 +797,10 @@ struct SignalBit {
     bit: u32,
 }
 
-fn scalar_target(
+fn static_target_bits(
     module: &word::WordModule,
     target: &word::LValue,
-) -> Result<Option<SignalBit>, crate::SynthError> {
+) -> Result<std::ops::Range<u32>, crate::SynthError> {
     if target.dynamic.is_some() {
         return Err(crate::SynthError::invariant(
             "dynamic connect target reached dataflow optimization",
@@ -782,15 +812,24 @@ fn scalar_target(
             target.signal
         ))
     })?;
-    let bit = match target.range {
-        None if signal.ty.width() == 1 => 0,
-        Some(range) if range.width() == 1 => range.lsb,
-        None | Some(_) => return Ok(None),
+    let bits = match target.range {
+        None => 0..signal.ty.width(),
+        Some(range) => {
+            let start = range.msb.min(range.lsb);
+            let end = range
+                .msb
+                .max(range.lsb)
+                .checked_add(1)
+                .ok_or_else(|| crate::SynthError::capacity("static connect target range"))?;
+            if end > signal.ty.width() {
+                return Err(crate::SynthError::invariant(
+                    "static connect target range exceeds its signal",
+                ));
+            }
+            start..end
+        }
     };
-    Ok(Some(SignalBit {
-        signal: target.signal,
-        bit,
-    }))
+    Ok(bits)
 }
 
 /// The signal bits some value still names once substitution has been applied.
