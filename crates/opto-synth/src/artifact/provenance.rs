@@ -537,28 +537,6 @@ impl ProvenanceBuilder {
         self.intern(operators)
     }
 
-    pub(crate) fn intern_cached_operators(
-        &mut self,
-        operators: &[u32],
-    ) -> Result<OriginSetId, crate::SynthError> {
-        let operators = operators
-            .iter()
-            .copied()
-            .map(|raw| {
-                let operator = OperatorId::from_raw(raw);
-                self.operators
-                    .get(raw as usize)
-                    .map(|_| operator)
-                    .ok_or_else(|| {
-                        crate::SynthError::invariant(
-                            "cached boundary repair references an unknown semantic operator",
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.intern(operators)
-    }
-
     pub(crate) fn finish(
         mut self,
         synthesis_regions: &crate::SynthesisRegionGraph,
@@ -611,11 +589,6 @@ impl ProvenanceBuilder {
                 MappedCellSource::Region { origins, owner } => {
                     (origins, InitialCellOwner::Region(owner))
                 }
-                MappedCellSource::Boundary {
-                    origins,
-                    driver,
-                    sink,
-                } => (origins, InitialCellOwner::Boundary { driver, sink }),
             };
             if origin.0 as usize >= self.origin_sets.len() {
                 return Err(crate::SynthError::invariant(format!(

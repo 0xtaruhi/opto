@@ -1,15 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{MemoryImplementationCandidate, RegionalDecisionPlan, RegionalDecisionVector};
+use super::MemoryImplementationCandidate;
 use crate::incremental::RegionalCacheRecord;
 use crate::{RegionContextKey, SynthesisEffort, SynthesisRegionGraph};
 use opto_ir::word;
 use opto_runtime::ExecutionContext;
 use opto_timing::ScenarioSet;
 use std::collections::BTreeSet;
-
-pub(crate) struct RegionalArchitectureSearch;
 
 #[derive(Clone, Copy)]
 pub(crate) struct RegionalSearchRequest<'a> {
@@ -25,12 +23,6 @@ pub(crate) struct RegionalSearchRequest<'a> {
     pub(crate) metrics: &'a crate::incremental::IncrementalRunMetrics,
 }
 
-pub(crate) struct RegionalSearchOutcome {
-    pub(crate) cache_records: Box<[RegionalCacheRecord]>,
-    pub(crate) contexts: Box<[RegionContextKey]>,
-    pub(crate) decision_plan: RegionalDecisionPlan,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateScore {
     primary: u64,
@@ -39,156 +31,116 @@ struct CandidateScore {
     candidate: u32,
 }
 
-#[derive(Debug, Clone)]
-struct RankedMemoryCandidate {
-    candidate: MemoryImplementationCandidate,
-    score: CandidateScore,
-}
-
-#[derive(Clone, Copy)]
-struct RegionRowSearchRequest<'a> {
-    module: &'a word::WordModule,
-    memories: &'a [word::MemoryId],
-    target_cells: &'a opto_library::TargetCellSet,
-    target_model: &'a crate::planning::regional::StructuralTargetModel,
-}
-
-impl RegionalArchitectureSearch {
-    pub(crate) fn select(
-        request: RegionalSearchRequest<'_>,
-        runtime: &ExecutionContext,
-    ) -> Result<RegionalSearchOutcome, crate::SynthError> {
-        let RegionalSearchRequest {
-            module,
-            regions,
-            scenarios,
-            target_cells,
-            target_model,
-            contracts,
-            effort,
-            target_fingerprint,
-            previous,
-            metrics,
-        } = request;
-        let contexts = regions
-            .regions()
-            .iter()
-            .map(|region| -> Result<RegionContextKey, crate::SynthError> {
-                let predecessor_summaries = regions
-                    .predecessors(*region)
-                    .iter()
-                    .map(|&predecessor| {
-                        regions
-                            .region(predecessor)
-                            .ok_or_else(|| {
-                                crate::SynthError::invariant(
-                                    "regional predecessor row is out of range",
-                                )
-                            })
-                            .map(|region| region.revision().bytes())
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(RegionContextKey::seal(
-                    region.revision(),
-                    contracts.contracts(region.row()),
-                    scenarios.generation(),
-                    target_fingerprint,
-                    effort,
-                    &predecessor_summaries,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let cached = contexts
-            .iter()
-            .copied()
-            .map(|context| {
-                previous
-                    .binary_search_by_key(&context, RegionalCacheRecord::context)
-                    .ok()
-                    .map(|index| &previous[index])
-            })
-            .collect::<Vec<_>>();
-        let results =
-            runtime.analyze_indexed(regions.regions().len(), |row| match &cached[row] {
-                Some(cached) => restore_cached_region(
-                    module,
-                    regions.memories(regions.regions()[row]),
-                    target_cells,
-                    cached,
-                ),
-                None => search_region(RegionRowSearchRequest {
-                    module,
-                    memories: regions.memories(regions.regions()[row]),
-                    target_cells,
-                    target_model,
-                }),
-            })?;
-        let mut decision_rows = Vec::with_capacity(results.len());
-        let mut checkpoint_records = Vec::with_capacity(results.len());
-        for (row, vector) in results.into_iter().enumerate() {
-            let memory_implementations = vector.portable_memory_implementations();
-            if cached[row].is_some() {
-                metrics.regional_decision_hit();
-            } else {
-                metrics.regional_decision_miss();
-            }
-            let checkpoint = cached[row].cloned().unwrap_or_else(|| {
-                RegionalCacheRecord::new(contexts[row], &memory_implementations)
-            });
-            checkpoint_records.push(checkpoint);
-            decision_rows.push(vector);
-        }
-        Ok(RegionalSearchOutcome {
-            cache_records: checkpoint_records.into_boxed_slice(),
-            contexts: contexts.into_boxed_slice(),
-            decision_plan: RegionalDecisionPlan::new(decision_rows),
+pub(crate) fn select_architectures(
+    request: RegionalSearchRequest<'_>,
+    runtime: &ExecutionContext,
+) -> Result<Box<[RegionalCacheRecord]>, crate::SynthError> {
+    let RegionalSearchRequest {
+        module,
+        regions,
+        scenarios,
+        target_cells,
+        target_model,
+        contracts,
+        effort,
+        target_fingerprint,
+        previous,
+        metrics,
+    } = request;
+    let contexts = regions
+        .regions()
+        .iter()
+        .map(|region| -> Result<RegionContextKey, crate::SynthError> {
+            let predecessor_summaries = regions
+                .predecessors(*region)
+                .iter()
+                .map(|&predecessor| {
+                    regions
+                        .region(predecessor)
+                        .ok_or_else(|| {
+                            crate::SynthError::invariant("regional predecessor row is out of range")
+                        })
+                        .map(|region| region.revision().bytes())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(RegionContextKey::seal(
+                region.revision(),
+                contracts.contracts(region.row()),
+                scenarios.generation(),
+                target_fingerprint,
+                effort,
+                &predecessor_summaries,
+            ))
         })
+        .collect::<Result<Vec<_>, _>>()?;
+    let cached = contexts
+        .iter()
+        .map(|context| {
+            previous
+                .binary_search_by_key(context, RegionalCacheRecord::context)
+                .ok()
+                .map(|index| &previous[index])
+        })
+        .collect::<Vec<_>>();
+    let records = runtime.analyze_indexed(regions.regions().len(), |row| {
+        let region = regions.regions()[row];
+        if let Some(cached) = cached[row] {
+            validate_cached_region(module, regions.memories(region), target_cells, cached)?;
+            return Ok::<_, crate::SynthError>(cached.clone());
+        }
+        let implementations =
+            search_region(module, regions.memories(region), target_cells, target_model)?;
+        let encoded = implementations
+            .iter()
+            .flat_map(|implementation| implementation.raw().to_le_bytes())
+            .collect::<Vec<_>>();
+        Ok::<_, crate::SynthError>(RegionalCacheRecord::new(contexts[row], &encoded))
+    })?;
+    for cached in cached {
+        if cached.is_some() {
+            metrics.regional_decision_hit();
+        } else {
+            metrics.regional_decision_miss();
+        }
     }
+    Ok(records.into_boxed_slice())
 }
 
 fn search_region(
-    request: RegionRowSearchRequest<'_>,
-) -> Result<RegionalDecisionVector, crate::SynthError> {
-    let RegionRowSearchRequest {
-        module,
-        memories,
-        target_cells,
-        target_model,
-    } = request;
-    let memory_implementations = memories
+    module: &word::WordModule,
+    memories: &[word::MemoryId],
+    target_cells: &opto_library::TargetCellSet,
+    target_model: &crate::planning::regional::StructuralTargetModel,
+) -> Result<Box<[MemoryImplementationCandidate]>, crate::SynthError> {
+    memories
         .iter()
         .copied()
         .map(|memory| {
             rank_memory(module, memory, target_cells, target_model)?
                 .first()
-                .map(|candidate| candidate.candidate)
+                .map(|candidate| candidate.1)
                 .ok_or_else(|| {
                     crate::SynthError::invariant(
                         "ranked regional memory has no construction candidate",
                     )
                 })
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(RegionalDecisionVector::new(memory_implementations))
+        .collect()
 }
 
-fn restore_cached_region(
+fn validate_cached_region(
     module: &word::WordModule,
     memories: &[word::MemoryId],
     target_cells: &opto_library::TargetCellSet,
     cached: &RegionalCacheRecord,
-) -> Result<RegionalDecisionVector, crate::SynthError> {
+) -> Result<(), crate::SynthError> {
     if cached.memory_implementations().len() != memories.len().saturating_mul(4) {
         return Err(crate::SynthError::invariant(
             "regional cache memory shape does not match reconstructed identity",
         ));
     }
-    let (encoded_memories, remainder) = cached.memory_implementations().as_chunks::<4>();
-    debug_assert!(remainder.is_empty(), "validated four-byte memory records");
-    let memory_implementations = encoded_memories
-        .iter()
-        .map(|bytes| MemoryImplementationCandidate::from_raw(u32::from_le_bytes(*bytes)))
-        .collect::<Vec<_>>();
+    let memory_implementations =
+        super::decode_memory_implementations(cached.memory_implementations())?;
     for (&memory, &implementation) in memories.iter().zip(&memory_implementations) {
         let valid = match implementation {
             MemoryImplementationCandidate::RegisterBank => {
@@ -205,8 +157,7 @@ fn restore_cached_region(
             ));
         }
     }
-    Ok(RegionalDecisionVector::new(memory_implementations)
-        .with_retained_plan(cached.plan().cloned()))
+    Ok(())
 }
 
 fn rank_memory(
@@ -214,7 +165,7 @@ fn rank_memory(
     memory: word::MemoryId,
     target_cells: &opto_library::TargetCellSet,
     target_model: &crate::planning::regional::StructuralTargetModel,
-) -> Result<Vec<RankedMemoryCandidate>, crate::SynthError> {
+) -> Result<Vec<(CandidateScore, MemoryImplementationCandidate)>, crate::SynthError> {
     let resource = module.memory(memory).ok_or_else(|| {
         crate::SynthError::invariant("regional search references an unknown memory")
     })?;
@@ -247,15 +198,15 @@ fn rank_memory(
                 logic_units,
                 wiring_units: logic_units.saturating_add(width.saturating_mul(reads + writes)),
             })?;
-        candidates.push(RankedMemoryCandidate {
-            candidate: MemoryImplementationCandidate::RegisterBank,
-            score: CandidateScore {
+        candidates.push((
+            CandidateScore {
                 primary,
                 secondary,
                 depth: depth_score,
                 candidate: MemoryImplementationCandidate::RegisterBank.raw(),
             },
-        });
+            MemoryImplementationCandidate::RegisterBank,
+        ));
     }
     let mut uncharacterized_macros = BTreeSet::new();
     for cell_index in
@@ -271,17 +222,17 @@ fn rank_memory(
         };
         let (primary, secondary, delay_score) = target_model.score_macro(area, delay);
         let candidate = MemoryImplementationCandidate::Macro(cell_index);
-        candidates.push(RankedMemoryCandidate {
-            candidate,
-            score: CandidateScore {
+        candidates.push((
+            CandidateScore {
                 primary,
                 secondary,
                 depth: delay_score,
                 candidate: candidate.raw(),
             },
-        });
+            candidate,
+        ));
     }
-    candidates.sort_by_key(|candidate| candidate.score);
+    candidates.sort_by_key(|candidate| candidate.0);
     if candidates.is_empty() {
         let mut reasons = Vec::new();
         if register_bank_supported && !register_bank_characterized {

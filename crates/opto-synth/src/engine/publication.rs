@@ -51,14 +51,13 @@ pub(super) fn finalize(
     let synthesis_regions = reuse
         .regional_decision_hits
         .saturating_add(reuse.regional_decision_misses);
-    let sizes = optimized.ledger.sizes;
     let operator_instances = optimized.operator_manifest.instances().len();
     let metrics = SynthesisMetrics {
         source_change: optimized.ledger.source_change,
-        normalized_values: sizes.normalized_values,
-        normalized_operations: sizes.normalized_operations,
-        lowered_values: sizes.lowered_values,
-        lowered_operations: sizes.lowered_operations,
+        normalized_values: optimized.ledger.normalized_values,
+        normalized_operations: optimized.ledger.normalized_operations,
+        lowered_values: optimized.ledger.lowered_values,
+        lowered_operations: optimized.ledger.lowered_operations,
         mapped_cells: optimized.mapped.cell_count() + optimized.mapped.design_instance_count(),
         mapped_nets: optimized.mapped.net_count(),
         operator_instances,

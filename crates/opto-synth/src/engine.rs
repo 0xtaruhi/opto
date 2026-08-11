@@ -9,7 +9,6 @@
 
 use crate::artifact::provenance::{ProvenanceBuilder, SourceInstanceProvenance};
 use crate::mapping::{MappingConfig, TargetMappingContext, TargetMappingContextKey};
-use crate::planning::regional::RegionalArchitectureSearch;
 use crate::{
     ImplementationDb, IncrementalSnapshot, SourceChangeMetrics, SourceSnapshot, StageId,
     SynthesisEffort, SynthesisOptions, SynthesisProgress, SynthesisRegionGraph, SynthesisResult,
@@ -407,15 +406,6 @@ impl SynthesisEnvironment {
     }
 }
 
-/// Sizes recorded as the pipeline rewrites the design.
-#[derive(Debug, Clone, Copy, Default)]
-struct PipelineSizes {
-    normalized_values: usize,
-    normalized_operations: usize,
-    lowered_values: usize,
-    lowered_operations: usize,
-}
-
 /// Identities and measurements every stage carries but no stage interprets.
 ///
 /// Stages move the ledger along unchanged except for the few fields they own,
@@ -424,7 +414,10 @@ struct PipelineSizes {
 struct SynthesisLedger {
     source_snapshot: SourceSnapshot,
     source_change: SourceChangeMetrics,
-    sizes: PipelineSizes,
+    normalized_values: usize,
+    normalized_operations: usize,
+    lowered_values: usize,
+    lowered_operations: usize,
     regional_cache_records: Box<[crate::incremental::RegionalCacheRecord]>,
     regional_epochs: usize,
     timing_memory: crate::closure::mmmc::MmmcTimingMemory,
@@ -523,7 +516,10 @@ impl SynthesisInput {
             ledger: SynthesisLedger {
                 source_snapshot,
                 source_change,
-                sizes: PipelineSizes::default(),
+                normalized_values: 0,
+                normalized_operations: 0,
+                lowered_values: 0,
+                lowered_operations: 0,
                 regional_cache_records: Box::new([]),
                 regional_epochs: 0,
                 timing_memory: crate::closure::mmmc::MmmcTimingMemory::default(),
@@ -549,8 +545,6 @@ struct PlannedState {
     target_model: crate::planning::regional::StructuralTargetModel,
     regions: SynthesisRegionGraph,
     contracts: crate::regional::RegionContractSet,
-    region_contexts: Box<[crate::RegionContextKey]>,
-    regional_decisions: crate::planning::regional::RegionalDecisionPlan,
 }
 
 struct LoweredState {
@@ -561,20 +555,16 @@ struct LoweredState {
     regions: SynthesisRegionGraph,
     region_ownership: crate::boolean::bitblast::LoweredRegionOwnership,
     contracts: crate::regional::RegionContractSet,
-    region_contexts: Box<[crate::RegionContextKey]>,
-    region_decision_keys: Box<[[u8; 32]]>,
-    regional_mapping_seed: crate::mapping::RegionalMappingSeed,
-    operators: Box<[crate::DurableOperatorArena]>,
+    regional_plans: Box<[regional_mapping::RegionalPlanRow]>,
     synthesized: word::WordModule,
     provenance: ProvenanceBuilder,
+    operator_manifest: crate::OperatorManifest,
 }
 
 struct InitiallyMappedState {
     lowered: LoweredState,
     mapped: crate::mapping::MappedOutput,
     timing: Option<crate::closure::mmmc::MmmcTiming>,
-    boundary_repair_schema: crate::regional::BoundaryRepairSchema,
-    operator_manifest: crate::OperatorManifest,
 }
 
 struct MappedState {
@@ -584,7 +574,6 @@ struct MappedState {
     connectivity: crate::mapping::materialize::FrozenObservableConnectivity,
     fanout_load_profile: crate::closure::postmap::MappedFanoutLoadProfile,
     implementations: ImplementationDb,
-    boundary_repair_schema: crate::regional::BoundaryRepairSchema,
     timing: Option<crate::closure::mmmc::MmmcTiming>,
     operator_manifest: crate::OperatorManifest,
 }
@@ -617,8 +606,8 @@ fn normalize(
         execution.runtime,
         execution.observer,
     )?;
-    ledger.sizes.normalized_values = synthesized.values().len();
-    ledger.sizes.normalized_operations = synthesized.operations().len();
+    ledger.normalized_values = synthesized.values().len();
+    ledger.normalized_operations = synthesized.operations().len();
     Ok(NormalizedState {
         environment,
         ledger,
@@ -645,8 +634,8 @@ fn plan_regions(
         &normalized.environment.port_bindings,
         execution.runtime,
     )?;
-    normalized.ledger.sizes.normalized_values = normalized.synthesized.values().len();
-    normalized.ledger.sizes.normalized_operations = normalized.synthesized.operations().len();
+    normalized.ledger.normalized_values = normalized.synthesized.values().len();
+    normalized.ledger.normalized_operations = normalized.synthesized.operations().len();
     let trace = crate::api::diagnostics::SynthTrace::timing(execution.engine.config.diagnostics);
     for region in regions.regions() {
         crate::api::diagnostics::trace!(
@@ -683,7 +672,7 @@ fn plan_regions(
         &normalized.environment.object_bindings,
         0,
     )?;
-    let regional_search = RegionalArchitectureSearch::select(
+    normalized.ledger.regional_cache_records = crate::planning::regional::select_architectures(
         crate::planning::regional::RegionalSearchRequest {
             module: &normalized.synthesized,
             regions: &regions,
@@ -704,15 +693,12 @@ fn plan_regions(
         execution.runtime,
     )?;
     normalized.previous_regional_cache_records = Arc::from([]);
-    normalized.ledger.regional_cache_records = regional_search.cache_records;
     Ok(PlannedState {
         normalized,
         mapping_context,
         target_model,
         regions,
         contracts,
-        region_contexts: regional_search.contexts,
-        regional_decisions: regional_search.decision_plan,
     })
 }
 
@@ -720,20 +706,12 @@ fn map_initial_logic(
     execution: &mut SynthesisExecution<'_>,
     mut lowered: LoweredState,
 ) -> Result<InitiallyMappedState, crate::SynthError> {
-    let boundary_repairs = lowered
-        .ledger
-        .regional_cache_records
-        .iter()
-        .flat_map(crate::incremental::RegionalCacheRecord::boundary_repairs)
-        .cloned()
-        .collect::<Vec<_>>();
     let regional_mapping::RegionalMappingOutcome {
         plans: selected_plans,
         plan_journal,
         epochs,
         mapped,
         timing,
-        boundary_repair_schema,
     } = regional_mapping::map_mapping_library_cells(
         regional_mapping::RegionalMappingRequest {
             module: &lowered.synthesized,
@@ -741,10 +719,7 @@ fn map_initial_logic(
             regions: &lowered.regions,
             region_ownership: &lowered.region_ownership,
             contracts: &lowered.contracts,
-            region_contexts: &lowered.region_contexts,
-            region_decision_keys: &lowered.region_decision_keys,
-            seed: &lowered.regional_mapping_seed,
-            boundary_repairs: &boundary_repairs,
+            regional_plans: &lowered.regional_plans,
             config: MappingConfig {
                 options: &lowered.environment.options,
                 port_bindings: &lowered.environment.port_bindings,
@@ -769,20 +744,11 @@ fn map_initial_logic(
         &selected_plans,
         plan_journal,
     )?;
-    let operator_manifest = capture_operator_manifest(&lowered.operators)?;
     Ok(InitiallyMappedState {
         lowered,
         mapped,
         timing,
-        boundary_repair_schema,
-        operator_manifest,
     })
-}
-
-fn capture_operator_manifest(
-    arenas: &[crate::DurableOperatorArena],
-) -> Result<crate::OperatorManifest, crate::SynthError> {
-    crate::OperatorManifest::capture(arenas)
 }
 
 fn build_mapped_artifact(
@@ -792,8 +758,6 @@ fn build_mapped_artifact(
         lowered,
         mapped,
         timing,
-        boundary_repair_schema,
-        operator_manifest,
     } = initially_mapped;
     let crate::mapping::MappedOutput {
         netlist,
@@ -830,9 +794,8 @@ fn build_mapped_artifact(
         connectivity,
         fanout_load_profile,
         implementations,
-        boundary_repair_schema,
         timing,
-        operator_manifest,
+        operator_manifest: lowered.operator_manifest,
     })
 }
 
@@ -900,17 +863,6 @@ fn optimize_postmap(
             record.clear_plan();
         }
     }
-    let boundary_repairs = crate::regional::BoundaryRepairArtifactRecord::capture_all(
-        &mapped.boundary_repair_schema,
-        &mapped.mapped,
-        &mapped.implementations,
-        &mapped.environment.options.target_cells,
-        touched_regions,
-    )?;
-    regional_cache::replace_boundary_repairs(
-        &mut mapped.ledger.regional_cache_records,
-        boundary_repairs,
-    )?;
     mapped.timing = outcome.timing;
     mapped.into_finalizable()
 }

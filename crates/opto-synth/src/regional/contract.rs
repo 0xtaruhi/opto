@@ -158,16 +158,21 @@ impl RegionContractSet {
     ///
     /// Updates in place and returns the rows whose contracts actually changed;
     /// unchanged rows keep their frozen plan and footprint.
-    pub(crate) fn reallocate_dirty(
+    pub(crate) fn reallocate_dirty<'a>(
         &mut self,
         dirty: &[crate::RegionRowId],
-        plans: &[crate::RegionCoverPlan],
+        plans: impl ExactSizeIterator<Item = &'a crate::RegionCoverPlan> + Clone,
         epoch: u32,
     ) -> Result<Box<[crate::RegionRowId]>, crate::SynthError> {
+        if plans.len() != self.contracts.len() {
+            return Err(crate::SynthError::invariant(
+                "regional plans do not align with boundary contracts",
+            ));
+        }
         let dirty = dirty.iter().copied().collect::<BTreeSet<_>>();
         let mut upstream = BTreeMap::new();
         let mut downstream = BTreeMap::new();
-        for plan in plans {
+        for plan in plans.clone() {
             for contract in plan.boundary_response() {
                 let Some(response) = plan
                     .measured_response()
@@ -193,11 +198,8 @@ impl RegionContractSet {
             }
         }
         let mut changed_rows = BTreeSet::new();
-        for (row_index, current) in self.contracts.iter_mut().enumerate() {
+        for (row_index, (current, plan)) in self.contracts.iter_mut().zip(plans).enumerate() {
             let row = crate::RegionRowId::from_index(row_index)?;
-            let plan = plans
-                .get(row_index)
-                .ok_or_else(|| crate::SynthError::invariant("regional plan row is out of range"))?;
             let extra = if dirty.contains(&row) {
                 (-plan.cost().minimum_slack.get()).max(0.0)
             } else {

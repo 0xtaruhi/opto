@@ -468,15 +468,6 @@ impl ImplementationDb {
             .map(Vec::as_slice)
     }
 
-    pub(crate) fn boundary_edge_footprints(
-        &self,
-    ) -> impl Iterator<Item = (RegionAnchorId, RegionAnchorId, &[CellId])> {
-        self.boundary_edges
-            .iter()
-            .zip(&self.boundary_edge_cells)
-            .map(|(edge, cells)| (edge.driver, edge.sink, cells.as_slice()))
-    }
-
     /// Drains source-region ownership touched by committed mapped edits.
     pub(crate) fn take_committed_owner_impact(&mut self) -> MappedOwnerImpact {
         std::mem::take(&mut self.committed_owner_impact)

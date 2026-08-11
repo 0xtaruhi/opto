@@ -72,9 +72,11 @@ impl WordMappedSignals {
     }
 }
 
-pub(crate) fn regional_binding_values(bindings: &[RegionPlanBinding]) -> Box<[word::ValueId]> {
+pub(crate) fn regional_binding_values<'a>(
+    bindings: impl IntoIterator<Item = &'a RegionPlanBinding>,
+) -> Box<[word::ValueId]> {
     bindings
-        .iter()
+        .into_iter()
         .flat_map(RegionPlanBinding::lowered_values)
         .collect::<BTreeSet<_>>()
         .into_iter()

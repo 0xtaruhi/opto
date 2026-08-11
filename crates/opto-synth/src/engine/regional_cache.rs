@@ -5,7 +5,7 @@
 
 use super::regional_mapping::RegionalPlanJournalRecord;
 use crate::incremental::RegionalCacheRecord;
-use crate::regional::{BoundaryRepairArtifactRecord, RegionCoverPlanRecord};
+use crate::regional::RegionCoverPlanRecord;
 use crate::{RegionContextKey, RegionCoverPlan, SynthError};
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -69,31 +69,4 @@ fn merge_plan(
         }
     }
     Ok(())
-}
-
-pub(super) fn replace_boundary_repairs(
-    records: &mut [RegionalCacheRecord],
-    repairs: Box<[BoundaryRepairArtifactRecord]>,
-) -> Result<(), SynthError> {
-    for record in records.iter_mut() {
-        record.clear_boundary_repairs();
-    }
-    let mut by_context = BTreeMap::<RegionContextKey, Vec<_>>::new();
-    for repair in repairs {
-        by_context
-            .entry(repair.driver_context())
-            .or_default()
-            .push(repair);
-    }
-    for (context, repairs) in by_context {
-        let index = records
-            .binary_search_by_key(&context, RegionalCacheRecord::context)
-            .map_err(|_| {
-                SynthError::invariant(
-                    "captured boundary repair has no current regional cache context",
-                )
-            })?;
-        records[index].set_boundary_repairs(repairs)?;
-    }
-    RegionalCacheRecord::validate_all(records)
 }

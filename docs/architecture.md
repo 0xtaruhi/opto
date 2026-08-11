@@ -183,17 +183,14 @@ it compares candidate CSR rows before accepting a match. The reverse index
 therefore neither duplicates each operator row into a boxed tree key nor treats
 hash equality as identity.
 
-An accepted cross-region repair is also captured as one portable
-`BoundaryRepairArtifactRecord` per exact `(driver region, sink region)` edge.
-The record carries graph boundary-port semantic keys, both endpoint plan
-contexts, and a content-addressed generation; it contains stable cell/pin/net
-anchors but no mapped IDs. The next synthesis run validates it against the current
-region graph and final selected epoch, then publishes its cells, nets, sink
-reconnections, provenance, and MMMC dirty cones through one mapped-timing
-transaction. Revision-local IDs live only in the receiving generation's exact
-`MappedBoundaryRepairFootprint`. Missing, same-region, global, and multi-region
-endpoints are never silently converted into a boundary owner; non-crossing root
-segments take an explicit region/global lineage at their call site.
+An accepted cross-region repair is represented once in the live implementation
+database as an exact `(driver region, sink region)` edge owner with a stable
+reverse cell footprint. Physical repair topology is not copied into the
+regional decision cache: every synthesis run reconstructs it through the same
+canonical post-map transaction flow. Missing, same-region, global, and
+multi-region endpoints are never silently converted into a boundary owner;
+non-crossing root segments take an explicit region/global lineage at their call
+site.
 
 ## Production Workflow
 
@@ -665,8 +662,8 @@ RtlModule
 SynthesisRegionGraph
   = stable semantic identities + dense rows + typed boundary CSR
 
-RegionalDecisionPlan
-  = exactly one construction vector per region
+regional cache records
+  = one context-keyed construction decision and optional compact plan per region
 
 canonical Boolean subject
   = one compact mixed-node graph for the selected target construction
@@ -775,15 +772,14 @@ timing_tag)`, and restore only when both sequences exactly match the rebuilt
 contracts.
 
 Plans, epoch journals, and regional cache records share immutable topology,
-measurement, implementation-census, decision, and repair slices by `Arc`.
+measurement, implementation-census, and decision slices by `Arc`.
 Checkpoint publication and reconstruction clone only those owners, never their
 payload bytes or per-cell records. Resident accounting charges each reachable
 allocation identity once even when several explored contexts share it, and
 treats an `Arc`'s two reference-count words plus inline payload as one
-allocation before applying allocator overhead. Strict context order plus
-per-record edge order proves repair uniqueness without a global identity tree;
-repair-local drivers resolve through the artifact's sorted cell and pin tables
-rather than scanning every cell for every net.
+allocation before applying allocator overhead. Physical boundary repair remains
+part of the published mapped artifact and its implementation ownership, not a
+second portable topology reconstructed by the next synthesis run.
 
 The checkpoint wire stores design owners, not their derived query indexes. A
 `DesignRecord` keeps its `DesignIndex` while resident, but serialization omits

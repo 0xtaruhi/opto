@@ -4,7 +4,6 @@
 //! Region identities, contracts, portable plans, and deterministic epochs.
 
 pub(crate) mod boundary;
-mod boundary_artifact;
 mod contract;
 mod epoch;
 mod ownership;
@@ -22,10 +21,6 @@ pub use region_graph::{
     SynthesisRegionGraph, SynthesisRegionKind, SynthesisRegionRevision,
 };
 
-pub(crate) use boundary_artifact::{
-    BoundaryRepairArtifactRecord, BoundaryRepairEndpoint, BoundaryRepairSchema,
-    BoundaryRepairSignal,
-};
 pub(crate) use contract::RegionContractSet;
 pub(crate) use epoch::{EpochDecision, RegionalEpochCoordinator};
 pub(crate) use ownership::StructuralOwnershipProvenance;

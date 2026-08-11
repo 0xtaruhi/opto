@@ -166,10 +166,6 @@ type SealedOwners = (
 pub(crate) enum InitialCellOwner {
     Global,
     Region(RegionAnchorId),
-    Boundary {
-        driver: RegionAnchorId,
-        sink: RegionAnchorId,
-    },
 }
 
 pub(super) fn seal_owners(
@@ -177,13 +173,9 @@ pub(super) fn seal_owners(
 ) -> Result<SealedOwners, crate::SynthError> {
     let mut regions = Vec::new();
     let mut ids = BTreeMap::new();
-    let mut boundary_edges = Vec::new();
-    let mut boundary_edge_cells = Vec::<Vec<CellId>>::new();
-    let mut boundary_edge_ids = BTreeMap::new();
     let cells = owners
         .into_iter()
-        .enumerate()
-        .map(|(index, owner)| {
+        .map(|owner| {
             owner
                 .map(|owner| {
                     let region = match owner {
@@ -191,31 +183,6 @@ pub(super) fn seal_owners(
                             return MappedOwnerId::region(RegionOwnerId::GLOBAL);
                         }
                         InitialCellOwner::Region(region) => region,
-                        InitialCellOwner::Boundary { driver, sink } => {
-                            if driver == sink {
-                                return Err(crate::SynthError::invariant(
-                                    "initial boundary owner has identical endpoints",
-                                ));
-                            }
-                            let edge = BoundaryEdge { driver, sink };
-                            let id = if let Some(&id) = boundary_edge_ids.get(&edge) {
-                                id
-                            } else {
-                                let id = BoundaryEdgeId(
-                                    u32::try_from(boundary_edges.len()).map_err(|_| {
-                                        crate::SynthError::capacity("mapped boundary-edge count")
-                                    })?,
-                                );
-                                boundary_edges.push(edge);
-                                boundary_edge_cells.push(Vec::new());
-                                boundary_edge_ids.insert(edge, id);
-                                id
-                            };
-                            boundary_edge_cells[id.0 as usize].push(
-                                CellId::from_index(index).map_err(crate::SynthError::Mapped)?,
-                            );
-                            return MappedOwnerId::boundary(id);
-                        }
                     };
                     let id = if let Some(&id) = ids.get(&region) {
                         id
@@ -232,12 +199,5 @@ pub(super) fn seal_owners(
                 .transpose()
         })
         .collect::<Result<_, crate::SynthError>>()?;
-    Ok((
-        cells,
-        regions,
-        ids,
-        boundary_edges,
-        boundary_edge_cells,
-        boundary_edge_ids,
-    ))
+    Ok((cells, regions, ids, Vec::new(), Vec::new(), BTreeMap::new()))
 }

@@ -9,48 +9,14 @@
 //! target instances back into that model.
 
 use super::region_delta::{MappedValueSignal, WordMappedSignals};
-use super::target_pin_id;
+use super::{ArtifactCell, ArtifactSignal, target_pin_id};
 use crate::artifact::MappedCellSource;
 use crate::mapping::MappedCell;
 use crate::mapping::library::CombinationalCellCatalog;
 use crate::mapping::sequential::{SelectedRegisterCell, SequentialCellCatalog};
-use opto_ir::mapped::{
-    AppliedRegionDelta, CellId, CellSpec, ConnectionRef, NetId, RegionDelta, TempCellId, TempNetId,
-};
+use opto_ir::mapped::{AppliedRegionDelta, CellId, NetId, RegionDelta, TempCellId};
 use opto_ir::word;
 use std::collections::BTreeSet;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArtifactSignal {
-    Mapped(MappedValueSignal),
-    Internal(usize),
-}
-
-impl ArtifactSignal {
-    fn connection(self, internal_nets: &[TempNetId]) -> Result<ConnectionRef, crate::SynthError> {
-        match self {
-            Self::Mapped(signal) => Ok(signal.connection()),
-            Self::Internal(index) => internal_nets
-                .get(index)
-                .copied()
-                .map(ConnectionRef::NewNet)
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "sequential artifact references an unknown internal net",
-                    )
-                }),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ArtifactCell {
-    name: String,
-    cell_type: String,
-    library_cell: Option<u32>,
-    connections: Box<[(String, Option<u16>, ArtifactSignal)]>,
-    source: MappedCellSource,
-}
 
 /// Immutable topology for every live register and latch in one lowered design.
 ///
@@ -59,7 +25,7 @@ struct ArtifactCell {
 /// the artifact to its transaction.
 #[derive(Debug, Clone)]
 pub(crate) struct MappedSequentialArtifact {
-    cells: Box<[ArtifactCell]>,
+    cells: Box<[ArtifactCell<MappedCellSource>]>,
     internal_net_count: usize,
     referenced_nets: Box<[NetId]>,
 }
@@ -187,28 +153,13 @@ impl MappedSequentialArtifact {
                 "sequential substrate net is absent from its transaction snapshot",
             ));
         }
-        let internal_nets = (0..self.internal_net_count)
-            .map(|_| delta.add_net(None).map_err(crate::SynthError::from))
-            .collect::<Result<Box<[_]>, _>>()?;
-        let cells = self
-            .cells
-            .iter()
-            .map(|cell| {
-                let mut spec =
-                    CellSpec::new(cell.name.clone(), cell.cell_type.clone(), cell.library_cell);
-                for (pin, library_pin, signal) in &cell.connections {
-                    spec = spec.connect(
-                        pin.clone(),
-                        *library_pin,
-                        signal.connection(&internal_nets)?,
-                    );
-                }
-                delta
-                    .add_cell(spec)
-                    .map(|cell_id| (cell_id, cell.source))
-                    .map_err(crate::SynthError::from)
-            })
-            .collect::<Result<Box<[_]>, _>>()?;
+        let (_, cells) = super::append_artifact_cells(
+            delta,
+            self.internal_net_count,
+            &self.cells,
+            "sequential artifact references an unknown internal net",
+            |cell, &source| (cell, source),
+        )?;
         Ok(PendingMappedSequential { cells })
     }
 }
@@ -216,7 +167,7 @@ impl MappedSequentialArtifact {
 struct ArtifactBuilder<'a> {
     module: &'a word::WordModule,
     state_targets: Vec<Option<word::LValue>>,
-    cells: Vec<ArtifactCell>,
+    cells: Vec<ArtifactCell<MappedCellSource>>,
     internal_net_count: usize,
 }
 
@@ -487,7 +438,7 @@ impl<'a> ArtifactBuilder<'a> {
             cell_type: mapped.cell_name,
             library_cell: Some(library_cell),
             connections: connections.into_boxed_slice(),
-            source,
+            metadata: source,
         });
         Ok(())
     }
@@ -498,7 +449,7 @@ impl<'a> ArtifactBuilder<'a> {
             .internal_net_count
             .checked_add(1)
             .ok_or_else(|| crate::SynthError::capacity("sequential internal nets"))?;
-        Ok(ArtifactSignal::Internal(index))
+        Ok(ArtifactSignal::LocalNet(index))
     }
 
     /// Names one sequential cell.
@@ -523,11 +474,11 @@ impl<'a> ArtifactBuilder<'a> {
         let mut referenced_nets = self
             .cells
             .iter()
-            .flat_map(|cell| &cell.connections)
+            .flat_map(|cell| cell.connections.iter())
             .filter_map(|(_, _, signal)| match signal {
                 ArtifactSignal::Mapped(MappedValueSignal::Net(net)) => Some(*net),
                 ArtifactSignal::Mapped(MappedValueSignal::Constant(_))
-                | ArtifactSignal::Internal(_) => None,
+                | ArtifactSignal::LocalNet(_) => None,
             })
             .collect::<Vec<_>>();
         referenced_nets.sort_unstable();

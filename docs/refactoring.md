@@ -48,10 +48,10 @@ There is exactly one active value of each kind per region and epoch.
 
 Initial mapping and post-map optimization share the mapped transaction and
 MMMC owner model. Cross-region repair is decomposed by exact driver-to-single-
-sink region edges. Each reusable edge is persisted as one
-`BoundaryRepairArtifactRecord` with semantic identity, content generation, and
-portable topology; restore resolves a separate generation-local exact
-footprint. No multi-region ownership shell remains. The only open
+sink region edges. Each committed edge is owned once by the live implementation
+database and post-map reconstructs physical repair topology on every synthesis
+run; the regional decision cache does not retain a second portable repair
+representation. No multi-region ownership shell remains. The only open
 items in [architecture.md](architecture.md)'s “Known Architectural Gaps” are
 benchmark qualification results, not representation migration.
 
@@ -65,7 +65,7 @@ path-exception arbitration rule.
 | Area | State | Result |
 |---|---|---|
 | Region identity and SCC-safe partition | Complete | Stable typed regions, packed boundary CSR, deterministic work estimates |
-| Construction planning | Complete | One `RegionalDecisionVector` per region; memory choice is part of the same stable vector |
+| Construction planning | Complete | One context-keyed regional cache record per region; memory choice is part of its stable decision payload |
 | Memory admission removal | Complete | No predicted-allocation rejection or hidden size gate |
 | Target lowering ownership | Complete | One canonical selected construction; no target-local Word cone |
 | Boundary identity | Complete | Whole protected equivalence classes and ownership rules survive canonicalization |
@@ -108,9 +108,10 @@ True unsupported combinational cycles still fail explicitly.
 
 ### One Regional Decision
 
-`RegionalArchitectureSearch` returns one complete vector for every region. The
-vector contains the selected provider for every owned semantic operator and
-the selected implementation of every owned first-class memory.
+Regional architecture selection returns one context-keyed cache record for
+every region. The record contains the selected implementation of every owned
+first-class memory and an optional compact plan restored only after topology
+reconstruction.
 
 Selection uses deterministic target/scenario structural estimates and a
 regional depth budget. It does not materialize several regional target
