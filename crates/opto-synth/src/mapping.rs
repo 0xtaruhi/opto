@@ -16,7 +16,6 @@ pub(crate) mod cover;
 pub(crate) mod library;
 pub(crate) mod logic_partition;
 pub(crate) mod materialize;
-mod prepare;
 mod region_binding;
 mod roots;
 mod sequential;
@@ -25,8 +24,8 @@ pub(crate) mod word_util;
 pub use clock_gating::ClockGatingStyle;
 
 pub(crate) use architecture::{
-    ArchitectureMappingConfig, RegionalArchitectureRequest, extend_operation_regions_for_memories,
-    prepare_regional_architectures,
+    ArchitectureMappingConfig, RegionalArchitectureMapping, RegionalArchitectureRequest,
+    extend_operation_regions_for_memories, prepare_regional_architectures,
 };
 pub(crate) use cell::{MappedCell, MappedInputConnection, MappedOutputConnection};
 use library::CombinationalCellCatalog;
@@ -38,25 +37,6 @@ pub(crate) use region_binding::{
 };
 pub(crate) use roots::FullDomainRootSemantics;
 use sequential::SequentialCellCatalog;
-
-pub(crate) enum RegionalMappingSeed {
-    Private {
-        plans: Box<[crate::RegionCoverPlan]>,
-        bindings: Box<[RegionPlanBinding]>,
-    },
-}
-
-impl RegionalMappingSeed {
-    pub(crate) fn bindings(&self) -> &[RegionPlanBinding] {
-        let Self::Private { bindings, .. } = self;
-        bindings
-    }
-
-    pub(crate) fn bindings_mut(&mut self) -> &mut [RegionPlanBinding] {
-        let Self::Private { bindings, .. } = self;
-        bindings
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TargetMappingContextKey([u8; 32]);
@@ -97,15 +77,55 @@ impl TargetMappingContext {
         target_mapping: bool,
         ownership: &mut crate::regional::StructuralOwnershipProvenance,
     ) -> Result<(), crate::SynthError> {
-        prepare::prepare_private_region(prepare::PrivateRegionPreparation {
-            module,
-            sequential_catalog: &self.sequential_catalog,
-            clock_gating,
-            clock_gating_catalog: &self.clock_gating_catalog,
-            target_mapping,
-            timing_diagnostics: self.config.diagnostics.timing,
-            ownership,
-        })
+        let trace = crate::api::diagnostics::SynthTrace::new(self.config.diagnostics.timing);
+        let mut stage_started = std::time::Instant::now();
+        let mut finish_stage = |stage: &str| {
+            crate::api::diagnostics::trace!(
+                trace,
+                "mapping.prepare",
+                "stage={stage} wall={:?}",
+                stage_started.elapsed()
+            );
+            stage_started = std::time::Instant::now();
+        };
+        sequential::normalize_sequential_controls(module, ownership)?;
+        finish_stage("normalize controls");
+        if target_mapping {
+            sequential::lower_controls(module, &self.sequential_catalog, ownership)?;
+            finish_stage("lower controls");
+        }
+        let gating_edges = |edge: word::Edge| {
+            clock_gating.is_some_and(|style| {
+                self.clock_gating_catalog
+                    .gate_for(edge, style.latch_based)
+                    .is_some()
+            })
+        };
+        if target_mapping {
+            sequential::recover_feedback_enables(
+                module,
+                &self.sequential_catalog,
+                &gating_edges,
+                ownership,
+            )?;
+            finish_stage("recover enables");
+            if let Some(style) = clock_gating {
+                clock_gating::gate_register_clocks_in_regions(
+                    module,
+                    &self.clock_gating_catalog,
+                    style,
+                    ownership,
+                )?;
+                finish_stage("gate clocks");
+                sequential::expand_unsupported_enables(
+                    module,
+                    &self.sequential_catalog,
+                    ownership,
+                )?;
+                finish_stage("expand enables");
+            }
+        }
+        Ok(())
     }
 }
 

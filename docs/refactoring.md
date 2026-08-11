@@ -48,10 +48,10 @@ There is exactly one active value of each kind per region and epoch.
 
 Initial mapping and post-map optimization share the mapped transaction and
 MMMC owner model. Cross-region repair is decomposed by exact driver-to-single-
-sink region edges. Each reusable edge is persisted as one
-`BoundaryRepairArtifactRecord` with semantic identity, content generation, and
-portable topology; restore resolves a separate generation-local exact
-footprint. No multi-region ownership shell remains. The only open
+sink region edges. Each committed edge is owned once by the live implementation
+database and post-map reconstructs physical repair topology on every synthesis
+run; the regional decision cache does not retain a second portable repair
+representation. No multi-region ownership shell remains. The only open
 items in [architecture.md](architecture.md)'s “Known Architectural Gaps” are
 benchmark qualification results, not representation migration.
 
@@ -65,7 +65,7 @@ path-exception arbitration rule.
 | Area | State | Result |
 |---|---|---|
 | Region identity and SCC-safe partition | Complete | Stable typed regions, packed boundary CSR, deterministic work estimates |
-| Construction planning | Complete | One `RegionalDecisionVector` per region; memory choice is part of the same stable vector |
+| Construction planning | Complete | One context-keyed regional cache record per region; memory choice is part of its stable decision payload |
 | Memory admission removal | Complete | No predicted-allocation rejection or hidden size gate |
 | Target lowering ownership | Complete | One canonical selected construction; no target-local Word cone |
 | Boundary identity | Complete | Whole protected equivalence classes and ownership rules survive canonicalization |
@@ -108,9 +108,10 @@ True unsupported combinational cycles still fail explicitly.
 
 ### One Regional Decision
 
-`RegionalArchitectureSearch` returns one complete vector for every region. The
-vector contains the selected provider for every owned semantic operator and
-the selected implementation of every owned first-class memory.
+Regional architecture selection returns one context-keyed cache record for
+every region. The record contains the selected implementation of every owned
+first-class memory and an optional compact plan restored only after topology
+reconstruction.
 
 Selection uses deterministic target/scenario structural estimates and a
 regional depth budget. It does not materialize several regional target
@@ -214,16 +215,13 @@ an independently maintained cell footprint. Driver provenance and ownership
 lineage are recorded separately, so a sink affects placement of the boundary
 artifact without becoming a semantic origin of the driver logic.
 
-The boundary segment is a cache artifact, not merely an ownership label on a
-temporary `RegionDelta`. After post-map commit, its exact edge cell footprint is
-encoded with stable endpoint anchors into `RegionalCacheRecord`; the edge's
-semantic identity is sealed from graph boundary keys and endpoint contexts,
-while its generation is sealed from the portable topology. At the final
-regional epoch of a later synthesis, matching records are reconstructed into one
-generation-local cell/net/pin footprint and committed with the existing MMMC
-mapped transaction. Context, graph-edge, library, name, ownership, footprint,
-and content-generation mismatches fail closed. Records never serialize a
-`CellId`, `NetId`, or `PinId`, and the boundary path has no region/global
+The boundary segment is a live implementation artifact, not merely an ownership
+label on a temporary `RegionDelta`. Its exact edge cell footprint belongs to the
+current mapped generation and is committed with the existing MMMC transaction.
+Post-map reconstructs the physical repair topology canonically on every
+synthesis run from graph boundary keys, endpoint contexts, and the current
+implementation. `RegionalCacheRecord` retains regional construction decisions,
+not a portable boundary topology, and the boundary path has no region/global
 fallback.
 
 HFNS uses actual mapped sink-pin capacitance and fanout in every early/late

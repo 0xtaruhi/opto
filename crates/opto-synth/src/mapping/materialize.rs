@@ -7,13 +7,12 @@ use crate::SynthesisOptions;
 use crate::artifact::provenance::SourceInstanceProvenance;
 use opto_ir::BitVal;
 use opto_ir::mapped::{
-    CellId, ConnectionSignal, MappedBuilder, MappedCellSpec, MappedNetlist, NetId, PinId,
-    PortDirection, PortId,
+    CellId, CellSpec, ConnectionRef, ConnectionSignal, MappedBuilder, MappedCellSpec,
+    MappedNetlist, NetId, PinId, PortDirection, PortId, RegionDelta, TempCellId, TempNetId,
 };
 use opto_ir::word;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) mod boundary_delta;
 pub(crate) mod region_delta;
 mod sequential_delta;
 
@@ -24,17 +23,77 @@ use crate::artifact::MappedCellSource;
 pub(crate) use region_delta::REGION_CELL_PREFIX;
 pub(crate) use sequential_delta::{MappedSequentialArtifact, sequential_binding_values};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ArtifactSignal {
+    Mapped(region_delta::MappedValueSignal),
+    LocalNet(usize),
+}
+
+impl ArtifactSignal {
+    fn connection(
+        self,
+        local_nets: &[TempNetId],
+        missing_local_net: &'static str,
+    ) -> Result<ConnectionRef, crate::SynthError> {
+        match self {
+            Self::Mapped(signal) => Ok(signal.connection()),
+            Self::LocalNet(index) => local_nets
+                .get(index)
+                .copied()
+                .map(ConnectionRef::NewNet)
+                .ok_or_else(|| crate::SynthError::invariant(missing_local_net)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ArtifactCell<M> {
+    name: String,
+    cell_type: String,
+    library_cell: Option<u32>,
+    connections: Box<[(String, Option<u16>, ArtifactSignal)]>,
+    metadata: M,
+}
+
+type AppendedArtifactCells<O> = (Box<[TempNetId]>, Box<[O]>);
+
+fn append_artifact_cells<M, O>(
+    delta: &mut RegionDelta,
+    local_net_count: usize,
+    cells: &[ArtifactCell<M>],
+    missing_local_net: &'static str,
+    output: impl Fn(TempCellId, &M) -> O,
+) -> Result<AppendedArtifactCells<O>, crate::SynthError> {
+    let local_nets = (0..local_net_count)
+        .map(|_| delta.add_net(None).map_err(crate::SynthError::from))
+        .collect::<Result<Box<[_]>, _>>()?;
+    let cells = cells
+        .iter()
+        .map(|cell| {
+            let mut spec = CellSpec::new(&cell.name, &cell.cell_type, cell.library_cell);
+            for (pin, library_pin, signal) in &cell.connections {
+                spec = spec.connect(
+                    pin,
+                    *library_pin,
+                    signal.connection(&local_nets, missing_local_net)?,
+                );
+            }
+            delta
+                .add_cell(spec)
+                .map(|id| output(id, &cell.metadata))
+                .map_err(crate::SynthError::from)
+        })
+        .collect::<Result<Box<[_]>, _>>()?;
+    Ok((local_nets, cells))
+}
+
 #[derive(Debug)]
 pub(crate) struct MappedOutput {
     pub(crate) netlist: MappedNetlist,
     pub(crate) cell_sources: Box<[(CellId, MappedCellSource)]>,
 }
 
-pub(crate) struct MappedSubstrate {
-    pub(crate) netlist: MappedNetlist,
-    pub(crate) cell_sources: Box<[(CellId, MappedCellSource)]>,
-    pub(crate) observed_nets: Box<[Option<NetId>]>,
-}
+pub(crate) type MappedSubstrate = (MappedOutput, Box<[Option<NetId>]>);
 
 #[derive(Debug)]
 struct ObservableOutput {
@@ -296,11 +355,7 @@ pub(crate) fn build_test_substrate(
     source_instances: &SourceInstanceProvenance,
     base_revision: opto_ir::RevisionId,
 ) -> Result<MappedOutput, crate::SynthError> {
-    let MappedSubstrate {
-        netlist,
-        cell_sources,
-        observed_nets: _,
-    } = build_mapped_substrate(MappedSubstrateRequest {
+    let (output, _) = build_mapped_substrate(MappedSubstrateRequest {
         module,
         options,
         design_references,
@@ -309,10 +364,7 @@ pub(crate) fn build_test_substrate(
         base_revision,
         observed_values: &[],
     })?;
-    Ok(MappedOutput {
-        netlist,
-        cell_sources,
-    })
+    Ok(output)
 }
 
 pub(crate) fn build_mapped_substrate(
@@ -550,11 +602,13 @@ pub(crate) fn build_mapped_substrate(
             cell_sources.len()
         )));
     }
-    Ok(MappedSubstrate {
-        netlist,
-        cell_sources: cell_sources.into_boxed_slice(),
-        observed_nets: observed_nets.into_boxed_slice(),
-    })
+    Ok((
+        MappedOutput {
+            netlist,
+            cell_sources: cell_sources.into_boxed_slice(),
+        },
+        observed_nets.into_boxed_slice(),
+    ))
 }
 
 fn required_substrate_roots(

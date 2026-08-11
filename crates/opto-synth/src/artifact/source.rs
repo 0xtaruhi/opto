@@ -17,9 +17,4 @@ pub(crate) enum MappedCellSource {
         origins: OriginSetId,
         owner: crate::RegionAnchorId,
     },
-    Boundary {
-        origins: OriginSetId,
-        driver: crate::RegionAnchorId,
-        sink: crate::RegionAnchorId,
-    },
 }

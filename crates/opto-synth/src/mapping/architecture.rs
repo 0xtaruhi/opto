@@ -6,7 +6,6 @@
 use super::roots::{MappingRoot, mapping_roots, merge_by_value};
 use crate::artifact::provenance::ProvenanceBuilder;
 use crate::boolean::logic::RegionLogicOptions;
-use crate::planning::regional::{RegionalDecisionPlan, RegionalDecisionVector};
 use crate::regional::RegionContractSet;
 use opto_ir::word;
 use opto_runtime::{ExecutionContext, Task, TaskKey};
@@ -38,46 +37,33 @@ struct RegionArchitectureMaterializer<'a> {
 pub(crate) struct RegionalArchitectureRequest<'a> {
     pub(crate) source: &'a word::WordModule,
     pub(crate) operation_regions: &'a [Option<crate::RegionRowId>],
-    pub(crate) plan: &'a RegionalDecisionPlan,
+    pub(crate) decisions: &'a [crate::incremental::RegionalCacheRecord],
     pub(crate) regions: &'a crate::SynthesisRegionGraph,
     pub(crate) contracts: &'a RegionContractSet,
-    pub(crate) contexts: &'a [crate::RegionContextKey],
     pub(crate) config: ArchitectureMappingConfig<'a>,
 }
 
-pub(crate) struct RegionalArchitecturePreparation {
-    pub(crate) private_architectures:
-        Box<[crate::artifact::provenance::PrivateArchitecturePublication]>,
-    pub(crate) decision_keys: Box<[[u8; 32]]>,
-    pub(crate) mapping_seed: super::RegionalMappingSeed,
-    pub(crate) memory_implementations:
-        Box<[crate::planning::regional::MemoryImplementationCandidate]>,
-    pub(crate) operators: Box<[crate::DurableOperatorArena]>,
+pub(crate) type RegionalArchitecturePreparation = (
+    Box<[RegionalArchitectureMapping]>,
+    Box<[crate::planning::regional::MemoryImplementationCandidate]>,
+);
+
+pub(crate) struct RegionalArchitectureMapping {
+    pub(crate) plan: crate::RegionCoverPlan,
+    pub(crate) binding: crate::mapping::RegionPlanBinding,
+    pub(crate) architecture: crate::artifact::provenance::PrivateArchitecturePublication,
+    pub(crate) operators: crate::DurableOperatorArena,
 }
 
-struct RegionArchitectureMapping {
-    plan: crate::RegionCoverPlan,
-    binding: crate::mapping::RegionPlanBinding,
-    architecture: crate::artifact::provenance::PrivateArchitecturePublication,
-    operators: crate::DurableOperatorArena,
-}
-
-struct PreparedPrivateWord {
-    module: word::WordModule,
-    source_to_local: std::collections::BTreeMap<word::ValueId, word::ValueId>,
-    boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
-    observations: Box<[word::ValueId]>,
-    operation_sources: Vec<Option<word::OpId>>,
-    memory_values: Vec<crate::planning::regional::RegionalMemoryValueBinding>,
-    root_bindings: Box<[(word::ValueId, word::SignalId)]>,
-    local_boundary_inputs: Vec<word::ValueId>,
-    root_pairs: Vec<(MappingRoot, word::ValueId)>,
-}
-
-struct PreparedOperators {
-    architecture: crate::artifact::provenance::PrivateArchitecturePublication,
-    arena: crate::DurableOperatorArena,
-}
+type PreparedPrivateWord = (
+    crate::planning::regional::RegionalWordCone,
+    Vec<word::ValueId>,
+    Vec<(MappingRoot, word::ValueId)>,
+);
+type PreparedOperators = (
+    crate::artifact::provenance::PrivateArchitecturePublication,
+    crate::DurableOperatorArena,
+);
 
 fn remap_private_values(
     changes: &crate::planning::dataflow::DataflowChanges,
@@ -104,13 +90,12 @@ pub(crate) fn prepare_regional_architectures(
     let RegionalArchitectureRequest {
         source,
         operation_regions,
-        plan,
+        decisions,
         regions,
         contracts,
-        contexts,
         config,
     } = request;
-    if plan.len() != regions.regions().len() || contexts.len() != regions.regions().len() {
+    if decisions.len() != regions.regions().len() {
         return Err(crate::SynthError::invariant(
             "regional architecture plan does not align with the region graph",
         ));
@@ -150,11 +135,15 @@ pub(crate) fn prepare_regional_architectures(
             format!("logic_lowering.region[{region_index}]")
         });
         let region = regions.regions()[region_index];
-        let vector = plan.vector(region.row());
+        let decision = &decisions[region_index];
+        let memory_implementations = crate::planning::regional::decode_memory_implementations(
+            decision.memory_implementations(),
+        )?;
         let mapped = materializer.materialize(
-            vector,
+            &memory_implementations,
+            decision.plan(),
             region,
-            contexts[region.row().index()],
+            decision.context(),
             regional_runtime,
         )?;
         crate::api::diagnostics::trace!(
@@ -168,23 +157,24 @@ pub(crate) fn prepare_regional_architectures(
             mapped.plan.cost().worst_normalized_violation.get(),
             mapped.plan.cost().minimum_slack.get(),
         );
-        Ok::<_, crate::SynthError>((vector.clone(), mapped))
+        Ok::<_, crate::SynthError>((memory_implementations, mapped))
     })?;
-    let mut selected_keys = Vec::with_capacity(mapped_regions.len());
-    let mut selected_plans = Vec::with_capacity(mapped_regions.len());
-    let mut selected_bindings = Vec::with_capacity(mapped_regions.len());
-    let mut private_architectures = Vec::with_capacity(mapped_regions.len());
-    let mut operators = Vec::with_capacity(mapped_regions.len());
+    let mut prepared_regions = Vec::with_capacity(mapped_regions.len());
     let mut selected_memories = vec![None; source.memories().len()];
-    for (row, (vector, mapped)) in mapped_regions.into_iter().enumerate() {
+    for (row, (memory_implementations, mapped)) in mapped_regions.into_iter().enumerate() {
         let region = regions.regions()[row];
+        if mapped.plan.region() != region.id() {
+            return Err(crate::SynthError::invariant(
+                "regional architecture result belongs to another region",
+            ));
+        }
         let memories = regions.memories(region);
-        if memories.len() != vector.memory_implementations().len() {
+        if memories.len() != memory_implementations.len() {
             return Err(crate::SynthError::invariant(
                 "selected memory implementations do not align with region ownership",
             ));
         }
-        for (&memory, &implementation) in memories.iter().zip(vector.memory_implementations()) {
+        for (&memory, &implementation) in memories.iter().zip(&memory_implementations) {
             if selected_memories[memory.index()]
                 .replace(implementation)
                 .is_some()
@@ -194,20 +184,11 @@ pub(crate) fn prepare_regional_architectures(
                 ));
             }
         }
-        selected_keys.push(vector.stable_key());
-        selected_plans.push(mapped.plan);
-        selected_bindings.push(mapped.binding);
-        private_architectures.push(mapped.architecture);
-        operators.push(mapped.operators);
+        prepared_regions.push(mapped);
     }
-    Ok(RegionalArchitecturePreparation {
-        private_architectures: private_architectures.into_boxed_slice(),
-        decision_keys: selected_keys.into_boxed_slice(),
-        mapping_seed: super::RegionalMappingSeed::Private {
-            plans: selected_plans.into_boxed_slice(),
-            bindings: selected_bindings.into_boxed_slice(),
-        },
-        memory_implementations: selected_memories
+    Ok((
+        prepared_regions.into_boxed_slice(),
+        selected_memories
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| {
@@ -216,8 +197,7 @@ pub(crate) fn prepare_regional_architectures(
                 )
             })?
             .into_boxed_slice(),
-        operators: operators.into_boxed_slice(),
-    })
+    ))
 }
 
 fn diagnostics_enabled(materializer: &RegionArchitectureMaterializer<'_>) -> bool {
@@ -261,10 +241,7 @@ impl RegionArchitectureMaterializer<'_> {
                     )
                 })
             })?;
-        Ok(PreparedOperators {
-            architecture,
-            arena,
-        })
+        Ok((architecture, arena))
     }
 
     fn value_belongs_to_region(
@@ -379,28 +356,32 @@ impl RegionArchitectureMaterializer<'_> {
 
     fn materialize(
         &self,
-        vector: &RegionalDecisionVector,
+        memory_implementations: &[crate::planning::regional::MemoryImplementationCandidate],
+        retained_plan: Option<&crate::regional::RegionCoverPlanRecord>,
         region: crate::SynthesisRegion,
         context: crate::RegionContextKey,
         runtime: &ExecutionContext,
-    ) -> Result<RegionArchitectureMapping, crate::SynthError> {
-        let restored_plan = vector
-            .retained_plan()
+    ) -> Result<RegionalArchitectureMapping, crate::SynthError> {
+        let restored_plan = retained_plan
             .map(|plan| plan.restore(region, context, self.contracts.contracts(region.row())))
             .transpose()?;
         let profiling = self.config.mapping_context.config.diagnostics.timing;
         let row = region.row().raw();
-        let PreparedPrivateWord {
-            mut module,
-            source_to_local,
-            boundary_bindings,
-            observations,
-            operation_sources,
-            memory_values,
-            root_bindings,
+        let (
+            crate::planning::regional::RegionalWordCone {
+                mut module,
+                source_to_local,
+                boundary_bindings,
+                observations,
+                operation_sources,
+                memory_values,
+                root_bindings,
+            },
             local_boundary_inputs,
             mut root_pairs,
-        } = self.prepare_private_word(vector, region)?;
+        ) = self.prepare_private_word(memory_implementations, region)?;
+        let operation_sources = operation_sources.into_vec();
+        let memory_values = memory_values.into_vec();
         let empty_port_bindings = opto_timing::PortBindings::new([]);
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
         let mut local_decisions =
@@ -412,10 +393,7 @@ impl RegionArchitectureMaterializer<'_> {
             self.config.target_model,
             self.contracts.delay_budget(region.row()),
         )?;
-        let PreparedOperators {
-            architecture,
-            arena: operators,
-        } = self.prepare_operators(
+        let (architecture, operators) = self.prepare_operators(
             region,
             &module,
             &local_decisions,
@@ -479,7 +457,7 @@ impl RegionArchitectureMaterializer<'_> {
             root_pairs.push((root, root.value));
         }
         let root_pairs = merge_mapping_root_pairs(&module, &local_semantics, root_pairs)?;
-        let decision_key = vector.stable_key();
+        let decision_key = crate::planning::regional::decision_key(memory_implementations);
         let mut slice = super::logic_partition::RegionLogicSlice::build_candidate(
             &module,
             region.id(),
@@ -557,7 +535,7 @@ impl RegionArchitectureMaterializer<'_> {
             }
             None => rematerialized,
         };
-        Ok(RegionArchitectureMapping {
+        Ok(RegionalArchitectureMapping {
             plan,
             binding,
             architecture,
@@ -567,11 +545,11 @@ impl RegionArchitectureMaterializer<'_> {
 
     fn prepare_private_word(
         &self,
-        vector: &RegionalDecisionVector,
+        memory_implementations: &[crate::planning::regional::MemoryImplementationCandidate],
         region: crate::SynthesisRegion,
     ) -> Result<PreparedPrivateWord, crate::SynthError> {
         let memories = self.regions.memories(region);
-        if vector.memory_implementations().len() != memories.len() {
+        if memory_implementations.len() != memories.len() {
             return Err(crate::SynthError::invariant(
                 "regional memory decision does not match region ownership",
             ));
@@ -622,7 +600,7 @@ impl RegionArchitectureMaterializer<'_> {
                     operation_regions: self.operation_regions,
                     region: region.row(),
                     memories,
-                    memory_implementations: vector.memory_implementations(),
+                    memory_implementations,
                     target_cells: &self.config.options.target_cells,
                     boundary_inputs: &boundary_inputs,
                     observations: regional_observations,
@@ -630,7 +608,7 @@ impl RegionArchitectureMaterializer<'_> {
                 },
             )
         }?;
-        let crate::planning::regional::RegionalWordConeParts {
+        let crate::planning::regional::RegionalWordCone {
             mut module,
             mut source_to_local,
             mut boundary_bindings,
@@ -638,7 +616,7 @@ impl RegionArchitectureMaterializer<'_> {
             operation_sources,
             mut memory_values,
             root_bindings,
-        } = cone.into_parts();
+        } = cone;
         let mut operation_sources = operation_sources.into_vec();
         let local_changes = {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
@@ -692,17 +670,19 @@ impl RegionArchitectureMaterializer<'_> {
             .iter()
             .map(|root| map_source(&root.value).map(|local| (*root, local)))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(PreparedPrivateWord {
-            module,
-            source_to_local,
-            boundary_bindings,
-            observations,
-            operation_sources,
-            memory_values: memory_values.into_vec(),
-            root_bindings,
+        Ok((
+            crate::planning::regional::RegionalWordCone {
+                module,
+                source_to_local,
+                boundary_bindings,
+                observations,
+                operation_sources: operation_sources.into_boxed_slice(),
+                memory_values,
+                root_bindings,
+            },
             local_boundary_inputs,
             root_pairs,
-        })
+        ))
     }
 
     fn checked_port_values(

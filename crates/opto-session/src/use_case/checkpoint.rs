@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const CHECKPOINT_MAGIC: &[u8; 8] = b"OPTOCKPT";
 const CHECKPOINT_SCHEMA: u32 = 31;
-const SYNTHESIS_CACHE_ABI: u32 = 11;
+const SYNTHESIS_CACHE_ABI: u32 = 12;
 const NATIVE_FRONTEND_FINGERPRINT_BYTES: usize = 16;
 const SCHEMA_OFFSET: usize = 8;
 const CACHE_ABI_OFFSET: usize = SCHEMA_OFFSET + 4;

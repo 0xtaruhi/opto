@@ -253,9 +253,11 @@ pub struct OperatorManifestInstance {
 }
 
 impl OperatorManifest {
-    pub(crate) fn capture(arenas: &[DurableOperatorArena]) -> Result<Self, crate::SynthError> {
+    pub(crate) fn capture<'a>(
+        arenas: impl ExactSizeIterator<Item = &'a DurableOperatorArena> + Clone,
+    ) -> Result<Self, crate::SynthError> {
         let mut signatures = BTreeMap::new();
-        for signature in arenas.iter().flat_map(DurableOperatorArena::signatures) {
+        for signature in arenas.clone().flat_map(DurableOperatorArena::signatures) {
             match signatures.entry(signature.id()) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(signature.clone());
@@ -268,8 +270,11 @@ impl OperatorManifest {
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
+        let expected = arenas
+            .clone()
+            .map(|arena| arena.instances().len())
+            .sum::<usize>();
         let instances = arenas
-            .iter()
             .flat_map(DurableOperatorArena::instances)
             .map(|instance| OperatorManifestInstance {
                 anchor: instance.anchor(),
@@ -277,10 +282,6 @@ impl OperatorManifest {
                 source_operations: instance.source_operations().into(),
             })
             .collect::<Vec<_>>();
-        let expected = arenas
-            .iter()
-            .map(|arena| arena.instances().len())
-            .sum::<usize>();
         if instances.len() != expected {
             return Err(crate::SynthError::invariant(
                 "operator manifest occurrences do not align with durable arenas",

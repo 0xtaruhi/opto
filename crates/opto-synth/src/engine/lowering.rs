@@ -14,8 +14,6 @@ pub(super) fn lower_logic(
         target_model,
         regions,
         contracts,
-        region_contexts,
-        regional_decisions,
     } = planned;
     let NormalizedState {
         environment,
@@ -35,10 +33,9 @@ pub(super) fn lower_logic(
             crate::mapping::RegionalArchitectureRequest {
                 source: &source,
                 operation_regions,
-                plan: &regional_decisions,
+                decisions: &ledger.regional_cache_records,
                 regions: &regions,
                 contracts: &contracts,
-                contexts: &region_contexts,
                 config: crate::mapping::ArchitectureMappingConfig {
                     options: &environment.options,
                     timing: environment.primary_scenario().constraints(),
@@ -53,14 +50,10 @@ pub(super) fn lower_logic(
             execution.runtime,
         )
     }?;
-    let private_architectures = preparation.private_architectures;
-    let region_decision_keys = preparation.decision_keys;
-    let mut regional_mapping_seed = preparation.mapping_seed;
-    let memory_implementations = preparation.memory_implementations;
-    let operators = preparation.operators;
-    validate_region_decision_keys(&regions, &regional_decisions, &region_decision_keys)?;
-    for binding in regional_mapping_seed.bindings_mut() {
-        binding.resolve_sequential_sources(&source)?;
+    let (prepared_regions, memory_implementations) = preparation;
+    let mut prepared_regions = prepared_regions.into_vec();
+    for prepared in &mut prepared_regions {
+        prepared.binding.resolve_sequential_sources(&source)?;
     }
     let memory_ownership = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
@@ -78,13 +71,14 @@ pub(super) fn lower_logic(
         memory_regions,
         &memory_ownership,
     )?;
-    for binding in regional_mapping_seed.bindings_mut() {
-        binding.resolve_memory_sources(&source, &memory_ownership)?;
+    for prepared in &mut prepared_regions {
+        prepared
+            .binding
+            .resolve_memory_sources(&source, &memory_ownership)?;
     }
-    let mut regional_binding_values = regional_mapping_seed
-        .bindings()
+    let mut regional_binding_values = prepared_regions
         .iter()
-        .flat_map(crate::mapping::RegionPlanBinding::source_values)
+        .flat_map(|prepared| prepared.binding.source_values())
         .collect::<Vec<_>>();
     for region in regions.regions() {
         for &port in regions
@@ -106,14 +100,25 @@ pub(super) fn lower_logic(
     }
     regional_binding_values.sort_unstable();
     regional_binding_values.dedup();
-    let (provenance, mut region_ownership) = {
+    let operator_manifest = crate::OperatorManifest::capture(
+        prepared_regions.iter().map(|prepared| &prepared.operators),
+    )?;
+    let (provenance, mut region_ownership, mut regional_plans) = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.global_bitblast".to_string()
         });
         let shell = crate::planning::operator::ArchitectureDecisions::for_regional_shell(&source);
         let mut provenance = ProvenanceBuilder::new(&source, &shell)?;
-        for architecture in private_architectures {
+        let mut regional_plans = Vec::with_capacity(prepared_regions.len());
+        for prepared in prepared_regions {
+            let crate::mapping::RegionalArchitectureMapping {
+                plan,
+                binding,
+                architecture,
+                operators: _,
+            } = prepared;
             provenance.import_private_architecture(architecture, &source)?;
+            regional_plans.push(super::regional_mapping::RegionalPlanRow { plan, binding });
         }
         let ownership = crate::boolean::bitblast::bitblast_module_with_regions(
             &mut source,
@@ -123,18 +128,19 @@ pub(super) fn lower_logic(
             &regional_binding_values,
             crate::boolean::bitblast::GlobalBitblastScope::RegionalShell,
         )?;
-        Ok::<_, crate::SynthError>((provenance, ownership))
+        Ok::<_, crate::SynthError>((provenance, ownership, regional_plans))
     }?;
     {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.binding_materialization".to_string()
         });
-        for binding in regional_mapping_seed.bindings_mut() {
-            binding.materialize_source_bits(&source, &region_ownership, &memory_ownership)?;
+        for row in &mut regional_plans {
+            row.binding
+                .materialize_source_bits(&source, &region_ownership, &memory_ownership)?;
         }
     }
-    ledger.sizes.lowered_values = source.values().len();
-    ledger.sizes.lowered_operations = source.operations().len();
+    ledger.lowered_values = source.values().len();
+    ledger.lowered_operations = source.operations().len();
     region_ownership.infer_unowned(&source)?;
     Ok(LoweredState {
         environment,
@@ -144,27 +150,9 @@ pub(super) fn lower_logic(
         regions,
         region_ownership,
         contracts,
-        region_contexts,
-        region_decision_keys,
-        regional_mapping_seed,
-        operators,
+        regional_plans: regional_plans.into_boxed_slice(),
         synthesized: source,
         provenance,
+        operator_manifest,
     })
-}
-
-fn validate_region_decision_keys(
-    regions: &crate::SynthesisRegionGraph,
-    decisions: &crate::planning::regional::RegionalDecisionPlan,
-    materialized_keys: &[[u8; 32]],
-) -> Result<(), crate::SynthError> {
-    for region in regions.regions() {
-        let key = materialized_keys[region.row().index()];
-        if decisions.vector(region.row()).stable_key() != key {
-            return Err(crate::SynthError::invariant(
-                "materialized regional decision key differs from its construction plan",
-            ));
-        }
-    }
-    Ok(())
 }

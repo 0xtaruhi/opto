@@ -5,8 +5,7 @@
 
 pub(super) struct BestMapping {
     pub(super) objective: MappedObjective,
-    pub(super) plans: Box<[crate::RegionCoverPlan]>,
-    pub(super) bindings: Box<[crate::mapping::RegionPlanBinding]>,
+    pub(super) rows: Box<[super::RegionalPlanRow]>,
 }
 
 #[derive(Debug, Clone, Copy)]

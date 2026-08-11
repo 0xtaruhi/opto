@@ -12,10 +12,9 @@ use crate::boolean::logic::{LogicInputs, LogicSignature};
 use crate::mapping::RegionPlanBinding;
 use crate::mapping::cover::{LibraryCoverBinding, LibraryCoverSource};
 use crate::mapping::library::CombinationalCellCatalog;
-use crate::mapping::materialize::target_pin_id;
+use crate::mapping::materialize::{ArtifactCell, ArtifactSignal, target_pin_id};
 use opto_ir::mapped::{
-    AppliedRegionDelta, CellId, CellSpec, ConnectionRef, NetId, RegionDelta, RegionSnapshot,
-    TempCellId, TempNetId,
+    AppliedRegionDelta, CellId, NetId, RegionDelta, RegionSnapshot, TempCellId, TempNetId,
 };
 use opto_ir::word;
 use std::fmt::Write as _;
@@ -23,37 +22,6 @@ use std::fmt::Write as _;
 mod aliases;
 
 pub(crate) use aliases::{MappedValueSignal, WordMappedSignals, regional_binding_values};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ArtifactSignal {
-    Mapped(MappedValueSignal),
-    LocalNet(usize),
-}
-
-impl ArtifactSignal {
-    fn connection(self, local_nets: &[TempNetId]) -> Result<ConnectionRef, crate::SynthError> {
-        match self {
-            Self::Mapped(signal) => Ok(signal.connection()),
-            Self::LocalNet(index) => local_nets
-                .get(index)
-                .copied()
-                .map(ConnectionRef::NewNet)
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "regional artifact references an unknown local net",
-                    )
-                }),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ArtifactCell {
-    name: String,
-    cell_type: String,
-    library_cell: Option<u32>,
-    connections: Box<[(String, Option<u16>, ArtifactSignal)]>,
-}
 
 /// Immutable mapped topology prepared from one portable library cover.
 ///
@@ -63,7 +31,7 @@ struct ArtifactCell {
 #[derive(Debug, Clone)]
 pub(crate) struct MappedRegionArtifact {
     region: crate::RegionAnchorId,
-    cells: Box<[ArtifactCell]>,
+    cells: Box<[ArtifactCell<()>]>,
     internal_net_count: usize,
     external_nets: Box<[NetId]>,
     roots: Box<[word::ValueId]>,
@@ -342,6 +310,7 @@ impl MappedRegionArtifact {
                 cell_type: mapped.cell_type,
                 library_cell: Some(library_cell),
                 connections: mapped.connections,
+                metadata: (),
             });
         }
         if pin_count != plan.local_pin_count() as usize {
@@ -414,25 +383,13 @@ impl MappedRegionArtifact {
                 delta.remove_net(net).map_err(crate::SynthError::from)?;
             }
         }
-        let internal_nets = (0..self.internal_net_count)
-            .map(|_| delta.add_net(None).map_err(crate::SynthError::from))
-            .collect::<Result<Box<[_]>, _>>()?;
-        let cells = self
-            .cells
-            .iter()
-            .map(|cell| {
-                let mut spec =
-                    CellSpec::new(cell.name.clone(), cell.cell_type.clone(), cell.library_cell);
-                for (pin, library_pin, signal) in &cell.connections {
-                    spec = spec.connect(
-                        pin.clone(),
-                        *library_pin,
-                        signal.connection(&internal_nets)?,
-                    );
-                }
-                delta.add_cell(spec).map_err(crate::SynthError::from)
-            })
-            .collect::<Result<Box<[_]>, _>>()?;
+        let (internal_nets, cells) = super::append_artifact_cells(
+            delta,
+            self.internal_net_count,
+            &self.cells,
+            "regional artifact references an unknown local net",
+            |cell, &()| cell,
+        )?;
         Ok(PendingMappedRegion {
             region: self.region,
             cells,
@@ -495,7 +452,7 @@ struct BoundArtifactCell {
 
 fn validate_implementation_cells(
     plan: &crate::RegionCoverPlan,
-    cells: &[ArtifactCell],
+    cells: &[ArtifactCell<()>],
 ) -> Result<(), crate::SynthError> {
     let mut implementation = cells
         .iter()
@@ -678,7 +635,7 @@ fn resolve_cover_source(
 
 fn finish_artifact(
     region: crate::RegionAnchorId,
-    cells: Box<[ArtifactCell]>,
+    cells: Box<[ArtifactCell<()>]>,
     internal_net_count: usize,
     binding: &RegionPlanBinding,
     ownership: &crate::boolean::bitblast::LoweredRegionOwnership,

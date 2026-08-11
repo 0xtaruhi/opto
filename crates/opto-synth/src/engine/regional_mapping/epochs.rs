@@ -45,12 +45,13 @@ impl RegionalMapper<'_> {
         let mut best = None::<BestMapping>;
         loop {
             let epoch = coordinator.epoch();
-            let (plans, bindings) = {
+            let rows = {
                 let _profile = self
                     .trace
                     .span(|| format!("initial_mapping.epoch[{epoch}].snapshot"));
-                (state.plans.clone(), state.bindings.clone())
+                state.rows.clone()
             };
+            let plans = rows.iter().map(|row| row.plan.clone()).collect::<Vec<_>>();
             let measured = self.measure_epoch(state, &mut mapped, &plans, epoch)?;
             let census = mapped.implementation_census.as_ref().ok_or_else(|| {
                 crate::SynthError::invariant("mapped implementation census was not initialized")
@@ -68,10 +69,16 @@ impl RegionalMapper<'_> {
                 .as_ref()
                 .is_none_or(|best| objective.better_than(&best.objective));
             if current_is_best {
+                let checkpoint_rows = measured
+                    .plans
+                    .iter()
+                    .cloned()
+                    .zip(rows.iter().map(|row| row.binding.clone()))
+                    .map(|(plan, binding)| super::RegionalPlanRow { plan, binding })
+                    .collect();
                 best = Some(BestMapping {
                     objective,
-                    plans: measured.plans.clone().into_boxed_slice(),
-                    bindings: bindings.clone().into_boxed_slice(),
+                    rows: checkpoint_rows,
                 });
             }
             let decision = coordinator.evaluate(&measured.plans);
@@ -79,7 +86,9 @@ impl RegionalMapper<'_> {
             // and spend an epoch of budget for nothing.
             let decision = match decision {
                 crate::regional::EpochDecision::Remap(dirty) => {
-                    state.plans = measured.plans;
+                    for (row, plan) in state.rows.iter_mut().zip(measured.plans) {
+                        row.plan = plan;
+                    }
                     let changed = Self::reallocate_contracts(state, &dirty, epoch)?;
                     if changed.is_empty() {
                         crate::regional::EpochDecision::Converged
@@ -90,8 +99,8 @@ impl RegionalMapper<'_> {
                                 let index = row.index();
                                 (
                                     index,
-                                    state.plans[index].payload().to_vec(),
-                                    state.bindings[index].clone(),
+                                    state.rows[index].plan.payload().to_vec(),
+                                    state.rows[index].binding.clone(),
                                 )
                             })
                             .collect::<Vec<_>>();
@@ -99,8 +108,8 @@ impl RegionalMapper<'_> {
                         let topology_changed = previous
                             .into_iter()
                             .filter_map(|(index, payload, binding)| {
-                                (state.plans[index].payload() != payload
-                                    || state.bindings[index] != binding)
+                                (state.rows[index].plan.payload() != payload
+                                    || state.rows[index].binding != binding)
                                     .then_some(index)
                             })
                             .collect::<Vec<_>>();
@@ -118,30 +127,27 @@ impl RegionalMapper<'_> {
                             "regional epoch completion has no legal mapped candidate",
                         )
                     })?;
-                    if !current_is_best {
-                        let changed = plans
+                    let best_rows = best.rows;
+                    if current_is_best {
+                        state.rows = best_rows.to_vec();
+                    } else {
+                        let changed = rows
                             .iter()
-                            .zip(&bindings)
-                            .zip(best.plans.iter().zip(&best.bindings))
+                            .zip(&best_rows)
                             .enumerate()
-                            .filter_map(
-                                |(
-                                    index,
-                                    ((current, binding), (checkpoint, checkpoint_binding)),
-                                )| {
-                                    (current.payload() != checkpoint.payload()
-                                        || binding != checkpoint_binding)
-                                        .then_some(index)
-                                },
-                            )
+                            .filter_map(|(index, (current, checkpoint))| {
+                                (current.plan.payload() != checkpoint.plan.payload()
+                                    || current.binding != checkpoint.binding)
+                                    .then_some(index)
+                            })
                             .collect::<Vec<_>>();
-                        state.plans = best.plans.to_vec();
-                        state.bindings = best.bindings.to_vec();
+                        state.rows = best_rows.to_vec();
                         self.replace_regions(ir, state, &mut mapped, &changed)?;
                     }
-                    let boundary_repair_schema =
-                        crate::regional::BoundaryRepairSchema::new(self.regions, &state.plans)?;
-                    self.restore_boundary_repairs(ir, &boundary_repair_schema, &mut mapped)?;
+                    let selected_plans = best_rows
+                        .into_iter()
+                        .map(|row| row.plan)
+                        .collect::<Box<[_]>>();
                     match mapped.timing.as_mut() {
                         Some(timing) => observer(SynthesisProgress::timing_candidate(
                             crate::OptimizationPhase::TechnologyMapping,
@@ -158,12 +164,11 @@ impl RegionalMapper<'_> {
                     }
                     let (mapped, timing) = mapped.finish()?;
                     return Ok(RegionalMappingOutcome {
-                        plans: best.plans,
+                        plans: selected_plans,
                         plan_journal: state.take_plan_journal()?,
                         epochs: coordinator.completed_epochs(),
                         mapped,
                         timing,
-                        boundary_repair_schema,
                     });
                 }
                 crate::regional::EpochDecision::Remap(_) => {
@@ -181,8 +186,10 @@ impl RegionalMapper<'_> {
         plans: &RegionalPlans,
     ) -> Result<RegionalMappedState, crate::SynthError> {
         let boundary_values = boundary_observation_values(self.regions, ir.region_ownership)?;
-        let mut observed_values =
-            materialize::region_delta::regional_binding_values(&plans.bindings).into_vec();
+        let mut observed_values = materialize::region_delta::regional_binding_values(
+            plans.rows.iter().map(|row| &row.binding),
+        )
+        .into_vec();
         observed_values.extend(materialize::sequential_binding_values(ir.module)?);
         observed_values.extend(
             boundary_values
@@ -191,11 +198,13 @@ impl RegionalMapper<'_> {
         );
         observed_values.sort_unstable();
         observed_values.dedup();
-        let materialize::MappedSubstrate {
-            netlist,
-            cell_sources: substrate_sources,
+        let (
+            materialize::MappedOutput {
+                netlist,
+                cell_sources: substrate_sources,
+            },
             observed_nets,
-        } = materialize::build_mapped_substrate(materialize::MappedSubstrateRequest {
+        ) = materialize::build_mapped_substrate(materialize::MappedSubstrateRequest {
             module: ir.module,
             options: self.config.options,
             design_references: self.config.design_references,
@@ -231,9 +240,8 @@ impl RegionalMapper<'_> {
             signals,
             boundary_nets: boundary_nets.into_boxed_slice(),
             footprints: std::iter::repeat_with(|| None)
-                .take(plans.plans.len())
+                .take(plans.rows.len())
                 .collect(),
-            boundary_footprints: Vec::new(),
             timing: None,
         };
         let sequential = materialize::MappedSequentialArtifact::from_module(
@@ -243,7 +251,7 @@ impl RegionalMapper<'_> {
             ir.region_ownership,
             &self.config,
         )?;
-        let rows = (0..plans.plans.len()).collect::<Vec<_>>();
+        let rows = (0..plans.rows.len()).collect::<Vec<_>>();
         let regions = self.prepare_regions(ir, plans, &mapped, &rows)?;
         self.apply_regions(&mut mapped, &regions, Some(&sequential))?;
         let census = self.full_implementation_census(ir, &mapped)?;
@@ -346,21 +354,18 @@ impl RegionalMapper<'_> {
                 let _profile = self
                     .trace
                     .span(|| format!("initial_mapping.region[{row}].materialization"));
-                let plan = state.plans.get(row).ok_or_else(|| {
+                let state_row = state.rows.get(row).ok_or_else(|| {
                     crate::SynthError::invariant("regional artifact row is out of range")
                 })?;
-                let binding = state.bindings.get(row).ok_or_else(|| {
-                    crate::SynthError::invariant("regional artifact binding is out of range")
-                })?;
                 let artifact = MappedRegionArtifact::from_library_plan(
-                    plan,
-                    binding,
+                    &state_row.plan,
+                    &state_row.binding,
                     region_ownership,
                     &mapped.signals,
                     self.combinational_catalog(),
                     &self.config.options.target_cells,
                 )?;
-                if artifact.region() != plan.region() {
+                if artifact.region() != state_row.plan.region() {
                     return Err(crate::SynthError::invariant(
                         "mapped artifact belongs to another synthesis region",
                     ));
@@ -565,118 +570,6 @@ impl RegionalMapper<'_> {
         })
     }
 
-    fn restore_boundary_repairs(
-        &self,
-        ir: &mut RegionalIr<'_>,
-        schema: &crate::regional::BoundaryRepairSchema,
-        mapped: &mut RegionalMappedState,
-    ) -> Result<(), crate::SynthError> {
-        use materialize::boundary_delta::PreparedBoundaryRepair;
-
-        if self.boundary_repairs.is_empty() {
-            return Ok(());
-        }
-        if !mapped.boundary_footprints.is_empty() {
-            return Err(crate::SynthError::invariant(
-                "boundary repairs were restored more than once into one mapped generation",
-            ));
-        }
-        let prepared = PreparedBoundaryRepair::prepare_all(
-            self.boundary_repairs,
-            schema,
-            &mapped.netlist,
-            &mapped.cell_sources,
-            ir.provenance,
-            &self.config.options.target_cells,
-        )?;
-        if prepared.is_empty() {
-            return Ok(());
-        }
-        let cells = prepared
-            .iter()
-            .flat_map(|repair| repair.required_cells().iter().copied())
-            .collect::<BTreeSet<_>>();
-        let nets = prepared
-            .iter()
-            .flat_map(|repair| repair.required_nets().iter().copied())
-            .collect::<BTreeSet<_>>();
-        let snapshot = mapped
-            .netlist
-            .snapshot_region(cells, nets)
-            .map_err(crate::SynthError::from)?;
-        let mut delta = RegionDelta::new(snapshot);
-        let pending = prepared
-            .iter()
-            .map(|repair| repair.append_to_delta(&mut delta))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let RegionalMappedState {
-            netlist,
-            cell_sources,
-            boundary_footprints,
-            timing,
-            ..
-        } = mapped;
-        let mut no_timing = [];
-        let owners = timing.as_mut().map_or(
-            no_timing.as_mut_slice(),
-            crate::closure::mmmc::MmmcTiming::owners_mut,
-        );
-        let transaction =
-            crate::closure::mapped_timing::MappedTimingTransaction::begin(netlist, owners, delta)?
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "fresh boundary-repair restore snapshot became stale",
-                    )
-                })?;
-        let publications = pending
-            .into_iter()
-            .map(|pending| pending.resolve(transaction.mapped_edit()))
-            .collect::<Result<Vec<_>, _>>();
-        let publications = match publications {
-            Ok(publications) => publications,
-            Err(error) => return transaction.abort(error, "boundary-repair restore"),
-        };
-        let mut sources = publications
-            .iter()
-            .flat_map(|publication| publication.sources.iter().copied())
-            .collect::<Vec<_>>();
-        sources.sort_unstable_by_key(|(cell, _)| *cell);
-        if sources.windows(2).any(|pair| pair[0].0 >= pair[1].0)
-            || sources.iter().any(|&(cell, _)| {
-                !transaction.mapped().is_live_cell(cell)
-                    || cell_sources.get(cell.index()).is_some_and(Option::is_some)
-            })
-        {
-            return transaction.abort(
-                crate::SynthError::invariant(
-                    "boundary-repair publication collides with mapped provenance",
-                ),
-                "boundary-repair restore",
-            );
-        }
-        for publication in &publications {
-            if let Err(error) = publication
-                .footprint
-                .validate_generation(transaction.mapped())
-            {
-                return transaction.abort(error, "boundary-repair restore");
-            }
-        }
-        transaction.commit_with("boundary-repair restore", |netlist, _| {
-            cell_sources.resize(netlist.cell_slot_count(), None);
-            for (cell, source) in sources {
-                cell_sources[cell.index()] = Some(source);
-            }
-            boundary_footprints.extend(
-                publications
-                    .into_iter()
-                    .map(|publication| publication.footprint),
-            );
-            Ok(())
-        })
-    }
-
     /// Folds this epoch's measurements back into the contracts and reports the
     /// rows whose contracts actually moved.
     ///
@@ -688,10 +581,9 @@ impl RegionalMapper<'_> {
         dirty: &[crate::RegionRowId],
         epoch: u32,
     ) -> Result<Box<[crate::RegionRowId]>, crate::SynthError> {
-        let plans = std::mem::take(&mut state.plans);
-        let changed = state.contracts.reallocate_dirty(dirty, &plans, epoch);
-        state.plans = plans;
-        changed
+        state
+            .contracts
+            .reallocate_dirty(dirty, state.rows.iter().map(|row| &row.plan), epoch)
     }
 
     /// Rebinds measured contracts without reopening frozen regional topology.
@@ -709,16 +601,13 @@ impl RegionalMapper<'_> {
             })
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
         for (row, context) in contexts {
-            state.contexts[row.index()] = context;
-        }
-        for &row in dirty {
             let index = row.index();
-            let plan = state.plans[index].clone().with_context_and_contracts(
-                state.contexts[index],
-                state.contracts.contracts(row).to_vec(),
-            );
+            let plan = state.rows[index]
+                .plan
+                .clone()
+                .with_context_and_contracts(context, state.contracts.contracts(row).to_vec());
             state.journal_compacted_plan(index, &plan)?;
-            state.plans[index] = plan;
+            state.rows[index].plan = plan;
         }
         Ok(())
     }
@@ -764,10 +653,6 @@ impl RegionalMappedState {
     fn finish(
         self,
     ) -> Result<(MappedOutput, Option<crate::closure::mmmc::MmmcTiming>), crate::SynthError> {
-        for footprint in &self.boundary_footprints {
-            footprint.validate_generation(&self.netlist)?;
-            footprint.validate_sources(&self.cell_sources)?;
-        }
         let Self {
             netlist,
             cell_sources,

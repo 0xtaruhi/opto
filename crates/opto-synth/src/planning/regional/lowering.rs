@@ -9,13 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 mod importer;
 
 pub(crate) struct RegionalWordCone {
-    module: word::WordModule,
-    source_to_local: BTreeMap<word::ValueId, word::ValueId>,
-    boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
-    observations: Box<[word::ValueId]>,
-    operation_sources: Box<[Option<word::OpId>]>,
-    memory_values: Box<[RegionalMemoryValueBinding]>,
-    root_bindings: Box<[(word::ValueId, word::SignalId)]>,
+    pub(crate) module: word::WordModule,
+    pub(crate) source_to_local: BTreeMap<word::ValueId, word::ValueId>,
+    pub(crate) boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
+    pub(crate) observations: Box<[word::ValueId]>,
+    pub(crate) operation_sources: Box<[Option<word::OpId>]>,
+    pub(crate) memory_values: Box<[RegionalMemoryValueBinding]>,
+    pub(crate) root_bindings: Box<[(word::ValueId, word::SignalId)]>,
 }
 
 pub(crate) struct RegionalWordConeRequest<'a> {
@@ -29,16 +29,6 @@ pub(crate) struct RegionalWordConeRequest<'a> {
     pub(crate) boundary_inputs: &'a [word::ValueId],
     pub(crate) observations: Vec<word::ValueId>,
     pub(crate) roots: Vec<word::ValueId>,
-}
-
-pub(crate) struct RegionalWordConeParts {
-    pub(crate) module: word::WordModule,
-    pub(crate) source_to_local: BTreeMap<word::ValueId, word::ValueId>,
-    pub(crate) boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
-    pub(crate) observations: Box<[word::ValueId]>,
-    pub(crate) operation_sources: Box<[Option<word::OpId>]>,
-    pub(crate) memory_values: Box<[RegionalMemoryValueBinding]>,
-    pub(crate) root_bindings: Box<[(word::ValueId, word::SignalId)]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -210,18 +200,6 @@ impl RegionalWordCone {
             root_bindings: root_bindings.into_boxed_slice(),
         })
     }
-
-    pub(crate) fn into_parts(self) -> RegionalWordConeParts {
-        RegionalWordConeParts {
-            module: self.module,
-            source_to_local: self.source_to_local,
-            boundary_bindings: self.boundary_bindings,
-            observations: self.observations,
-            operation_sources: self.operation_sources,
-            memory_values: self.memory_values,
-            root_bindings: self.root_bindings,
-        }
-    }
 }
 
 struct RegionalWordImporter<'a> {
@@ -385,12 +363,12 @@ mod tests {
             roots: vec![first],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             module,
             source_to_local: values,
             operation_sources: operations,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         assert_eq!(module.operations().len(), 1);
         assert_eq!(
@@ -468,11 +446,11 @@ mod tests {
             roots: vec![register, next],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             module,
             operation_sources: operations,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         assert_eq!(module.operations().len(), 1);
         assert_eq!(
@@ -551,11 +529,11 @@ mod tests {
             roots: vec![consumer],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             module,
             operation_sources,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         assert_eq!(module.operations().len(), 2);
         assert_eq!(
@@ -623,11 +601,11 @@ mod tests {
             roots: vec![producer],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             source_to_local,
             root_bindings,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         assert_eq!(source_to_local[&observation], source_to_local[&producer]);
         assert_eq!(root_bindings.len(), 1);
@@ -693,12 +671,12 @@ mod tests {
             roots: vec![consumer],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             module,
             source_to_local,
             operation_sources,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         assert!(matches!(
             module.value(source_to_local[&boundary]).unwrap().kind,
@@ -769,12 +747,12 @@ mod tests {
             roots: vec![root],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             module,
             source_to_local,
             operation_sources,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         assert_eq!(
             module
@@ -844,11 +822,11 @@ mod tests {
             roots: vec![root],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             module,
             source_to_local,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         assert_eq!(module.ports().len(), 2);
         assert_eq!(source_to_local[&first], source_to_local[&second]);
@@ -894,11 +872,11 @@ mod tests {
             roots: vec![full, lower],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             module,
             source_to_local,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         let word::ValueKind::Signal(full_reference) =
             module.value(source_to_local[&full]).unwrap().kind
@@ -985,11 +963,11 @@ mod tests {
             roots: vec![root],
         })
         .unwrap();
-        let RegionalWordConeParts {
+        let RegionalWordCone {
             source_to_local,
             boundary_bindings,
             ..
-        } = cone.into_parts();
+        } = cone;
 
         assert!(source_to_local.contains_key(&root));
         assert!(

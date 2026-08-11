@@ -9,16 +9,13 @@ use crate::mapping::library::CombinationalCellCatalog;
 use crate::mapping::materialize::region_delta::{
     MappedRegionArtifact, MappedRegionFootprint, MappedValueSignal, WordMappedSignals,
 };
-use crate::mapping::{
-    self, MappingConfig, RegionPlanBinding, RegionalMappingSeed, cover, materialize,
-};
+use crate::mapping::{self, MappingConfig, RegionPlanBinding, cover, materialize};
 use opto_ir::word;
 use opto_runtime::ExecutionContext;
 
 mod census;
 mod epochs;
 mod objective;
-mod seed;
 
 use objective::{BestMapping, MappedObjective};
 
@@ -28,7 +25,6 @@ pub(crate) struct RegionalMappingOutcome {
     pub(crate) epochs: usize,
     pub(crate) mapped: mapping::MappedOutput,
     pub(crate) timing: Option<crate::closure::mmmc::MmmcTiming>,
-    pub(crate) boundary_repair_schema: crate::regional::BoundaryRepairSchema,
 }
 
 pub(crate) struct RegionalPlanJournalRecord {
@@ -44,10 +40,7 @@ pub(crate) struct RegionalMappingRequest<'a> {
     pub(crate) regions: &'a crate::SynthesisRegionGraph,
     pub(crate) region_ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
     pub(crate) contracts: &'a crate::regional::RegionContractSet,
-    pub(crate) region_contexts: &'a [crate::RegionContextKey],
-    pub(crate) region_decision_keys: &'a [[u8; 32]],
-    pub(crate) seed: &'a RegionalMappingSeed,
-    pub(crate) boundary_repairs: &'a [crate::regional::BoundaryRepairArtifactRecord],
+    pub(crate) regional_plans: &'a [RegionalPlanRow],
     pub(crate) config: MappingConfig<'a>,
 }
 
@@ -58,7 +51,6 @@ struct RegionalMapper<'a> {
     config: MappingConfig<'a>,
     runtime: &'a ExecutionContext,
     trace: crate::api::diagnostics::SynthTrace,
-    boundary_repairs: &'a [crate::regional::BoundaryRepairArtifactRecord],
 }
 
 /// Frozen Word semantics and ownership plus the mutable provenance ledger.
@@ -69,11 +61,15 @@ struct RegionalIr<'a> {
 }
 
 /// Regional state that one epoch may replace.
+#[derive(Clone)]
+pub(super) struct RegionalPlanRow {
+    pub(super) plan: crate::RegionCoverPlan,
+    pub(super) binding: RegionPlanBinding,
+}
+
 struct RegionalPlans {
     contracts: crate::regional::RegionContractSet,
-    contexts: Vec<crate::RegionContextKey>,
-    plans: Vec<crate::RegionCoverPlan>,
-    bindings: Vec<RegionPlanBinding>,
+    rows: Vec<RegionalPlanRow>,
     plan_journal: std::collections::BTreeMap<
         (usize, crate::RegionContextKey),
         crate::regional::RegionCoverPlanRecord,
@@ -127,7 +123,6 @@ struct RegionalMappedState {
     signals: WordMappedSignals,
     boundary_nets: Box<[crate::closure::BoundaryNetObservation]>,
     footprints: Vec<Option<MappedRegionFootprint>>,
-    boundary_footprints: Vec<materialize::boundary_delta::MappedBoundaryRepairFootprint>,
     timing: Option<crate::closure::mmmc::MmmcTiming>,
 }
 
@@ -163,17 +158,17 @@ pub(crate) fn map_mapping_library_cells(
         regions,
         region_ownership,
         contracts,
-        region_contexts,
-        region_decision_keys,
-        seed,
-        boundary_repairs,
+        regional_plans,
         config,
     } = request;
-    if region_contexts.len() != regions.regions().len()
-        || region_decision_keys.len() != regions.regions().len()
+    if regional_plans.len() != regions.regions().len()
+        || regional_plans
+            .iter()
+            .zip(regions.regions())
+            .any(|(mapping, region)| mapping.plan.region() != region.id())
     {
         return Err(crate::SynthError::invariant(
-            "regional mapping identities do not align with the region graph",
+            "regional mappings do not align with the region graph",
         ));
     }
     let mut ir = RegionalIr {
@@ -187,19 +182,15 @@ pub(crate) fn map_mapping_library_cells(
     let mapper = RegionalMapper {
         regions,
         response_models: cover::CoverResponseModels::new(config.scenarios),
-        boundary_repairs,
         config,
         runtime,
         trace,
     };
     let mut state = RegionalPlans {
         contracts,
-        contexts: region_contexts.to_vec(),
-        plans: Vec::new(),
-        bindings: Vec::new(),
+        rows: regional_plans.to_vec(),
         plan_journal: std::collections::BTreeMap::new(),
     };
-    mapper.seed_plans(&ir, &mut state, seed, observer)?;
     mapper.run_epochs(&mut ir, &mut state, observer)
 }
 
