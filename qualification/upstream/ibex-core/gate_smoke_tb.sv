@@ -5,7 +5,7 @@
 
 module ibex_smoke_tb;
     localparam logic [31:0] SIGNATURE_ADDRESS = 32'h0000_0104;
-    localparam logic [31:0] EXPECTED_SIGNATURE = 32'd12;
+    localparam logic [31:0] EXPECTED_SIGNATURE = 32'd16;
     localparam int unsigned MAXIMUM_CYCLES = 500;
 
     logic clk_i = 1'b0;
@@ -99,8 +99,12 @@ module ibex_smoke_tb;
             32'h0000_009c: instruction_word = 32'h0022_9463; // bne  x5, x2, +8
             32'h0000_00a0: instruction_word = 32'h0010_0313; // skipped on success
             32'h0000_00a4: instruction_word = 32'h0022_8313; // addi x6, x5, 2
-            32'h0000_00a8: instruction_word = 32'h1060_2223; // sw   x6, 260(x0)
-            32'h0000_00ac: instruction_word = 32'h0000_006f; // jal  x0, 0
+            32'h0000_00a8: instruction_word = 32'h0213_43b3; // div  x7, x6, x1
+            32'h0000_00ac: instruction_word = 32'h0213_6433; // rem  x8, x6, x1
+            32'h0000_00b0: instruction_word = 32'h0083_84b3; // add  x9, x7, x8
+            32'h0000_00b4: instruction_word = 32'h0093_0533; // add  x10, x6, x9
+            32'h0000_00b8: instruction_word = 32'h10a0_2223; // sw   x10, 260(x0)
+            32'h0000_00bc: instruction_word = 32'h0000_006f; // jal  x0, 0
             default: instruction_word = 32'h0000_0013; // addi x0, x0, 0
         endcase
     endfunction

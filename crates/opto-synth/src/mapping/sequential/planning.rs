@@ -410,37 +410,28 @@ pub(crate) fn lower_controls(
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let mut controlled = BTreeMap::<word::OpId, ControlledRegister>::new();
-    for connect in module.connects() {
-        let value = module.value(connect.value).ok_or_else(|| {
-            crate::SynthError::invariant(format!("unknown RTL value {:?}", connect.value))
-        })?;
-        let word::ValueKind::Operation(operation_id) = value.kind else {
-            continue;
-        };
-        let operation = module.operation(operation_id).ok_or_else(|| {
-            crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
-        })?;
+    let mut direct_targets = register_targets(module)?;
+    let observability = word::netlist_observability(module)?;
+    for (index, operation) in module.operations().iter().enumerate() {
         let word::OpKind::Register(register) = &operation.kind else {
             continue;
         };
         if register.enable.is_none() && register.resets.is_empty() {
             continue;
         }
-        if controlled
-            .insert(
-                operation_id,
-                ControlledRegister {
-                    register: register.clone(),
-                    target: connect.target.clone(),
-                    source: operation.source.clone(),
-                },
-            )
-            .is_some()
-        {
-            return Err(crate::SynthError::invariant(format!(
-                "controlled register operation {operation_id:?} drives multiple targets"
-            )));
+        if !observability.observes_value(operation.result)? {
+            continue;
         }
+        let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
+        controlled.insert(
+            operation_id,
+            ControlledRegister {
+                register: register.clone(),
+                result: operation.result,
+                target: direct_targets.remove(&operation_id),
+                source: operation.source.clone(),
+            },
+        );
     }
 
     for (operation_id, controlled) in controlled {
@@ -491,7 +482,10 @@ pub(crate) fn lower_controls(
             }
         } else {
             if let Some(enable) = controlled.register.enable {
-                let q = read_target(module, &controlled.target, &controlled.source)?;
+                let q = match &controlled.target {
+                    Some(target) => read_target(module, target, &controlled.source)?,
+                    None => controlled.result,
+                };
                 data = if enable.active_high {
                     module.mux(enable.value, data, q, controlled.source.clone())
                 } else {
@@ -905,7 +899,8 @@ fn read_target(
 
 struct ControlledRegister {
     register: word::RegisterOp,
-    target: word::LValue,
+    result: word::ValueId,
+    target: Option<word::LValue>,
     source: word::SourceSpan,
 }
 
@@ -928,6 +923,21 @@ mod tests {
                 module.port(port).unwrap().signal,
                 word::SourceSpan::default(),
             )
+            .unwrap()
+    }
+
+    fn stable_input(module: &mut word::WordModule, name: &str) -> word::ValueId {
+        let source = word::SourceSpan::stable("test");
+        let port = module
+            .add_port(
+                name,
+                word::PortDirection::Input,
+                word::WordType::bits(1).unwrap(),
+                source.clone(),
+            )
+            .unwrap();
+        module
+            .read_signal(module.port(port).unwrap().signal, source)
             .unwrap()
     }
 
@@ -1052,5 +1062,86 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn lowers_controls_when_state_reaches_a_signal_through_reconstruction() {
+        let mut module = word::WordModule::new("reconstructed_state");
+        let source = word::SourceSpan::stable("test");
+        let bit = word::WordType::bits(1).unwrap();
+        let pair = word::WordType::bits(2).unwrap();
+        let clock = stable_input(&mut module, "clock");
+        let reset = stable_input(&mut module, "reset");
+        let data = stable_input(&mut module, "data");
+        let reset_value = module
+            .constant(
+                ConstBits::from_bits(vec![BitVal::Zero]).unwrap(),
+                bit,
+                source.clone(),
+            )
+            .unwrap();
+        let state = module
+            .register(
+                word::RegisterOp {
+                    name: None,
+                    d: data,
+                    clock,
+                    edge: word::Edge::Pos,
+                    enable: None,
+                    resets: vec![word::Reset {
+                        kind: word::ResetKind::Sync,
+                        value: reset,
+                        active_high: true,
+                        reset_value,
+                    }],
+                },
+                source.clone(),
+            )
+            .unwrap();
+        let reconstructed = module
+            .concat(vec![state, reset_value], source.clone())
+            .unwrap();
+        let output = module
+            .add_port("q", word::PortDirection::Output, pair, source.clone())
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(module.port(output).unwrap().signal),
+                reconstructed,
+                source,
+            )
+            .unwrap();
+        let regions = crate::regional::region_graph::partition::build(
+            &module,
+            crate::regional::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let mut ownership =
+            crate::regional::StructuralOwnershipProvenance::new(&module, &regions).unwrap();
+
+        lower_controls(
+            &mut module,
+            &super::super::SequentialCellCatalog::default(),
+            &mut ownership,
+        )
+        .unwrap();
+
+        let operation = module
+            .operations()
+            .iter()
+            .find(|operation| operation.result == state)
+            .unwrap();
+        let word::OpKind::Register(register) = &operation.kind else {
+            panic!("state operation changed kind");
+        };
+        assert!(register.resets.is_empty());
+        assert!(matches!(
+            module.value(register.d).map(|value| &value.kind),
+            Some(word::ValueKind::Operation(operation))
+                if matches!(
+                    module.operation(*operation).map(|operation| &operation.kind),
+                    Some(word::OpKind::Mux { .. })
+                )
+        ));
     }
 }

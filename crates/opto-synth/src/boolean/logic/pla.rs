@@ -65,7 +65,7 @@ pub(super) fn build_multi_output(
     if roots.len() < 2 {
         return Ok(None);
     }
-    let Some((inputs, values, full)) = simulate(source) else {
+    let Some((inputs, values, full)) = simulate(source, roots) else {
         return Ok(None);
     };
     let outputs = roots.iter().map(|&root| signal_value(&values, root, full));
@@ -794,10 +794,21 @@ fn project(target: u128, features: &[u128], full: u128) -> Option<(TruthTable, u
     ))
 }
 
-fn simulate(source: &LogicGraph) -> Option<Simulation> {
+fn simulate(source: &LogicGraph, roots: &[LogicNodeId]) -> Option<Simulation> {
+    let mut live = vec![false; source.node_count()];
+    let mut pending = roots.iter().map(|root| root.positive()).collect::<Vec<_>>();
+    while let Some(node) = pending.pop() {
+        if std::mem::replace(&mut live[node.index()], true) {
+            continue;
+        }
+        pending.extend(source.node(node).fanins().map(LogicNodeId::positive));
+    }
     let mut inputs = Vec::new();
     let mut positions = HashMap::new();
-    for index in 0..source.node_count() {
+    for (index, &is_live) in live.iter().enumerate() {
+        if !is_live {
+            continue;
+        }
         let node = LogicNodeId::from_index(index);
         if let LogicNode::Var(origin) = source.node(node) {
             if inputs.len() == INPUT_CAP {
@@ -817,7 +828,11 @@ fn simulate(source: &LogicGraph) -> Option<Simulation> {
         .map(|position| variable_bits(position, inputs.len()))
         .collect::<Vec<_>>();
     let mut values = Vec::with_capacity(source.node_count());
-    for index in 0..source.node_count() {
+    for (index, &is_live) in live.iter().enumerate() {
+        if !is_live {
+            values.push(0);
+            continue;
+        }
         let value = match source.node(LogicNodeId::from_index(index)) {
             LogicNode::Const(value) => full * u128::from(value),
             LogicNode::Var(origin) => variables[*positions.get(&origin)?],
@@ -984,6 +999,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ignores_dead_variables_when_enforcing_the_truth_space_limit() {
+        let mut source = LogicGraph::new();
+        let inputs = (0..=INPUT_CAP)
+            .map(|origin| source.variable(origin).unwrap())
+            .collect::<Vec<_>>();
+        let roots = [
+            source.and(inputs[0], inputs[1]),
+            source.xor(inputs[0], inputs[1]),
+        ];
+        source.freeze();
+        let runtime =
+            ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 }).unwrap();
+
+        assert!(
+            build_multi_output(&source, &roots, &runtime)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn factors_a_cube_shared_by_multiple_outputs() {
         let a = variable_bits(0, 3);
         let b = variable_bits(1, 3);
@@ -1051,7 +1087,7 @@ mod tests {
             (inputs[0] & inputs[6]) | (inputs[2] & !inputs[4]),
         ];
         let subject = synthesize_multi_output(INPUT_CAP, outputs).unwrap();
-        let (_, values, full) = simulate(&subject.network).unwrap();
+        let (_, values, full) = simulate(&subject.network, &subject.roots).unwrap();
 
         for (actual, expected) in subject.roots.iter().zip(outputs) {
             assert_eq!(signal_value(&values, *actual, full), expected);

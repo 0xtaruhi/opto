@@ -177,8 +177,13 @@ pub(crate) fn mapping_roots(
     sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
 ) -> Result<Vec<MappingRoot>, crate::SynthError> {
     let mut roots = Vec::new();
+    let mut published_state = BTreeSet::new();
+    let observability = word::netlist_observability(module)?;
     let global_required = timing.minimum_synthesis_delay();
-    for connect in module.connects() {
+    for (connect_index, connect) in module.connects().iter().enumerate() {
+        if !observability.observes_connect(connect_index)? {
+            continue;
+        }
         let endpoint = timing_port_for_signal(module, connect.target.signal, port_bindings);
         let endpoint_required = endpoint
             .and_then(|port| timing.minimum_max_delay_to(opto_timing::TimingEndpoint::Port(port)))
@@ -200,41 +205,19 @@ pub(crate) fn mapping_roots(
             crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
         })?;
         if let word::OpKind::Register(register) = &operation.kind {
-            let mut required_time = timing_port_for_value(module, register.clock, port_bindings)
-                .and_then(|port| timing.minimum_clock_period_on(port))
-                .or(global_required);
-            if let (Some(required), Some(setup)) = (
-                required_time,
-                sequential_timing.and_then(|projection| projection.setup(connect.value)),
-            ) {
-                required_time = Some(required - setup);
-            }
-            roots.push(MappingRoot {
-                value: register.d,
-                required_time,
-                output_load: None,
-                requires_combinational_cover: false,
-            });
-            roots.push(timed_root(register.clock, global_required));
-            if let Some(enable) = register.enable {
-                roots.push(timed_root(enable.value, global_required));
-            }
-            for reset in &register.resets {
-                roots.push(timed_root(reset.value, global_required));
-                roots.push(timed_root(reset.reset_value, global_required));
-            }
+            published_state.insert(operation_id);
+            roots.extend(register_roots(
+                module,
+                operation.result,
+                register,
+                timing,
+                port_bindings,
+                sequential_timing,
+                global_required,
+            ));
         } else if let word::OpKind::Latch(latch) = &operation.kind {
-            roots.push(MappingRoot {
-                value: latch.d,
-                required_time: global_required,
-                output_load: None,
-                requires_combinational_cover: false,
-            });
-            roots.push(timed_root(latch.enable.value, global_required));
-            for reset in &latch.resets {
-                roots.push(timed_root(reset.value, global_required));
-                roots.push(timed_root(reset.reset_value, global_required));
-            }
+            published_state.insert(operation_id);
+            roots.extend(latch_roots(latch, global_required));
         } else {
             roots.push(MappingRoot {
                 value: connect.value,
@@ -242,6 +225,39 @@ pub(crate) fn mapping_roots(
                 output_load,
                 requires_combinational_cover: false,
             });
+        }
+    }
+    // A state result can be reconstructed through structural projections before
+    // it reaches its signal connection. Publishing state semantics from the
+    // operation arena keeps D and control cones complete regardless of whether
+    // Q is connected directly or through Concat/Extract/Cast operations.
+    for (index, operation) in module.operations().iter().enumerate() {
+        let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
+        if published_state.contains(&operation_id) {
+            continue;
+        }
+        if !observability.observes_value(operation.result)? {
+            continue;
+        }
+        match &operation.kind {
+            word::OpKind::Register(register) => roots.extend(register_roots(
+                module,
+                operation.result,
+                register,
+                timing,
+                port_bindings,
+                sequential_timing,
+                global_required,
+            )),
+            word::OpKind::Latch(latch) => roots.extend(latch_roots(latch, global_required)),
+            word::OpKind::Unary { .. }
+            | word::OpKind::Binary { .. }
+            | word::OpKind::Mux { .. }
+            | word::OpKind::Cast { .. }
+            | word::OpKind::Extract { .. }
+            | word::OpKind::DynamicExtract { .. }
+            | word::OpKind::DynamicInsert { .. }
+            | word::OpKind::Concat { .. } => {}
         }
     }
     for connection in module
@@ -256,6 +272,56 @@ pub(crate) fn mapping_roots(
         );
     }
     Ok(merge_by_value(roots))
+}
+
+fn register_roots(
+    module: &word::WordModule,
+    state: word::ValueId,
+    register: &word::RegisterOp,
+    timing: &opto_timing::TimingContext,
+    port_bindings: &opto_timing::PortBindings,
+    sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
+    global_required: Option<f64>,
+) -> Vec<MappingRoot> {
+    let mut required_time = timing_port_for_value(module, register.clock, port_bindings)
+        .and_then(|port| timing.minimum_clock_period_on(port))
+        .or(global_required);
+    if let (Some(required), Some(setup)) = (
+        required_time,
+        sequential_timing.and_then(|projection| projection.setup(state)),
+    ) {
+        required_time = Some(required - setup);
+    }
+    let mut roots = vec![MappingRoot {
+        value: register.d,
+        required_time,
+        output_load: None,
+        requires_combinational_cover: false,
+    }];
+    roots.push(timed_root(register.clock, global_required));
+    if let Some(enable) = register.enable {
+        roots.push(timed_root(enable.value, global_required));
+    }
+    for reset in &register.resets {
+        roots.push(timed_root(reset.value, global_required));
+        roots.push(timed_root(reset.reset_value, global_required));
+    }
+    roots
+}
+
+fn latch_roots(latch: &word::LatchOp, global_required: Option<f64>) -> Vec<MappingRoot> {
+    let mut roots = vec![MappingRoot {
+        value: latch.d,
+        required_time: global_required,
+        output_load: None,
+        requires_combinational_cover: false,
+    }];
+    roots.push(timed_root(latch.enable.value, global_required));
+    for reset in &latch.resets {
+        roots.push(timed_root(reset.value, global_required));
+        roots.push(timed_root(reset.reset_value, global_required));
+    }
+    roots
 }
 
 /// Folds every sink constraint on a value into the single root that names it.
@@ -362,7 +428,9 @@ pub(crate) fn scalar_value_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opto_ir::word::{LValue, PortDirection, SourceSpan, WordModule, WordType};
+    use opto_ir::word::{
+        Edge, LValue, PortDirection, RegisterOp, SourceSpan, WordModule, WordType,
+    };
     use std::num::NonZeroU32;
 
     #[test]
@@ -413,6 +481,148 @@ mod tests {
         assert_eq!(roots[0].value, value);
         assert_eq!(roots[0].required_time, Some(0.8));
         assert_eq!(roots[0].output_load, Some(0.02));
+    }
+
+    #[test]
+    fn reconstructed_state_publishes_each_data_and_control_root() {
+        let mut module = WordModule::new("reconstructed_state");
+        let bit = WordType::bits(1).unwrap();
+        let pair = WordType::bits(2).unwrap();
+        let clock = module
+            .add_port("clock", PortDirection::Input, bit, SourceSpan::default())
+            .unwrap();
+        let data = ["low_d", "high_d"].map(|name| {
+            module
+                .add_port(name, PortDirection::Input, bit, SourceSpan::default())
+                .unwrap()
+        });
+        let output = module
+            .add_port("q", PortDirection::Output, pair, SourceSpan::default())
+            .unwrap();
+        let clock = module
+            .read_signal(module.port(clock).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let data = data.map(|port| {
+            module
+                .read_signal(module.port(port).unwrap().signal, SourceSpan::default())
+                .unwrap()
+        });
+        let state = data.map(|d| {
+            module
+                .register(
+                    RegisterOp {
+                        name: None,
+                        d,
+                        clock,
+                        edge: Edge::Pos,
+                        enable: None,
+                        resets: Vec::new(),
+                    },
+                    SourceSpan::default(),
+                )
+                .unwrap()
+        });
+        let reconstructed = module
+            .concat(state.into_iter().rev().collect(), SourceSpan::default())
+            .unwrap();
+        module
+            .connect(
+                LValue::signal(module.port(output).unwrap().signal),
+                reconstructed,
+                SourceSpan::default(),
+            )
+            .unwrap();
+
+        let roots = mapping_roots(
+            &module,
+            &opto_timing::TimingContext::new(),
+            &opto_timing::PortBindings::new([]),
+            None,
+        )
+        .unwrap();
+        let values = roots.iter().map(|root| root.value).collect::<BTreeSet<_>>();
+
+        assert!(values.contains(&data[0]));
+        assert!(values.contains(&data[1]));
+        assert!(values.contains(&clock));
+    }
+
+    #[test]
+    fn unobserved_scalar_state_bit_does_not_publish_mapping_roots() {
+        let mut module = WordModule::new("sliced_state");
+        let bit = WordType::bits(1).unwrap();
+        let pair = WordType::bits(2).unwrap();
+        let clock = module
+            .add_port("clock", PortDirection::Input, bit, SourceSpan::default())
+            .unwrap();
+        let data = ["d0", "d1"].map(|name| {
+            module
+                .add_port(name, PortDirection::Input, bit, SourceSpan::default())
+                .unwrap()
+        });
+        let output = module
+            .add_port("q", PortDirection::Output, bit, SourceSpan::default())
+            .unwrap();
+        let state_signal = module
+            .add_wire("state", pair, SourceSpan::default())
+            .unwrap();
+        let clock = module
+            .read_signal(module.port(clock).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let data = data.map(|port| {
+            module
+                .read_signal(module.port(port).unwrap().signal, SourceSpan::default())
+                .unwrap()
+        });
+        for (bit_index, d) in data.into_iter().enumerate() {
+            let state = module
+                .register(
+                    RegisterOp {
+                        name: None,
+                        d,
+                        clock,
+                        edge: Edge::Pos,
+                        enable: None,
+                        resets: Vec::new(),
+                    },
+                    SourceSpan::default(),
+                )
+                .unwrap();
+            let bit_index = u32::try_from(bit_index).unwrap();
+            module
+                .connect(
+                    LValue::signal(state_signal).with_range(word::BitRange {
+                        msb: bit_index,
+                        lsb: bit_index,
+                    }),
+                    state,
+                    SourceSpan::default(),
+                )
+                .unwrap();
+        }
+        let live_state = module
+            .read_signal_slice(state_signal, 0, 1, SourceSpan::default())
+            .unwrap();
+        module
+            .connect(
+                LValue::signal(module.port(output).unwrap().signal),
+                live_state,
+                SourceSpan::default(),
+            )
+            .unwrap();
+
+        let roots = mapping_roots(
+            &module,
+            &opto_timing::TimingContext::new(),
+            &opto_timing::PortBindings::new([]),
+            None,
+        )
+        .unwrap();
+        let values = roots.iter().map(|root| root.value).collect::<BTreeSet<_>>();
+
+        assert!(values.contains(&data[0]));
+        assert!(!values.contains(&data[1]));
+        assert!(values.contains(&clock));
     }
 
     #[test]

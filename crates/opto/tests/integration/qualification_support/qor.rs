@@ -585,6 +585,18 @@ mod tests {
             "NAND2_X1".to_string(),
             "NOR2_X1".to_string(),
             "OR2_X1".to_string(),
+            "QUAL_DFFEPN_X1".to_string(),
+            "QUAL_DFFEP_X1".to_string(),
+            "QUAL_DFFERN_X1".to_string(),
+            "QUAL_DFFER_X1".to_string(),
+            "QUAL_DFFE_X1".to_string(),
+            "QUAL_DFFNP_X1".to_string(),
+            "QUAL_DFFNRN_X1".to_string(),
+            "QUAL_DFFN_X1".to_string(),
+            "QUAL_DFFPN_X1".to_string(),
+            "QUAL_DFFP_X1".to_string(),
+            "QUAL_DFFRN_X1".to_string(),
+            "QUAL_DFFR_X1".to_string(),
             "XNOR2_X1".to_string(),
             "XOR2_X1".to_string(),
         ]);
@@ -605,7 +617,7 @@ mod tests {
             arcs.iter()
                 .filter(|arc| matches!(arc.timing_type(), TargetTimingType::ClockToQ(_)))
                 .count(),
-            2
+            14
         );
         assert_eq!(
             arcs.iter()
@@ -617,7 +629,7 @@ mod tests {
                     }
                 ))
                 .count(),
-            2
+            19
         );
         for arc in combinational {
             for edge in [TimingEdge::Rise, TimingEdge::Fall] {

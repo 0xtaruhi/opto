@@ -14,6 +14,7 @@ pub(crate) fn optimize_structure(
     port_bindings: &opto_timing::PortBindings,
     runtime: &opto_runtime::ExecutionContext,
 ) -> Result<crate::SynthesisRegionGraph, crate::SynthError> {
+    let state_constants = word::inductive_state_constants(module);
     crate::planning::dataflow::coalesce_static_wire_drivers(module)?;
     crate::planning::dataflow::resolve_static_connect_aliases(module)?;
     let provisional = crate::regional::region_graph::partition::build(
@@ -21,6 +22,17 @@ pub(crate) fn optimize_structure(
         crate::regional::region_graph::RegionPartitionPolicy::default(),
     )?;
     let mut ownership = crate::regional::StructuralOwnershipProvenance::new(module, &provisional)?;
+    if crate::planning::dataflow::lower_inductive_state_constants(
+        module,
+        &state_constants,
+        &mut ownership,
+    )? != 0
+    {
+        let remap = module
+            .compact_observable_netlist()
+            .map_err(crate::SynthError::from)?;
+        ownership.apply_netlist_remap(&remap)?;
+    }
 
     crate::planning::fsm::optimize_derived_fsms_in_regions(
         module,
@@ -43,6 +55,10 @@ pub(crate) fn optimize_structure(
                 .unwrap_or(value)
         },
     )?;
+    let remap = module
+        .compact_observable_netlist()
+        .map_err(crate::SynthError::from)?;
+    ownership.apply_netlist_remap(&remap)?;
     mapping.publish_owned_preparation(module, clock_gating, target_mapping, &mut ownership)?;
     crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
 

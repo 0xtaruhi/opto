@@ -22,6 +22,8 @@ use thiserror::Error;
 
 mod compact;
 pub use compact::NetlistRemap;
+mod observability;
+pub use observability::{NetlistObservability, netlist_observability};
 mod linked_elaboration;
 pub use linked_elaboration::elaborate_linked_root;
 pub(crate) use linked_elaboration::{ModuleRemap, elaborate_linked_root_with};
@@ -111,7 +113,9 @@ pub use range::{
     UnsignedValueAnalysis, UnsignedValueRange, unsigned_value_alignment, unsigned_value_range,
 };
 mod known_bits;
-pub use known_bits::{KnownBit, KnownBits128, KnownBitsAnalysis};
+pub use known_bits::{
+    InductiveStateConstants, KnownBit, KnownBits128, KnownBitsAnalysis, inductive_state_constants,
+};
 
 mod module;
 pub use module::WordModule;

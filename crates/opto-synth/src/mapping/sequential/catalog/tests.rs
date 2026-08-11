@@ -64,7 +64,12 @@ fn projects_selected_flip_flop_timing_onto_register_boundaries() {
                 clock,
                 edge: word::Edge::Pos,
                 enable: None,
-                resets: Vec::new(),
+                resets: vec![word::Reset {
+                    kind: word::ResetKind::Sync,
+                    value: data,
+                    active_high: true,
+                    reset_value: data,
+                }],
             },
             source.clone(),
         )

@@ -78,6 +78,31 @@ impl WordModule {
         self.compact_netlist_with_roots(&[])
     }
 
+    /// Removes connections, values, and operations outside the externally
+    /// observable state-aware closure.
+    ///
+    /// Unlike [`Self::compact_netlist`], a connection is not itself a root.
+    /// State data and controls remain live exactly when the corresponding state
+    /// output reaches a module boundary, retained object, instance, or memory
+    /// control. This is the appropriate compaction after an equivalence rewrite
+    /// redirects every consumer away from a superseded state copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WordError`] when observability or dense-ID remapping finds an
+    /// invalid structural reference or exceeds a compact arena capacity.
+    pub fn compact_observable_netlist(&mut self) -> Result<NetlistRemap, WordError> {
+        let observability = super::netlist_observability(self)?;
+        let mut connects = Vec::with_capacity(self.connects.len());
+        for (index, connect) in std::mem::take(&mut self.connects).into_iter().enumerate() {
+            if observability.observes_connect(index)? {
+                connects.push(connect);
+            }
+        }
+        self.connects = connects;
+        self.compact_netlist()
+    }
+
     /// Removes unreachable values while retaining additional semantic roots.
     ///
     /// The additional roots are for side databases whose references are not

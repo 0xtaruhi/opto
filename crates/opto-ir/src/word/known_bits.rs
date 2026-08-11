@@ -176,6 +176,31 @@ pub struct KnownBitsAnalysis {
     arena: Vec<FactWord>,
     drivers: SignalDrivers,
     external_signals: Box<[bool]>,
+    state_constants: Vec<Option<Box<[KnownBit]>>>,
+}
+
+/// Reset-established state invariants proven by a descending fixed point.
+///
+/// A bit is reported constant only when every reset value establishes the same
+/// Boolean value and its data function preserves that value under all retained
+/// state assumptions. Enable and latch hold behavior preserve an established
+/// invariant automatically; an unreset state bit remains unknown.
+#[derive(Debug, Clone)]
+pub struct InductiveStateConstants {
+    values: Vec<Option<Box<[KnownBit]>>>,
+}
+
+impl InductiveStateConstants {
+    /// Returns the proven invariant for `value[index]`.
+    #[must_use]
+    pub fn bit(&self, value: ValueId, index: u32) -> KnownBit {
+        self.values
+            .get(value.index())
+            .and_then(Option::as_deref)
+            .and_then(|bits| bits.get(index as usize))
+            .copied()
+            .unwrap_or(KnownBit::Unknown)
+    }
 }
 
 impl KnownBitsAnalysis {
@@ -194,7 +219,17 @@ impl KnownBitsAnalysis {
             arena: Vec::new(),
             drivers: SignalDrivers::build(module),
             external_signals: external_signals.into_boxed_slice(),
+            state_constants: vec![None; module.values().len()],
         }
+    }
+
+    fn with_state_constants(
+        module: &WordModule,
+        state_constants: Vec<Option<Box<[KnownBit]>>>,
+    ) -> Self {
+        let mut analysis = Self::new(module);
+        analysis.state_constants = state_constants;
+        analysis
     }
 
     /// Returns the proven state of `value[index]`.
@@ -237,6 +272,82 @@ impl KnownBitsAnalysis {
     }
 }
 
+/// Proves reset-established constant bits of registers and latches.
+///
+/// The analysis starts with bits whose reset values unanimously agree, then
+/// repeatedly removes any assumption not preserved by the corresponding data
+/// function. Because facts only move from known to unknown, termination is
+/// deterministic and bounded by the number of seeded state bits.
+#[must_use]
+pub fn inductive_state_constants(module: &WordModule) -> InductiveStateConstants {
+    let mut values = vec![None; module.values().len()];
+    let mut reset_facts = KnownBitsAnalysis::new(module);
+    for operation in module.operations() {
+        let (resets, width) = match &operation.kind {
+            OpKind::Register(register) => (
+                register.resets.as_slice(),
+                module.value(operation.result).map(|value| value.ty.width()),
+            ),
+            OpKind::Latch(latch) => (
+                latch.resets.as_slice(),
+                module.value(operation.result).map(|value| value.ty.width()),
+            ),
+            _ => continue,
+        };
+        let Some(width) = width else { continue };
+        if resets.is_empty() {
+            continue;
+        }
+        let bits = (0..width)
+            .map(|index| {
+                let first = reset_facts.bit(module, resets[0].reset_value, index);
+                if first == KnownBit::Unknown
+                    || resets
+                        .iter()
+                        .skip(1)
+                        .any(|reset| reset_facts.bit(module, reset.reset_value, index) != first)
+                {
+                    KnownBit::Unknown
+                } else {
+                    first
+                }
+            })
+            .collect::<Vec<_>>();
+        values[operation.result.index()] = Some(bits.into_boxed_slice());
+    }
+
+    loop {
+        let mut analysis = KnownBitsAnalysis::with_state_constants(module, values.clone());
+        let mut changed = false;
+        for operation in module.operations() {
+            let data = match &operation.kind {
+                OpKind::Register(register) => register.d,
+                OpKind::Latch(latch) => latch.d,
+                _ => continue,
+            };
+            let Some(bits) = values
+                .get_mut(operation.result.index())
+                .and_then(Option::as_deref_mut)
+            else {
+                continue;
+            };
+            for (index, bit) in (0u32..).zip(bits.iter_mut()) {
+                if *bit == KnownBit::Unknown {
+                    continue;
+                }
+                if analysis.bit(module, data, index) != *bit {
+                    *bit = KnownBit::Unknown;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    InductiveStateConstants { values }
+}
+
 fn known_constant(width: u32, mut bit: impl FnMut(u32) -> KnownBit) -> Option<ConstBits> {
     let bits = (0..width)
         .rev()
@@ -262,6 +373,16 @@ fn derive_value(
     }
     analysis.values[id.index()] = FactState::Computing;
     let value = module.value(id)?;
+    if let Some(bits) = analysis
+        .state_constants
+        .get(id.index())
+        .and_then(Option::as_deref)
+    {
+        let bits = bits.to_vec();
+        let facts = store_bits(bits, width, &mut analysis.arena);
+        analysis.values[id.index()] = FactState::Computed(facts);
+        return Some(facts);
+    }
     let facts = match &value.kind {
         ValueKind::Signal(reference) => {
             let signal = derive_signal(module, reference.signal, analysis)?;
@@ -421,12 +542,28 @@ fn derive_operation(
         } => {
             let input = value_facts(module, *value, analysis);
             let offset = value_facts(module, *offset, analysis);
-            known_usize(offset, &analysis.arena)
-                .and_then(|offset| u32::try_from(offset).ok())
-                .filter(|offset| offset.saturating_add(width.get()) <= input.width)
-                .map_or(FactRange::unknown(width.get()), |offset| {
-                    slice_facts(input, offset, width.get(), analysis)
+            if let Some(offset) = known_usize(offset, &analysis.arena) {
+                match u32::try_from(offset)
+                    .ok()
+                    .filter(|offset| offset.saturating_add(width.get()) <= input.width)
+                {
+                    Some(offset) => slice_facts(input, offset, width.get(), analysis),
+                    None => store_generated(analysis, width.get(), |_, _| KnownBit::Zero),
+                }
+            } else if is_zero(input, &analysis.arena) {
+                // Every selectable data bit and the out-of-range fill agree.
+                // This is common for disabled packed arrays whose index remains
+                // dynamic after parameter elaboration.
+                store_generated(analysis, width.get(), |_, _| KnownBit::Zero)
+            } else if uniform_known_bit(input, &analysis.arena) == Some(KnownBit::One)
+                && maximum_unsigned(offset, &analysis.arena).is_some_and(|maximum| {
+                    maximum <= u128::from(input.width.saturating_sub(width.get()))
                 })
+            {
+                store_generated(analysis, width.get(), |_, _| KnownBit::One)
+            } else {
+                FactRange::unknown(width.get())
+            }
         }
         OpKind::DynamicInsert {
             value,
@@ -881,6 +1018,30 @@ fn is_zero(input: FactRange, arena: &[FactWord]) -> bool {
     trailing_zeros(input, arena) == input.width
 }
 
+fn uniform_known_bit(input: FactRange, arena: &[FactWord]) -> Option<KnownBit> {
+    let first = input.bit(arena, 0);
+    if first == KnownBit::Unknown {
+        return None;
+    }
+    (1..input.width)
+        .all(|index| input.bit(arena, index) == first)
+        .then_some(first)
+}
+
+fn maximum_unsigned(input: FactRange, arena: &[FactWord]) -> Option<u128> {
+    let mut maximum = 0u128;
+    for index in 0..input.width {
+        match input.bit(arena, index) {
+            KnownBit::Zero => {}
+            KnownBit::One | KnownBit::Unknown if index < u128::BITS => {
+                maximum |= 1u128 << index;
+            }
+            KnownBit::One | KnownBit::Unknown => return None,
+        }
+    }
+    Some(maximum)
+}
+
 fn is_one(input: FactRange, arena: &[FactWord]) -> bool {
     input.width > 0
         && input.bit(arena, 0) == KnownBit::One
@@ -902,7 +1063,9 @@ fn known_usize(input: FactRange, arena: &[FactWord]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::word::{BitRange, LValue, LogicStateKind, SourceSpan, WordType};
+    use crate::word::{
+        BitRange, Edge, LValue, LogicStateKind, RegisterOp, Reset, ResetKind, SourceSpan, WordType,
+    };
 
     fn ty(width: u32) -> WordType {
         WordType::new(width, false, LogicStateKind::FourState).unwrap()
@@ -1006,6 +1169,96 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_extract_preserves_unanimous_data_facts() {
+        let mut module = WordModule::new("dynamic_facts");
+        let offset = module
+            .add_port("offset", PortDirection::Input, ty(4), SourceSpan::default())
+            .unwrap();
+        let offset = module
+            .read_signal(module.port(offset).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let zero = module
+            .constant(
+                ConstBits::from_bin_str("00000000").unwrap(),
+                ty(8),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let extracted = module
+            .dynamic_extract(zero, offset, 3, SourceSpan::default())
+            .unwrap();
+        let bounded_offset = module
+            .add_port(
+                "bounded_offset",
+                PortDirection::Input,
+                ty(2),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let bounded_offset = module
+            .read_signal(
+                module.port(bounded_offset).unwrap().signal,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let ones = module
+            .constant(
+                ConstBits::from_bin_str("11111111").unwrap(),
+                ty(8),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let selected_ones = module
+            .dynamic_extract(ones, bounded_offset, 3, SourceSpan::default())
+            .unwrap();
+        let data = module
+            .constant(
+                ConstBits::from_bin_str("11010110").unwrap(),
+                ty(8),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let in_range_offset = module
+            .constant(
+                ConstBits::from_bin_str("0010").unwrap(),
+                ty(4),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let in_range = module
+            .dynamic_extract(data, in_range_offset, 3, SourceSpan::default())
+            .unwrap();
+        let out_of_range_offset = module
+            .constant(
+                ConstBits::from_bin_str("1000").unwrap(),
+                ty(4),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let out_of_range = module
+            .dynamic_extract(data, out_of_range_offset, 3, SourceSpan::default())
+            .unwrap();
+
+        let mut facts = KnownBitsAnalysis::new(&module);
+        assert_eq!(
+            facts.constant(&module, extracted),
+            Some(ConstBits::from_bin_str("000").unwrap())
+        );
+        assert_eq!(
+            facts.constant(&module, selected_ones),
+            Some(ConstBits::from_bin_str("111").unwrap())
+        );
+        assert_eq!(
+            facts.constant(&module, in_range),
+            Some(ConstBits::from_bin_str("101").unwrap())
+        );
+        assert_eq!(
+            facts.constant(&module, out_of_range),
+            Some(ConstBits::from_bin_str("000").unwrap())
+        );
+    }
+
+    #[test]
     fn treats_multiple_drivers_as_unknown() {
         let mut module = WordModule::new("multiple");
         let signal = module
@@ -1104,5 +1357,145 @@ mod tests {
         assert_eq!(packed.bit(u128::BITS - 1), KnownBit::One);
         assert_eq!(facts.packed128(&module, over_limit), None);
         assert_eq!(facts.bit(&module, over_limit, u128::BITS), KnownBit::One);
+    }
+
+    #[test]
+    fn proves_only_reset_established_inductive_state_bits() {
+        let mut module = WordModule::new("state_invariants");
+        let clock = module
+            .add_port("clock", PortDirection::Input, ty(1), SourceSpan::default())
+            .unwrap();
+        let reset = module
+            .add_port("reset", PortDirection::Input, ty(1), SourceSpan::default())
+            .unwrap();
+        let alternate_reset = module
+            .add_port(
+                "alternate_reset",
+                PortDirection::Input,
+                ty(1),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let input = module
+            .add_port("input", PortDirection::Input, ty(1), SourceSpan::default())
+            .unwrap();
+        let clock = module
+            .read_signal(module.port(clock).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let reset = module
+            .read_signal(module.port(reset).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let alternate_reset = module
+            .read_signal(
+                module.port(alternate_reset).unwrap().signal,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let input = module
+            .read_signal(module.port(input).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let zero = module
+            .constant(
+                ConstBits::from_bin_str("0").unwrap(),
+                ty(1),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let one = module
+            .constant(
+                ConstBits::from_bin_str("1").unwrap(),
+                ty(1),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let invariant_signal = module
+            .add_wire("invariant", ty(1), SourceSpan::default())
+            .unwrap();
+        let feedback = module
+            .read_signal(invariant_signal, SourceSpan::default())
+            .unwrap();
+        let held_zero = module
+            .binary(BinaryOp::BitAnd, feedback, input, SourceSpan::default())
+            .unwrap();
+        let reset_spec = Reset {
+            kind: ResetKind::Async,
+            value: reset,
+            active_high: true,
+            reset_value: zero,
+        };
+        let invariant = module
+            .register(
+                RegisterOp {
+                    name: None,
+                    d: held_zero,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: vec![reset_spec],
+                },
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(
+                LValue::signal(invariant_signal),
+                invariant,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let variable = module
+            .register(
+                RegisterOp {
+                    name: None,
+                    d: input,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: vec![reset_spec],
+                },
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let conflicting_resets = module
+            .register(
+                RegisterOp {
+                    name: None,
+                    d: zero,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: vec![
+                        reset_spec,
+                        Reset {
+                            kind: ResetKind::Async,
+                            value: alternate_reset,
+                            active_high: true,
+                            reset_value: one,
+                        },
+                    ],
+                },
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let unreset = module
+            .register(
+                RegisterOp {
+                    name: None,
+                    d: zero,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: Vec::new(),
+                },
+                SourceSpan::default(),
+            )
+            .unwrap();
+
+        let facts = inductive_state_constants(&module);
+
+        assert_eq!(facts.bit(invariant, 0), KnownBit::Zero);
+        assert_eq!(facts.bit(variable, 0), KnownBit::Unknown);
+        assert_eq!(facts.bit(conflicting_resets, 0), KnownBit::Unknown);
+        assert_eq!(facts.bit(unreset, 0), KnownBit::Unknown);
     }
 }

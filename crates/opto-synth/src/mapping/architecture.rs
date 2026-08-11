@@ -427,6 +427,11 @@ impl RegionArchitectureMaterializer<'_> {
             &self.config.options.target_cells,
             &local_semantics,
         )?;
+        let sequential_timing = super::sequential::SequentialTimingProjection::build(
+            &module,
+            &self.config.mapping_context.sequential_catalog,
+            &self.config.mapping_context.combinational_catalog,
+        )?;
         for (root, local) in &mut root_pairs {
             let bits = ownership
                 .lowered_bits(*local)
@@ -440,11 +445,6 @@ impl RegionArchitectureMaterializer<'_> {
                 root.requires_combinational_cover = false;
             }
         }
-        let sequential_timing = super::sequential::SequentialTimingProjection::build(
-            &module,
-            &self.config.mapping_context.sequential_catalog,
-            &self.config.mapping_context.combinational_catalog,
-        )?;
         for mut root in mapping_roots(
             &module,
             self.config.timing,

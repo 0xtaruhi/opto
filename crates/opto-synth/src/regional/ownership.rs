@@ -138,6 +138,40 @@ impl StructuralOwnershipProvenance {
         &self.owners
     }
 
+    /// Applies dense Word compaction without changing surviving owner atoms or
+    /// their durable partition anchors.
+    pub(crate) fn apply_netlist_remap(
+        &mut self,
+        remap: &word::NetlistRemap,
+    ) -> Result<(), crate::SynthError> {
+        if remap.old_operation_count() != self.owners.len() {
+            return Err(crate::SynthError::invariant(
+                "structural ownership does not match its Word compaction source",
+            ));
+        }
+        let mut owners = vec![None; remap.operation_count()];
+        let mut assigned = vec![false; remap.operation_count()];
+        for (index, owner) in self.owners.iter().copied().enumerate() {
+            let operation = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
+            let Some(compacted) = remap.operation(operation) else {
+                continue;
+            };
+            let slot = owners.get_mut(compacted.index()).ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "structural ownership remap exceeds the compact operation arena",
+                )
+            })?;
+            if std::mem::replace(&mut assigned[compacted.index()], true) {
+                return Err(crate::SynthError::invariant(
+                    "structural ownership compaction is not injective",
+                ));
+            }
+            *slot = owner;
+        }
+        self.owners = owners;
+        Ok(())
+    }
+
     pub(crate) fn anchor(&self, operation: word::OpId) -> Option<[u8; 32]> {
         self.owner(operation)
             .and_then(|owner| self.owner_anchors.get(owner.index()).copied())

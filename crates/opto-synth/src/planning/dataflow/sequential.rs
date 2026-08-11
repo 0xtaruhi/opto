@@ -7,6 +7,169 @@ use opto_ir::word;
 use opto_runtime::ExecutionContext;
 use std::collections::BTreeSet;
 
+pub(crate) fn lower_inductive_state_constants(
+    module: &mut word::WordModule,
+    facts: &word::InductiveStateConstants,
+    ownership: &mut crate::regional::StructuralOwnershipProvenance,
+) -> Result<usize, crate::SynthError> {
+    let initial_operations = module.operations().len();
+    let candidates = (0..initial_operations)
+        .filter_map(|index| {
+            let operation_id = word::OpId::from_index(index).ok()?;
+            let operation = module.operation(operation_id)?;
+            let width = module.value(operation.result)?.ty.width();
+            matches!(
+                operation.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            )
+            .then(|| {
+                let constants = (0..width)
+                    .map(|bit| facts.bit(operation.result, bit))
+                    .collect::<Box<[_]>>();
+                constants
+                    .iter()
+                    .any(|bit| *bit != word::KnownBit::Unknown)
+                    .then(|| (operation_id, operation.clone(), constants))
+            })
+            .flatten()
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let mut aliases = Vec::with_capacity(candidates.len());
+    let mut lowered_bits = 0usize;
+    for (source_operation, operation, constants) in candidates {
+        let start = ownership.start(module)?;
+        let result_ty = module
+            .value(operation.result)
+            .ok_or_else(|| crate::SynthError::invariant("state result disappeared"))?
+            .ty;
+        let mut bits = Vec::with_capacity(constants.len());
+        for (index, constant) in constants.iter().copied().enumerate() {
+            let index =
+                u32::try_from(index).map_err(|_| crate::SynthError::capacity("state bit index"))?;
+            let bit = match constant {
+                word::KnownBit::Zero | word::KnownBit::One => {
+                    lowered_bits += 1;
+                    module
+                        .constant(
+                            opto_ir::ConstBits::from_bits(vec![match constant {
+                                word::KnownBit::Zero => opto_ir::BitVal::Zero,
+                                word::KnownBit::One => opto_ir::BitVal::One,
+                                word::KnownBit::Unknown => unreachable!(),
+                            }])
+                            .map_err(crate::SynthError::from)?,
+                            word::WordType::new(1, false, result_ty.state())
+                                .map_err(crate::SynthError::from)?,
+                            operation.source.clone(),
+                        )
+                        .map_err(crate::SynthError::from)?
+                }
+                word::KnownBit::Unknown => match &operation.kind {
+                    word::OpKind::Register(register) => {
+                        let d = scalar_state_input(module, register.d, index, &operation.source)?;
+                        let resets = register
+                            .resets
+                            .iter()
+                            .map(|reset| {
+                                Ok(word::Reset {
+                                    reset_value: scalar_state_input(
+                                        module,
+                                        reset.reset_value,
+                                        index,
+                                        &operation.source,
+                                    )?,
+                                    ..*reset
+                                })
+                            })
+                            .collect::<Result<Vec<_>, crate::SynthError>>()?;
+                        module
+                            .register(
+                                word::RegisterOp {
+                                    d,
+                                    resets,
+                                    ..register.clone()
+                                },
+                                operation.source.clone(),
+                            )
+                            .map_err(crate::SynthError::from)?
+                    }
+                    word::OpKind::Latch(latch) => {
+                        let d = scalar_state_input(module, latch.d, index, &operation.source)?;
+                        let resets = latch
+                            .resets
+                            .iter()
+                            .map(|reset| {
+                                Ok(word::Reset {
+                                    reset_value: scalar_state_input(
+                                        module,
+                                        reset.reset_value,
+                                        index,
+                                        &operation.source,
+                                    )?,
+                                    ..*reset
+                                })
+                            })
+                            .collect::<Result<Vec<_>, crate::SynthError>>()?;
+                        module
+                            .latch(
+                                word::LatchOp {
+                                    d,
+                                    resets,
+                                    ..latch.clone()
+                                },
+                                operation.source.clone(),
+                            )
+                            .map_err(crate::SynthError::from)?
+                    }
+                    _ => unreachable!("candidate is sequential"),
+                },
+            };
+            bits.push(bit);
+        }
+        bits.reverse();
+        let replacement = if let [bit] = bits.as_slice() {
+            *bit
+        } else {
+            module
+                .concat(bits, operation.source.clone())
+                .map_err(crate::SynthError::from)?
+        };
+        aliases.push((operation.result, replacement));
+        ownership.claim_since(module, start, &[source_operation])?;
+    }
+
+    let mut replacements = (0..module.values().len())
+        .map(|index| word::ValueId::from_index(index).map_err(crate::SynthError::Word))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (source, replacement) in aliases {
+        replacements[source.index()] = replacement;
+    }
+    module
+        .rewrite_value_uses(&replacements)
+        .map_err(crate::SynthError::from)?;
+    Ok(lowered_bits)
+}
+
+fn scalar_state_input(
+    module: &mut word::WordModule,
+    value: word::ValueId,
+    index: u32,
+    source: &word::SourceSpan,
+) -> Result<word::ValueId, crate::SynthError> {
+    if module
+        .value(value)
+        .is_some_and(|stored| stored.ty.width() == 1 && index == 0)
+    {
+        return Ok(value);
+    }
+    module
+        .extract(value, index, 1, source.clone())
+        .map_err(crate::SynthError::from)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SequentialKey {
     Register {
@@ -486,6 +649,104 @@ mod tests {
         assert_eq!(
             changes.representatives()[registers[1].index()],
             registers[0]
+        );
+    }
+
+    #[test]
+    fn lowers_only_inductively_constant_bits_of_vector_state() {
+        let mut module = word::WordModule::new("state_constants");
+        let source = word::SourceSpan::default();
+        let bit = word::WordType::bits(1).unwrap();
+        let pair = word::WordType::bits(2).unwrap();
+        let clock = module
+            .add_port("clock", word::PortDirection::Input, bit, source.clone())
+            .unwrap();
+        let reset = module
+            .add_port("reset", word::PortDirection::Input, bit, source.clone())
+            .unwrap();
+        let input = module
+            .add_port("input", word::PortDirection::Input, bit, source.clone())
+            .unwrap();
+        let output = module
+            .add_port("output", word::PortDirection::Output, pair, source.clone())
+            .unwrap();
+        let state_signal = module.add_wire("state", pair, source.clone()).unwrap();
+        let clock = module
+            .read_signal(module.port(clock).unwrap().signal, source.clone())
+            .unwrap();
+        let reset = module
+            .read_signal(module.port(reset).unwrap().signal, source.clone())
+            .unwrap();
+        let input = module
+            .read_signal(module.port(input).unwrap().signal, source.clone())
+            .unwrap();
+        let state = module.read_signal(state_signal, source.clone()).unwrap();
+        let low = module.extract(state, 0, 1, source.clone()).unwrap();
+        let held_zero = module
+            .binary(word::BinaryOp::BitAnd, low, input, source.clone())
+            .unwrap();
+        let data = module
+            .concat(vec![input, held_zero], source.clone())
+            .unwrap();
+        let zero = module
+            .constant(
+                opto_ir::ConstBits::from_bin_str("00").unwrap(),
+                pair,
+                source.clone(),
+            )
+            .unwrap();
+        let register = module
+            .register(
+                word::RegisterOp {
+                    name: None,
+                    d: data,
+                    clock,
+                    edge: word::Edge::Pos,
+                    enable: None,
+                    resets: vec![word::Reset {
+                        kind: word::ResetKind::Async,
+                        value: reset,
+                        active_high: true,
+                        reset_value: zero,
+                    }],
+                },
+                source.clone(),
+            )
+            .unwrap();
+        module
+            .connect(word::LValue::signal(state_signal), register, source.clone())
+            .unwrap();
+        let visible = module.read_signal(state_signal, source.clone()).unwrap();
+        module
+            .connect(
+                word::LValue::signal(module.port(output).unwrap().signal),
+                visible,
+                source,
+            )
+            .unwrap();
+
+        let facts = word::inductive_state_constants(&module);
+        assert_eq!(facts.bit(register, 0), word::KnownBit::Zero);
+        assert_eq!(facts.bit(register, 1), word::KnownBit::Unknown);
+        let mut ownership = crate::regional::StructuralOwnershipProvenance::from_owners_for_test(
+            &module,
+            one_region(&module),
+        )
+        .unwrap();
+        assert_eq!(
+            lower_inductive_state_constants(&mut module, &facts, &mut ownership).unwrap(),
+            1
+        );
+        let remap = module.compact_observable_netlist().unwrap();
+        ownership.apply_netlist_remap(&remap).unwrap();
+
+        assert_eq!(
+            module
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation.kind, word::OpKind::Register(_)))
+                .count(),
+            1
         );
     }
 }

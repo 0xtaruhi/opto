@@ -319,6 +319,26 @@ unknown bits receive publication endpoints. A private cover may omit an
 artifact for one of those frozen constants, but a private pass-through never
 creates a substrate alias or weakens a source-level publication obligation.
 
+Structural preparation also computes a bit-precise externally observable
+closure. Output and inout ports, preserved signals, instance bindings, and
+memory controls seed that closure. A state operation becomes live only when
+its result reaches one of those sinks; once live, its data, clock, enable, and
+reset inputs are ordinary dependencies. State publication is therefore derived
+from each live register or latch operation, not from the incidental shape of
+the connection that carries `Q`. Reconstructing a vector through
+`Concat`/`Extract`/`Cast` cannot hide its state roots, while a superseded state
+copy with no live consumer can be removed together with its private controls.
+
+Before ownership is frozen, a descending fixed-point analysis may prove
+reset-established state bits constant. A candidate bit must have at least one
+reset, every reset value must establish the same Boolean value, and its data
+function must preserve that value under the complete retained set of state
+assumptions. Facts only move from known to unknown, so the analysis is bounded
+and deterministic. Proven bits become constants; the unknown bits of a vector
+state are reconstructed as scalar registers or latches with the original
+clock, enable, reset kind, polarity, and per-bit reset data. Generated state
+inherits the exact source owner before observable compaction and final freeze.
+
 State and output roots claim their fan-in cones. Size truncation promotes a
 frontier operation to a seed; shared fan-in receives one owner. Coarsening
 scores adjacent cones by the accumulated criticality and bit width of the
@@ -377,6 +397,13 @@ used. The worker then performs, in that module:
    priority-mux rebalancing;
 2. semantic operator discovery and architecture choice;
 3. selected-recipe bit lowering and Liberty Boolean cover.
+
+Known-bit propagation covers static and dynamic selection. A dynamic extract
+with a constant in-range offset becomes the corresponding slice; a provably
+out-of-range offset produces the language-defined zero fill. When every
+selectable data bit and the fill agree, that unanimous fact is retained even
+for a variable offset. These are full-domain facts rather than care-set
+assumptions and may therefore remove disabled packed-array logic before cover.
 
 The sequential shell is selected before Boolean cover establishes its timing
 coordinates. Cover guidance and substrate materialization call one deterministic
@@ -1011,6 +1038,7 @@ defect.
 | Architecture-independent partition and budget estimates | Implemented |
 | Separate region anchors/revisions and boundary identities/revisions | Implemented |
 | Word graph as the sole pre-cover connectivity and dataflow authority | Implemented |
+| Bit-precise state-aware observability and reset-established state invariants | Implemented |
 | Absolute locally dependent timing budgets | Implemented |
 | Region-private Word optimization and architecture selection | Implemented |
 | Private muxed arithmetic, CSA, Wallace/Dadda, and fused MAC; owner-confined FSM and sequential sharing | Implemented |

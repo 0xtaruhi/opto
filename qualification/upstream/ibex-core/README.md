@@ -31,4 +31,5 @@ qualification/upstream/ibex-core/run_smoke.sh gate /tmp/ibex-gate \
   /tmp/ibex-netlist/ibex_core.v
 ```
 
-Both simulations must write the value `12` to signature address `0x104`.
+Both simulations execute arithmetic, branch, load/store, `DIV`, and `REM`
+instructions and must write the value `16` to signature address `0x104`.

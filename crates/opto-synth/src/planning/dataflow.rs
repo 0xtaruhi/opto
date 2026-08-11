@@ -6,7 +6,9 @@ mod priority;
 mod sequential;
 
 use canonical::{canonicalize_values, canonicalize_values_by};
-pub(crate) use sequential::share_equivalent_sequential_values_by;
+pub(crate) use sequential::{
+    lower_inductive_state_constants, share_equivalent_sequential_values_by,
+};
 
 use opto_core::PackedRows;
 use opto_ir::word;

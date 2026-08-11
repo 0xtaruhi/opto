@@ -45,8 +45,16 @@ impl SequentialTimingProjection {
                 _ => None,
             })
             .map(|(result, register)| {
+                // Synchronous resets are lowered into the data and enable cones
+                // before library sequential materialization. Project timing from
+                // that eventual cell shape while the original controls are still
+                // present for mapping-root publication.
+                let mut projected = register.clone();
+                projected
+                    .resets
+                    .retain(|reset| reset.kind == word::ResetKind::Async);
                 sequential
-                    .select_register(module, register, combinational)
+                    .select_register(module, &projected, combinational)
                     .map(|selected| (result, selected.timing()))
             })
             .collect::<Result<Vec<_>, _>>()?;

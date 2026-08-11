@@ -446,6 +446,173 @@ fn synthesize_bitblasts_vector_flop_to_target_dffs() {
 }
 
 #[test]
+fn regional_mapping_preserves_dynamic_reads_of_vector_state() {
+    let mut module = WordModule::new("top");
+    let vector = WordType::bits(4).unwrap();
+    let offset_ty = WordType::bits(2).unwrap();
+    let clock = module
+        .add_port("clk", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let data = module
+        .add_port("d", PortDirection::Input, vector, test_span())
+        .unwrap();
+    let offset = module
+        .add_port("offset", PortDirection::Input, offset_ty, test_span())
+        .unwrap();
+    let output = module
+        .add_port("y", PortDirection::Output, bit(), test_span())
+        .unwrap();
+    let state = module.add_wire("q", vector, test_span()).unwrap();
+    let clock = read_port(&mut module, clock);
+    let data = read_port(&mut module, data);
+    let offset = read_port(&mut module, offset);
+    let register = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: data,
+                clock,
+                edge: Edge::Pos,
+                enable: None,
+                resets: Vec::new(),
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(LValue::signal(state), register, test_span())
+        .unwrap();
+    let state = module.read_signal(state, test_span()).unwrap();
+    let selected = module
+        .dynamic_extract(state, offset, 1, test_span())
+        .unwrap();
+    connect_port(&mut module, output, selected);
+
+    let synthesized = synthesize_test_module(
+        &mut module,
+        SynthesisOptions {
+            target_cells: vec![simple_dff_target_cell(), characterized_mux_target_cell()].into(),
+        },
+    )
+    .unwrap();
+    let text = synthesized.mapped_verilog();
+
+    assert_eq!(text.matches("  DFD1 ").count(), 4, "{text}");
+    assert!(text.matches("  MUX2 ").count() >= 3, "{text}");
+    for bit in 0..4 {
+        assert!(text.contains(&format!("q[{bit}]")), "{text}");
+    }
+}
+
+#[test]
+fn regional_mapping_preserves_dynamic_state_reads_across_registers() {
+    let mut module = WordModule::new("top");
+    let vector = WordType::bits(4).unwrap();
+    let offset_ty = WordType::bits(2).unwrap();
+    let clock = module
+        .add_port("clk", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let data = module
+        .add_port("d", PortDirection::Input, vector, test_span())
+        .unwrap();
+    let offset = module
+        .add_port("offset", PortDirection::Input, offset_ty, test_span())
+        .unwrap();
+    let output = module
+        .add_port("y", PortDirection::Output, bit(), test_span())
+        .unwrap();
+    let source_state = module.add_wire("source_q", vector, test_span()).unwrap();
+    let sink_state = module.add_wire("sink_q", bit(), test_span()).unwrap();
+    let clock = read_port(&mut module, clock);
+    let data = read_port(&mut module, data);
+    let offset = read_port(&mut module, offset);
+    let source_register = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: data,
+                clock,
+                edge: Edge::Pos,
+                enable: None,
+                resets: Vec::new(),
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(LValue::signal(source_state), source_register, test_span())
+        .unwrap();
+    let source_state = module.read_signal(source_state, test_span()).unwrap();
+    let selected = module
+        .dynamic_extract(source_state, offset, 1, test_span())
+        .unwrap();
+    let sink_register = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: selected,
+                clock,
+                edge: Edge::Pos,
+                enable: None,
+                resets: Vec::new(),
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(LValue::signal(sink_state), sink_register, test_span())
+        .unwrap();
+    let sink_state = module.read_signal(sink_state, test_span()).unwrap();
+    connect_port(&mut module, output, sink_state);
+
+    let synthesized = synthesize_test_module(
+        &mut module,
+        SynthesisOptions {
+            target_cells: vec![simple_dff_target_cell(), characterized_mux_target_cell()].into(),
+        },
+    )
+    .unwrap();
+    let text = synthesized.mapped_verilog();
+
+    assert_eq!(text.matches("  DFD1 ").count(), 5, "{text}");
+    assert!(text.matches("  MUX2 ").count() >= 3, "{text}");
+    assert!(text.contains("sink_q_reg"), "{text}");
+    for bit in 0..4 {
+        assert!(text.contains(&format!("source_q[{bit}]")), "{text}");
+    }
+}
+
+fn characterized_mux_target_cell() -> opto_library::TargetCell {
+    let mut mux = target_cell(
+        "MUX2",
+        1.0,
+        &[
+            ("I0", TargetPinDirection::Input, None),
+            ("I1", TargetPinDirection::Input, None),
+            ("S", TargetPinDirection::Input, None),
+            ("Z", TargetPinDirection::Output, Some("(!S*I0)+(S*I1)")),
+        ],
+    );
+    let delay = opto_library::ArcDelayModel::Nldm(opto_library::NldmTimingModel::new(
+        Some(opto_library::LookupTable::scalar(1.0)),
+        Some(opto_library::LookupTable::scalar(1.0)),
+        Some(opto_library::LookupTable::scalar(0.1)),
+        Some(opto_library::LookupTable::scalar(0.1)),
+    ));
+    for related_pin in ["I0", "I1", "S"] {
+        mux.pins[3].timing_arcs.push(opto_library::TargetTimingArc {
+            related_pin: related_pin.to_string(),
+            timing_type: opto_library::TargetTimingType::Combinational,
+            timing_sense: opto_library::TimingSense::NonUnate,
+            delay_model: Some(delay.clone()),
+            rise_constraint: None,
+            fall_constraint: None,
+        });
+    }
+    mux
+}
+
+#[test]
 fn synthesize_shares_equivalent_registers_inside_a_small_design_region() {
     let mut module = WordModule::new("top");
     let clock = module

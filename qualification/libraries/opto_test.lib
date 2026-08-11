@@ -281,8 +281,28 @@ library (opto_test) {
       next_state : "D";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_falling;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : falling_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFRN_X1) {
     area : 5.0;
@@ -292,9 +312,29 @@ library (opto_test) {
       clear : "!RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFR_X1) {
     area : 5.0;
@@ -304,9 +344,29 @@ library (opto_test) {
       clear : "RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFP_X1) {
     area : 5.0;
@@ -316,9 +376,29 @@ library (opto_test) {
       preset : "RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFPN_X1) {
     area : 5.0;
@@ -328,9 +408,29 @@ library (opto_test) {
       preset : "!RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFE_X1) {
     area : 5.0;
@@ -339,9 +439,38 @@ library (opto_test) {
       next_state : "((D EN) + (IQ !EN))";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
-    pin (EN) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (EN) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFER_X1) {
     area : 6.0;
@@ -351,10 +480,39 @@ library (opto_test) {
       clear : "RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
-    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (EN) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFERN_X1) {
     area : 6.0;
@@ -364,10 +522,39 @@ library (opto_test) {
       clear : "!RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
-    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (EN) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFEP_X1) {
     area : 6.0;
@@ -377,10 +564,39 @@ library (opto_test) {
       preset : "RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
-    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (EN) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFEPN_X1) {
     area : 6.0;
@@ -390,10 +606,39 @@ library (opto_test) {
       preset : "!RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
-    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
+    pin (EN) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFNP_X1) {
     area : 5.0;
@@ -403,9 +648,29 @@ library (opto_test) {
       preset : "RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_falling;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : falling_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_DFFNRN_X1) {
     area : 5.0;
@@ -415,9 +680,29 @@ library (opto_test) {
       clear : "!RESET";
     }
     pin (CLK) { direction : input; clock : true; }
-    pin (D) { direction : input; capacitance : 0.01; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.01;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_falling;
+        rise_constraint (scalar) { values ("0.1"); }
+        fall_constraint (scalar) { values ("0.1"); }
+      }
+    }
     pin (RESET) { direction : input; capacitance : 0.01; }
-    pin (Q) { direction : output; function : "IQ"; }
+    pin (Q) {
+      direction : output;
+      function : "IQ";
+      timing () {
+        related_pin : "CLK";
+        timing_type : falling_edge;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
   }
   cell (QUAL_LATCH_X1) {
     area : 3.0;
