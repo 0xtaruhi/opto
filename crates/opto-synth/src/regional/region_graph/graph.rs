@@ -295,6 +295,7 @@ impl SynthesisRegionRevision {
 pub struct SynthesisRegion {
     pub(super) graph_owner: RegionGraphOwnerId,
     pub(super) row: RegionRowId,
+    pub(super) partition_anchor: [u8; 32],
     pub(super) id: RegionAnchorId,
     pub(super) revision: RegionRevision,
     pub(super) kind: SynthesisRegionKind,
@@ -314,6 +315,10 @@ impl SynthesisRegion {
     /// Return the content-anchored identity stable across compatible revisions.
     pub const fn id(self) -> RegionAnchorId {
         self.id
+    }
+
+    pub(crate) const fn partition_anchor(self) -> [u8; 32] {
+        self.partition_anchor
     }
 
     #[must_use]
