@@ -129,8 +129,8 @@ impl LogicGraph {
     /// Counts how many times each node is referenced, treating every root as one
     /// external reference.
     ///
-    /// Rewriting, balancing, selector restructuring, and recipe replay all size
-    /// their MFFCs from this same count.
+    /// Rewriting, balancing, and recipe replay all size their MFFCs from this
+    /// same count.
     pub(crate) fn reference_counts(&self, roots: &[LogicNodeId]) -> Vec<u32> {
         let node_count = self.node_count();
         let mut references = vec![0u32; node_count];

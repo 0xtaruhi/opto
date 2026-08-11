@@ -102,18 +102,7 @@ pub(super) fn optimize(
         runtime,
         incremental,
     )?;
-    let baseline_roots = map_roots(&baseline.remap, roots)?;
-    let control = functional.is_none().then(|| {
-        super::control::build_control_choice(&source, roots, &baseline.network, &baseline_roots)
-    });
-    let alternatives = functional
-        .into_iter()
-        .chain(control.flatten().map(|choice| ChoiceProposal {
-            pass: "control_decomposition",
-            network: choice.network,
-            roots: choice.roots,
-        }))
-        .collect();
+    let alternatives = functional.into_iter().collect();
     finish(baseline, roots, alternatives)
 }
 
@@ -238,7 +227,7 @@ fn optimize_with(
             "AXM pass requirements do not align with roots",
         ));
     }
-    let mut state = TransformState::start(roots, super::selector::restructure(network, roots))?;
+    let mut state = TransformState::start(roots, copy_active(network, roots)?)?;
     rewrite(&mut state, requirements, diagnostics, runtime, incremental)?;
     state.network.freeze();
     state.analyses = TransformAnalyses::default();
@@ -311,6 +300,22 @@ fn identity(network: LogicGraph) -> TransformProduct {
         remap,
         analyses: TransformAnalyses::default(),
     }
+}
+
+fn copy_active(
+    network: &LogicGraph,
+    roots: &[LogicNodeId],
+) -> Result<TransformProduct, crate::SynthError> {
+    let live = live_nodes(network, roots);
+    let mut copied = LogicGraph::new();
+    let mut variables = HashMap::new();
+    let remap = copy_graph(network, Some(&live), &mut copied, &mut variables)?;
+    copied.freeze();
+    Ok(TransformProduct {
+        network: copied,
+        remap,
+        analyses: TransformAnalyses::default(),
+    })
 }
 
 pub(super) fn map_roots(
