@@ -409,38 +409,29 @@ pub(crate) fn lower_controls(
     sequential_catalog: &super::SequentialCellCatalog,
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
-    let mut controlled = BTreeMap::<word::OpId, ControlledRegister>::new();
-    for connect in module.connects() {
-        let value = module.value(connect.value).ok_or_else(|| {
-            crate::SynthError::invariant(format!("unknown RTL value {:?}", connect.value))
-        })?;
-        let word::ValueKind::Operation(operation_id) = value.kind else {
-            continue;
-        };
-        let operation = module.operation(operation_id).ok_or_else(|| {
-            crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
-        })?;
+    let mut controlled = Vec::new();
+    let mut direct_targets = register_targets(module)?;
+    let observability = crate::word::uses::netlist_observability(module)?;
+    for (index, operation) in module.operations().iter().enumerate() {
         let word::OpKind::Register(register) = &operation.kind else {
             continue;
         };
         if register.enable.is_none() && register.resets.is_empty() {
             continue;
         }
-        if controlled
-            .insert(
-                operation_id,
-                ControlledRegister {
-                    register: register.clone(),
-                    target: connect.target.clone(),
-                    source: operation.source.clone(),
-                },
-            )
-            .is_some()
-        {
-            return Err(crate::SynthError::invariant(format!(
-                "controlled register operation {operation_id:?} drives multiple targets"
-            )));
+        if !observability.observes_value(operation.result)? {
+            continue;
         }
+        let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
+        controlled.push((
+            operation_id,
+            ControlledRegister {
+                register: register.clone(),
+                result: operation.result,
+                target: direct_targets.remove(&operation_id),
+                source: operation.source.clone(),
+            },
+        ));
     }
 
     for (operation_id, controlled) in controlled {
@@ -491,7 +482,10 @@ pub(crate) fn lower_controls(
             }
         } else {
             if let Some(enable) = controlled.register.enable {
-                let q = read_target(module, &controlled.target, &controlled.source)?;
+                let q = match &controlled.target {
+                    Some(target) => read_target(module, target, &controlled.source)?,
+                    None => controlled.result,
+                };
                 data = if enable.active_high {
                     module.mux(enable.value, data, q, controlled.source.clone())
                 } else {
@@ -905,7 +899,8 @@ fn read_target(
 
 struct ControlledRegister {
     register: word::RegisterOp,
-    target: word::LValue,
+    result: word::ValueId,
+    target: Option<word::LValue>,
     source: word::SourceSpan,
 }
 

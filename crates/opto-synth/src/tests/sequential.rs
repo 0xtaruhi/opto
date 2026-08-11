@@ -446,6 +446,73 @@ fn synthesize_bitblasts_vector_flop_to_target_dffs() {
 }
 
 #[test]
+fn synthesize_preserves_reconstructed_state_and_controls() {
+    let mut module = WordModule::new("top");
+    let inputs = ["clk", "reset", "d0", "d1"].map(|name| {
+        module
+            .add_port(name, PortDirection::Input, bit(), test_span())
+            .unwrap()
+    });
+    let output = module
+        .add_port(
+            "q",
+            PortDirection::Output,
+            WordType::bits(2).unwrap(),
+            test_span(),
+        )
+        .unwrap();
+    let [clock, reset, d0, d1] = inputs.map(|port| read_port(&mut module, port));
+    let zero = module
+        .constant(ConstBits::from_bin_str("0").unwrap(), bit(), test_span())
+        .unwrap();
+    let states = [d0, d1].map(|d| {
+        module
+            .register(
+                word::RegisterOp {
+                    name: None,
+                    d,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: vec![word::Reset {
+                        kind: word::ResetKind::Sync,
+                        value: reset,
+                        active_high: true,
+                        reset_value: zero,
+                    }],
+                },
+                test_span(),
+            )
+            .unwrap()
+    });
+    let reconstructed = module
+        .concat(states.into_iter().rev().collect(), test_span())
+        .unwrap();
+    connect_port(&mut module, output, reconstructed);
+    let reset_gate = target_cell(
+        "ANR2",
+        1.0,
+        &[
+            ("A", TargetPinDirection::Input, None),
+            ("B", TargetPinDirection::Input, None),
+            ("Z", TargetPinDirection::Output, Some("A*!B")),
+        ],
+    );
+
+    let report = synthesize_test_module(
+        &mut module,
+        SynthesisOptions {
+            target_cells: vec![simple_dff_target_cell(), reset_gate].into(),
+        },
+    )
+    .unwrap();
+    let text = report.mapped_verilog();
+
+    assert_eq!(text.matches("  DFD1 ").count(), 2, "{text}");
+    assert_eq!(text.matches("  ANR2 ").count(), 2, "{text}");
+}
+
+#[test]
 fn synthesize_shares_equivalent_registers_inside_a_small_design_region() {
     let mut module = WordModule::new("top");
     let clock = module

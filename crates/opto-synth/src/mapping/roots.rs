@@ -178,6 +178,23 @@ pub(crate) fn mapping_roots(
 ) -> Result<Vec<MappingRoot>, crate::SynthError> {
     let mut roots = Vec::new();
     let global_required = timing.minimum_synthesis_delay();
+    let observability = crate::word::uses::netlist_observability(module)?;
+    // State shells are semantic roots even when their results reach a signal
+    // through Concat, Extract, or Cast rather than as its direct driver.
+    for operation in module.operations() {
+        if !observability.observes_value(operation.result)? {
+            continue;
+        }
+        publish_state_roots(
+            &mut roots,
+            module,
+            operation,
+            timing,
+            port_bindings,
+            sequential_timing,
+            global_required,
+        );
+    }
     for connect in module.connects() {
         let endpoint = timing_port_for_signal(module, connect.target.signal, port_bindings);
         let endpoint_required = endpoint
@@ -187,62 +204,23 @@ pub(crate) fn mapping_roots(
         let value = module.value(connect.value).ok_or_else(|| {
             crate::SynthError::invariant(format!("unknown RTL value {:?}", connect.value))
         })?;
-        let word::ValueKind::Operation(operation_id) = value.kind else {
-            roots.push(MappingRoot {
-                value: connect.value,
-                required_time: endpoint_required,
-                output_load,
-                requires_combinational_cover: false,
-            });
-            continue;
-        };
-        let operation = module.operation(operation_id).ok_or_else(|| {
-            crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
-        })?;
-        if let word::OpKind::Register(register) = &operation.kind {
-            let mut required_time = timing_port_for_value(module, register.clock, port_bindings)
-                .and_then(|port| timing.minimum_clock_period_on(port))
-                .or(global_required);
-            if let (Some(required), Some(setup)) = (
-                required_time,
-                sequential_timing.and_then(|projection| projection.setup(connect.value)),
+        if let word::ValueKind::Operation(operation_id) = value.kind {
+            let operation = module.operation(operation_id).ok_or_else(|| {
+                crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
+            })?;
+            if matches!(
+                operation.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
             ) {
-                required_time = Some(required - setup);
+                continue;
             }
-            roots.push(MappingRoot {
-                value: register.d,
-                required_time,
-                output_load: None,
-                requires_combinational_cover: false,
-            });
-            roots.push(timed_root(register.clock, global_required));
-            if let Some(enable) = register.enable {
-                roots.push(timed_root(enable.value, global_required));
-            }
-            for reset in &register.resets {
-                roots.push(timed_root(reset.value, global_required));
-                roots.push(timed_root(reset.reset_value, global_required));
-            }
-        } else if let word::OpKind::Latch(latch) = &operation.kind {
-            roots.push(MappingRoot {
-                value: latch.d,
-                required_time: global_required,
-                output_load: None,
-                requires_combinational_cover: false,
-            });
-            roots.push(timed_root(latch.enable.value, global_required));
-            for reset in &latch.resets {
-                roots.push(timed_root(reset.value, global_required));
-                roots.push(timed_root(reset.reset_value, global_required));
-            }
-        } else {
-            roots.push(MappingRoot {
-                value: connect.value,
-                required_time: endpoint_required,
-                output_load,
-                requires_combinational_cover: false,
-            });
         }
+        roots.push(MappingRoot {
+            value: connect.value,
+            required_time: endpoint_required,
+            output_load,
+            requires_combinational_cover: false,
+        });
     }
     for connection in module
         .instances()
@@ -256,6 +234,61 @@ pub(crate) fn mapping_roots(
         );
     }
     Ok(merge_by_value(roots))
+}
+
+fn publish_state_roots(
+    roots: &mut Vec<MappingRoot>,
+    module: &word::WordModule,
+    operation: &word::Operation,
+    timing: &opto_timing::TimingContext,
+    port_bindings: &opto_timing::PortBindings,
+    sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
+    global_required: Option<f64>,
+) -> bool {
+    match &operation.kind {
+        word::OpKind::Register(register) => {
+            let mut required = timing_port_for_value(module, register.clock, port_bindings)
+                .and_then(|port| timing.minimum_clock_period_on(port))
+                .or(global_required);
+            if let (Some(current), Some(setup)) = (
+                required,
+                sequential_timing.and_then(|projection| projection.setup(operation.result)),
+            ) {
+                required = Some(current - setup);
+            }
+            roots.push(MappingRoot {
+                value: register.d,
+                required_time: required,
+                output_load: None,
+                requires_combinational_cover: false,
+            });
+            roots.push(timed_root(register.clock, global_required));
+            roots.extend(
+                register
+                    .enable
+                    .map(|enable| timed_root(enable.value, global_required)),
+            );
+            for reset in &register.resets {
+                roots.push(timed_root(reset.value, global_required));
+                roots.push(timed_root(reset.reset_value, global_required));
+            }
+        }
+        word::OpKind::Latch(latch) => {
+            roots.push(MappingRoot {
+                value: latch.d,
+                required_time: global_required,
+                output_load: None,
+                requires_combinational_cover: false,
+            });
+            roots.push(timed_root(latch.enable.value, global_required));
+            for reset in &latch.resets {
+                roots.push(timed_root(reset.value, global_required));
+                roots.push(timed_root(reset.reset_value, global_required));
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// Folds every sink constraint on a value into the single root that names it.

@@ -5,6 +5,7 @@ use opto_ir::word;
 
 pub(crate) struct NetlistObservability {
     observed_signals: Box<[bool]>,
+    reachable_values: Box<[bool]>,
 }
 
 impl NetlistObservability {
@@ -18,6 +19,17 @@ impl NetlistObservability {
             .ok_or_else(|| {
                 crate::SynthError::invariant(
                     "observability query references a signal outside the Word arena",
+                )
+            })
+    }
+
+    pub(crate) fn observes_value(&self, value: word::ValueId) -> Result<bool, crate::SynthError> {
+        self.reachable_values
+            .get(value.index())
+            .copied()
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "observability query references a value outside the Word arena",
                 )
             })
     }
@@ -116,6 +128,7 @@ pub(crate) fn netlist_observability(
 
     Ok(NetlistObservability {
         observed_signals: observed_signals.into_boxed_slice(),
+        reachable_values: reachable_values.into_boxed_slice(),
     })
 }
 
