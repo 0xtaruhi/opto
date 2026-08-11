@@ -149,6 +149,7 @@ struct ScenarioLeakageCensus {
 struct MeasuredEpoch {
     plans: Vec<crate::RegionCoverPlan>,
     global_dynamic_power: Option<f64>,
+    timing_quality: Option<opto_timing::TimingQualitySummary>,
 }
 
 pub(crate) fn map_mapping_library_cells(

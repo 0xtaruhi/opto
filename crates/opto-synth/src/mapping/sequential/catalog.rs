@@ -10,6 +10,7 @@ use crate::{
     TargetSequentialRef,
 };
 use opto_ir::word;
+use opto_library::{TargetTimingType, TimingCheckKind, TimingEdge};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
@@ -17,9 +18,78 @@ pub(crate) mod cells;
 
 use cells::{
     AsyncControl, AsyncResetRequest, LatchCell, SequentialCell, SequentialEnableCell,
-    SequentialInvertedOutput, asynchronous_controls, cell_cost, compare_cells, compare_latch_cells,
-    enable_flip_flop_pattern, is_input_pin, latch_cell, next_state_input_pins, state_output_pins,
+    SequentialInvertedOutput, SequentialTiming, asynchronous_controls, cell_cost, compare_cells,
+    compare_latch_cells, enable_flip_flop_pattern, is_input_pin, latch_cell, next_state_input_pins,
+    sequential_timing, state_output_pins,
 };
+
+#[derive(Debug, Default)]
+pub(crate) struct SequentialTimingProjection {
+    rows: Box<[(word::ValueId, SequentialTiming)]>,
+}
+
+impl SequentialTimingProjection {
+    pub(crate) fn build(
+        module: &word::WordModule,
+        sequential: &SequentialCellCatalog,
+        combinational: &crate::mapping::library::CombinationalCellCatalog,
+    ) -> Result<Self, crate::SynthError> {
+        let live = crate::mapping::word_util::live_operation_mask(module, &[])?;
+        let mut rows = module
+            .operations()
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| live[index])
+            .filter_map(|(_, operation)| match &operation.kind {
+                word::OpKind::Register(register) => Some((operation.result, register)),
+                _ => None,
+            })
+            .map(|(result, register)| {
+                sequential
+                    .select_register(module, register, combinational)
+                    .map(|selected| (result, selected.timing()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.sort_unstable_by_key(|&(value, _)| value);
+        Ok(Self {
+            rows: rows.into_boxed_slice(),
+        })
+    }
+
+    fn timing(&self, value: word::ValueId) -> Option<SequentialTiming> {
+        self.rows
+            .binary_search_by_key(&value, |&(value, _)| value)
+            .ok()
+            .map(|index| self.rows[index].1)
+    }
+
+    pub(crate) fn clock_to_q(&self, value: word::ValueId) -> Option<f64> {
+        self.timing(value).and_then(|timing| timing.clock_to_q)
+    }
+
+    pub(crate) fn output_transition(&self, value: word::ValueId) -> Option<f64> {
+        self.timing(value)
+            .and_then(|timing| timing.output_transition)
+    }
+
+    pub(crate) fn setup(&self, value: word::ValueId) -> Option<f64> {
+        self.timing(value).and_then(|timing| timing.setup)
+    }
+}
+
+pub(crate) enum SelectedRegisterCell<'a> {
+    Simple(&'a SequentialCell),
+    Enabled(&'a SequentialEnableCell),
+}
+
+impl SelectedRegisterCell<'_> {
+    fn timing(&self) -> SequentialTiming {
+        match self {
+            Self::Simple(cell) => cell.timing,
+            Self::Enabled(cell) => cell.timing,
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct SequentialCellCatalog {
@@ -92,6 +162,13 @@ impl SequentialCellCatalog {
                             resets,
                             edge,
                             cost,
+                            timing: sequential_timing(
+                                cell,
+                                pattern.data_pin,
+                                clock_pin,
+                                output_pin,
+                                edge,
+                            ),
                         });
                     }
                     continue;
@@ -114,6 +191,7 @@ impl SequentialCellCatalog {
                     resets,
                     edge,
                     cost,
+                    timing: sequential_timing(cell, data_pin, clock_pin, output_pin, edge),
                 };
                 catalog.cells.push(candidate);
             }
@@ -170,6 +248,32 @@ impl SequentialCellCatalog {
                     .map(AsyncControl::request)
                     .eq(resets.iter().copied())
         })
+    }
+
+    pub(crate) fn select_register<'a>(
+        &'a self,
+        module: &word::WordModule,
+        register: &word::RegisterOp,
+        combinational: &crate::mapping::library::CombinationalCellCatalog,
+    ) -> Result<SelectedRegisterCell<'a>, crate::SynthError> {
+        let resets = super::async_reset_requests(module, &register.resets)?;
+        if let Some(enable) = register.enable {
+            return self
+                .best_enable(
+                    register.edge,
+                    &resets,
+                    enable.active_high,
+                    false,
+                    super::enable_inverter_cost(module, enable.value, combinational),
+                )
+                .map(SelectedRegisterCell::Enabled)
+                .ok_or_else(|| {
+                    crate::SynthError::mapping("target library has no compatible enabled DFF")
+                });
+        }
+        self.best(register.edge, &resets, false, None)
+            .map(SelectedRegisterCell::Simple)
+            .ok_or_else(|| crate::SynthError::mapping("target library has no compatible DFF"))
     }
 
     pub(crate) fn best_enable(

@@ -364,6 +364,14 @@ used. The worker then performs, in that module:
 2. semantic operator discovery and architecture choice;
 3. selected-recipe bit lowering and Liberty Boolean cover.
 
+The sequential shell is selected before Boolean cover establishes its timing
+coordinates. Cover guidance and substrate materialization call one deterministic
+register-cell selector: the selected flip-flop's characterized clock-to-Q delay
+and output transition seed the `Q` boundary input, while its setup check reduces
+the corresponding `D` root requirement. Missing characterization remains absent
+rather than becoming an invented zero. Latch transparency remains the global
+timing engine's responsibility and is not approximated as a flip-flop boundary.
+
 The canonical Boolean subject is an **AXM graph**:
 
 ```text
@@ -494,6 +502,10 @@ and new footprint. The transaction core rejects any existing cell or net outside
 that explicit read/write set.
 
 The committed generation is evaluated by authoritative global timing and power.
+Every epoch derives checkpoint WNS, TNS, and violating-endpoint count from the
+complete mapped MMMC owners, including the materialized sequential shell.
+Projected regional timing guides the first cover but never decides which mapped
+checkpoint is best and is never reported as committed-candidate slack.
 Measured boundary responses may reallocate contracts and mark dirty regions.
 An epoch updates the dirty plans' explicit contract and context rows, then
 replaces only those plans' owned footprints. It does not reopen private cover,
@@ -505,7 +517,9 @@ global shell is forbidden.
 
 There is one MMMC fact source, but acceptance authority is deliberately scoped
 to its decision domain. Initial mapping has one total `MappedObjective` used
-only to retain or restore an epoch checkpoint from boundary-contract metrics.
+only to retain or restore an epoch checkpoint. Its timing order comes from the
+complete mapped MMMC quality; boundary-contract metrics identify local response
+and break exact global timing ties rather than replacing full-design STA.
 Post-map has one transaction gate that first rejects any edit that removes a
 frozen boundary net or changes the unique driver of an affected observable
 output, then compares full-design STA/DRC and physical metrics before commit or
@@ -993,6 +1007,7 @@ defect.
 | Direct transactional region artifact commit | Implemented |
 | Single-atom mapped ownership and edge-owned boundary repair | Implemented |
 | Sparse boundary measurement and bounded feedback | Implemented |
+| Selected sequential clock-to-Q/setup projection plus exact mapped checkpoint timing | Implemented |
 | One shared sparse MMMC owner service | Implemented |
 | Transactional mapped optimization and exact STA | Implemented |
 | Structured source diagnostics | Implemented for synthesis/frontend errors carried by typed diagnostics; coverage continues to expand |

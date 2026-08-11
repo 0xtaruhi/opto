@@ -12,6 +12,7 @@ pub(super) struct BestMapping {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MappedObjective {
     legal: bool,
+    timing_violations: usize,
     worst_normalized_violation: crate::FiniteValue,
     minimum_slack: crate::FiniteValue,
     total_negative_slack: crate::FiniteValue,
@@ -30,6 +31,7 @@ impl MappedObjective {
         implementation_leakage: Option<f64>,
         implementation_cell_count: u64,
         static_implementation_key: [u8; 32],
+        timing_quality: Option<opto_timing::TimingQualitySummary>,
     ) -> Result<Self, crate::SynthError> {
         let costs = plans
             .iter()
@@ -45,8 +47,26 @@ impl MappedObjective {
             digest.update(&cost.stable_plan_key);
         }
         digest.update(&static_implementation_key);
+        let projected_minimum_slack = costs
+            .iter()
+            .map(|cost| cost.minimum_slack.get())
+            .min_by(f64::total_cmp)
+            .unwrap_or(0.0);
+        let projected_total_negative_slack =
+            saturated_sum(costs.iter().map(|cost| cost.total_negative_slack.get()));
+        let (timing_violations, minimum_slack, total_negative_slack) = timing_quality.map_or_else(
+            || (0, projected_minimum_slack, projected_total_negative_slack),
+            |quality| {
+                (
+                    quality.violating_paths(),
+                    quality.wns().unwrap_or(0.0),
+                    -quality.tns(),
+                )
+            },
+        );
         Ok(Self {
             legal: costs.iter().all(|cost| cost.legal),
+            timing_violations,
             worst_normalized_violation: finite(
                 costs
                     .iter()
@@ -54,16 +74,8 @@ impl MappedObjective {
                     .max_by(f64::total_cmp)
                     .unwrap_or(0.0),
             )?,
-            minimum_slack: finite(
-                costs
-                    .iter()
-                    .map(|cost| cost.minimum_slack.get())
-                    .min_by(f64::total_cmp)
-                    .unwrap_or(0.0),
-            )?,
-            total_negative_slack: finite(saturated_sum(
-                costs.iter().map(|cost| cost.total_negative_slack.get()),
-            ))?,
+            minimum_slack: finite(minimum_slack)?,
+            total_negative_slack: finite(total_negative_slack)?,
             area: finite(implementation_area)?,
             leakage_power: implementation_leakage
                 .or_else(|| complete_optional_sum(costs.iter().map(|cost| cost.leakage_power)))
@@ -82,16 +94,17 @@ impl MappedObjective {
         other
             .legal
             .cmp(&self.legal)
+            .then_with(|| self.timing_violations.cmp(&other.timing_violations))
+            .then_with(|| self.total_negative_slack.cmp(&other.total_negative_slack))
+            .then_with(|| other.minimum_slack.cmp(&self.minimum_slack))
             .then_with(|| {
                 self.worst_normalized_violation
                     .cmp(&other.worst_normalized_violation)
             })
-            .then_with(|| self.total_negative_slack.cmp(&other.total_negative_slack))
             .then_with(|| self.area.cmp(&other.area))
             .then_with(|| compare_optional_finite(self.leakage_power, other.leakage_power))
             .then_with(|| compare_optional_finite(self.dynamic_power, other.dynamic_power))
             .then_with(|| self.cell_count.cmp(&other.cell_count))
-            .then_with(|| other.minimum_slack.cmp(&self.minimum_slack))
             .then_with(|| self.stable_key.cmp(&other.stable_key))
             .is_lt()
     }

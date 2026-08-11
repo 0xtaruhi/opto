@@ -194,6 +194,28 @@ impl RegionLogicSlice {
         })
     }
 
+    pub(crate) fn project_sequential_timing(
+        &mut self,
+        sequential_timing: &super::sequential::SequentialTimingProjection,
+    ) {
+        merge_max_timing(
+            &mut self.search_input_arrivals,
+            self.inputs.iter().filter_map(|&input| {
+                sequential_timing
+                    .clock_to_q(input)
+                    .map(|timing| (input, timing))
+            }),
+        );
+        merge_max_timing(
+            &mut self.search_input_transitions,
+            self.inputs.iter().filter_map(|&input| {
+                sequential_timing
+                    .output_transition(input)
+                    .map(|timing| (input, timing))
+            }),
+        );
+    }
+
     fn from_resolved(
         module: &word::WordModule,
         inputs: &BTreeSet<word::ValueId>,
@@ -365,6 +387,20 @@ impl RegionLogicSlice {
                 )
             })
     }
+}
+
+fn merge_max_timing(
+    rows: &mut Box<[(word::ValueId, f64)]>,
+    additions: impl IntoIterator<Item = (word::ValueId, f64)>,
+) {
+    let mut merged = rows.iter().copied().collect::<BTreeMap<_, _>>();
+    for (value, timing) in additions {
+        merged
+            .entry(value)
+            .and_modify(|current| *current = current.max(timing))
+            .or_insert(timing);
+    }
+    *rows = merged.into_iter().collect();
 }
 
 fn boundary_aliases(
