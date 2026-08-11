@@ -215,16 +215,13 @@ an independently maintained cell footprint. Driver provenance and ownership
 lineage are recorded separately, so a sink affects placement of the boundary
 artifact without becoming a semantic origin of the driver logic.
 
-The boundary segment is a cache artifact, not merely an ownership label on a
-temporary `RegionDelta`. After post-map commit, its exact edge cell footprint is
-encoded with stable endpoint anchors into `RegionalCacheRecord`; the edge's
-semantic identity is sealed from graph boundary keys and endpoint contexts,
-while its generation is sealed from the portable topology. At the final
-regional epoch of a later synthesis, matching records are reconstructed into one
-generation-local cell/net/pin footprint and committed with the existing MMMC
-mapped transaction. Context, graph-edge, library, name, ownership, footprint,
-and content-generation mismatches fail closed. Records never serialize a
-`CellId`, `NetId`, or `PinId`, and the boundary path has no region/global
+The boundary segment is a live implementation artifact, not merely an ownership
+label on a temporary `RegionDelta`. Its exact edge cell footprint belongs to the
+current mapped generation and is committed with the existing MMMC transaction.
+Post-map reconstructs the physical repair topology canonically on every
+synthesis run from graph boundary keys, endpoint contexts, and the current
+implementation. `RegionalCacheRecord` retains regional construction decisions,
+not a portable boundary topology, and the boundary path has no region/global
 fallback.
 
 HFNS uses actual mapped sink-pin capacitance and fanout in every early/late
