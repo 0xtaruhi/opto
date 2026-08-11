@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    BoundaryCheckKind, BoundaryContract, BoundaryContractRow, BoundaryDataflowContract,
-    BoundaryInputContract, BoundaryKnownFact, BoundaryOutputContract, EarlyLate, FiniteValue,
-    RiseFall, TimingTag, TimingTagId, TimingTagInterner, check_value_lane, input_transition_lane,
-    path_timing_lane,
+    BoundaryCheckKind, BoundaryContract, BoundaryContractRow, BoundaryInputContract,
+    BoundaryOutputContract, EarlyLate, FiniteValue, RiseFall, TimingTag, TimingTagId,
+    TimingTagInterner, check_value_lane, input_transition_lane, path_timing_lane,
 };
 use opto_ir::word;
 use opto_timing::{Scenario, ScenarioCheckSet, ScenarioSet, TimingEdge};
@@ -21,7 +20,6 @@ type PathBudget = (Option<f64>, Option<f64>);
 #[derive(Debug, Clone)]
 pub(crate) struct RegionContractSet {
     contracts: Box<[Box<[BoundaryContract]>]>,
-    dataflow: Box<[Box<[BoundaryDataflowContract]>]>,
     delay_budgets: Box<[Option<f64>]>,
     timing_tags: TimingTagInterner,
 }
@@ -76,7 +74,6 @@ impl RegionContractSet {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut rows = Vec::with_capacity(regions.regions().len());
-        let mut dataflow_rows = Vec::with_capacity(regions.regions().len());
         for region in regions.regions() {
             let mut contracts = Vec::new();
             for &port in regions
@@ -135,32 +132,10 @@ impl RegionContractSet {
                 );
             }
             contracts.sort_by_key(|contract| contract.port().id());
-            let mut dataflow = Vec::with_capacity(contracts.len());
-            for contract in &contracts {
-                let value = contract.port().value();
-                let incoming = BoundaryDataflowContract {
-                    known: module
-                        .value(value)
-                        .map_or(BoundaryKnownFact::Unknown, |value| match &value.kind {
-                            word::ValueKind::Constant(bits) => {
-                                BoundaryKnownFact::Constant(bits.clone())
-                            }
-                            word::ValueKind::Signal(_) | word::ValueKind::Operation(_) => {
-                                BoundaryKnownFact::Unknown
-                            }
-                        }),
-                    live: true,
-                };
-                let mut contract = BoundaryDataflowContract::default();
-                contract.refine(&incoming);
-                dataflow.push(contract);
-            }
             rows.push(contracts.into_boxed_slice());
-            dataflow_rows.push(dataflow.into_boxed_slice());
         }
         Ok(Self {
             contracts: rows.into_boxed_slice(),
-            dataflow: dataflow_rows.into_boxed_slice(),
             delay_budgets,
             timing_tags,
         })
@@ -172,29 +147,6 @@ impl RegionContractSet {
 
     pub(crate) fn contracts(&self, row: crate::RegionRowId) -> &[BoundaryContract] {
         &self.contracts[row.index()]
-    }
-
-    pub(crate) fn dataflow(
-        &self,
-        row: crate::RegionRowId,
-        port: crate::RegionBoundaryPortId,
-    ) -> Result<&BoundaryDataflowContract, crate::SynthError> {
-        let contracts = self.contracts(row);
-        let index = contracts
-            .binary_search_by_key(&port, |contract| contract.port().id())
-            .map_err(|_| {
-                crate::SynthError::invariant(
-                    "regional dataflow contract references an unknown boundary port",
-                )
-            })?;
-        self.dataflow
-            .get(row.index())
-            .and_then(|contracts| contracts.get(index))
-            .ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "regional dataflow contracts do not align with timing contracts",
-                )
-            })
     }
 
     pub(crate) fn timing_tags(&self) -> &TimingTagInterner {

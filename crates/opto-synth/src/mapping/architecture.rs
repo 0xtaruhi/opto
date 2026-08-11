@@ -586,17 +586,15 @@ impl RegionArchitectureMaterializer<'_> {
             let port = self.regions.port(port).ok_or_else(|| {
                 crate::SynthError::invariant("regional output references an unknown port")
             })?;
-            if self.contracts.dataflow(region.row(), port.id())?.live {
-                regional_observations.push(port.value());
-                let value = self.semantics.canonical_root(port.value())?;
-                if self.value_belongs_to_region(value, region.row(), memories)? {
-                    regional_roots.push(MappingRoot {
-                        value,
-                        required_time: None,
-                        output_load: None,
-                        requires_combinational_cover: self.semantics.requires_artifact(value)?,
-                    });
-                }
+            regional_observations.push(port.value());
+            let value = self.semantics.canonical_root(port.value())?;
+            if self.value_belongs_to_region(value, region.row(), memories)? {
+                regional_roots.push(MappingRoot {
+                    value,
+                    required_time: None,
+                    output_load: None,
+                    requires_combinational_cover: self.semantics.requires_artifact(value)?,
+                });
             }
         }
         let regional_roots = merge_by_value(regional_roots);

@@ -73,13 +73,12 @@ pub use planning::{
 };
 pub use regional::{
     BoundaryCheckKind, BoundaryContract, BoundaryContractError, BoundaryContractRow,
-    BoundaryDataflowContract, BoundaryInputContract, BoundaryKnownFact, BoundaryOutputContract,
-    BoundaryPortId, BoundaryResponse, BoundaryResponseRow, BoundaryValueRevision,
-    ContractGeneration, EarlyLate, FiniteValue, OperationAnchorId, RegionAnchorId,
-    RegionBoundaryPort, RegionBoundaryPortId, RegionContextKey, RegionCoverPlan, RegionPlanCost,
-    RegionPlanIdentity, RegionPlanSize, RegionPortDirection, RegionRevision, RegionRowId, RiseFall,
-    SynthesisRegion, SynthesisRegionGraph, SynthesisRegionKind, SynthesisRegionRevision, TimingTag,
-    TimingTagId, TimingTagInterner,
+    BoundaryInputContract, BoundaryOutputContract, BoundaryPortId, BoundaryResponse,
+    BoundaryResponseRow, BoundaryValueRevision, ContractGeneration, EarlyLate, FiniteValue,
+    OperationAnchorId, RegionAnchorId, RegionBoundaryPort, RegionBoundaryPortId, RegionContextKey,
+    RegionCoverPlan, RegionPlanCost, RegionPlanIdentity, RegionPlanSize, RegionPortDirection,
+    RegionRevision, RegionRowId, RiseFall, SynthesisRegion, SynthesisRegionGraph,
+    SynthesisRegionKind, SynthesisRegionRevision, TimingTag, TimingTagId, TimingTagInterner,
 };
 
 #[cfg(test)]
