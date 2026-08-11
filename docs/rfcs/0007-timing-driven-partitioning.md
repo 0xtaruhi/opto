@@ -30,7 +30,7 @@ Ownership Partition    cone claiming from stable anchors, then local matching
 Owned Structure        FSM/sharing/control rewrites, confined to one owner
 Final Region Freeze    rebuild identities, boundaries, estimates, and contracts
 Region Work            private IR: optimize, plan, lower, map (parallel)
-  <-> Boundary Facts   monotone worklist propagation, interleaved
+  <-> Timing Contract  sparse timing/electrical feedback only
 Assembly               deterministic publication from region artifacts
 ```
 
@@ -55,8 +55,9 @@ Five pillars:
 3. **Region-private authority and IR** — structural rewrites have exactly one
    region owner; after the final freeze each region owns a local module and
    returns a complete artifact.
-4. **Boundary contracts as the sole cross-region channel** — timing budget plus
-   dataflow facts, propagated by monotone worklist.
+4. **One dataflow authority** — the frozen Word graph defines connectivity,
+   constants, liveness, and region ports; boundary contracts carry only
+   timing/electrical measurements.
 5. **Locally dependent budget** — absolute estimated delay, no design-wide
    normalization.
 
@@ -369,71 +370,19 @@ lowering, Boolean optimization, and cover operate only on the private module.
 Assembly is deterministic reconstruction from region artifacts in region
 order.
 
-### Pillar 4: boundary facts by monotone propagation
+### Pillar 4: one frozen dataflow authority
 
-Boundary propagation cannot be a single pass before region work, because a
-region's output facts are produced *by* that work. Propagation and region work
-interleave under one worklist.
+Boundary contracts do not duplicate Word semantics. The final Word graph is
+the only authority for connectivity, constants, liveness, aliases, and region
+ports. Region optimization may simplify an owned implementation, but its local
+care set cannot publish an alias into the global substrate or delete another
+owner's endpoint.
 
-```rust
-pub enum BoundaryKnownFact {
-    Unknown,
-    Constant(ConstBits),
-    Packed(KnownBits128),
-    Conflict,
-}
-
-pub struct BoundaryDataflowContract {
-    known: BoundaryKnownFact,
-    live: bool,
-}
-```
-
-**Meet table.** `Unknown` is the top element meaning *no information has reached
-this port yet*; `Conflict` is the bottom element meaning *no single fact holds
-on all incoming paths*.
-
-| meet | `Unknown` | `Constant(b)` | `Packed(b)` | `Conflict` |
-| --- | --- | --- | --- | --- |
-| `Unknown` | `Unknown` | `Constant(b)` | `Packed(b)` | `Conflict` |
-| `Constant(a)` | `Constant(a)` | `Constant(a)` if `a == b`, else `Conflict` | agreement of `a` and `b`; `Conflict` if none | `Conflict` |
-| `Packed(a)` | `Packed(a)` | symmetric | `Packed(agree(a, b))`; `Conflict` if no bit agrees | `Conflict` |
-| `Conflict` | `Conflict` | `Conflict` | `Conflict` | `Conflict` |
-
-`agree` keeps bits proven identical in both operands and marks the rest unknown.
-A `Constant` wider than 128 bits meeting a `Packed` is `Conflict` unless the
-constant matches every proven bit, in which case the `Packed` result is kept.
-
-**Interpretation by the optimizer.** `Constant` and `Packed` may be folded.
-`Unknown` and `Conflict` are both treated as fully unknown and may not be folded
-— they are indistinguishable to a region pass. They differ only in propagation:
-`Unknown` may still be lowered by an incoming fact, while `Conflict` is a
-fixpoint and never changes again.
-
-Both lattices have finite height and descend only, so worklist propagation
-terminates on its own; no iteration cap is specified because none is needed.
-`live` starts empty and grows backward from output ports and preserved signals.
-
-**Width limitation, stated explicitly.** `KnownBits128` deliberately does not
-represent values wider than 128 bits, and `packed128` returns `None` above that
-width. Wide boundary values propagate a fact only when wholly constant;
-otherwise they propagate `Unknown`. This RFC does **not** claim region-private
-passes receive everything a whole-module pass had.
-
-**Two-tier scheduling.** Fact propagation runs to fixpoint unbounded — pure
-analysis over the region graph, rescheduling only regions whose input facts
-changed. Region work re-execution is bounded by policy: re-optimizing a region
-because an input fact improved is expensive, and the bound is a cost decision,
-not a correctness one. A region that is not re-run keeps a valid but
-less-optimized implementation.
-
-State regions cut the combinational graph, so the combinational region graph is
-a DAG and one topological sweep suffices there; only sequential feedback
-iterates.
-
-**Boundary identity is for wiring and caching only.** `BoundaryPortId` means the
-same net at assembly; `BoundaryValueRevision` means the same content for
-invalidation. Neither licenses merging implementations across regions.
+`BoundaryContract` carries only sparse timing and electrical rows. Feedback may
+change a region's optimization budget, but it does not rewrite connectivity,
+repartition ownership, or manufacture a dataflow fact. `BoundaryPortId` keeps
+wiring identity and `BoundaryValueRevision` keeps invalidation identity;
+neither licenses merging implementations across owners.
 
 ### Pillar 5: locally dependent budget
 
@@ -474,21 +423,21 @@ Three different things cross boundaries, and this RFC treats them differently.
 
 | Kind | Examples | Disposition |
 | --- | --- | --- |
-| Information | timing budget, known bits, liveness, wiring aliases | **kept and extended** — boundary contracts, pillar 4 |
+| Information | timing budget and electrical limits | **explicit** — boundary contracts, pillar 4 |
+| Dataflow | constants, liveness, aliases, region ports | **frozen** — derived only from the Word graph |
 | Semantic structure | CSE, sequential merging, resource sharing | **owner-confined** — retained inside one provisional owner, unavailable across owners |
-| Physical and post-map | buffering, don't-care resynthesis, boundary repair, load fixing | **unaffected** — already global, and stays global |
+| Physical and post-map | buffering, resynthesis, boundary repair, load fixing | **globally scheduled, owner-confined mutation** |
 
-**Post-map is not constrained by this RFC.** `engine::optimize_postmap` passes
-the whole `MappedNetlist` to `closure::postmap`, which performs buffering,
-`mfs` don't-care resynthesis, mapped-timing repair, and boundary repair across
-regions; `owner_impact.regions()` returns the *set* of regions a commit touched,
-and affected region plans are invalidated accordingly. That stage is global by
-design and remains so. The scope of this RFC is the pre-freeze semantic
-optimization stage only.
+**Post-map is globally measured but not ownerless.** `engine::optimize_postmap`
+passes the whole `MappedNetlist` to `closure::postmap` for full-design timing
+and electrical measurement. A mutation remains inside one exact implementation
+owner; immutable external nets and nets between different owners are frozen
+optimization boundaries. Boundary repair receives one explicit directed-edge
+owner, and affected owners are invalidated from durable provenance rather than
+cell names or reconstructed hierarchy.
 
-The same split appears in industrial flows: distribution and partitioning apply
-to technology-independent optimization and mapping, while post-map optimization
-is a global incremental phase.
+The stage is global in analysis and transaction ordering, not in write
+authority.
 
 **Why the semantic-structure row stops at the owner.** A cross-boundary
 structural optimization is compensation for a partition that put the wrong
@@ -534,27 +483,26 @@ and identical output.
 **Incrementality.** Guaranteed by construction: partition inputs are structural,
 locally computed, and locally terminated (pillar 1); identity separates location
 from content at every level (identity section); work is region-private
-(pillar 3); cross-region information is explicit and monotone (pillar 4); budget
-has no global normalizer (pillar 5).
+(pillar 3); dataflow has one frozen authority (pillar 4); budget has no global
+normalizer (pillar 5).
 
 **Scalability.** Serial work is criticality estimation (parallel by level), cone
 claiming, a fixed number of matching rounds, deterministic commits of
-owner-confined structural plans, fact propagation, and assembly. Expensive
-architecture discovery and Boolean mapping scale over final private modules;
-the owned structural stage never searches across the whole design for a shared
-candidate.
+owner-confined structural plans, timing-contract propagation, and assembly.
+Expensive architecture discovery and Boolean mapping scale over final private
+modules; the owned structural stage never searches across the whole design for
+a shared candidate.
 
 **QoR.** Not neutral.
 
 *Expected gains* — flip-flops keep their fan-in cones, so a critical path is
 optimized as one path inside one region instead of being cut at every register
-boundary; constant propagation across register boundaries becomes possible.
+boundary.
 
 *Deliberate losses* — cross-region CSE; resource sharing and sequential
 equivalence across provisional owners; design-level architecture solve; FSM
-re-encoding for machines whose output logic is not co-resident; boundary facts
-for partially-known values wider than 128 bits; estimation accuracy for fusible
-operator chains.
+re-encoding for machines whose output logic is not co-resident; estimation
+accuracy for fusible operator chains.
 
 *Risks* — criticality estimate has no wirelength and no fusion awareness;
 non-owner cones of shared logic have a cut path; frontier fragmentation may
@@ -680,11 +628,10 @@ removing whole-module visibility necessarily changes the netlist. QoR regression
 within a stated threshold that phase 3 is expected to recover; pre-mapping wall
 time scales with core count.
 
-**Phase 3 — boundary facts.** Add `BoundaryDataflowContract` with the meet table
-and width limitation as specified. Implement monotone worklist propagation with
-two-tier scheduling.
-*Accept:* QoR recovers the phase 2 regression; cross-register constant
-propagation is a measurable new gain.
+**Phase 3 — timing contracts.** Add sparse timing/electrical boundary rows while
+keeping the frozen Word graph as the sole dataflow authority.
+*Accept:* feedback changes bounded regional optimization policy without
+changing connectivity, ownership, or publication identity.
 
 **Phase 4 — region-owned structural passes.** Establish provisional ownership,
 then run `optimize_derived_fsms`, `share_equivalent_sequential_values`, and

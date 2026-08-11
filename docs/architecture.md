@@ -298,10 +298,12 @@ not run here. After the owned structural stage,
 `StructuralOwnershipProvenance` is the write authority during structural
 preparation. Initial operations carry their frozen owner atom; every transform
 must claim each generated operation from an exact source set with one common
-atom. The final graph consumes those claims and verifies that it did not split
-a frozen owner. Ownership is not a preparation-side lookup that later
-partitioning may discard: it survives operation replacement, final partition,
-private-IR construction, plan binding, artifact publication, and provenance.
+atom. The final graph independently recomputes the complete synthesis-root
+closure, rejects an unowned live operation, and verifies that every surviving
+frozen atom remains whole. Final partitioning may merge whole atoms but may not
+split one. Ownership is not a preparation-side lookup that later partitioning
+may discard: it survives operation replacement, final partition, private-IR
+construction, plan binding, artifact publication, and provenance.
 Published objects use exactly three owner classes: global substrate, one
 region, or one directed boundary edge.
 
@@ -339,9 +341,9 @@ identity and makes one-thread and many-thread output equivalent.
 Sparse scenarios bind explicit early/late libraries, constraints, interconnect
 views, activity, and enabled checks. `BoundaryContract` carries only active
 scenario/tag rows, including arrival, transition, required time, load, and
-electrical limits. Known-bit facts descend monotonically from unknown to a
-constant, packed agreement, or conflict; liveness grows backward from observed
-sinks. Absolute structural delay drives arrival/required propagation without a
+electrical limits. It is not a second dataflow representation: constants,
+liveness, aliases, and region ports are derived from the frozen Word graph.
+Absolute structural delay drives arrival/required propagation without a
 design-wide normalization factor.
 
 For memories, compatible characterized macros and an exact register-bank
@@ -390,10 +392,10 @@ primitive-weight estimates never decide which structure survives.
 This functional path is selected solely when the complete region truth space
 fits the fixed `u128` representation (at most seven inputs and at least two
 roots). The bound is a representation invariant, not a QoR threshold. Regions
-beyond it retain ordinary local rewrite and may use one bounded control
-decomposition proposal. Within the bounded state space, output ordering is
-derived from functional sharing, and the search budget is divided among
-remaining roots so an early combinatorial search cannot starve later roots.
+beyond it retain ordinary local rewrite. Within the bounded state space,
+output ordering is derived from functional sharing, and the search budget is
+divided among remaining roots so an early combinatorial search cannot starve
+later roots.
 Functional dependency is proved by bit-parallel separation before a projected
 truth table is constructed, so rejected feature sets do not repeat the exact
 projection work. No RTL operator or benchmark pattern is recognized. Liberty
@@ -581,7 +583,10 @@ Boundary nets remain stable identities: MFS may replace the cell driving an
 output net, but a constant/wire reduction cannot rewire internal consumers and
 discard that output net. Candidate generation prunes that form, while the
 shared transaction gate remains the authoritative defense for every post-map
-pass.
+pass. MFS starts from immutable top-level, retained-design, constant-driver,
+and external nets, then adds every net whose incident cells have different
+exact implementation owners. Cell names and hierarchy strings never infer
+ownership or optimization permission.
 
 This topology order runs whenever an MMMC timing owner exists, whether or not
 the scenario has explicit optimization constraints. Constraints add
@@ -978,7 +983,7 @@ defect.
 | Timing-driven cone claiming and fixed-round local matching | Implemented |
 | Architecture-independent partition and budget estimates | Implemented |
 | Separate region anchors/revisions and boundary identities/revisions | Implemented |
-| Monotone known-bit/liveness boundary facts | Implemented |
+| Word graph as the sole pre-cover connectivity and dataflow authority | Implemented |
 | Absolute locally dependent timing budgets | Implemented |
 | Region-private Word optimization and architecture selection | Implemented |
 | Private muxed arithmetic, CSA, Wallace/Dadda, and fused MAC; owner-confined FSM and sequential sharing | Implemented |
@@ -999,11 +1004,12 @@ defect.
 
 ## Known Architectural Gaps
 
-No open representation cutover remains in the synthesis front half,
-mapped-owner, MMMC, or publication path. The remaining unproven product targets are
-multi-million-gate runtime/RSS and public-suite QoR/runtime comparison. Those
-require the benchmark evidence below, not compatibility paths or additional
-ownership models.
+The remaining unproven product targets are multi-million-gate runtime/RSS and
+public-suite QoR/runtime comparison. Those require the benchmark evidence
+below, not compatibility paths or additional ownership models. Full-domain
+state equivalence sharing is intentionally absent until arbitrary initial
+state, reset, enable, and clock semantics can be proved rather than inferred
+from locally equal data inputs.
 
 ## Qualification Contract
 
