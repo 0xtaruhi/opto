@@ -379,6 +379,95 @@ fn state_fanout_consumers_share_one_downstream_region() {
 }
 
 #[test]
+fn star_fragments_are_absorbed_without_mutual_nomination() {
+    let mut module = WordModule::new("state_star");
+    let data = input(&mut module, "d");
+    let clock = input(&mut module, "clk");
+    let shared = module.unary(UnaryOp::BitNot, data, test_span()).unwrap();
+    for _ in 0..12 {
+        module
+            .register(
+                RegisterOp {
+                    name: None,
+                    d: shared,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: Vec::new(),
+                },
+                test_span(),
+            )
+            .unwrap();
+    }
+
+    let graph = super::partition::build(
+        &module,
+        RegionPartitionPolicy::with_work_limits(1, 8, 16, 64),
+    )
+    .unwrap();
+
+    assert_eq!(graph.regions().len(), 1);
+    assert_eq!(graph.operations(graph.regions()[0]).len(), 13);
+}
+
+#[test]
+fn inconsistent_work_policy_is_rejected() {
+    let mut module = WordModule::new("policy");
+    let data = input(&mut module, "d");
+    let inverted = module.unary(UnaryOp::BitNot, data, test_span()).unwrap();
+    output(&mut module, "q", inverted);
+    let policies = [
+        RegionPartitionPolicy::with_work_limits(0, 1, 1, 1),
+        RegionPartitionPolicy::with_work_limits(1, 0, 1, 1),
+        RegionPartitionPolicy::with_work_limits(1, 1, 0, 1),
+        RegionPartitionPolicy::with_work_limits(1, 1, 16, 8),
+        RegionPartitionPolicy::with_work_limits(1, 32, 16, 64),
+    ];
+
+    for policy in policies {
+        let error = super::partition::build(&module, policy).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("region work policy is inconsistent")
+        );
+    }
+}
+
+#[test]
+fn final_partition_treats_structural_owners_as_indivisible_atoms() {
+    let mut module = WordModule::new("owner_atoms");
+    let source = input(&mut module, "a");
+    let first = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
+    let middle = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
+    let last = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
+    output(&mut module, "x", first);
+    output(&mut module, "y", middle);
+    output(&mut module, "z", last);
+    let first_owner = RegionRowId::from_index(0).unwrap();
+    let middle_owner = RegionRowId::from_index(1).unwrap();
+    let ownership = crate::regional::StructuralOwnershipProvenance::from_owners_for_test(
+        &module,
+        vec![Some(first_owner), Some(middle_owner), Some(first_owner)],
+    )
+    .unwrap();
+
+    let graph = super::partition::build_with_ownership(
+        &module,
+        RegionPartitionPolicy::with_target_work(1),
+        &ownership,
+    )
+    .unwrap();
+
+    let first_region = graph.operation_owner(operation(&module, first)).unwrap();
+    let middle_region = graph.operation_owner(operation(&module, middle)).unwrap();
+    let last_region = graph.operation_owner(operation(&module, last)).unwrap();
+    assert_eq!(first_region, last_region);
+    assert_ne!(first_region, middle_region);
+    assert_eq!(graph.regions().len(), 2);
+}
+
+#[test]
 fn stable_identity_resolves_a_deep_forward_reference_chain() {
     let mut module = WordModule::new("forward");
     let source = input(&mut module, "a");

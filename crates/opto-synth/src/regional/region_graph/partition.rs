@@ -26,24 +26,55 @@ const REGION_REVISION_DOMAIN: &[u8] = b"opto/synthesis-region/revision/v1\0";
 const MEMORY_ANCHOR_DOMAIN: &[u8] = b"opto/memory-region-anchor/v1\0";
 const BOUNDARY_EDGE_ID_DOMAIN: &[u8] = b"opto/boundary-port/id/v1\0";
 const BOUNDARY_ENDPOINT_ID_DOMAIN: &[u8] = b"opto/boundary-port/endpoint/v1\0";
-const MATCHING_ROUNDS: usize = 12;
+const COARSENING_ROUNDS: usize = 12;
+const DEFAULT_TARGET_WORK: u64 = 32_768;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RegionPartitionPolicy {
-    target_work: u64,
+    partition_start: u64,
+    minimum: u64,
+    target: u64,
+    maximum: u64,
 }
 
 impl RegionPartitionPolicy {
     #[cfg(test)]
     pub(crate) const fn with_target_work(target_work: u64) -> Self {
-        Self { target_work }
+        Self {
+            partition_start: target_work,
+            minimum: 1,
+            target: target_work,
+            maximum: target_work,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_work_limits(
+        partition_start_work: u64,
+        minimum_work: u64,
+        target_work: u64,
+        maximum_work: u64,
+    ) -> Self {
+        Self {
+            partition_start: partition_start_work,
+            minimum: minimum_work,
+            target: target_work,
+            maximum: maximum_work,
+        }
     }
 }
 
 impl Default for RegionPartitionPolicy {
     fn default() -> Self {
         Self {
-            target_work: 32_768,
+            // A region carries substantial import, planning, publication, and
+            // scheduling overhead. Keep blocks within eight target workers as
+            // one local problem unless their bounded-work estimate proves that
+            // distribution is necessary.
+            partition_start: DEFAULT_TARGET_WORK.saturating_mul(8),
+            minimum: DEFAULT_TARGET_WORK / 8,
+            target: DEFAULT_TARGET_WORK,
+            maximum: DEFAULT_TARGET_WORK.saturating_mul(2),
         }
     }
 }
@@ -170,18 +201,24 @@ fn build_inner(
     policy: RegionPartitionPolicy,
     ownership: Option<&crate::regional::StructuralOwnershipProvenance>,
 ) -> Result<SynthesisRegionGraph, crate::SynthError> {
-    if policy.target_work == 0 {
+    if policy.partition_start == 0
+        || policy.minimum == 0
+        || policy.target == 0
+        || policy.maximum < policy.target
+        || policy.minimum > policy.target
+    {
         return Err(crate::SynthError::invariant(
-            "region target work must be nonzero",
+            "region work policy is inconsistent",
         ));
     }
     let drivers = SignalDriverIndex::new(module)?;
     let value_keys = semantic::value_keys(module)?;
     let anchors = operation_anchors(module)?;
-    let mut regions = partition_operations(module, &anchors, &drivers, policy)?;
-    if let Some(ownership) = ownership {
-        merge_ownership_claims(module, ownership, &mut regions)?;
-    }
+    let mut regions = if let Some(ownership) = ownership {
+        partition_owned_operations(module, &drivers, policy, ownership)?
+    } else {
+        partition_operations(module, &anchors, &drivers, policy)?
+    };
     append_memory_regions(module, &mut regions)?;
     let mut operation_owner = vec![None; module.operations().len()];
     let mut memory_owner = vec![None; module.memories().len()];
@@ -214,93 +251,78 @@ fn build_inner(
     )
 }
 
-fn merge_ownership_claims(
+fn partition_owned_operations(
     module: &word::WordModule,
+    drivers: &SignalDriverIndex,
+    policy: RegionPartitionPolicy,
     ownership: &crate::regional::StructuralOwnershipProvenance,
-    regions: &mut Vec<TempRegion>,
-) -> Result<(), crate::SynthError> {
+) -> Result<Vec<TempRegion>, crate::SynthError> {
     if ownership.len() != module.operations().len() {
         return Err(crate::SynthError::invariant(
             "final partition received incomplete structural ownership provenance",
         ));
     }
-    let mut operation_regions = vec![None; module.operations().len()];
-    for (region, contents) in regions.iter().enumerate() {
-        for operation in &contents.operations {
-            operation_regions[operation.index()] = Some(region);
+    let mut input_operations = InputOperations::new(module, drivers);
+    let dependencies = operation_dependencies(module, &mut input_operations)?;
+    let roots = synthesis_root_operations(module, &mut input_operations);
+    let reachable = synthesis_root_closure(&dependencies, &roots);
+    let estimates = StructuralEstimateIndex::build(module, &dependencies);
+    let criticality = estimates.criticality(&dependencies);
+    let mut owner_regions = BTreeMap::<RegionRowId, TempRegion>::new();
+    for (index, &reachable) in reachable.iter().enumerate() {
+        if !reachable {
+            continue;
         }
-    }
-    let mut parents = (0..regions.len()).collect::<Vec<_>>();
-    let mut owner_regions = BTreeMap::new();
-    for (index, region) in operation_regions.iter().copied().enumerate() {
         let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
-        let Some(owner) = ownership.owner(operation) else {
-            continue;
-        };
-        let Some(region) = region else {
-            continue;
-        };
-        if let Some(previous) = owner_regions.insert(owner, region) {
-            union_region_claims(&mut parents, region, previous);
-        }
-    }
-    if parents
-        .iter()
-        .enumerate()
-        .all(|(index, &parent)| index == parent)
-    {
-        return Ok(());
-    }
-    for index in 0..parents.len() {
-        let root = find_region_claim(&mut parents, index);
-        parents[index] = root;
-    }
-    let mut merged = BTreeMap::<usize, TempRegion>::new();
-    for (index, region) in std::mem::take(regions).into_iter().enumerate() {
-        let root = parents[index];
-        match merged.entry(root) {
+        let owner = ownership.owner(operation).ok_or_else(|| {
+            crate::SynthError::invariant("live operation lost structural owner before final freeze")
+        })?;
+        let anchor = ownership.anchor(operation).ok_or_else(|| {
+            crate::SynthError::invariant("live operation lost structural owner anchor")
+        })?;
+        let stored = &module.operations()[index];
+        match owner_regions.entry(owner) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(region);
+                entry.insert(TempRegion {
+                    anchor,
+                    kind: if is_state(&stored.kind) {
+                        SynthesisRegionKind::State
+                    } else {
+                        SynthesisRegionKind::Combinational
+                    },
+                    operations: vec![operation],
+                    memories: Vec::new(),
+                    work: operation_work(module, stored),
+                    delay: estimates.operations[index].delay,
+                    wiring: estimates.operations[index].wiring_units,
+                    id: RegionAnchorId::from_bytes([0; 32]),
+                    revision: RegionRevision::from_bytes([0; 32]),
+                });
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let target = entry.get_mut();
-                target.operations.extend(region.operations);
-                target.operations.sort_unstable();
-                target.work = target.work.saturating_add(region.work);
-                target.delay = target.delay.saturating_add(region.delay);
-                target.wiring = target.wiring.saturating_add(region.wiring);
-                target.anchor = target.anchor.min(region.anchor);
-                if region.kind == SynthesisRegionKind::State {
+                if target.anchor != anchor {
+                    return Err(crate::SynthError::invariant(
+                        "one structural owner has inconsistent stable anchors",
+                    ));
+                }
+                target.operations.push(operation);
+                target.work = target.work.saturating_add(operation_work(module, stored));
+                target.delay = target
+                    .delay
+                    .saturating_add(estimates.operations[index].delay);
+                target.wiring = target
+                    .wiring
+                    .saturating_add(estimates.operations[index].wiring_units);
+                if is_state(&stored.kind) {
                     target.kind = SynthesisRegionKind::State;
                 }
             }
         }
     }
-    *regions = merged.into_values().collect();
-    Ok(())
-}
-
-fn find_region_claim(parents: &mut [usize], mut region: usize) -> usize {
-    while parents[region] != region {
-        let parent = parents[region];
-        parents[region] = parents[parent];
-        region = parents[region];
-    }
-    region
-}
-
-fn union_region_claims(parents: &mut [usize], left: usize, right: usize) {
-    let left = find_region_claim(parents, left);
-    let right = find_region_claim(parents, right);
-    if left == right {
-        return;
-    }
-    let (root, child) = if left < right {
-        (left, right)
-    } else {
-        (right, left)
-    };
-    parents[child] = root;
+    let mut regions = owner_regions.into_values().collect::<Vec<_>>();
+    coarsen_regions(module, &dependencies, &criticality, policy, &mut regions)?;
+    Ok(regions)
 }
 
 fn partition_operations(
@@ -330,15 +352,9 @@ fn partition_operations(
         estimates: &estimates,
         reachable: &reachable,
         seeds,
-        size_limit: policy.target_work,
+        size_limit: policy.target,
     })?;
-    coarsen_regions(
-        module,
-        &dependencies,
-        &criticality,
-        policy.target_work,
-        &mut regions,
-    );
+    coarsen_regions(module, &dependencies, &criticality, policy, &mut regions)?;
     Ok(regions)
 }
 
@@ -369,7 +385,7 @@ fn whole_design_region(
         }
         operations.push(word::OpId::from_index(index).map_err(crate::SynthError::from)?);
         work = work.saturating_add(operation_work(module, operation));
-        if work > policy.target_work {
+        if work > policy.partition_start {
             return Ok(None);
         }
         delay = delay.saturating_add(estimates.operations[index].delay);
@@ -840,108 +856,225 @@ fn coarsen_regions(
     module: &word::WordModule,
     dependencies: &[Vec<usize>],
     criticality: &[u64],
-    size_limit: u64,
+    policy: RegionPartitionPolicy,
     regions: &mut Vec<TempRegion>,
-) {
+) -> Result<(), crate::SynthError> {
     let mut owners = vec![None; module.operations().len()];
     for (region, contents) in regions.iter().enumerate() {
         for operation in &contents.operations {
             owners[operation.index()] = Some(region);
         }
     }
-    for _ in 0..MATCHING_ROUNDS {
-        let mut edges = BTreeMap::<(usize, usize), u64>::new();
-        for (sink, inputs) in dependencies.iter().enumerate() {
-            let Some(sink_region) = owners[sink] else {
-                continue;
-            };
-            for &source in inputs {
-                let Some(source_region) = owners[source] else {
-                    continue;
-                };
-                if source_region == sink_region {
-                    continue;
-                }
-                let pair = if source_region < sink_region {
-                    (source_region, sink_region)
-                } else {
-                    (sink_region, source_region)
-                };
-                let edge = criticality[source].min(criticality[sink]);
-                edges
-                    .entry(pair)
-                    .and_modify(|weight| *weight = (*weight).max(edge))
-                    .or_insert(edge);
-            }
+    for _ in 0..COARSENING_ROUNDS {
+        let edges = region_cut_gains(module, dependencies, criticality, &owners);
+        let absorbed = absorb_fragments(&edges, policy, regions, &mut owners)?;
+        if absorbed {
+            continue;
         }
-        let mut nominations = vec![None; regions.len()];
-        for (&(left, right), &weight) in &edges {
-            if regions[left].operations.is_empty()
-                || regions[right].operations.is_empty()
-                || regions[left].work >= size_limit
-                || regions[right].work >= size_limit
-                || regions[left].work.saturating_add(regions[right].work) > size_limit
-            {
-                continue;
-            }
-            nominate(regions, &mut nominations, left, right, weight);
-            nominate(regions, &mut nominations, right, left, weight);
-        }
-        let pairs = nominations
-            .iter()
-            .enumerate()
-            .filter_map(|(left, &nomination)| {
-                nomination.and_then(|(_, right)| {
-                    (left < right && nominations[right].is_some_and(|(_, peer)| peer == left))
-                        .then_some((left, right))
-                })
-            })
-            .collect::<Vec<_>>();
-        for (left, right) in pairs {
-            let (survivor, removed) = if regions[left].anchor <= regions[right].anchor {
-                (left, right)
-            } else {
-                (right, left)
-            };
-            let removed_region = std::mem::replace(
-                &mut regions[removed],
-                empty_unsealed_region(SynthesisRegionKind::Combinational, Vec::new(), 0),
-            );
-            regions[survivor]
-                .operations
-                .extend(removed_region.operations);
-            regions[survivor].operations.sort_unstable();
-            regions[survivor].work = regions[survivor].work.saturating_add(removed_region.work);
-            regions[survivor].delay = regions[survivor].delay.saturating_add(removed_region.delay);
-            regions[survivor].wiring = regions[survivor]
-                .wiring
-                .saturating_add(removed_region.wiring);
-            if removed_region.kind == SynthesisRegionKind::State {
-                regions[survivor].kind = SynthesisRegionKind::State;
-            }
-            regions[survivor].anchor = regions[survivor].anchor.min(removed_region.anchor);
-            for operation in &regions[survivor].operations {
-                owners[operation.index()] = Some(survivor);
-            }
+        if !merge_maximal_pairs(&edges, policy, regions, &mut owners) {
+            break;
         }
     }
     regions.retain(|region| !region.operations.is_empty());
+    Ok(())
 }
 
-fn nominate(
-    regions: &[TempRegion],
-    nominations: &mut [Option<(u64, usize)>],
-    source: usize,
-    candidate: usize,
-    weight: u64,
-) {
-    let replace = nominations[source].is_none_or(|(current_weight, current)| {
-        weight > current_weight
-            || (weight == current_weight && regions[candidate].anchor < regions[current].anchor)
-    });
-    if replace {
-        nominations[source] = Some((weight, candidate));
+fn region_cut_gains(
+    module: &word::WordModule,
+    dependencies: &[Vec<usize>],
+    criticality: &[u64],
+    owners: &[Option<usize>],
+) -> BTreeMap<(usize, usize), u64> {
+    let mut edges = BTreeMap::<(usize, usize), u64>::new();
+    for (sink, inputs) in dependencies.iter().enumerate() {
+        let Some(sink_region) = owners[sink] else {
+            continue;
+        };
+        for &source in inputs {
+            let Some(source_region) = owners[source] else {
+                continue;
+            };
+            if source_region == sink_region {
+                continue;
+            }
+            let pair = if source_region < sink_region {
+                (source_region, sink_region)
+            } else {
+                (sink_region, source_region)
+            };
+            let boundary_bits = module
+                .value(module.operations()[source].result)
+                .map_or(1, |value| u64::from(value.ty.width()))
+                .max(1);
+            let gain = criticality[source]
+                .min(criticality[sink])
+                .saturating_add(boundary_bits);
+            edges
+                .entry(pair)
+                .and_modify(|weight| *weight = weight.saturating_add(gain))
+                .or_insert(gain);
+        }
     }
+    edges
+}
+
+fn absorb_fragments(
+    edges: &BTreeMap<(usize, usize), u64>,
+    policy: RegionPartitionPolicy,
+    regions: &mut [TempRegion],
+    owners: &mut [Option<usize>],
+) -> Result<bool, crate::SynthError> {
+    let incident = region_incident_edges(regions.len(), edges)?;
+    let mut proposals = BTreeMap::<usize, Vec<(u64, usize)>>::new();
+    for source in 0..regions.len() {
+        if regions[source].operations.is_empty() || regions[source].work >= policy.minimum {
+            continue;
+        }
+        let neighbours = incident.get(source).ok_or_else(|| {
+            crate::SynthError::invariant("region incident-edge index lost a region row")
+        })?;
+        let candidate = neighbours
+            .iter()
+            .filter_map(|&(receiver, gain)| {
+                (!regions[receiver].operations.is_empty()
+                    && regions[receiver].work >= policy.minimum
+                    && regions[receiver].work.saturating_add(regions[source].work)
+                        <= policy.maximum)
+                    .then_some((gain, std::cmp::Reverse(regions[receiver].anchor), receiver))
+            })
+            .max();
+        if let Some((gain, _, receiver)) = candidate {
+            proposals.entry(receiver).or_default().push((gain, source));
+        }
+    }
+    let mut changed = false;
+    for (receiver, mut incoming) in proposals {
+        incoming.sort_unstable_by_key(|&(gain, source)| {
+            (std::cmp::Reverse(gain), regions[source].anchor)
+        });
+        for (_, source) in incoming {
+            if regions[source].operations.is_empty()
+                || regions[receiver].work.saturating_add(regions[source].work) > policy.maximum
+            {
+                continue;
+            }
+            merge_region_into(regions, owners, source, receiver);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn region_incident_edges(
+    region_count: usize,
+    edges: &BTreeMap<(usize, usize), u64>,
+) -> Result<opto_core::PackedRows<(usize, u64)>, crate::SynthError> {
+    opto_core::PackedRows::try_from_entries(
+        region_count,
+        edges
+            .iter()
+            .flat_map(|(&(left, right), &gain)| [(left, (right, gain)), (right, (left, gain))]),
+    )
+    .map_err(|error| crate::SynthError::capacity(error.to_string()))
+}
+
+fn merge_maximal_pairs(
+    edges: &BTreeMap<(usize, usize), u64>,
+    policy: RegionPartitionPolicy,
+    regions: &mut [TempRegion],
+    owners: &mut [Option<usize>],
+) -> bool {
+    let mut candidates = edges
+        .iter()
+        .filter_map(|(&(left, right), &gain)| {
+            (!regions[left].operations.is_empty()
+                && !regions[right].operations.is_empty()
+                && regions[left].work < policy.target
+                && regions[right].work < policy.target
+                && regions[left].work.saturating_add(regions[right].work) <= policy.maximum)
+                .then_some((gain, left, right))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by_key(|&(gain, left, right)| {
+        let anchors = if regions[left].anchor <= regions[right].anchor {
+            (regions[left].anchor, regions[right].anchor)
+        } else {
+            (regions[right].anchor, regions[left].anchor)
+        };
+        (std::cmp::Reverse(gain), anchors)
+    });
+    let mut claimed = vec![false; regions.len()];
+    let mut pairs = Vec::new();
+    for (_, left, right) in candidates {
+        if claimed[left] || claimed[right] {
+            continue;
+        }
+        claimed[left] = true;
+        claimed[right] = true;
+        pairs.push((left, right));
+    }
+    for (left, right) in pairs.iter().copied() {
+        let (source, receiver) = if regions[left].anchor <= regions[right].anchor {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        merge_region_into(regions, owners, source, receiver);
+    }
+    !pairs.is_empty()
+}
+
+fn merge_region_into(
+    regions: &mut [TempRegion],
+    owners: &mut [Option<usize>],
+    source: usize,
+    receiver: usize,
+) {
+    let removed = std::mem::replace(
+        &mut regions[source],
+        empty_unsealed_region(SynthesisRegionKind::Combinational, Vec::new(), 0),
+    );
+    let TempRegion {
+        anchor,
+        kind,
+        operations,
+        memories: _,
+        work,
+        delay,
+        wiring,
+        id: _,
+        revision: _,
+    } = removed;
+    for operation in &operations {
+        owners[operation.index()] = Some(receiver);
+    }
+    let receiver_operations = std::mem::take(&mut regions[receiver].operations);
+    regions[receiver].operations = merge_sorted_operations(&receiver_operations, &operations);
+    regions[receiver].work = regions[receiver].work.saturating_add(work);
+    regions[receiver].delay = regions[receiver].delay.saturating_add(delay);
+    regions[receiver].wiring = regions[receiver].wiring.saturating_add(wiring);
+    if kind == SynthesisRegionKind::State {
+        regions[receiver].kind = SynthesisRegionKind::State;
+    }
+    regions[receiver].anchor = regions[receiver].anchor.min(anchor);
+}
+
+fn merge_sorted_operations(left: &[word::OpId], right: &[word::OpId]) -> Vec<word::OpId> {
+    let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    while left_index < left.len() && right_index < right.len() {
+        if left[left_index] <= right[right_index] {
+            merged.push(left[left_index]);
+            left_index += 1;
+        } else {
+            merged.push(right[right_index]);
+            right_index += 1;
+        }
+    }
+    merged.extend_from_slice(&left[left_index..]);
+    merged.extend_from_slice(&right[right_index..]);
+    merged
 }
 
 fn empty_unsealed_region(
@@ -1349,6 +1482,7 @@ fn canonicalize(
         rows.push(SynthesisRegion {
             graph_owner,
             row,
+            partition_anchor: region.anchor,
             id: region.id,
             revision: region.revision,
             kind: region.kind,

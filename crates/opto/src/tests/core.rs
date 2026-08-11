@@ -88,12 +88,18 @@ fn synthesize_events_render_structured_progress() {
                 },
                 mapped_cells: 2,
                 mapped_nets: 3,
+                regional_decision_hits: 1,
+                regional_decision_misses: 2,
+                synthesis_regions: 3,
+                regional_cover_plans: 3,
+                regional_epochs: 4,
                 ..opto_session::SynthesisMetrics::default()
             }),
         }),
         concat!(
             "Synthesis artifact for 'top' is complete; preparing the mapped object ",
-            "index.\n"
+            "index.\n",
+            "Regional synthesis: regions=3 rebuilt=2 reused=1 plans=3 epochs=4.\n"
         )
     );
     assert_eq!(

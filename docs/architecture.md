@@ -323,15 +323,32 @@ artifact for one of those frozen constants, but a private pass-through never
 creates a substrate alias or weakens a source-level publication obligation.
 
 State and output roots claim their fan-in cones. Size truncation promotes a
-frontier operation to a seed; shared fan-in receives one owner. A fixed number
-of mutually nominated, critical-edge local matching rounds coarsens adjacent
-cones. When the complete reachable operation closure fits one target region,
-the partitioner emits exactly one operation region before seed construction;
-this preserves all region-local sharing for small blocks and gives that region
-a module-stable anchor. Larger closures use the bounded cone partitioner and
-never merge merely to reduce region count. There is no global bin packing,
+frontier operation to a seed; shared fan-in receives one owner. Coarsening
+scores adjacent cones by the accumulated criticality and bit width of the
+boundary that a merge removes. Below-minimum fragments propose to a feasible
+established neighbour, which may absorb several independent fragments in one
+round; otherwise a deterministic maximal matching merges disjoint highest-gain
+pairs. A fixed maximum round count bounds propagation, and coarsening stops
+early when no admissible adjacent merge remains.
+
+Partition activation, minimum useful work, target work, and maximum merge work
+are separate deterministic limits. When the complete reachable operation
+closure fits the activation limit, the initial cone partitioner emits exactly
+one operation region before seed construction; this preserves all region-local
+sharing and amortizes regional scheduling and publication for small blocks.
+The final structural-owner path groups its already-frozen owner atoms directly
+and does not evaluate the activation limit. Larger initial closures use the
+bounded cone partitioner and never merge disconnected work merely to reduce
+region count. There is no global bin packing,
 resource-affinity proposer, cross-owner candidate analysis, or architecture
 candidate analysis before the final freeze.
+
+The final freeze contracts each provisional `StructuralOwnershipProvenance`
+owner into an indivisible atom before coarsening. Generated operations inherit
+both the owner and its stable partition anchor. The final partition may merge
+whole atoms but never repartitions individual operations and then repairs a
+split owner after the fact; therefore capacity accounting observes the actual
+atomic input to the final partition.
 
 Partition size does not depend on thread count. This preserves incremental
 identity and makes one-thread and many-thread output equivalent.

@@ -273,10 +273,15 @@ pub(crate) fn synthesis_event_text(event: &SynthesisEvent) -> String {
                  ({effort}).\n"
             )
         }
-        SynthesisEvent::ArtifactCompleted { design, metrics: _ } => {
+        SynthesisEvent::ArtifactCompleted { design, metrics } => {
             format!(
                 "Synthesis artifact for '{design}' is complete; preparing the mapped object \
-                 index.\n"
+                 index.\nRegional synthesis: regions={} rebuilt={} reused={} plans={} epochs={}.\n",
+                metrics.synthesis_regions,
+                metrics.regional_decision_misses,
+                metrics.regional_decision_hits,
+                metrics.regional_cover_plans,
+                metrics.regional_epochs,
             )
         }
         SynthesisEvent::DesignInformationUpdateStarted { design, effort: _ } => {

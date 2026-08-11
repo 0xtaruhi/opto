@@ -14,6 +14,7 @@ use opto_ir::word;
 #[derive(Debug, Clone)]
 pub(crate) struct StructuralOwnershipProvenance {
     owners: Vec<Option<super::RegionRowId>>,
+    owner_anchors: Vec<[u8; 32]>,
 }
 
 impl StructuralOwnershipProvenance {
@@ -21,6 +22,7 @@ impl StructuralOwnershipProvenance {
     pub(crate) fn global(module: &word::WordModule) -> Self {
         Self {
             owners: vec![None; module.operations().len()],
+            owner_anchors: Vec::new(),
         }
     }
 
@@ -33,8 +35,16 @@ impl StructuralOwnershipProvenance {
                 "initial structural ownership does not cover the operation arena",
             ));
         }
+        let owners = graph.operation_owner_rows().to_vec();
+        let owner_anchors = graph
+            .regions()
+            .iter()
+            .copied()
+            .map(super::SynthesisRegion::partition_anchor)
+            .collect();
         Ok(Self {
-            owners: graph.operation_owner_rows().to_vec(),
+            owners,
+            owner_anchors,
         })
     }
 
@@ -48,7 +58,23 @@ impl StructuralOwnershipProvenance {
                 "test structural ownership does not cover the operation arena",
             ));
         }
-        Ok(Self { owners })
+        let owner_count = owners
+            .iter()
+            .flatten()
+            .map(|owner| owner.index().saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        let owner_anchors = (0..owner_count)
+            .map(|index| {
+                let mut anchor = [0; 32];
+                anchor[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                anchor
+            })
+            .collect();
+        Ok(Self {
+            owners,
+            owner_anchors,
+        })
     }
 
     pub(crate) fn start(&self, module: &word::WordModule) -> Result<usize, crate::SynthError> {
@@ -112,6 +138,11 @@ impl StructuralOwnershipProvenance {
         &self.owners
     }
 
+    pub(crate) fn anchor(&self, operation: word::OpId) -> Option<[u8; 32]> {
+        self.owner(operation)
+            .and_then(|owner| self.owner_anchors.get(owner.index()).copied())
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.owners.len()
     }
@@ -121,6 +152,16 @@ impl StructuralOwnershipProvenance {
         module: &word::WordModule,
         graph: &super::SynthesisRegionGraph,
     ) -> Result<(), crate::SynthError> {
+        if self
+            .owners
+            .iter()
+            .flatten()
+            .any(|owner| owner.index() >= self.owner_anchors.len())
+        {
+            return Err(crate::SynthError::invariant(
+                "structural owner anchor table does not cover ownership",
+            ));
+        }
         let reachable = super::region_graph::partition::synthesis_reachable_operations(module)?;
         verify_relation(&self.owners, graph.operation_owner_rows(), &reachable)
     }
@@ -206,5 +247,45 @@ mod tests {
             &[true, true],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn frozen_verification_rejects_an_owner_without_an_anchor() {
+        let mut module = word::WordModule::new("missing_anchor");
+        let span = word::SourceSpan::stable("test");
+        let ty = word::WordType::bits(1).unwrap();
+        let input = module
+            .add_port("d", word::PortDirection::Input, ty, span.clone())
+            .unwrap();
+        let value = module
+            .read_signal(module.port(input).unwrap().signal, span.clone())
+            .unwrap();
+        let value = module
+            .unary(word::UnaryOp::BitNot, value, span.clone())
+            .unwrap();
+        let output = module
+            .add_port("q", word::PortDirection::Output, ty, span.clone())
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(module.port(output).unwrap().signal),
+                value,
+                span,
+            )
+            .unwrap();
+        let graph = super::super::region_graph::partition::build(
+            &module,
+            super::super::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let mut provenance = StructuralOwnershipProvenance::new(&module, &graph).unwrap();
+        provenance.owner_anchors.clear();
+
+        let error = provenance.verify_frozen(&module, &graph).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("structural owner anchor table does not cover ownership")
+        );
     }
 }

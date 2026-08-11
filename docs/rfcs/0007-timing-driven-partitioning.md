@@ -9,6 +9,8 @@
   a future qualification target rather than a claimed result
 - Author: Zhengyi Zhang
 - Date: 2026-08-03
+- Amended: 2026-08-11 to replace mutual-only matching with bounded cut-gain
+  coarsening and to make provisional owners atomic inputs to the final freeze
 
 ## Summary
 
@@ -49,7 +51,7 @@ RFC*.
 Five pillars:
 
 1. **Timing-driven partitioning** — each flip-flop keeps its fan-in cone; shared
-   logic gets a single owner; regions coarsen by local matching on criticality.
+   logic gets a single owner; regions coarsen by local boundary-cut gain.
 2. **No false invalidation** — partition, identity, and budget depend only on
    real structural, fact, and contract closures.
 3. **Region-private authority and IR** — structural rewrites have exactly one
@@ -134,15 +136,16 @@ rows existed and treated the estimator as freely reusable. The evidence:
   ordinal reduces to instance enumeration order, so adding one instance
   renumbers every later occurrence.
 
-### Gap against the target architecture
+### Pre-cutover gap against the target architecture
 
 A scalable timing-driven partitioner must cut across source hierarchy, retain
 the timing context of every region, keep state boundaries explicit, and avoid
 cutting critical launch-to-capture cones arbitrarily. Coarse regions amortize
 scheduling and publication costs; finer subregions bound local optimization
-work. The current implementation does not yet satisfy that complete contract.
+work. The implementation replaced by this RFC did not satisfy that complete
+contract.
 
-| Criterion | Target | Opto today |
+| Criterion | Target | Before this RFC |
 | --- | --- | --- |
 | Partition objective | timing criticality; cut only non-critical edges | equal work, `target_work: 32_768` |
 | Flip-flop treatment | FF's fan-in path stays with the FF | every `is_state` op is its own single-op region |
@@ -303,18 +306,31 @@ are processed in `RegionAnchorId` order and claim unowned operations by
 deterministic backward traversal. Adding or deleting a seed perturbs only what
 that seed claimed or released, plus its immediate neighbours.
 
-**Coarsening by local matching.** Cone count is on the order of the flip-flop
+**Coarsening by local cut gain.** Cone count is on the order of the flip-flop
 count and must come down by orders of magnitude. Coarsening never uses global
-packing:
+packing. Each adjacent pair accumulates the estimated criticality and bit width
+of every operation dependency that the merge would remove from the boundary.
+This distinguishes one scalar control edge from a wide or reconvergent shared
+boundary without consulting architecture candidates or a design-wide search.
 
-- a unit whose size has reached the target withdraws from matching entirely —
-  it neither nominates nor accepts. This is a purely local predicate;
-- an active unit nominates one neighbour: the incident edge of highest estimated
-  criticality whose merge would not exceed the size limit, ties by
-  `RegionAnchorId`;
-- a mutually nominating pair merges, taking the lower-ordered anchor and the
-  union of members;
-- rounds repeat up to a fixed policy round count, identical for every design.
+The policy has four distinct structural work limits:
+
+- the partition-activation limit keeps a complete modest block in one region,
+  amortizing private-module, scheduling, and publication overhead;
+- the minimum useful work identifies fragments that should seek an adjacent
+  owner when a capacity-safe positive-gain merge exists;
+- target work controls ordinary pair formation;
+- maximum work is the hard capacity bound for coarsening, except that an
+  indivisible input atom may already exceed it.
+
+Each round first lets a below-minimum fragment propose to its highest-gain
+feasible established neighbour. A neighbour may accept several proposals in
+stable gain-and-anchor order while capacity remains; acceptance does not
+require the receiver to nominate each fragment in return. If no fragment is
+absorbed, a deterministic greedy maximal matching over positive-gain adjacent
+edges merges disjoint pairs. The lower-ordered anchor survives every merge.
+Rounds stop early at convergence and have one fixed maximum count identical for
+every design.
 
 **Termination and region count are separate concerns.** The round count is a
 constant, not a function of the design, and no rule stops matching when a
@@ -323,17 +339,28 @@ a local edit change the number of rounds executed and therefore re-form every
 region — the same class of defect as sorting by content hash. Region count is an
 outcome measured at acceptance, never a control input.
 
-No lower bound is claimed on merges per round. A strictly increasing weight
-chain can yield one merge per round, so the achieved region count varies by
-design; it is calibrated, not guaranteed.
+No lower bound is claimed on merges per round. Capacity, topology, and local
+gain can leave small regions without an admissible neighbour, so the achieved
+region count varies by design; it is calibrated, not guaranteed.
 
-A cone's nomination depends only on its incident edges, so an edit perturbs
-nominations within a radius equal to the round count — bounded, and never
-cascading along a global sequence.
+A cone's proposals and matching candidates depend only on incident edges and
+neighbour work. An edit therefore perturbs coarsening within a radius bounded
+by the maximum round count, never by a global sequence or target region total.
 
-**Cut selection is a consequence, not a rule.** Matching consumes the highest-
-criticality edges first, so the edges left uncut at the end — the region
-boundaries — are the least critical ones.
+**Cut selection is a consequence, not a rule.** Coarsening consumes the
+highest-gain boundaries first, so the edges left cut are those that lose to a
+more valuable local boundary or cannot satisfy the capacity limits.
+
+### Atomic final ownership
+
+Structural preparation records both the provisional owner and its stable
+partition anchor on every operation. Generated operations inherit that exact
+pair from their one admitted source owner. The final freeze contracts surviving
+operations by provisional owner before it performs any coarsening; an owner is
+therefore an indivisible input vertex rather than a relation repaired after an
+independent operation-level repartition. Final coarsening may merge complete
+owner atoms but may not split one. This makes work accounting and region
+identity observe the same atomic structure that `verify_frozen` enforces.
 
 ### Pillar 2: no false invalidation
 
@@ -487,8 +514,8 @@ from content at every level (identity section); work is region-private
 normalizer (pillar 5).
 
 **Scalability.** Serial work is criticality estimation (parallel by level), cone
-claiming, a fixed number of matching rounds, deterministic commits of
-owner-confined structural plans, timing-contract propagation, and assembly.
+claiming, a fixed maximum number of bounded coarsening rounds, deterministic
+commits of owner-confined structural plans, timing-contract propagation, and assembly.
 Expensive architecture discovery and Boolean mapping scale over final private
 modules; the owned structural stage never searches across the whole design for
 a shared candidate.
@@ -530,9 +557,9 @@ partition input derived from a design-wide search makes region membership
 globally dependent.
 
 **Stopping coarsening at a design-wide region count.** Rejected: a local edit
-could change the number of rounds executed and re-form every region. Local size
-withdrawal plus a fixed round count achieves coarsening without a global
-stopping condition.
+could change the number of rounds executed and re-form every region. Local
+capacity and cut-gain admission plus a fixed maximum round count achieve
+coarsening without a global stopping condition.
 
 **Deriving operation identity from `SourceSpan`.** Held by an earlier draft.
 Rejected: absolute line and column shift when a line is inserted anywhere above,
@@ -576,7 +603,7 @@ onto lowered operations, and hierarchy occurrence provenance through
 role. `SourceSpan` is reduced to diagnostics.
 This is prerequisite infrastructure spanning the frontend, `opto-ir`, and
 `opto-synth`, and it is on the critical path: frontier seeds, `BoundaryPortId`,
-matching order, and the no-false-invalidation invariant all rest on it. It is
+coarsening order, and the no-false-invalidation invariant all rest on it. It is
 not a preliminary cleanup, and earlier drafts of this RFC underestimated it.
 *Accept:* anchors are invariant under comment insertion, unrelated-line edits,
 reordering of unrelated declarations, and the addition of a sibling instance;
@@ -599,8 +626,8 @@ bit-identical.
 **Phase 1 — partitioning.** Add `StructuralEstimateIndex` independent of
 `ArchitectureDecisions`. Add arrival/required estimation and edge criticality.
 Replace `partition_operations` with cone seeding, frontier promotion,
-claim-based ownership, single-owner shared fan-in, and coarsening by local
-matching with fixed rounds. Introduce `RegionAnchorId` and `BoundaryPortId`.
+claim-based ownership, single-owner shared fan-in, and bounded coarsening by
+local cut gain. Introduce `RegionAnchorId` and `BoundaryPortId`.
 Delete the pre-freeze resource-sharing and sequential-equivalence searches.
 Calibrate the size target.
 *Measure and record:* the QoR cost of losing both optimizations, the coverage
