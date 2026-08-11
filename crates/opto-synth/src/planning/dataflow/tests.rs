@@ -86,75 +86,6 @@ fn canonicalizes_word_values_before_bit_lowering() {
 }
 
 #[test]
-fn protects_entire_canonical_equivalence_class() {
-    let mut module = word::WordModule::new("guarded");
-    let bit = word::WordType::bits(1).unwrap();
-    let inputs = ["a", "b"].map(|name| {
-        module
-            .add_port(
-                name,
-                word::PortDirection::Input,
-                bit,
-                word::SourceSpan::default(),
-            )
-            .unwrap()
-    });
-    let values = inputs.map(|port| {
-        module
-            .read_signal(
-                module.port(port).unwrap().signal,
-                word::SourceSpan::default(),
-            )
-            .unwrap()
-    });
-    let duplicates = [values, [values[1], values[0]]].map(|operands| {
-        module
-            .binary(
-                word::BinaryOp::BitAnd,
-                operands[0],
-                operands[1],
-                word::SourceSpan::default(),
-            )
-            .unwrap()
-    });
-    for (index, value) in duplicates.into_iter().enumerate() {
-        let output = module
-            .add_port(
-                format!("y{index}"),
-                word::PortDirection::Output,
-                bit,
-                word::SourceSpan::default(),
-            )
-            .unwrap();
-        module
-            .connect(
-                word::LValue::signal(module.port(output).unwrap().signal),
-                value,
-                word::SourceSpan::default(),
-            )
-            .unwrap();
-    }
-
-    let mut protected = vec![false; module.values().len()];
-    protected[duplicates[0].index()] = true;
-    let changes =
-        optimize_combinational_dataflow_by_preserving_classes(&mut module, &protected, |_, _| true)
-            .unwrap();
-    module.compact_netlist().unwrap();
-    module.validate().unwrap();
-
-    assert!(
-        changes
-            .representatives()
-            .iter()
-            .enumerate()
-            .all(|(index, value)| value.index() == index)
-    );
-    assert_eq!(module.operations().len(), 2);
-    assert_ne!(module.connects()[0].value, module.connects()[1].value);
-}
-
-#[test]
 fn resolves_exact_static_vector_aliases_before_region_freeze() {
     let mut module = word::WordModule::new("top");
     let ty = word::WordType::new(32, false, LogicStateKind::FourState).unwrap();
@@ -646,14 +577,14 @@ fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
     }
     let original_operations = owners.len();
 
-    let regions = crate::SynthesisRegionGraph::build(&module).unwrap();
     let mut ownership =
-        crate::regional::StructuralOwnershipProvenance::new(&module, &regions).unwrap();
-    optimize_owned_priority_dataflow(&mut module, &mut owners, &mut ownership).unwrap();
-    assert_eq!(owners.len(), module.operations().len());
-    assert!(owners.len() > original_operations);
+        crate::regional::StructuralOwnershipProvenance::from_owners_for_test(&module, owners)
+            .unwrap();
+    optimize_owned_priority_dataflow(&mut module, &mut ownership).unwrap();
+    assert_eq!(ownership.len(), module.operations().len());
+    assert!(ownership.len() > original_operations);
     assert!(
-        owners[original_operations..]
+        ownership.owners()[original_operations..]
             .iter()
             .all(|owner| *owner == Some(chain_owner))
     );

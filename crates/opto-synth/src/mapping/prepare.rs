@@ -10,7 +10,6 @@ pub(crate) struct PrivateRegionPreparation<'a> {
     pub(crate) clock_gating_catalog: &'a crate::mapping::clock_gating::ClockGatingCatalog,
     pub(crate) target_mapping: bool,
     pub(crate) timing_diagnostics: bool,
-    pub(crate) operation_regions: &'a [Option<crate::RegionRowId>],
     pub(crate) ownership: &'a mut crate::regional::StructuralOwnershipProvenance,
 }
 
@@ -24,7 +23,6 @@ pub(crate) fn prepare_private_region(
         clock_gating_catalog,
         target_mapping,
         timing_diagnostics,
-        operation_regions,
         ownership,
     } = request;
     let trace = crate::api::diagnostics::SynthTrace::new(timing_diagnostics);
@@ -59,7 +57,6 @@ pub(crate) fn prepare_private_region(
                 module,
                 clock_gating_catalog,
                 style,
-                Some(operation_regions),
                 ownership,
             )?;
             finish_stage("gate clocks");

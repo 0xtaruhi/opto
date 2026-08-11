@@ -357,10 +357,9 @@ pub(crate) fn optimize_owned_combinational_dataflow(
 
 pub(crate) fn rebalance_priority_muxes_in_regions(
     module: &mut word::WordModule,
-    owners: &mut Vec<Option<crate::RegionRowId>>,
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<bool, crate::SynthError> {
-    if owners.len() != module.operations().len() {
+    if ownership.len() != module.operations().len() {
         return Err(crate::SynthError::invariant(
             "priority-mux ownership does not align with the operation arena",
         ));
@@ -369,9 +368,7 @@ pub(crate) fn rebalance_priority_muxes_in_regions(
         .values()
         .iter()
         .map(|value| match value.kind {
-            word::ValueKind::Operation(operation) => {
-                owners.get(operation.index()).copied().flatten()
-            }
+            word::ValueKind::Operation(operation) => ownership.owner(operation),
             word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
         })
         .collect::<Vec<_>>();
@@ -385,7 +382,8 @@ pub(crate) fn rebalance_priority_muxes_in_regions(
             .then_some(owner)
     })?;
     for generated in result.generated {
-        if generated.range.start != owners.len() || generated.range.end > module.operations().len()
+        if generated.range.start != ownership.len()
+            || generated.range.end > module.operations().len()
         {
             return Err(crate::SynthError::invariant(
                 "priority-mux generated ownership does not align with the operation arena",
@@ -397,34 +395,21 @@ pub(crate) fn rebalance_priority_muxes_in_regions(
             generated.range.end,
             &generated.sources,
         )?;
-        owners.extend(std::iter::repeat_n(
-            Some(generated.scope),
-            generated.range.len(),
-        ));
     }
     Ok(result.changed)
 }
 
 pub(crate) fn optimize_owned_priority_dataflow(
     module: &mut word::WordModule,
-    owners: &mut Vec<Option<crate::RegionRowId>>,
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<DataflowChanges, crate::SynthError> {
-    optimize_owned_combinational_dataflow(module, owners)?;
-    rebalance_priority_muxes_in_regions(module, owners, ownership)?;
-    optimize_owned_combinational_dataflow(module, owners)
+    optimize_owned_combinational_dataflow(module, ownership.owners())?;
+    rebalance_priority_muxes_in_regions(module, ownership)?;
+    optimize_owned_combinational_dataflow(module, ownership.owners())
 }
 
 pub(crate) fn optimize_combinational_dataflow_by(
     module: &mut word::WordModule,
-    permit_equivalence: impl FnMut(word::ValueId, word::ValueId) -> bool,
-) -> Result<DataflowChanges, crate::SynthError> {
-    optimize_combinational_dataflow_by_preserving_classes(module, &[], permit_equivalence)
-}
-
-pub(crate) fn optimize_combinational_dataflow_by_preserving_classes(
-    module: &mut word::WordModule,
-    protected_values: &[bool],
     mut permit_equivalence: impl FnMut(word::ValueId, word::ValueId) -> bool,
 ) -> Result<DataflowChanges, crate::SynthError> {
     let drivers = DriverIndex::build(module)?;
@@ -443,24 +428,9 @@ pub(crate) fn optimize_combinational_dataflow_by_preserving_classes(
     // intermediate alias can otherwise approve an equivalence whose transitive
     // target belongs to a different hard synthesis region.
     close_representatives(&mut resolved_values)?;
-    if protected_values.len() > resolved_values.len() {
-        return Err(crate::SynthError::invariant(
-            "protected dataflow identity is outside the Word value arena",
-        ));
-    }
-    let mut protected_classes = vec![false; resolved_values.len()];
-    for (index, &protected) in protected_values.iter().enumerate() {
-        if !protected {
-            continue;
-        }
-        let representative = resolved_values[index];
-        protected_classes[representative.index()] = true;
-    }
     for (index, canonical) in resolved_values.iter_mut().enumerate() {
         let original = word::ValueId::from_index(index).map_err(crate::SynthError::Word)?;
-        if original != *canonical
-            && (protected_classes[canonical.index()] || !permit_equivalence(original, *canonical))
-        {
+        if original != *canonical && !permit_equivalence(original, *canonical) {
             *canonical = original;
         }
     }

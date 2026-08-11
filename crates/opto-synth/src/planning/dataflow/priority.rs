@@ -32,15 +32,14 @@ struct PriorityNode {
     value: word::ValueId,
 }
 
-pub(super) struct GeneratedOperations<Scope> {
+pub(super) struct GeneratedOperations {
     pub(super) range: Range<usize>,
-    pub(super) scope: Scope,
     pub(super) sources: Box<[word::OpId]>,
 }
 
-pub(super) struct RebalanceResult<Scope> {
+pub(super) struct RebalanceResult {
     pub(super) changed: bool,
-    pub(super) generated: Vec<GeneratedOperations<Scope>>,
+    pub(super) generated: Vec<GeneratedOperations>,
 }
 
 #[cfg(test)]
@@ -53,14 +52,14 @@ pub(super) fn rebalance_constant_priority_muxes(
 pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
     module: &mut word::WordModule,
     mut classify: impl FnMut(&[word::ValueId]) -> Option<Scope>,
-) -> Result<RebalanceResult<Scope>, crate::SynthError> {
+) -> Result<RebalanceResult, crate::SynthError> {
     let mut chains = module
         .connects()
         .iter()
         .enumerate()
         .filter_map(|(connect, sink)| trace_chain(module, connect, sink))
         .filter(|chain| chain.entries.len() >= 4)
-        .filter_map(|chain| classify(&chain.nodes).map(|scope| (chain, scope)))
+        .filter(|chain| classify(&chain.nodes).is_some())
         .collect::<Vec<_>>();
     if chains.is_empty() {
         return Ok(RebalanceResult {
@@ -68,10 +67,10 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
             generated: Vec::new(),
         });
     }
-    materialize_defaults(module, chains.iter_mut().map(|(chain, _)| chain))?;
+    materialize_defaults(module, chains.iter_mut())?;
     let condition_sequences = chains
         .iter()
-        .map(|(chain, _)| {
+        .map(|chain| {
             chain
                 .entries
                 .iter()
@@ -79,7 +78,7 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    for (index, (chain, _)) in chains.iter_mut().enumerate() {
+    for (index, chain) in chains.iter_mut().enumerate() {
         let conditions = &condition_sequences[index];
         let Some(master) = condition_sequences
             .iter()
@@ -107,7 +106,7 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
     }
     let mut replacements = Vec::with_capacity(chains.len());
     let mut generated = Vec::with_capacity(chains.len());
-    for (chain, scope) in &chains {
+    for chain in &chains {
         let start = module.operations().len();
         let replacement = build_chain(module, chain)?;
         let end = module.operations().len();
@@ -123,7 +122,6 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
             .collect();
         generated.push(GeneratedOperations {
             range: start..end,
-            scope: *scope,
             sources,
         });
         replacements.push((chain.connect, replacement));

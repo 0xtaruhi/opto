@@ -342,6 +342,16 @@ fn partition_operations(
     Ok(regions)
 }
 
+pub(crate) fn synthesis_reachable_operations(
+    module: &word::WordModule,
+) -> Result<Box<[bool]>, crate::SynthError> {
+    let drivers = SignalDriverIndex::new(module)?;
+    let mut input_operations = InputOperations::new(module, &drivers);
+    let dependencies = operation_dependencies(module, &mut input_operations)?;
+    let roots = synthesis_root_operations(module, &mut input_operations);
+    Ok(synthesis_root_closure(&dependencies, &roots))
+}
+
 fn whole_design_region(
     module: &word::WordModule,
     reachable: &[bool],
