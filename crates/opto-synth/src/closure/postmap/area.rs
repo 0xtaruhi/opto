@@ -59,7 +59,8 @@ pub(super) fn optimize(
     let mut cleanup_dirty = std::collections::HashSet::new();
     let phase_started = std::time::Instant::now();
 
-    let optimization_boundary = super::mfs::optimization_boundary_nets(session.mapped);
+    let optimization_boundary =
+        super::mfs::optimization_boundary_nets(session.mapped, session.implementations)?;
     let mut merged = true;
     while merged {
         merged = false;

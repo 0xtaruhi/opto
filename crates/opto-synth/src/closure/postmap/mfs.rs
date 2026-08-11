@@ -260,55 +260,34 @@ fn single_output_function(cell: TargetCellRef<'_>, library_index: u32) -> Option
     })
 }
 
-pub(super) fn optimization_boundary_nets(mapped: &MappedNetlist) -> HashSet<NetId> {
-    let mut boundary = HashSet::new();
-    for index in 0..mapped.ports().len() {
-        if let Ok(port) = opto_ir::mapped::PortId::from_index(index)
-            && let Some(nets) = mapped.port_nets(port)
-        {
-            boundary.extend(nets.iter().copied());
-        }
-    }
-    boundary
-}
-
-#[cfg(test)]
-pub(super) fn region_boundary_nets(mapped: &MappedNetlist) -> HashSet<NetId> {
-    let mut boundary = optimization_boundary_nets(mapped);
-    for instance in mapped.design_instance_ids() {
-        if let Some(connections) = mapped.design_instance_connections(instance) {
-            for connection in connections {
-                if let Some(signals) = mapped.design_connection_signals(connection) {
-                    for signal in signals {
-                        if let ConnectionSignal::Net(net) = signal {
-                            boundary.insert(*net);
-                        }
-                    }
-                }
-            }
-        }
-    }
+pub(super) fn optimization_boundary_nets(
+    mapped: &MappedNetlist,
+    implementations: &ImplementationDb,
+) -> Result<HashSet<NetId>, crate::SynthError> {
+    let mut boundary = mapped
+        .immutable_boundary_nets()
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
     for net in mapped.net_ids() {
+        if boundary.contains(&net) {
+            continue;
+        }
         let Some(pins) = mapped.pins_on_net(net) else {
             continue;
         };
-        let mut scope = None;
-        for owner in pins.filter_map(|pin| mapped.pin_owner(pin)) {
-            let Some(name) = mapped.cell_name(owner) else {
-                continue;
-            };
-            let current = name.rsplit_once('/').map_or("", |(scope, _)| scope);
-            match scope {
-                None => scope = Some(current),
-                Some(first) if first != current => {
-                    boundary.insert(net);
-                    break;
-                }
-                Some(_) => {}
+        let mut first = None;
+        for cell in pins.filter_map(|pin| mapped.pin_owner(pin)) {
+            if let Some(first) = first
+                && !implementations.cells_share_owner(first, cell)?
+            {
+                boundary.insert(net);
+                break;
             }
+            first = Some(cell);
         }
     }
-    boundary
+    Ok(boundary)
 }
 
 pub(super) fn optimization_candidate(

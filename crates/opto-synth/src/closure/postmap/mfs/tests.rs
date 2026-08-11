@@ -3,9 +3,10 @@
 
 use super::{
     CellFunction, DriverIndex, OptimizationContext, ResynthesisObjective, cell_functions,
-    closed_dying_cone, optimization_boundary_nets, optimization_candidate, region_boundary_nets,
-    resynthesis_cells, sorted_candidate_nets,
+    closed_dying_cone, optimization_boundary_nets, optimization_candidate, resynthesis_cells,
+    sorted_candidate_nets,
 };
+use crate::artifact::implementation::{InitialCellOwner, OriginSetId};
 use hashbrown::{HashMap, HashSet};
 use opto_ir::mapped::{
     CellSpec, ConnectionRef, ConnectionSignal, MappedBuilder, NetId, PortDirection, RegionDelta,
@@ -154,10 +155,11 @@ fn timing_resynthesis_catalog_selects_fast_cells_independently_of_area_catalog()
 }
 
 #[test]
-fn hierarchy_anchors_partition_regions_without_blocking_optimization() {
+fn retained_design_bindings_are_immutable_optimization_boundaries() {
     let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
     let input = builder.add_net(Some("input")).unwrap();
     let hierarchy = builder.add_net(Some("hierarchy")).unwrap();
+    let constant = builder.add_net(Some("constant")).unwrap();
     builder
         .add_port("input", PortDirection::Input, &[input])
         .unwrap();
@@ -168,14 +170,66 @@ fn hierarchy_anchors_partition_regions_without_blocking_optimization() {
             &[("a".to_string(), vec![ConnectionSignal::Net(hierarchy)])],
         )
         .unwrap();
+    builder.drive_constant(constant, false);
     let mapped = builder.freeze().unwrap();
+    let implementations = crate::ImplementationDb::empty(mapped.cell_slot_count());
 
-    let optimization = optimization_boundary_nets(&mapped);
-    let regions = region_boundary_nets(&mapped);
+    let optimization = optimization_boundary_nets(&mapped, &implementations).unwrap();
     assert!(optimization.contains(&input));
-    assert!(!optimization.contains(&hierarchy));
-    assert!(regions.contains(&input));
-    assert!(regions.contains(&hierarchy));
+    assert!(optimization.contains(&hierarchy));
+    assert!(optimization.contains(&constant));
+}
+
+#[test]
+fn nets_between_exact_implementation_owners_are_optimization_boundaries() {
+    let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+    let input = builder.add_net(Some("input")).unwrap();
+    let shared = builder.add_net(Some("shared")).unwrap();
+    let output = builder.add_net(Some("output")).unwrap();
+    builder
+        .add_cell(
+            "left",
+            "BUF",
+            None,
+            &[
+                ("A0".to_string(), None, ConnectionSignal::Net(input)),
+                ("Z".to_string(), None, ConnectionSignal::Net(shared)),
+            ],
+        )
+        .unwrap();
+    builder
+        .add_cell(
+            "right",
+            "BUF",
+            None,
+            &[
+                ("A0".to_string(), None, ConnectionSignal::Net(shared)),
+                ("Z".to_string(), None, ConnectionSignal::Net(output)),
+            ],
+        )
+        .unwrap();
+    let mapped = builder.freeze().unwrap();
+    let implementations = crate::ImplementationDb::new(
+        mapped.generation_id(),
+        Vec::new().into_boxed_slice(),
+        vec![OriginSetId::EMPTY; mapped.cell_slot_count()],
+        vec![0, 0],
+        Vec::new(),
+        vec![
+            Some(InitialCellOwner::Region(
+                crate::RegionAnchorId::from_bytes_for_test([1; 32]),
+            )),
+            Some(InitialCellOwner::Region(
+                crate::RegionAnchorId::from_bytes_for_test([2; 32]),
+            )),
+        ],
+    )
+    .unwrap();
+
+    let boundary = optimization_boundary_nets(&mapped, &implementations).unwrap();
+    assert!(boundary.contains(&shared));
+    assert!(!boundary.contains(&input));
+    assert!(!boundary.contains(&output));
 }
 
 #[test]
@@ -216,8 +270,8 @@ fn output_boundary_identity_blocks_wire_replacement() {
     let functions = HashMap::from([function("BUF", 1, 0b10)]);
     let resynthesis = resynthesis_cells(&functions, ResynthesisObjective::Area);
     let drivers = DriverIndex::build(&mapped, &functions);
-    let boundary = optimization_boundary_nets(&mapped);
     let implementations = crate::ImplementationDb::empty(mapped.cell_slot_count());
+    let boundary = optimization_boundary_nets(&mapped, &implementations).unwrap();
 
     assert!(
         optimization_candidate(
@@ -234,40 +288,6 @@ fn output_boundary_identity_blocks_wire_replacement() {
         )
         .is_none()
     );
-}
-
-#[test]
-fn elaborated_hierarchy_labels_create_typed_region_boundaries() {
-    let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
-    let input = builder.add_net(Some("input")).unwrap();
-    let boundary = builder.add_net(Some("boundary")).unwrap();
-    let output = builder.add_net(Some("u_child/output")).unwrap();
-    builder
-        .add_cell(
-            "U0",
-            "BUF",
-            None,
-            &[
-                ("A".to_string(), None, ConnectionSignal::Net(input)),
-                ("Y".to_string(), None, ConnectionSignal::Net(boundary)),
-            ],
-        )
-        .unwrap();
-    builder
-        .add_cell(
-            "u_child/U1",
-            "BUF",
-            None,
-            &[
-                ("A".to_string(), None, ConnectionSignal::Net(boundary)),
-                ("Y".to_string(), None, ConnectionSignal::Net(output)),
-            ],
-        )
-        .unwrap();
-    let mapped = builder.freeze().unwrap();
-
-    assert!(!optimization_boundary_nets(&mapped).contains(&boundary));
-    assert!(region_boundary_nets(&mapped).contains(&boundary));
 }
 
 #[test]

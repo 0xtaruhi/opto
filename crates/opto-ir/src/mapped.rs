@@ -352,6 +352,16 @@ impl MappedNetlist {
             .get(port.net_start as usize..port.net_end as usize)
     }
 
+    /// Returns nets retained by immutable module and design boundaries.
+    ///
+    /// The sorted set includes top-level ports, explicit constant drivers, and
+    /// retained design-occurrence bindings. Transactions may replace cells
+    /// driving these nets but may not remove or redirect the nets themselves.
+    #[must_use]
+    pub fn immutable_boundary_nets(&self) -> &[NetId] {
+        &self.external_nets
+    }
+
     #[must_use]
     /// Returns the number of live target cells, excluding tombstones.
     pub fn cell_count(&self) -> usize {
