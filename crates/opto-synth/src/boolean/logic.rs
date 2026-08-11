@@ -6,13 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::ops::Index;
 
 mod balance;
-mod control;
 pub(crate) mod cuts;
 pub(crate) mod network;
 mod pipeline;
 mod pla;
 mod rewrite;
-mod selector;
 mod subject;
 
 #[cfg(test)]

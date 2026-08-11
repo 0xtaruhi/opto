@@ -57,14 +57,13 @@ pub(crate) fn gate_register_clocks(
     style: ClockGatingStyle,
 ) -> Result<ClockGatingSummary, crate::SynthError> {
     let mut ownership = crate::regional::StructuralOwnershipProvenance::global(module);
-    gate_register_clocks_in_regions(module, catalog, style, None, &mut ownership)
+    gate_register_clocks_in_regions(module, catalog, style, &mut ownership)
 }
 
 pub(super) fn gate_register_clocks_in_regions(
     module: &mut word::WordModule,
     catalog: &ClockGatingCatalog,
     style: ClockGatingStyle,
-    operation_regions: Option<&[Option<crate::RegionRowId>]>,
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<ClockGatingSummary, crate::SynthError> {
     let mut summary = ClockGatingSummary::default();
@@ -92,10 +91,7 @@ pub(super) fn gate_register_clocks_in_regions(
         };
         banks
             .entry(BankKey {
-                region: operation_regions
-                    .and_then(|regions| regions.get(index))
-                    .copied()
-                    .flatten(),
+                region: ownership.owner(operation_id),
                 clock: register.clock,
                 enable: enable.value,
                 active_high: enable.active_high,

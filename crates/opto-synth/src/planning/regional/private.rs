@@ -15,30 +15,26 @@ pub(crate) fn optimize_structure(
     runtime: &opto_runtime::ExecutionContext,
 ) -> Result<crate::SynthesisRegionGraph, crate::SynthError> {
     crate::planning::dataflow::coalesce_static_wire_drivers(module)?;
+    crate::planning::dataflow::resolve_static_connect_aliases(module)?;
     let provisional = crate::regional::region_graph::partition::build(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
     )?;
-    let mut owners = provisional.operation_owner_rows().to_vec();
     let mut ownership = crate::regional::StructuralOwnershipProvenance::new(module, &provisional)?;
 
     crate::planning::fsm::optimize_derived_fsms_in_regions(
         module,
-        &mut owners,
         &mut ownership,
         timing,
         port_bindings,
         runtime,
     )?;
-    let canonical_values = crate::planning::dataflow::optimize_owned_priority_dataflow(
-        module,
-        &mut owners,
-        &mut ownership,
-    )?;
+    let canonical_values =
+        crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
     crate::planning::dataflow::share_equivalent_sequential_values_by(
         module,
         runtime,
-        &owners,
+        ownership.owners(),
         |value| {
             canonical_values
                 .representatives()
@@ -47,13 +43,8 @@ pub(crate) fn optimize_structure(
                 .unwrap_or(value)
         },
     )?;
-    mapping.publish_owned_preparation(
-        module,
-        clock_gating,
-        target_mapping,
-        &owners,
-        &mut ownership,
-    )?;
+    mapping.publish_owned_preparation(module, clock_gating, target_mapping, &mut ownership)?;
+    crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
 
     let final_partition = crate::regional::region_graph::partition::build_with_ownership(
         module,

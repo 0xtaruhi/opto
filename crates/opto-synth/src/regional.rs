@@ -12,9 +12,8 @@ mod plan;
 pub(crate) mod region_graph;
 pub use boundary::{
     BoundaryCheckKind, BoundaryContract, BoundaryContractError, BoundaryContractRow,
-    BoundaryDataflowContract, BoundaryInputContract, BoundaryKnownFact, BoundaryOutputContract,
-    ContractGeneration, EarlyLate, FiniteValue, RegionContextKey, RiseFall, TimingTag, TimingTagId,
-    TimingTagInterner,
+    BoundaryInputContract, BoundaryOutputContract, ContractGeneration, EarlyLate, FiniteValue,
+    RegionContextKey, RiseFall, TimingTag, TimingTagId, TimingTagInterner,
 };
 use boundary::{check_value_lane, input_transition_lane, path_timing_lane};
 pub use region_graph::{

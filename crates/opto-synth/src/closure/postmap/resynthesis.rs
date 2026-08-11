@@ -26,7 +26,8 @@ pub(super) fn optimize(
     }
     let functions = catalog.mfs_functions();
     let resynthesis = catalog.mfs_resynthesis(mfs::ResynthesisObjective::Timing);
-    let optimization_boundary = mfs::optimization_boundary_nets(session.mapped);
+    let optimization_boundary =
+        mfs::optimization_boundary_nets(session.mapped, session.implementations)?;
     let mut drivers = mfs::DriverIndex::build(session.mapped, functions);
     loop {
         let cells = sizing::mapped_cells_for_timing_instances(

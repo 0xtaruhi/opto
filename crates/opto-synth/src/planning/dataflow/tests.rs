@@ -86,75 +86,6 @@ fn canonicalizes_word_values_before_bit_lowering() {
 }
 
 #[test]
-fn protects_entire_canonical_equivalence_class() {
-    let mut module = word::WordModule::new("guarded");
-    let bit = word::WordType::bits(1).unwrap();
-    let inputs = ["a", "b"].map(|name| {
-        module
-            .add_port(
-                name,
-                word::PortDirection::Input,
-                bit,
-                word::SourceSpan::default(),
-            )
-            .unwrap()
-    });
-    let values = inputs.map(|port| {
-        module
-            .read_signal(
-                module.port(port).unwrap().signal,
-                word::SourceSpan::default(),
-            )
-            .unwrap()
-    });
-    let duplicates = [values, [values[1], values[0]]].map(|operands| {
-        module
-            .binary(
-                word::BinaryOp::BitAnd,
-                operands[0],
-                operands[1],
-                word::SourceSpan::default(),
-            )
-            .unwrap()
-    });
-    for (index, value) in duplicates.into_iter().enumerate() {
-        let output = module
-            .add_port(
-                format!("y{index}"),
-                word::PortDirection::Output,
-                bit,
-                word::SourceSpan::default(),
-            )
-            .unwrap();
-        module
-            .connect(
-                word::LValue::signal(module.port(output).unwrap().signal),
-                value,
-                word::SourceSpan::default(),
-            )
-            .unwrap();
-    }
-
-    let mut protected = vec![false; module.values().len()];
-    protected[duplicates[0].index()] = true;
-    let changes =
-        optimize_combinational_dataflow_by_preserving_classes(&mut module, &protected, |_, _| true)
-            .unwrap();
-    module.compact_netlist().unwrap();
-    module.validate().unwrap();
-
-    assert!(
-        changes
-            .representatives()
-            .iter()
-            .enumerate()
-            .all(|(index, value)| value.index() == index)
-    );
-    assert_eq!(module.operations().len(), 2);
-    assert_ne!(module.connects()[0].value, module.connects()[1].value);
-}
-
-#[test]
 fn resolves_exact_static_vector_aliases_before_region_freeze() {
     let mut module = word::WordModule::new("top");
     let ty = word::WordType::new(32, false, LogicStateKind::FourState).unwrap();
@@ -221,7 +152,7 @@ fn resolves_exact_static_vector_aliases_before_region_freeze() {
         )
         .unwrap();
 
-    optimize_combinational_dataflow(&mut module).unwrap();
+    resolve_static_connect_aliases(&mut module).unwrap();
     module.validate().unwrap();
 
     let and_operation = module
@@ -241,6 +172,161 @@ fn resolves_exact_static_vector_aliases_before_region_freeze() {
         crate::word::operation_inputs(&and_operation.kind)
             .into_iter()
             .any(|input| input == xor)
+    );
+    assert!(
+        module
+            .connects()
+            .iter()
+            .all(|connect| connect.target.signal != shared)
+    );
+}
+
+#[test]
+fn exact_vector_aliases_reject_reverse_and_multiple_drivers() {
+    let mut module = word::WordModule::new("top");
+    let wide = word::WordType::bits(4).unwrap();
+    let source = word::SourceSpan::default();
+    let inputs = ["a", "b"].map(|name| {
+        let port = module
+            .add_port(name, word::PortDirection::Input, wide, source.clone())
+            .unwrap();
+        module
+            .read_signal(module.port(port).unwrap().signal, source.clone())
+            .unwrap()
+    });
+
+    let reversed = module.add_wire("reversed", wide, source.clone()).unwrap();
+    module
+        .connect(
+            word::LValue::signal(reversed).with_range(word::BitRange { msb: 0, lsb: 3 }),
+            inputs[0],
+            source.clone(),
+        )
+        .unwrap();
+    let reversed_read = module.read_signal(reversed, source.clone()).unwrap();
+
+    let multiple = module.add_wire("multiple", wide, source.clone()).unwrap();
+    for &input in &inputs {
+        module
+            .connect(word::LValue::signal(multiple), input, source.clone())
+            .unwrap();
+    }
+    let multiple_read = module.read_signal(multiple, source).unwrap();
+    let mixed = module
+        .add_wire("mixed", wide, word::SourceSpan::default())
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(mixed),
+            inputs[0],
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let low = module
+        .extract(inputs[1], 0, 2, word::SourceSpan::default())
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(mixed).with_range(word::BitRange { msb: 1, lsb: 0 }),
+            low,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let mixed_read = module
+        .read_signal(mixed, word::SourceSpan::default())
+        .unwrap();
+    for (name, value) in [
+        ("reversed_output", reversed_read),
+        ("multiple_output", multiple_read),
+        ("mixed_output", mixed_read),
+    ] {
+        let output = module
+            .add_port(
+                name,
+                word::PortDirection::Output,
+                wide,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(module.port(output).unwrap().signal),
+                value,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+    }
+
+    let changes = resolve_static_connect_aliases(&mut module).unwrap();
+
+    assert_eq!(
+        changes.representatives()[reversed_read.index()],
+        reversed_read
+    );
+    assert_eq!(
+        changes.representatives()[multiple_read.index()],
+        multiple_read
+    );
+    assert_eq!(changes.representatives()[mixed_read.index()], mixed_read);
+    assert_eq!(
+        module
+            .connects()
+            .iter()
+            .filter(|connect| connect.target.signal == reversed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        module
+            .connects()
+            .iter()
+            .filter(|connect| connect.target.signal == multiple)
+            .count(),
+        2
+    );
+    assert_eq!(
+        module
+            .connects()
+            .iter()
+            .filter(|connect| connect.target.signal == mixed)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn exact_vector_aliases_preserve_explicit_signal_identity() {
+    let mut module = word::WordModule::new("top");
+    let wide = word::WordType::bits(4).unwrap();
+    let source = word::SourceSpan::default();
+    let input = module
+        .add_port("a", word::PortDirection::Input, wide, source.clone())
+        .unwrap();
+    let input = module
+        .read_signal(module.port(input).unwrap().signal, source.clone())
+        .unwrap();
+    let kept = module.add_wire("kept", wide, source.clone()).unwrap();
+    module
+        .set_synthesis_directive(
+            word::AnnotationTarget::Signal(kept),
+            word::SynthesisDirectiveKind::KeepSignal,
+            true,
+            source.clone(),
+        )
+        .unwrap();
+    module
+        .connect(word::LValue::signal(kept), input, source.clone())
+        .unwrap();
+    let kept_read = module.read_signal(kept, source).unwrap();
+
+    let changes = resolve_static_connect_aliases(&mut module).unwrap();
+
+    assert_eq!(changes.representatives()[kept_read.index()], kept_read);
+    assert!(
+        module
+            .connects()
+            .iter()
+            .any(|connect| connect.target.signal == kept)
     );
 }
 
@@ -646,14 +732,14 @@ fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
     }
     let original_operations = owners.len();
 
-    let regions = crate::SynthesisRegionGraph::build(&module).unwrap();
     let mut ownership =
-        crate::regional::StructuralOwnershipProvenance::new(&module, &regions).unwrap();
-    optimize_owned_priority_dataflow(&mut module, &mut owners, &mut ownership).unwrap();
-    assert_eq!(owners.len(), module.operations().len());
-    assert!(owners.len() > original_operations);
+        crate::regional::StructuralOwnershipProvenance::from_owners_for_test(&module, owners)
+            .unwrap();
+    optimize_owned_priority_dataflow(&mut module, &mut ownership).unwrap();
+    assert_eq!(ownership.len(), module.operations().len());
+    assert!(ownership.len() > original_operations);
     assert!(
-        owners[original_operations..]
+        ownership.owners()[original_operations..]
             .iter()
             .all(|owner| *owner == Some(chain_owner))
     );

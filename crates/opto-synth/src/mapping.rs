@@ -95,7 +95,6 @@ impl TargetMappingContext {
         module: &mut word::WordModule,
         clock_gating: Option<ClockGatingStyle>,
         target_mapping: bool,
-        operation_regions: &[Option<crate::RegionRowId>],
         ownership: &mut crate::regional::StructuralOwnershipProvenance,
     ) -> Result<(), crate::SynthError> {
         prepare::prepare_private_region(prepare::PrivateRegionPreparation {
@@ -105,7 +104,6 @@ impl TargetMappingContext {
             clock_gating_catalog: &self.clock_gating_catalog,
             target_mapping,
             timing_diagnostics: self.config.diagnostics.timing,
-            operation_regions,
             ownership,
         })
     }
