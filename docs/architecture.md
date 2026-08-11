@@ -333,11 +333,13 @@ early when no admissible adjacent merge remains.
 
 Partition activation, minimum useful work, target work, and maximum merge work
 are separate deterministic limits. When the complete reachable operation
-closure fits the activation limit, the partitioner emits exactly one operation
-region before seed construction; this preserves all region-local sharing and
-amortizes regional scheduling and publication for small blocks. Larger
-closures use the bounded cone partitioner and never merge disconnected work
-merely to reduce region count. There is no global bin packing,
+closure fits the activation limit, the initial cone partitioner emits exactly
+one operation region before seed construction; this preserves all region-local
+sharing and amortizes regional scheduling and publication for small blocks.
+The final structural-owner path groups its already-frozen owner atoms directly
+and does not evaluate the activation limit. Larger initial closures use the
+bounded cone partitioner and never merge disconnected work merely to reduce
+region count. There is no global bin packing,
 resource-affinity proposer, cross-owner candidate analysis, or architecture
 candidate analysis before the final freeze.
 

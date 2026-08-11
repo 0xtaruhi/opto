@@ -248,4 +248,44 @@ mod tests {
         )
         .unwrap();
     }
+
+    #[test]
+    fn frozen_verification_rejects_an_owner_without_an_anchor() {
+        let mut module = word::WordModule::new("missing_anchor");
+        let span = word::SourceSpan::stable("test");
+        let ty = word::WordType::bits(1).unwrap();
+        let input = module
+            .add_port("d", word::PortDirection::Input, ty, span.clone())
+            .unwrap();
+        let value = module
+            .read_signal(module.port(input).unwrap().signal, span.clone())
+            .unwrap();
+        let value = module
+            .unary(word::UnaryOp::BitNot, value, span.clone())
+            .unwrap();
+        let output = module
+            .add_port("q", word::PortDirection::Output, ty, span.clone())
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(module.port(output).unwrap().signal),
+                value,
+                span,
+            )
+            .unwrap();
+        let graph = super::super::region_graph::partition::build(
+            &module,
+            super::super::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let mut provenance = StructuralOwnershipProvenance::new(&module, &graph).unwrap();
+        provenance.owner_anchors.clear();
+
+        let error = provenance.verify_frozen(&module, &graph).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("structural owner anchor table does not cover ownership")
+        );
+    }
 }

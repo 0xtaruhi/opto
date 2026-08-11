@@ -317,6 +317,8 @@ impl SynthesisRegion {
         self.id
     }
 
+    #[must_use]
+    /// Return the stable partition anchor recorded when the region was formed.
     pub(crate) const fn partition_anchor(self) -> [u8; 32] {
         self.partition_anchor
     }

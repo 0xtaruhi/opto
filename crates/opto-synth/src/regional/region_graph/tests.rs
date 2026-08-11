@@ -411,6 +411,30 @@ fn star_fragments_are_absorbed_without_mutual_nomination() {
 }
 
 #[test]
+fn inconsistent_work_policy_is_rejected() {
+    let mut module = WordModule::new("policy");
+    let data = input(&mut module, "d");
+    let inverted = module.unary(UnaryOp::BitNot, data, test_span()).unwrap();
+    output(&mut module, "q", inverted);
+    let policies = [
+        RegionPartitionPolicy::with_work_limits(0, 1, 1, 1),
+        RegionPartitionPolicy::with_work_limits(1, 0, 1, 1),
+        RegionPartitionPolicy::with_work_limits(1, 1, 0, 1),
+        RegionPartitionPolicy::with_work_limits(1, 1, 16, 8),
+        RegionPartitionPolicy::with_work_limits(1, 32, 16, 64),
+    ];
+
+    for policy in policies {
+        let error = super::partition::build(&module, policy).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("region work policy is inconsistent")
+        );
+    }
+}
+
+#[test]
 fn final_partition_treats_structural_owners_as_indivisible_atoms() {
     let mut module = WordModule::new("owner_atoms");
     let source = input(&mut module, "a");

@@ -321,7 +321,7 @@ fn partition_owned_operations(
         }
     }
     let mut regions = owner_regions.into_values().collect::<Vec<_>>();
-    coarsen_regions(module, &dependencies, &criticality, policy, &mut regions);
+    coarsen_regions(module, &dependencies, &criticality, policy, &mut regions)?;
     Ok(regions)
 }
 
@@ -354,7 +354,7 @@ fn partition_operations(
         seeds,
         size_limit: policy.target,
     })?;
-    coarsen_regions(module, &dependencies, &criticality, policy, &mut regions);
+    coarsen_regions(module, &dependencies, &criticality, policy, &mut regions)?;
     Ok(regions)
 }
 
@@ -858,7 +858,7 @@ fn coarsen_regions(
     criticality: &[u64],
     policy: RegionPartitionPolicy,
     regions: &mut Vec<TempRegion>,
-) {
+) -> Result<(), crate::SynthError> {
     let mut owners = vec![None; module.operations().len()];
     for (region, contents) in regions.iter().enumerate() {
         for operation in &contents.operations {
@@ -867,7 +867,7 @@ fn coarsen_regions(
     }
     for _ in 0..COARSENING_ROUNDS {
         let edges = region_cut_gains(module, dependencies, criticality, &owners);
-        let absorbed = absorb_fragments(&edges, policy, regions, &mut owners);
+        let absorbed = absorb_fragments(&edges, policy, regions, &mut owners)?;
         if absorbed {
             continue;
         }
@@ -876,6 +876,7 @@ fn coarsen_regions(
         }
     }
     regions.retain(|region| !region.operations.is_empty());
+    Ok(())
 }
 
 fn region_cut_gains(
@@ -922,22 +923,19 @@ fn absorb_fragments(
     policy: RegionPartitionPolicy,
     regions: &mut [TempRegion],
     owners: &mut [Option<usize>],
-) -> bool {
+) -> Result<bool, crate::SynthError> {
+    let incident = region_incident_edges(regions.len(), edges)?;
     let mut proposals = BTreeMap::<usize, Vec<(u64, usize)>>::new();
     for source in 0..regions.len() {
         if regions[source].operations.is_empty() || regions[source].work >= policy.minimum {
             continue;
         }
-        let candidate = edges
+        let neighbours = incident.get(source).ok_or_else(|| {
+            crate::SynthError::invariant("region incident-edge index lost a region row")
+        })?;
+        let candidate = neighbours
             .iter()
-            .filter_map(|(&(left, right), &gain)| {
-                let receiver = if left == source {
-                    right
-                } else if right == source {
-                    left
-                } else {
-                    return None;
-                };
+            .filter_map(|&(receiver, gain)| {
                 (!regions[receiver].operations.is_empty()
                     && regions[receiver].work >= policy.minimum
                     && regions[receiver].work.saturating_add(regions[source].work)
@@ -964,7 +962,20 @@ fn absorb_fragments(
             changed = true;
         }
     }
-    changed
+    Ok(changed)
+}
+
+fn region_incident_edges(
+    region_count: usize,
+    edges: &BTreeMap<(usize, usize), u64>,
+) -> Result<opto_core::PackedRows<(usize, u64)>, crate::SynthError> {
+    opto_core::PackedRows::try_from_entries(
+        region_count,
+        edges
+            .iter()
+            .flat_map(|(&(left, right), &gain)| [(left, (right, gain)), (right, (left, gain))]),
+    )
+    .map_err(|error| crate::SynthError::capacity(error.to_string()))
 }
 
 fn merge_maximal_pairs(
@@ -1023,18 +1034,47 @@ fn merge_region_into(
         &mut regions[source],
         empty_unsealed_region(SynthesisRegionKind::Combinational, Vec::new(), 0),
     );
-    regions[receiver].operations.extend(removed.operations);
-    regions[receiver].operations.sort_unstable();
-    regions[receiver].work = regions[receiver].work.saturating_add(removed.work);
-    regions[receiver].delay = regions[receiver].delay.saturating_add(removed.delay);
-    regions[receiver].wiring = regions[receiver].wiring.saturating_add(removed.wiring);
-    if removed.kind == SynthesisRegionKind::State {
-        regions[receiver].kind = SynthesisRegionKind::State;
-    }
-    regions[receiver].anchor = regions[receiver].anchor.min(removed.anchor);
-    for operation in &regions[receiver].operations {
+    let TempRegion {
+        anchor,
+        kind,
+        operations,
+        memories: _,
+        work,
+        delay,
+        wiring,
+        id: _,
+        revision: _,
+    } = removed;
+    for operation in &operations {
         owners[operation.index()] = Some(receiver);
     }
+    let receiver_operations = std::mem::take(&mut regions[receiver].operations);
+    regions[receiver].operations = merge_sorted_operations(&receiver_operations, &operations);
+    regions[receiver].work = regions[receiver].work.saturating_add(work);
+    regions[receiver].delay = regions[receiver].delay.saturating_add(delay);
+    regions[receiver].wiring = regions[receiver].wiring.saturating_add(wiring);
+    if kind == SynthesisRegionKind::State {
+        regions[receiver].kind = SynthesisRegionKind::State;
+    }
+    regions[receiver].anchor = regions[receiver].anchor.min(anchor);
+}
+
+fn merge_sorted_operations(left: &[word::OpId], right: &[word::OpId]) -> Vec<word::OpId> {
+    let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    while left_index < left.len() && right_index < right.len() {
+        if left[left_index] <= right[right_index] {
+            merged.push(left[left_index]);
+            left_index += 1;
+        } else {
+            merged.push(right[right_index]);
+            right_index += 1;
+        }
+    }
+    merged.extend_from_slice(&left[left_index..]);
+    merged.extend_from_slice(&right[right_index..]);
+    merged
 }
 
 fn empty_unsealed_region(
