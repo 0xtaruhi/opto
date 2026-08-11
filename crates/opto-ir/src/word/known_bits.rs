@@ -421,12 +421,19 @@ fn derive_operation(
         } => {
             let input = value_facts(module, *value, analysis);
             let offset = value_facts(module, *offset, analysis);
-            known_usize(offset, &analysis.arena)
-                .and_then(|offset| u32::try_from(offset).ok())
-                .filter(|offset| offset.saturating_add(width.get()) <= input.width)
-                .map_or(FactRange::unknown(width.get()), |offset| {
-                    slice_facts(input, offset, width.get(), analysis)
-                })
+            match known_usize(offset, &analysis.arena) {
+                Some(offset) => match u32::try_from(offset)
+                    .ok()
+                    .filter(|offset| offset.saturating_add(width.get()) <= input.width)
+                {
+                    Some(offset) => slice_facts(input, offset, width.get(), analysis),
+                    None => store_generated(analysis, width.get(), |_, _| KnownBit::Zero),
+                },
+                None if is_zero(input, &analysis.arena) => {
+                    store_generated(analysis, width.get(), |_, _| KnownBit::Zero)
+                }
+                None => FactRange::unknown(width.get()),
+            }
         }
         OpKind::DynamicInsert {
             value,
