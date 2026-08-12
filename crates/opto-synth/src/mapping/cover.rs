@@ -309,6 +309,15 @@ fn select_subject_cover(
         request,
     };
     let mut implementations = subject.implementations().iter();
+    let timing_driven = request
+        .roots
+        .iter()
+        .any(|root| root.required_time.is_some_and(f64::is_finite));
+    let portfolio_search = if timing_driven {
+        CoverSearch::Estimate
+    } else {
+        CoverSearch::Exact
+    };
     let baseline = implementations.next().ok_or_else(|| {
         crate::SynthError::invariant("regional Boolean subject has no baseline implementation")
     })?;
@@ -316,7 +325,7 @@ fn select_subject_cover(
         return Ok(None);
     };
     let mut selected = selector
-        .select(&outputs, CoverSearch::Estimate)?
+        .select(&outputs, portfolio_search)?
         .ok_or_else(|| crate::SynthError::mapping("regional Boolean network cannot be covered"))?;
     let mut selected_pass = baseline.pass();
     for implementation in implementations {
@@ -324,7 +333,7 @@ fn select_subject_cover(
             analyzed_outputs(request.roots, |value| implementation.node(value))?.ok_or_else(
                 || crate::SynthError::invariant("AXM alternative has no analyzed outputs"),
             )?;
-        let Some(candidate) = selector.select(&candidate_outputs, CoverSearch::Estimate)? else {
+        let Some(candidate) = selector.select(&candidate_outputs, portfolio_search)? else {
             crate::api::diagnostics::trace!(
                 crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
                 "cover.logic_alternative",
@@ -333,7 +342,7 @@ fn select_subject_cover(
             );
             continue;
         };
-        let preferred = prefer_cover_rank(candidate.rank, selected.rank);
+        let preferred = prefer_cover_rank(candidate.rank, selected.rank, timing_driven);
         crate::api::diagnostics::trace!(
             crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
             "cover.logic_alternative",
@@ -348,16 +357,20 @@ fn select_subject_cover(
             selected_pass = implementation.pass();
         }
     }
-    let estimate_area = selected.cover.total_area;
-    let selected = selector
-        .select(&outputs, CoverSearch::Exact)?
-        .ok_or_else(|| {
-            crate::SynthError::mapping("selected AXM implementation cannot be covered")
-        })?;
+    let portfolio_area = selected.cover.total_area;
+    let selected = if portfolio_search == CoverSearch::Exact {
+        selected
+    } else {
+        selector
+            .select(&outputs, CoverSearch::Exact)?
+            .ok_or_else(|| {
+                crate::SynthError::mapping("selected AXM implementation cannot be covered")
+            })?
+    };
     crate::api::diagnostics::trace!(
         crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
         "cover.logic_portfolio",
-        "pass={selected_pass} estimate={estimate_area:.3} exact={:.3}",
+        "pass={selected_pass} portfolio={portfolio_area:.3} exact={:.3}",
         selected.cover.total_area
     );
     Ok(Some((outputs, selected.cover)))
@@ -517,7 +530,7 @@ impl CoverSelector<'_, '_> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum CoverSearch {
     Estimate,
     Exact,
@@ -528,8 +541,17 @@ struct RankedCover {
     rank: CoverRank,
 }
 
-fn prefer_cover_rank(candidate: CoverRank, current: CoverRank) -> bool {
-    candidate < current
+fn prefer_cover_rank(candidate: CoverRank, current: CoverRank, timing_driven: bool) -> bool {
+    if timing_driven {
+        candidate < current
+    } else {
+        candidate
+            .area
+            .total_cmp(&current.area)
+            .then_with(|| candidate.delay.total_cmp(&current.delay))
+            .then_with(|| candidate.cells.cmp(&current.cells))
+            .is_lt()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -615,10 +637,10 @@ mod tests {
 
     #[test]
     fn feasible_alternative_minimizes_area_delay_product() {
-        assert!(!prefer_cover_rank(rank(99.8, 1.1), rank(100.0, 1.0)));
-        assert!(prefer_cover_rank(rank(99.8, 0.9), rank(100.0, 1.0)));
-        assert!(prefer_cover_rank(rank(100.0, 0.9), rank(100.0, 1.0)));
-        assert!(prefer_cover_rank(rank(110.0, 0.9), rank(100.0, 1.0)));
+        assert!(!prefer_cover_rank(rank(99.8, 1.1), rank(100.0, 1.0), true));
+        assert!(prefer_cover_rank(rank(99.8, 0.9), rank(100.0, 1.0), true));
+        assert!(prefer_cover_rank(rank(100.0, 0.9), rank(100.0, 1.0), true));
+        assert!(prefer_cover_rank(rank(110.0, 0.9), rank(100.0, 1.0), true));
     }
 
     #[test]
@@ -628,7 +650,17 @@ mod tests {
         violating.worst_violation = 0.1;
         violating.total_violation = 0.1;
 
-        assert!(!prefer_cover_rank(violating, rank(100.0, 100.0)));
-        assert!(prefer_cover_rank(rank(100.0, 100.0), violating));
+        assert!(!prefer_cover_rank(violating, rank(100.0, 100.0), true));
+        assert!(prefer_cover_rank(rank(100.0, 100.0), violating, true));
+    }
+
+    #[test]
+    fn unconstrained_alternative_minimizes_area_before_delay() {
+        assert!(prefer_cover_rank(rank(99.8, 10.0), rank(100.0, 1.0), false));
+        assert!(!prefer_cover_rank(
+            rank(100.1, 0.1),
+            rank(100.0, 1.0),
+            false
+        ));
     }
 }
