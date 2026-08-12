@@ -407,20 +407,6 @@ pub(super) fn timing_profile(
     (score.depth, score.total_depth)
 }
 
-pub(super) fn balance_profile(
-    network: &LogicGraph,
-    roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-) -> (u32, u64) {
-    if requirements.iter().any(Option::is_some) {
-        return timing_profile(network, roots, requirements);
-    }
-    roots.iter().fold((0, 0), |(maximum, total), &root| {
-        let depth = network.level(root);
-        (maximum.max(depth), total + u64::from(depth))
-    })
-}
-
 fn node_weight(node: LogicNode) -> u32 {
     match node {
         LogicNode::Const(_) | LogicNode::Var(_) => 0,

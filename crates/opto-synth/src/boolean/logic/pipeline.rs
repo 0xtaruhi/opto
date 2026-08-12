@@ -26,12 +26,29 @@ struct ChoiceProposal {
 }
 
 type LogicRoots = (LogicGraph, Box<[LogicNodeId]>);
+type ProposalTransform =
+    fn(&LogicGraph, &[LogicNodeId]) -> Result<Option<LogicRoots>, crate::SynthError>;
+
+#[derive(Clone, Copy)]
+struct ProposalSpec {
+    pass: &'static str,
+    transform: ProposalTransform,
+    round_budget: u8,
+    optimization: OptimizationPolicy,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CopyStyle {
     Preserve,
     DecomposeMux,
 }
+
+const MUX_DECOMPOSITION: ProposalSpec = ProposalSpec {
+    pass: "mux_decomposition",
+    transform: decompose_muxes,
+    round_budget: 2,
+    optimization: OptimizationPolicy::Factored,
+};
 
 pub(super) struct TransformProduct {
     pub(super) network: LogicGraph,
@@ -111,7 +128,8 @@ pub(super) fn optimize(
         incremental,
     )?;
     let mut alternatives = functional.into_iter().collect::<Vec<_>>();
-    alternatives.extend(decomposed_choice(
+    alternatives.extend(build_proposal(
+        MUX_DECOMPOSITION,
         &source,
         roots,
         requirements,
@@ -121,32 +139,45 @@ pub(super) fn optimize(
     finish(baseline, roots, alternatives)
 }
 
-fn decomposed_choice(
+fn build_proposal(
+    spec: ProposalSpec,
     source: &LogicGraph,
     roots: &[LogicNodeId],
     requirements: &[Option<f64>],
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
 ) -> Result<Option<ChoiceProposal>, crate::SynthError> {
-    let Some((network, roots)) = decompose_muxes(source, roots)? else {
-        return Ok(None);
-    };
-    let first = optimize_factored(&network, &roots, requirements, diagnostics, runtime)?;
-    let first_roots = map_roots(&first.remap, &roots)?;
-    let (optimized, roots) = if let Some((network, roots)) =
-        decompose_muxes(&first.network, &first_roots)?
-    {
-        let optimized = optimize_factored(&network, &roots, requirements, diagnostics, runtime)?;
+    let mut transformed = (spec.transform)(source, roots)?;
+    let mut proposal = None;
+    for round in 0..spec.round_budget {
+        let Some((network, roots)) = transformed else {
+            break;
+        };
+        let cache = super::rewrite::RewriteRecipeCache::default();
+        let metrics = crate::incremental::IncrementalRunMetrics::default();
+        let optimized = optimize_with(
+            &network,
+            &roots,
+            requirements,
+            diagnostics,
+            runtime,
+            RewriteIncremental::new(&cache, &metrics),
+            spec.optimization,
+        )?;
         let roots = map_roots(&optimized.remap, &roots)?;
-        (optimized, roots)
-    } else {
-        (first, first_roots)
-    };
-    Ok(Some(ChoiceProposal {
-        pass: "mux_decomposition",
-        network: optimized.network,
-        roots,
-    }))
+        let candidate = ChoiceProposal {
+            pass: spec.pass,
+            network: optimized.network,
+            roots,
+        };
+        transformed = if round + 1 < spec.round_budget {
+            (spec.transform)(&candidate.network, &candidate.roots)?
+        } else {
+            None
+        };
+        proposal = Some(candidate);
+    }
+    Ok(proposal)
 }
 
 fn decompose_muxes(
@@ -236,7 +267,8 @@ pub(super) fn optimize_baseline(
             requirements,
             diagnostics,
             runtime,
-            (incremental, super::rewrite::resynthesize, false),
+            incremental,
+            OptimizationPolicy::Baseline,
         )
     } else {
         let cache = super::rewrite::RewriteRecipeCache::default();
@@ -247,11 +279,8 @@ pub(super) fn optimize_baseline(
             requirements,
             diagnostics,
             runtime,
-            (
-                RewriteIncremental::new(&cache, &metrics),
-                super::rewrite::resynthesize,
-                false,
-            ),
+            RewriteIncremental::new(&cache, &metrics),
+            OptimizationPolicy::Baseline,
         )
     }
 }
@@ -271,23 +300,16 @@ fn optimize_factored(
         requirements,
         diagnostics,
         runtime,
-        (
-            RewriteIncremental::new(&cache, &metrics),
-            super::rewrite::normalize,
-            true,
-        ),
+        RewriteIncremental::new(&cache, &metrics),
+        OptimizationPolicy::Factored,
     )
 }
 
-type RewriteStage = fn(
-    &mut TransformState,
-    &[Option<f64>],
-    crate::SynthesisDiagnostics,
-    &ExecutionContext,
-    RewriteIncremental<'_>,
-) -> Result<(), crate::SynthError>;
-
-type OptimizationStage<'a> = (RewriteIncremental<'a>, RewriteStage, bool);
+#[derive(Clone, Copy)]
+enum OptimizationPolicy {
+    Baseline,
+    Factored,
+}
 
 fn optimize_with(
     network: &LogicGraph,
@@ -295,15 +317,19 @@ fn optimize_with(
     requirements: &[Option<f64>],
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
-    options: OptimizationStage<'_>,
+    incremental: RewriteIncremental<'_>,
+    policy: OptimizationPolicy,
 ) -> Result<TransformProduct, crate::SynthError> {
     if roots.len() != requirements.len() {
         return Err(crate::SynthError::invariant(
             "AXM pass requirements do not align with roots",
         ));
     }
-    let (incremental, rewrite, balance_unconstrained) = options;
     let mut state = TransformState::start(roots, copy_active(network, roots)?)?;
+    let rewrite = match policy {
+        OptimizationPolicy::Baseline => super::rewrite::resynthesize,
+        OptimizationPolicy::Factored => super::rewrite::normalize,
+    };
     rewrite(&mut state, requirements, diagnostics, runtime, incremental)?;
     state.network.freeze();
     state.analyses = TransformAnalyses::default();
@@ -311,12 +337,16 @@ fn optimize_with(
     let started = std::time::Instant::now();
     let balanced = super::balance::balance(&state.network, &state.roots);
     let balanced_roots = map_roots(&balanced.remap, &state.roots)?;
-    let profile = |network, roots| {
-        if balance_unconstrained {
-            super::rewrite::balance_profile(network, roots, requirements)
-        } else {
-            super::rewrite::timing_profile(network, roots, requirements)
+    let profile = |network: &LogicGraph, roots: &[LogicNodeId]| {
+        if matches!(policy, OptimizationPolicy::Baseline)
+            || requirements.iter().any(Option::is_some)
+        {
+            return super::rewrite::timing_profile(network, roots, requirements);
         }
+        roots.iter().fold((0, 0), |(maximum, total), &root| {
+            let depth = network.level(root);
+            (maximum.max(depth), total + u64::from(depth))
+        })
     };
     let accepted =
         profile(&balanced.network, &balanced_roots) < profile(&state.network, &state.roots);

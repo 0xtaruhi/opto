@@ -440,12 +440,15 @@ larger input sets; it does not reconstruct a second global factoring engine.
 AXM optimization is scheduled statically by a typed pass pipeline. Destructive
 passes return a `TransformProduct`; `TransformState` alone composes node maps,
 checks that active roots survive, and carries typed reusable analyses. Optional
-passes return equivalent proposals. The pipeline installs retained proposals
-once into the shared graph. The mapper covers the generic implementation list
-with real Liberty cells. Timing-driven portfolios use bounded flow ranking
-before exact recovery of the selected implementation; unconstrained portfolios
-compare exact mapped area because that is their stated objective. Pass names,
-remap composition, analysis
+passes return equivalent proposals. Iterative representation proposals use a
+static specification that names the transform, its fixed round budget, and its
+optimization policy; proposal-specific booleans and open-coded retry chains are
+not part of the scheduler. The pipeline installs retained proposals once into
+the shared graph. The mapper covers the generic implementation list with real
+Liberty cells. Timing-driven portfolios use bounded flow ranking before exact
+recovery of the selected implementation; unconstrained portfolios compare
+exact mapped area because that is their stated objective. Pass names, remap
+composition, analysis
 invalidation, and proposal handling do not leak into candidate enumeration.
 Dispatch remains monomorphic, with no per-node pass objects or virtual calls.
 
