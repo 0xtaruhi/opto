@@ -109,6 +109,8 @@ pub(super) struct CaseSpec {
     pub(super) id: String,
     pub(super) kind: CaseKind,
     #[serde(default)]
+    pub(super) covers: Vec<String>,
+    #[serde(default)]
     pub(super) category: Option<String>,
     #[serde(default)]
     pub(super) class: Option<String>,

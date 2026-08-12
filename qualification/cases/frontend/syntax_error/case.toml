@@ -4,6 +4,7 @@
 format = 1
 id = "frontend-syntax-error"
 kind = "regression"
+covers = ["A malformed SystemVerilog port list produces a stable frontend syntax diagnostic."]
 category = "negative"
 language = "sverilog"
 top = "top"

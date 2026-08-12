@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Explicit typed fixtures shared by timing-domain unit tests.
+
 use super::*;
 
 pub(crate) fn test_object_uid(raw: u64) -> opto_db::ObjectUid {
@@ -20,6 +22,14 @@ pub(crate) fn test_port_id(name: &str) -> PortId {
 
 pub(crate) fn test_clock_id(raw: u64) -> ClockId {
     ClockId::from_uid(test_object_uid(raw))
+}
+
+pub(crate) fn test_library_units() -> TimingLibraryUnits {
+    TimingLibraryUnits {
+        time_seconds: Some(1e-12),
+        capacitance_farads: Some(1e-15),
+        resistance_ohms: None,
+    }
 }
 
 /// Builds one top-level timing port bound to a net of the same name.
@@ -42,6 +52,21 @@ pub(crate) fn test_analyze_timing(
     options: &ReportTimingOptions,
 ) -> TimingAnalysis {
     TimingEngine::analyze_once(timing, model, options).unwrap()
+}
+
+pub(crate) fn assert_path_summary(
+    analysis: &TimingAnalysis,
+    startpoint: &str,
+    endpoint: &str,
+    arrival: f64,
+    required: f64,
+    slack: f64,
+) {
+    assert_eq!(analysis.startpoint(), startpoint);
+    assert_eq!(analysis.endpoint(), endpoint);
+    assert!((analysis.arrival() - arrival).abs() < 1e-12);
+    assert!((analysis.required().unwrap() - required).abs() < 1e-12);
+    assert!((analysis.slack().unwrap() - slack).abs() < 1e-12);
 }
 
 pub(crate) mod test_library {

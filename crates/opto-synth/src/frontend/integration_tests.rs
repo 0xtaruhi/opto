@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::*;
+//! Cross-stage tests owned by frontend normalization and Word-IR publication.
+
+use crate::test_support::*;
 
 fn target_options(cells: Vec<TargetCell>) -> SynthesisOptions {
     SynthesisOptions {
@@ -20,60 +22,6 @@ fn mux_target_cell() -> TargetCell {
             ("Z", TargetPinDirection::Output, Some("(S&A)|(!S&B)")),
         ],
     )
-}
-
-#[test]
-fn rtl_module_rejects_duplicate_instances() {
-    let mut module = WordModule::new("top");
-    module
-        .add_port("a", PortDirection::Input, bit(), test_span())
-        .unwrap();
-    module
-        .add_instance("u0", "child", Vec::new(), test_span())
-        .unwrap();
-    let err = module
-        .add_instance("u0", "child", Vec::new(), test_span())
-        .unwrap_err();
-    assert!(err.to_string().contains("duplicate RTL instance name 'u0'"));
-}
-
-#[test]
-fn write_verilog_emits_assigns_and_instance_connections() {
-    let text = write_verilog(&structural_module()).unwrap();
-
-    assert!(text.contains("assign n = ~a;"));
-    assert!(text.contains("child u_child(.i(n), .o(y));"));
-}
-
-#[test]
-fn write_verilog_emits_sized_constants() {
-    let mut module = WordModule::new("top");
-    let y = module
-        .add_port(
-            "y",
-            PortDirection::Output,
-            WordType::new(4, false, LogicStateKind::FourState).unwrap(),
-            test_span(),
-        )
-        .unwrap();
-    let value = module
-        .constant(
-            ConstBits::from_bin_str("1010").unwrap(),
-            WordType::new(4, false, LogicStateKind::FourState).unwrap(),
-            test_span(),
-        )
-        .unwrap();
-    module
-        .connect(
-            LValue::signal(module.port(y).unwrap().signal),
-            value,
-            test_span(),
-        )
-        .unwrap();
-
-    let text = write_verilog(&module).unwrap();
-
-    assert!(text.contains("assign y = 4'b1010;"));
 }
 
 #[test]

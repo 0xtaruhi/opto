@@ -9,20 +9,48 @@ all pass.
 
 | Tier | Corpus | Current scale | Gate |
 | --- | --- | ---: | --- |
-| Unit | Rust tests beside each domain | domain-local cases and invariants | every push |
-| Static integration | focused RTL, Tcl shell behavior, SDC, hierarchy, memory and sequential cases | 20 cases | every push |
-| Generated semantics | operator × width × signedness × context | 238 CEC-proved points | every push |
-| Generated differential | deterministic RTL generator | 512 fixed-seed designs as a low-cost regression sentinel | every push |
-| Mapping-fixture determinism | presubmit mapping cases without Yosys | 5 zero-tolerance local-mechanism baselines | every push, every platform |
+| Unit | Rust tests beside each domain | domain-local cases and invariants | every pull request |
+| Static integration | focused RTL, Tcl shell behavior, SDC, hierarchy, memory and sequential cases | 18 cases | every pull request |
+| Generated semantics | operator × width × signedness × context | 238 synthesis points on pull requests; the same points are CEC-proved nightly | pull request and nightly |
+| Generated differential | deterministic RTL generator | 512 fixed-seed, CEC-proved designs as a regression sentinel | nightly |
+| Mapping-fixture determinism | presubmit mapping cases without Yosys | 5 zero-tolerance local-mechanism baselines | every Linux pull request |
 | Language conformance | CHIPS Alliance `sv-tests` | 1,027 audited HDL files; 137/137 reviewed positive ASIC cases | nightly |
 | Synthesis qualification | Yosys RTL tests | 549 files audited; 172 designs synthesized; 119/119 mandatory observable designs proved | nightly |
 | Real designs | pinned Ibex and CVA6 configurations | complete checked manifests | weekly |
 | QoR | representative kernels and blocks | area, timing, cell mix, runtime, memory and CEC | weekly |
 
-The 20 static cases are seeds, not a claim of broad coverage. Every fixed bug
+The 18 static cases are seeds, not a claim of broad coverage. Every fixed bug
 must add the smallest stable regression case that would have caught it. Broad
 semantic spaces belong in a generator; real integration behavior belongs in a
 pinned upstream design.
+
+Every static case declares its unique dimension in the checked `covers` field:
+
+| Case | Unique dimension | Pull-request oracle |
+| --- | --- | --- |
+| `frontend-packed-generate` | packed-struct arrays across generated parameterized instances | elaboration inventory |
+| `frontend-syntax-error` | malformed SystemVerilog port-list diagnostic | expected process failure and diagnostic text |
+| `hierarchy-parameter-generate` | indexed part-selects through generated child hierarchy | mapped synthesis; CEC nightly |
+| `memories-dual-port-register-bank` | two clocked ports with explicit same-address write priority | sequential mapped synthesis; CEC nightly |
+| `memories-sync-ram` | typed 64-by-32 synchronous-read memory retention | elaboration inventory |
+| `processes-priority-case` | `priority casez` wildcard order under an outer enable | mapped synthesis; CEC nightly |
+| `processes-grouped-case-items` | Verilog `always @*`, grouped case items, and default | mapped synthesis; CEC nightly |
+| `sdc-max-delay` | Tcl-composed collections carrying electrical and path constraints | constrained synthesis and reports |
+| `semantics-division` | guarded signed/unsigned quotient and remainder composition | mapped synthesis; CEC nightly |
+| `semantics-multilevel-boolean-cover` | shared five-input two-level AND-OR product cover | mapped synthesis; CEC nightly |
+| `semantics-resolved-nets` | multiple-driver `wand` and `wor` resolution | mapped synthesis; CEC nightly |
+| `semantics-signed-arithmetic` | mixed-width sign extension, arithmetic shift, compare, and dynamic slice | mapped synthesis; CEC nightly |
+| `semantics-verilog-truncating-add` | non-ANSI Verilog declarations and fixed-width addition truncation | mapped synthesis; CEC nightly |
+| `sequential-async-set-clear` | preset-over-clear priority composed with enable | sequential mapped synthesis; CEC nightly |
+| `sequential-dff-enable` | vector inferred clock-enable register | sequential mapped synthesis; CEC nightly |
+| `sequential-fsm-equivalent-states` | equivalent-state merge from reviewed zero initial state | sequential mapped synthesis; CEC nightly |
+| `sequential-fsm-sparse-timing` | sparse FSM under an explicit timing clock | timing-aware synthesis; CEC nightly |
+| `tcl-collections` | collection length/filtering plus redirect and reports | script-owned exact assertions |
+
+The policy checker rejects a static case without a specific `covers` entry.
+Renames replace vague smoke identifiers rather than preserving aliases. Case
+deletions and their stronger surviving owners are recorded in
+[`../docs/testing.md`](../docs/testing.md).
 
 Generated differential testing is deliberately capped at 512 fixed seeds. It
 is useful for inexpensive mutation coverage inside already modeled semantic
@@ -46,8 +74,9 @@ qualification/
   suites/                typed suite manifests
   upstream/              adapters, manifests, hashes and license audit data
 crates/opto/tests/
-  integration.rs         the single Cargo integration-test entry point
-  integration/           CLI and qualification modules, typed runners and reports
+  cli/                    public executable and command-line behavior
+  qualification/          typed corpus runners, formal adapters and reports
+  support/                focused integration-test support
 benchmarks/qor/           performance and quality measurements, not correctness smoke tests
 ```
 
@@ -64,8 +93,8 @@ it does not treat unrelated arbitrary register contents as equivalent.
 
 ## Local gates
 
-The normal workspace test command runs the static corpus and the 238-point
-generated matrix:
+The normal workspace test command runs the domain tests, static corpus, and
+the non-CEC form of the 238-point generated matrix:
 
 ```sh
 cargo test --workspace --all-targets --all-features
@@ -75,11 +104,11 @@ CEC requires an explicit Yosys executable:
 
 ```sh
 OPTO_YOSYS=/path/to/yosys \
-  cargo test -p opto --test integration qualification::presubmit_equivalence \
+  cargo test -p opto --test qualification presubmit_equivalence \
   -- --exact --ignored --nocapture
 
 OPTO_YOSYS=/path/to/yosys \
-  cargo test -p opto --test integration qualification::generated_semantic_equivalence \
+  cargo test -p opto --test qualification generated_semantic_equivalence \
   -- --exact --ignored --nocapture
 ```
 
@@ -87,7 +116,7 @@ Filter a static suite without editing its manifest:
 
 ```sh
 OPTO_REGRESSION_CASE=sequential-dff-enable \
-  cargo test -p opto --test integration qualification::presubmit_corpus -- --exact --nocapture
+  cargo test -p opto --test qualification presubmit_corpus -- --exact --nocapture
 ```
 
 External suites are documented in [`upstream/README.md`](upstream/README.md).
@@ -102,6 +131,8 @@ process lowering, hierarchy/parameters, sequential behavior, memories,
 constraints, Tcl collections, mapping, reports, errors, determinism, or
 resource limits. New constructs need positive and negative tests; synthesis
 changes need CEC; QoR changes need a representative nontrivial benchmark.
+Test placement, primary ownership, fixture, ignored-test, and consolidation
+rules are defined in [`../docs/testing.md`](../docs/testing.md).
 
 The nightly `sv-tests` baseline hashes the exact required case IDs. The Yosys
 baseline independently hashes synthesized designs, observable roots, mandatory

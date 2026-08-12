@@ -4,6 +4,7 @@
 format = 1
 id = "frontend-packed-generate"
 kind = "regression"
+covers = ["Packed-struct arrays cross generated parameterized instance boundaries during elaboration."]
 category = "frontend"
 language = "sverilog"
 top = "top"

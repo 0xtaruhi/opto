@@ -114,7 +114,7 @@ jobs:
           OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
           OPTO_DIFFERENTIAL_SEEDS: 512
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::generated_differential --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification generated_differential --locked -- --exact --ignored --nocapture
 
       - name: Prove static regression corpus
         id: regression
@@ -122,7 +122,7 @@ jobs:
         env:
           OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::presubmit_equivalence --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification presubmit_equivalence --locked -- --exact --ignored --nocapture
 
       - name: Prove generated semantic matrix
         id: semantics
@@ -130,7 +130,7 @@ jobs:
         env:
           OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::generated_semantic_equivalence --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification generated_semantic_equivalence --locked -- --exact --ignored --nocapture
 
       - name: Prove self-contained mapping fixtures
         id: mapping
@@ -138,7 +138,7 @@ jobs:
         env:
           OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::presubmit_qor --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification presubmit_qor --locked -- --exact --ignored --nocapture
 
       - name: Cross-check opto-formal against Yosys SAT
         id: formal
@@ -307,8 +307,8 @@ jobs:
           OPTO_QOR_BINARY: ${{ runner.temp }}/opto-head
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
         run: >-
-          cargo test -p opto --test integration
-          qualification::real_medium_qor_regression --locked --
+          cargo test -p opto --test qualification
+          real_medium_qor_regression --locked --
           --exact --ignored --nocapture
 
       - name: Upload medium-scale measurements
@@ -416,7 +416,7 @@ jobs:
           OPTO_SOURCE_SV_TESTS: ${{ github.workspace }}/.external/sv-tests
           OPTO_SV_TESTS_JOBS: 8
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::systemverilog_conformance --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification systemverilog_conformance --locked -- --exact --ignored --nocapture
 
       - name: Upload mismatch diagnostics
         if: always()
@@ -469,7 +469,7 @@ jobs:
           OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
           OPTO_YOSYS_TESTS_JOBS: 8
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::yosys_rtl_qualification --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification yosys_rtl_qualification --locked -- --exact --ignored --nocapture
 
       - name: Upload mismatch diagnostics
         if: always()

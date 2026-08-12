@@ -26,7 +26,7 @@ with:
 
 ```sh
 OPTO_YOSYS=/path/to/yosys \
-  cargo test -p opto --test integration qualification::presubmit_qor \
+  cargo test -p opto --test qualification presubmit_qor \
   -- --exact --ignored --nocapture
 ```
 
@@ -36,7 +36,7 @@ gates. They run in weekly CI rather than on every commit:
 
 ```sh
 OPTO_YOSYS=/path/to/yosys \
-  cargo test -p opto --test integration qualification::extended_qor \
+  cargo test -p opto --test qualification extended_qor \
   -- --exact --ignored --nocapture
 ```
 
@@ -51,7 +51,7 @@ OPTO_QOR_BINARY="$PWD/target/fast-release/opto" \
 OPTO_YOSYS=/path/to/yosys \
 OPTO_LIBRARY_SKY130_HD=/tmp/sky130.lib \
 OPTO_REGRESSION_OUTPUT=/tmp/opto-regression \
-  cargo test -p opto --test integration qualification::public_qor \
+  cargo test -p opto --test qualification public_qor \
   -- --exact --ignored --nocapture
 ```
 

@@ -3,14 +3,6 @@
 
 use super::*;
 
-fn units() -> TimingLibraryUnits {
-    TimingLibraryUnits {
-        time_seconds: Some(1e-12),
-        capacitance_farads: Some(1e-15),
-        resistance_ohms: None,
-    }
-}
-
 fn tree() -> RcNetwork {
     RcNetwork {
         name: "n".to_string(),
@@ -47,7 +39,7 @@ fn tree() -> RcNetwork {
 fn computes_scalar_elmore_delay_on_an_rc_tree() {
     let parasitics = Parasitics::from_rc_networks(
         vec![tree()],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Elmore,
             ..ParasiticAnalysisOptions::default()
@@ -75,9 +67,12 @@ fn rc_only_mode_preserves_a_cyclic_network_without_annotating_delay() {
             resistance_ohms: 1e3,
         },
     ]);
-    let parasitics =
-        Parasitics::from_rc_networks(vec![network], units(), ParasiticAnalysisOptions::default())
-            .unwrap();
+    let parasitics = Parasitics::from_rc_networks(
+        vec![network],
+        crate::test_library_units(),
+        ParasiticAnalysisOptions::default(),
+    )
+    .unwrap();
     let net = parasitics.net("n").unwrap();
     assert_eq!(net.delay_model(), ParasiticDelayModel::None);
     assert_eq!(net.sink_delay("U2/A", TimingEdge::Rise), None);
@@ -89,7 +84,7 @@ fn partial_network_is_kept_without_backannotating_delay() {
     network.resistors.clear();
     let parasitics = Parasitics::from_rc_networks(
         vec![network],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Elmore,
             ..ParasiticAnalysisOptions::default()
@@ -107,7 +102,7 @@ fn partial_network_is_kept_without_backannotating_delay() {
 fn incremental_overlay_updates_rc_but_retains_existing_delays() {
     let original = Parasitics::from_rc_networks(
         vec![tree()],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Elmore,
             ..ParasiticAnalysisOptions::default()
@@ -119,7 +114,7 @@ fn incremental_overlay_updates_rc_but_retains_existing_delays() {
     changed.resistors[0].resistance_ohms = 2e3;
     let changed = Parasitics::from_rc_networks(
         vec![changed],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Elmore,
             ..ParasiticAnalysisOptions::default()
@@ -155,7 +150,7 @@ fn rejects_every_two_node_coupling_capacitor() {
         });
         let error = Parasitics::from_rc_networks(
             vec![network],
-            units(),
+            crate::test_library_units(),
             ParasiticAnalysisOptions::default(),
         )
         .unwrap_err();
@@ -180,7 +175,7 @@ fn rejects_cyclic_rc_networks_in_elmore_mode() {
     ]);
     let error = Parasitics::from_rc_networks(
         vec![network],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Elmore,
             ..ParasiticAnalysisOptions::default()
@@ -206,7 +201,7 @@ fn multiple_drivers_use_the_conservative_sink_delay_envelope() {
     });
     let parasitics = Parasitics::from_rc_networks(
         vec![network],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Elmore,
             ..ParasiticAnalysisOptions::default()
@@ -226,7 +221,7 @@ fn multiple_drivers_use_the_conservative_sink_delay_envelope() {
 fn arnoldi_matches_the_single_pole_rc_step_response() {
     let parasitics = Parasitics::from_rc_networks(
         vec![tree()],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Arnoldi,
             ..ParasiticAnalysisOptions::default()
@@ -260,7 +255,7 @@ fn arnoldi_accepts_and_analyzes_a_resistor_loop() {
     ]);
     let parasitics = Parasitics::from_rc_networks(
         vec![network],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Arnoldi,
             ..ParasiticAnalysisOptions::default()
@@ -287,7 +282,7 @@ fn arnoldi_consumes_edge_specific_receiver_capacitance_and_driver_waveforms() {
     });
     let parasitics = Parasitics::from_rc_networks(
         vec![network],
-        units(),
+        crate::test_library_units(),
         ParasiticAnalysisOptions {
             delay_model: ParasiticDelayModel::Arnoldi,
             ..ParasiticAnalysisOptions::default()

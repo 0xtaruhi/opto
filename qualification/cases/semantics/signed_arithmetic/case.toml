@@ -4,6 +4,7 @@
 format = 1
 id = "semantics-signed-arithmetic"
 kind = "regression"
+covers = ["Mixed-width sign extension, arithmetic shift, signed comparison, and dynamic indexed slicing compose correctly."]
 category = "semantics"
 language = "sverilog"
 top = "top"

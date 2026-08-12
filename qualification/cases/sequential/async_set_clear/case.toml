@@ -4,6 +4,7 @@
 format = 1
 id = "sequential-async-set-clear"
 kind = "regression"
+covers = ["Asynchronous preset-over-clear priority composes with a clocked data enable."]
 category = "sequential"
 language = "sverilog"
 top = "top"

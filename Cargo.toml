@@ -106,3 +106,12 @@ debug = true
 opt-level = 1
 lto = false
 incremental = true
+
+# Large unit-test targets retain line-level backtraces without embedding full
+# debug-value information in every test binary. Keep this profile measured as
+# described in docs/testing.md.
+[profile.test]
+debug = 1
+opt-level = 1
+lto = false
+incremental = true

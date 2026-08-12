@@ -28,6 +28,7 @@ Run these checks before submitting a pull request:
 python3 tools/check_license_headers.py
 python3 tools/check_public_repository.py
 python3 tools/check_architecture.py
+python3 tools/check_test_policy.py
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -39,6 +40,12 @@ caught it. Synthesis behavior changes also need equivalence coverage. QoR
 changes need representative benchmark results and an intentional baseline
 update; see [`benchmarks/qor/README.md`](benchmarks/qor/README.md) and
 [`qualification/README.md`](qualification/README.md).
+
+Tests have one primary owner at the lowest responsible layer. Higher-layer
+tests must protect a distinct boundary, public contract, or independent oracle
+instead of repeating the lower layer's matrix and internal assertions. Follow
+the placement, fixture, ignored-test, consolidation, and review rules in
+[`docs/testing.md`](docs/testing.md).
 
 ## Contributor licensing
 

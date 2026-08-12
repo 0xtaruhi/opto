@@ -4,6 +4,7 @@
 format = 1
 id = "tcl-collections"
 kind = "regression"
+covers = ["Tcl collection length, property filtering, file redirection, and report commands compose in one script."]
 category = "tcl"
 top = "top"
 sources = ["top.sv"]

@@ -4,6 +4,7 @@
 format = 1
 id = "memories-dual-port-register-bank"
 kind = "regression"
+covers = ["Two clocked memory ports with explicit same-address write priority lower to sequential register-bank logic."]
 category = "memories"
 language = "sverilog"
 top = "top"

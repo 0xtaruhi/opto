@@ -1,33 +1,34 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-mod frontend;
-mod reports;
-mod sequential;
+//! Explicit builders shared by cross-stage synthesis contract tests.
+//!
+//! Domain assertions do not live here. Each test remains under the
+//! architecture domain that owns its primary observable behavior.
 
-use super::*;
-use opto_formats::{AreaCellKind, AreaReportContext, FormatError, report_area, report_qor};
-use opto_ir::ConstBits;
-use opto_ir::proc::{
+pub(crate) use super::*;
+pub(crate) use opto_formats::{AreaCellKind, AreaReportContext, FormatError, report_qor};
+pub(crate) use opto_ir::ConstBits;
+pub(crate) use opto_ir::proc::{
     AssignmentMode, ProcBuilder, ProcModule, ProcTarget, ProcedureKind, SensitivityEvent,
 };
-use opto_ir::word::{
+pub(crate) use opto_ir::word::{
     self, BinaryOp, Edge, LValue, LogicStateKind, PortDirection, SourceSpan, UnaryOp, WordModule,
     WordType,
 };
 use std::ops::{Deref, DerefMut};
 
-fn write_verilog(module: &WordModule) -> Result<String, FormatError> {
+pub(crate) fn write_verilog(module: &WordModule) -> Result<String, FormatError> {
     let mut output = Vec::new();
     opto_formats::write_verilog(&mut output, module)?;
     Ok(String::from_utf8(output).expect("Verilog writer only emits UTF-8 text"))
 }
 
-fn bit() -> WordType {
+pub(crate) fn bit() -> WordType {
     WordType::new(1, false, LogicStateKind::FourState).unwrap()
 }
 
-fn test_span() -> SourceSpan {
+pub(crate) fn test_span() -> SourceSpan {
     SourceSpan::stable("test")
 }
 
@@ -37,14 +38,14 @@ fn test_span() -> SourceSpan {
 /// that inspects the implementation reads `mapped`. `report` and the replaced
 /// Word module remain for tests that assert on source-level structure.
 #[derive(Debug)]
-struct SynthesizedTest {
-    report: SynthesisReport,
-    mapped: opto_ir::mapped::MappedNetlist,
+pub(crate) struct SynthesizedTest {
+    pub(crate) report: SynthesisReport,
+    pub(crate) mapped: opto_ir::mapped::MappedNetlist,
 }
 
 impl SynthesizedTest {
     /// Renders the mapped netlist the way a published artifact is written.
-    fn mapped_verilog(&self) -> String {
+    pub(crate) fn mapped_verilog(&self) -> String {
         let mut output = Vec::new();
         opto_formats::write_mapped_verilog(&mut output, &self.mapped)
             .expect("mapped test netlist renders");
@@ -52,7 +53,7 @@ impl SynthesizedTest {
     }
 }
 
-fn synthesize_test_module<M: TestSource>(
+pub(crate) fn synthesize_test_module<M: TestSource>(
     module: &mut M,
     options: SynthesisOptions,
 ) -> Result<SynthesizedTest, crate::SynthError> {
@@ -63,7 +64,7 @@ fn synthesize_test_module<M: TestSource>(
     Ok(SynthesizedTest { report, mapped })
 }
 
-trait TestSource {
+pub(crate) trait TestSource {
     fn rtl(&self) -> Result<opto_ir::rtl::RtlModule, crate::SynthError>;
     fn replace_word(&mut self, word: WordModule);
 }
@@ -79,9 +80,9 @@ impl TestSource for WordModule {
     }
 }
 
-struct TestModule {
+pub(crate) struct TestModule {
     word: WordModule,
-    procedures: ProcModule,
+    pub(crate) procedures: ProcModule,
 }
 
 impl TestModule {
@@ -119,47 +120,16 @@ impl TestSource for TestModule {
     }
 }
 
-fn structural_module() -> WordModule {
-    let mut module = WordModule::new("top");
-    let a = module
-        .add_port("a", PortDirection::Input, bit(), test_span())
-        .unwrap();
-    let y = module
-        .add_port("y", PortDirection::Output, bit(), test_span())
-        .unwrap();
-    let n = module.add_wire("n", bit(), test_span()).unwrap();
-    let a_value = module
-        .read_signal(module.port(a).unwrap().signal, test_span())
-        .unwrap();
-    let not_a = module.unary(UnaryOp::BitNot, a_value, test_span()).unwrap();
-    module
-        .connect(LValue::signal(n), not_a, test_span())
-        .unwrap();
-    let n_value = module.read_signal(n, test_span()).unwrap();
-    let y_value = module
-        .read_signal(module.port(y).unwrap().signal, test_span())
-        .unwrap();
-    module
-        .add_instance(
-            "u_child",
-            "child",
-            vec![
-                ("i".to_string(), n_value, test_span()),
-                ("o".to_string(), y_value, test_span()),
-            ],
-            test_span(),
-        )
-        .unwrap();
-    module
-}
-
-fn read_port(module: &mut WordModule, port: opto_ir::word::PortId) -> opto_ir::word::ValueId {
+pub(crate) fn read_port(
+    module: &mut WordModule,
+    port: opto_ir::word::PortId,
+) -> opto_ir::word::ValueId {
     module
         .read_signal(module.port(port).unwrap().signal, test_span())
         .unwrap()
 }
 
-fn connect_port(
+pub(crate) fn connect_port(
     module: &mut WordModule,
     port: opto_ir::word::PortId,
     value: opto_ir::word::ValueId,
@@ -173,7 +143,7 @@ fn connect_port(
         .unwrap();
 }
 
-fn target_cell(
+pub(crate) fn target_cell(
     name: &str,
     area: f64,
     pins: &[(&str, TargetPinDirection, Option<&str>)],
@@ -206,7 +176,7 @@ fn target_cell(
     }
 }
 
-fn single_assignment(
+pub(crate) fn single_assignment(
     module: WordModule,
     kind: ProcedureKind,
     clock: Option<word::SignalId>,
@@ -233,7 +203,7 @@ fn single_assignment(
     TestModule::new(module, cfg)
 }
 
-fn conditional_assignment(
+pub(crate) fn conditional_assignment(
     module: WordModule,
     kind: ProcedureKind,
     clock: Option<word::SignalId>,
@@ -268,9 +238,8 @@ fn conditional_assignment(
     TestModule::new(module, cfg)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn reset_enable_module(
-    module: WordModule,
+#[derive(Clone, Copy)]
+struct ResetEnableFixture {
     kind: ProcedureKind,
     clock: Option<word::SignalId>,
     reset: word::ValueId,
@@ -278,7 +247,18 @@ fn reset_enable_module(
     target: word::SignalId,
     reset_value: word::ValueId,
     data: word::ValueId,
-) -> TestModule {
+}
+
+fn reset_enable_module(module: WordModule, fixture: ResetEnableFixture) -> TestModule {
+    let ResetEnableFixture {
+        kind,
+        clock,
+        reset,
+        enable,
+        target,
+        reset_value,
+        data,
+    } = fixture;
     let mut cfg = ProcBuilder::new();
     let procedure = match clock {
         Some(signal) => cfg.add_clocked_procedure(
@@ -330,7 +310,7 @@ fn reset_enable_module(
     TestModule::new(module, cfg)
 }
 
-fn module_with_process(blocking: bool) -> TestModule {
+pub(crate) fn module_with_process(blocking: bool) -> TestModule {
     let mut module = WordModule::new("top");
     let a = module
         .add_port("a", PortDirection::Input, bit(), test_span())
@@ -357,7 +337,7 @@ fn module_with_process(blocking: bool) -> TestModule {
     )
 }
 
-fn module_with_flop_process() -> TestModule {
+pub(crate) fn module_with_flop_process() -> TestModule {
     let mut module = WordModule::new("top");
     let clk = module
         .add_port("clk", PortDirection::Input, bit(), test_span())
@@ -383,7 +363,7 @@ fn module_with_flop_process() -> TestModule {
     )
 }
 
-fn module_with_latch_process() -> TestModule {
+pub(crate) fn module_with_latch_process() -> TestModule {
     let mut module = WordModule::new("top");
     let enable = module
         .add_port("en", PortDirection::Input, bit(), test_span())
@@ -408,7 +388,7 @@ fn module_with_latch_process() -> TestModule {
     )
 }
 
-fn module_with_reset_latch_process() -> TestModule {
+pub(crate) fn module_with_reset_latch_process() -> TestModule {
     let mut module = WordModule::new("top");
     let reset = module
         .add_port("reset", PortDirection::Input, bit(), test_span())
@@ -431,17 +411,19 @@ fn module_with_reset_latch_process() -> TestModule {
     let target = module.port(q).unwrap().signal;
     reset_enable_module(
         module,
-        ProcedureKind::Latch,
-        None,
-        reset,
-        Some(enable),
-        target,
-        zero,
-        data,
+        ResetEnableFixture {
+            kind: ProcedureKind::Latch,
+            clock: None,
+            reset,
+            enable: Some(enable),
+            target,
+            reset_value: zero,
+            data,
+        },
     )
 }
 
-fn module_with_enable_flop_process() -> TestModule {
+pub(crate) fn module_with_enable_flop_process() -> TestModule {
     let mut module = WordModule::new("top");
     let clk = module
         .add_port("clk", PortDirection::Input, bit(), test_span())
@@ -470,7 +452,7 @@ fn module_with_enable_flop_process() -> TestModule {
     )
 }
 
-fn module_with_lowered_feedback_mux_flop() -> WordModule {
+pub(crate) fn module_with_lowered_feedback_mux_flop() -> WordModule {
     let mut module = WordModule::new("top");
     let clk = module
         .add_port("clk", PortDirection::Input, bit(), test_span())
@@ -509,15 +491,15 @@ fn module_with_lowered_feedback_mux_flop() -> WordModule {
     module
 }
 
-fn module_with_sync_reset_flop_process() -> TestModule {
+pub(crate) fn module_with_sync_reset_flop_process() -> TestModule {
     module_with_sync_reset_control(false)
 }
 
-fn module_with_sync_reset_enable_flop_process() -> TestModule {
+pub(crate) fn module_with_sync_reset_enable_flop_process() -> TestModule {
     module_with_sync_reset_control(true)
 }
 
-fn module_with_sync_reset_control(with_enable: bool) -> TestModule {
+pub(crate) fn module_with_sync_reset_control(with_enable: bool) -> TestModule {
     let mut module = WordModule::new("top");
     let clk = module
         .add_port("clk", PortDirection::Input, bit(), test_span())
@@ -545,17 +527,19 @@ fn module_with_sync_reset_control(with_enable: bool) -> TestModule {
     let clock = module.port(clk).unwrap().signal;
     reset_enable_module(
         module,
-        ProcedureKind::FlipFlop,
-        Some(clock),
-        reset,
-        enable,
-        q_signal,
-        zero,
-        data,
+        ResetEnableFixture {
+            kind: ProcedureKind::FlipFlop,
+            clock: Some(clock),
+            reset,
+            enable,
+            target: q_signal,
+            reset_value: zero,
+            data,
+        },
     )
 }
 
-fn module_with_prioritized_constant_updates() -> TestModule {
+pub(crate) fn module_with_prioritized_constant_updates() -> TestModule {
     let mut module = WordModule::new("top");
     let clk = module
         .add_port("clk", PortDirection::Input, bit(), test_span())
@@ -629,7 +613,7 @@ fn module_with_prioritized_constant_updates() -> TestModule {
     TestModule::new(module, cfg)
 }
 
-fn module_with_vector_flop_process(width: u32) -> TestModule {
+pub(crate) fn module_with_vector_flop_process(width: u32) -> TestModule {
     let mut module = WordModule::new("top");
     let ty = WordType::new(width, false, LogicStateKind::FourState).unwrap();
     let clk = module
@@ -656,7 +640,7 @@ fn module_with_vector_flop_process(width: u32) -> TestModule {
     )
 }
 
-fn module_with_inverted_flop_output() -> WordModule {
+pub(crate) fn module_with_inverted_flop_output() -> WordModule {
     let mut module = WordModule::new("top");
     let clock = module
         .add_port("clk", PortDirection::Input, bit(), test_span())
@@ -694,7 +678,7 @@ fn module_with_inverted_flop_output() -> WordModule {
     module
 }
 
-fn simple_dff_target_cell() -> TargetCell {
+pub(crate) fn simple_dff_target_cell() -> TargetCell {
     TargetCell {
         dont_use: false,
         usage: opto_library::TargetCellUsage::default(),
@@ -758,7 +742,7 @@ fn simple_dff_target_cell() -> TargetCell {
     }
 }
 
-fn simple_latch_target_cell() -> TargetCell {
+pub(crate) fn simple_latch_target_cell() -> TargetCell {
     TargetCell {
         dont_use: false,
         usage: opto_library::TargetCellUsage::default(),
@@ -822,7 +806,7 @@ fn simple_latch_target_cell() -> TargetCell {
     }
 }
 
-fn clear_latch_target_cell() -> TargetCell {
+pub(crate) fn clear_latch_target_cell() -> TargetCell {
     let mut cell = simple_latch_target_cell();
     cell.name = "LHQD1R".to_string();
     cell.pins.insert(
@@ -846,7 +830,7 @@ fn clear_latch_target_cell() -> TargetCell {
     cell
 }
 
-fn enable_dff_target_cell() -> TargetCell {
+pub(crate) fn enable_dff_target_cell() -> TargetCell {
     TargetCell {
         dont_use: false,
         usage: opto_library::TargetCellUsage::default(),
@@ -924,7 +908,7 @@ fn enable_dff_target_cell() -> TargetCell {
     }
 }
 
-fn dual_output_dff_target_cell() -> TargetCell {
+pub(crate) fn dual_output_dff_target_cell() -> TargetCell {
     let mut cell = simple_dff_target_cell();
     cell.name = "DFDQN".to_string();
     cell.area = Some(2.3);
@@ -945,7 +929,7 @@ fn dual_output_dff_target_cell() -> TargetCell {
     cell
 }
 
-fn module_with_if_process() -> TestModule {
+pub(crate) fn module_with_if_process() -> TestModule {
     let mut module = WordModule::new("top");
     let sel = module
         .add_port("sel", PortDirection::Input, bit(), test_span())

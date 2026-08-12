@@ -1,13 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! End-to-end command-line behavior for the public `opto` executable.
+
+#[path = "../support/tcl.rs"]
+mod test_tcl;
+
 use std::io::Write;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::{Condvar, Mutex, OnceLock};
 
-use crate::test_tcl::tcl_path_word;
+use test_tcl::tcl_path_word;
 
-fn opto() -> Command {
+fn bare_opto() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_opto"));
     for (key, _) in std::env::vars_os() {
         if key.to_str().is_some_and(|key| key.starts_with("OPTO_")) {
@@ -15,6 +22,75 @@ fn opto() -> Command {
         }
     }
     command
+}
+
+const MAX_CONCURRENT_PRODUCT_PROCESSES: usize = 4;
+static PRODUCT_PROCESS_SLOTS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+
+#[derive(Debug)]
+struct ProductProcessSlot;
+
+impl ProductProcessSlot {
+    fn acquire() -> Self {
+        let (active, changed) =
+            PRODUCT_PROCESS_SLOTS.get_or_init(|| (Mutex::new(0), Condvar::new()));
+        let mut active = active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *active >= MAX_CONCURRENT_PRODUCT_PROCESSES {
+            active = changed
+                .wait(active)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *active += 1;
+        Self
+    }
+}
+
+impl Drop for ProductProcessSlot {
+    fn drop(&mut self) {
+        let (active, changed) =
+            PRODUCT_PROCESS_SLOTS.get_or_init(|| (Mutex::new(0), Condvar::new()));
+        let mut active = active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.checked_sub(1).expect("product process slot balance");
+        changed.notify_one();
+    }
+}
+
+#[derive(Debug)]
+struct TestCommand {
+    command: Command,
+    _slot: ProductProcessSlot,
+}
+
+impl Deref for TestCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl DerefMut for TestCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
+/// Build a resource-bounded product process for parallel libtest execution.
+///
+/// The CLI suite owns process behavior, not worker-count determinism. Without
+/// this bound, every concurrently running test inherits all host CPUs and the
+/// suite can create thousands of worker threads on a large CI runner.
+fn opto() -> TestCommand {
+    let mut command = bare_opto();
+    command.args(["--threads", "1"]);
+    TestCommand {
+        command,
+        _slot: ProductProcessSlot::acquire(),
+    }
 }
 
 fn output_text(output: &Output) -> String {
@@ -61,7 +137,8 @@ fn color_and_theme_flags_preserve_batch_output() {
 
 #[test]
 fn piped_stdin_is_promptless_and_supports_multiline_tcl() {
-    let mut child = opto()
+    let mut command = opto();
+    let mut child = command
         .arg("--no-init")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -92,7 +169,7 @@ fn x_evaluates_tcl_without_loading_init_files() {
 
 #[test]
 fn threads_accepts_a_positive_worker_limit() {
-    let output = opto()
+    let output = bare_opto()
         .args(["--no-init", "--threads", "1", "-x", "echo ok"])
         .output()
         .unwrap();
@@ -103,7 +180,7 @@ fn threads_accepts_a_positive_worker_limit() {
 
 #[test]
 fn threads_rejects_zero() {
-    let output = opto()
+    let output = bare_opto()
         .args(["--no-init", "--threads", "0", "-x", "echo ok"])
         .output()
         .unwrap();
@@ -462,8 +539,6 @@ fn synthesis_drives_logic_in_every_unpacked_array_element() {
     let mapped = temp_path("cli-unpacked-array-driver-mapped.v");
     let output = opto()
         .arg("--no-init")
-        .arg("--threads")
-        .arg("1")
         .arg("-x")
         .arg(format!(
             "{} read_hdl {}; elaborate top; synth; write_hdl {}",

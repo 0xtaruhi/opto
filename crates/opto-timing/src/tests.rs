@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Public timing-context state, identity, constraint, and top-level STA tests.
+//!
+//! Propagation semantics belong to `analysis::tests`; incremental edit and
+//! rollback mechanics belong to `engine::tests`.
+
 use super::test_library::{TimingArc, TimingCell, test_cells, test_instance, test_target_cells};
 use super::*;
 use crate::{
@@ -8,17 +13,9 @@ use crate::{
     test_port_id as port_id,
 };
 
-fn generation_units() -> TimingLibraryUnits {
-    TimingLibraryUnits {
-        time_seconds: Some(1e-12),
-        capacitance_farads: Some(1e-15),
-        resistance_ohms: None,
-    }
-}
-
 fn generation_library(delay: f64) -> TimingLibrary {
     TimingLibrary {
-        units: generation_units(),
+        units: test_library_units(),
         cells: test_cells(vec![TimingCell {
             name: "BUF".to_string(),
             arcs: vec![TimingArc::scalar("A", "Y", delay)],
@@ -61,7 +58,7 @@ fn generation_parasitics(capacitance_farads: f64) -> Parasitics {
             resistors: Vec::new(),
             source_waveforms: [None, None],
         }],
-        generation_units(),
+        test_library_units(),
         ParasiticAnalysisOptions::default(),
     )
     .unwrap()

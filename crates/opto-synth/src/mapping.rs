@@ -21,6 +21,9 @@ mod roots;
 mod sequential;
 pub(crate) mod word_util;
 
+#[cfg(test)]
+mod sequential_integration_tests;
+
 pub use clock_gating::ClockGatingStyle;
 
 pub(crate) use architecture::{

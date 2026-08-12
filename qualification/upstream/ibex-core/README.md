@@ -11,7 +11,7 @@ elaborates, links and checks the complete core.
 ```sh
 OPTO_SOURCE_IBEX=/path/to/ibex \
 OPTO_REGRESSION_OUTPUT=/tmp/opto-regression \
-  cargo test -p opto --test integration qualification::upstream_ibex \
+  cargo test -p opto --test qualification upstream_ibex \
   -- --exact --ignored --nocapture
 ```
 

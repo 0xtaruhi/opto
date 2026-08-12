@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Session-to-timing wiring, publication, cache, and report-boundary tests.
+//!
+//! Scalar STA and incremental edit algorithms remain owned by `opto-timing`.
+
 use super::*;
 
 #[test]

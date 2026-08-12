@@ -46,6 +46,8 @@ fn derived_source(
 }
 
 #[cfg(test)]
+mod integration_tests;
+#[cfg(test)]
 mod tests;
 
 /// Lowers immutable procedural CFGs into structural Word IR.

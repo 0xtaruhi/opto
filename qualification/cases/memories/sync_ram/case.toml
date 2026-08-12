@@ -4,6 +4,7 @@
 format = 1
 id = "memories-sync-ram"
 kind = "regression"
+covers = ["A 64-by-32 synchronous-read memory remains a typed inferred memory through elaboration."]
 category = "memories"
 language = "sverilog"
 top = "top"

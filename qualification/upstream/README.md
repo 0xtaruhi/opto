@@ -40,7 +40,7 @@ Run it with an official checkout at the pinned revision:
 OPTO_SOURCE_SV_TESTS=/path/to/sv-tests \
 OPTO_SV_TESTS_JOBS=8 \
 OPTO_REGRESSION_OUTPUT=/tmp/opto-regression \
-  cargo test -p opto --test integration qualification::systemverilog_conformance \
+  cargo test -p opto --test qualification systemverilog_conformance \
   -- --exact --ignored --nocapture
 ```
 
@@ -52,7 +52,7 @@ OPTO_SOURCE_YOSYS_TESTS=/path/to/yosys-source \
 OPTO_YOSYS=/path/to/yosys \
 OPTO_YOSYS_TESTS_JOBS=8 \
 OPTO_REGRESSION_OUTPUT=/tmp/opto-regression \
-  cargo test -p opto --test integration qualification::yosys_rtl_qualification \
+  cargo test -p opto --test qualification yosys_rtl_qualification \
   -- --exact --ignored --nocapture
 ```
 
@@ -60,11 +60,11 @@ Run the real-design gates similarly:
 
 ```sh
 OPTO_SOURCE_IBEX=/path/to/ibex \
-  cargo test -p opto --test integration qualification::upstream_ibex \
+  cargo test -p opto --test qualification upstream_ibex \
   -- --exact --ignored --nocapture
 
 OPTO_SOURCE_CVA6=/path/to/cva6 \
-  cargo test -p opto --test integration qualification::upstream_cva6 \
+  cargo test -p opto --test qualification upstream_cva6 \
   -- --exact --ignored --nocapture
 ```
 

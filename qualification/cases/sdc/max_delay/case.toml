@@ -4,6 +4,7 @@
 format = 1
 id = "sdc-max-delay"
 kind = "regression"
+covers = ["A Tcl-composed input collection carries transition, load, and maximum-delay intent into synthesis."]
 category = "sdc"
 language = "sverilog"
 top = "top"
