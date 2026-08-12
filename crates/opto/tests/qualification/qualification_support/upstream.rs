@@ -58,7 +58,7 @@ pub(super) fn run(case: &Case, opto: &Path, output_root: &Path) -> ResultEntry {
                 path.clone(),
             );
         }
-        let output = run_process(
+        let process = run_process(
             opto,
             vec![
                 OsString::from("--no-init"),
@@ -70,7 +70,7 @@ pub(super) fn run(case: &Case, opto: &Path, output_root: &Path) -> ResultEntry {
             true,
         );
         assert!(
-            output.status.success(),
+            process.status.success(),
             "upstream case {} failed",
             case.spec.id
         );
@@ -137,7 +137,7 @@ fn config_runs(case: &Case, source_root: &Path) -> Vec<ConfigRun> {
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
         .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
         .map(|line| {
             let fields = line.split('\t').collect::<Vec<_>>();
             assert_eq!(fields.len(), 5, "invalid config row: {line}");
@@ -165,11 +165,17 @@ fn validate_checkout(case: &Case, source_root: &Path, manifest: &Path) {
     let text = std::fs::read_to_string(manifest)
         .unwrap_or_else(|error| panic!("read {}: {error}", manifest.display()));
     let lines = text.lines().collect::<Vec<_>>();
-    assert!(lines.len() >= 3, "manifest is incomplete");
+    assert!(lines.len() >= 4, "manifest is incomplete");
     assert_eq!(lines[0], "# repository_commit", "invalid manifest header");
     assert_eq!(lines[1], revision, "manifest revision mismatch");
+    assert_eq!(
+        lines[2].replace("\\t", "\t"),
+        "# relative_path\tsha256",
+        "invalid manifest column header"
+    );
+    let mut validated_sources = 0usize;
     for line in &lines[3..] {
-        if line.is_empty() || line.starts_with('#') {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
         let (relative, expected) = line.split_once('\t').expect("manifest row has two fields");
@@ -187,7 +193,13 @@ fn validate_checkout(case: &Case, source_root: &Path, manifest: &Path) {
             expected,
             "source hash mismatch: {relative}"
         );
+        validated_sources += 1;
     }
+    assert!(
+        validated_sources > 0,
+        "{} manifest records no pinned source hashes",
+        case.spec.id
+    );
 }
 
 fn git_revision(root: &Path) -> String {

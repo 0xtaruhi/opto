@@ -155,6 +155,7 @@ struct AuditedExpectation {
 struct Report {
     format: u32,
     revision: &'static str,
+    filtered: bool,
     upstream_hdl_cases: usize,
     eligible_cases: usize,
     required_cases: usize,
@@ -326,8 +327,9 @@ pub(super) fn run() {
     }
     let proved_designs = results.iter().map(|result| result.proved_designs).sum();
     let report = Report {
-        format: 2,
+        format: 3,
         revision: REVISION,
+        filtered: filtered.is_some(),
         upstream_hdl_cases: UPSTREAM_HDL_CASES,
         eligible_cases: results.len(),
         required_cases: required.len(),
@@ -667,34 +669,26 @@ fn run_one(
         .map(|design| design.name.clone())
         .collect::<Vec<_>>();
     let mut deferred_proofs = Vec::new();
-    let proof_targets = if test.expectation == Expectation::Pass {
-        reference_designs
-            .iter()
-            .filter(|design| design.observable)
-            .filter(|design| {
-                let key = (test.relative.clone(), design.name.clone());
-                if let Some(entry) = proof_audit.get(&key) {
-                    deferred_proofs.push(DeferredProof {
-                        design: design.name.clone(),
-                        category: entry.category.clone(),
-                        reason: entry.reason.clone(),
-                    });
-                    false
-                } else {
-                    true
-                }
-            })
-            .map(|design| design.name.clone())
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let mut proof_targets = Vec::new();
+    if test.expectation == Expectation::Pass {
+        for design in reference_designs.iter().filter(|design| design.observable) {
+            let key = (test.relative.clone(), design.name.clone());
+            if let Some(entry) = proof_audit.get(&key) {
+                deferred_proofs.push(DeferredProof {
+                    design: design.name.clone(),
+                    category: entry.category.clone(),
+                    reason: entry.reason.clone(),
+                });
+            } else {
+                proof_targets.push(design.name.clone());
+            }
+        }
+    }
     let mut proved_designs = 0;
-    for (proof_index, design) in reference_designs
+    for design in reference_designs
         .iter()
         .filter(|design| design.observable)
         .filter(|design| proof_targets.contains(&design.name))
-        .enumerate()
     {
         let Some(netlist) = proof_specs.get(&design.name) else {
             continue;
@@ -707,7 +701,7 @@ fn run_one(
                 top: &design.name,
                 netlist,
                 library,
-                log: &directory.join(format!("proof-{proof_index:04}.log")),
+                log: &netlist.with_extension("log"),
                 kind: design.kind,
             },
         ) {

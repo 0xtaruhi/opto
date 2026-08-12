@@ -77,7 +77,7 @@ benchmarks/real/           pinned medium and scale-oriented resource gates
 
 Do not move a tiny regression into `benchmarks/` to make it appear
 representative. Do not put an algorithm matrix behind the CLI merely to make
-it end to end.
+it end-to-end.
 
 ## Writing tests
 

@@ -138,7 +138,14 @@ pub(super) fn run(case: &Case, opto: &Path, yosys: &Path, output_root: &Path) ->
             false,
         );
         if run.status.success() {
-            parse_opto_timing(&report, clock_period)
+            let timing = parse_opto_timing(&report, clock_period);
+            if timing.is_none() {
+                diagnostics.push(format!(
+                    "Yosys+ABC mapped-netlist timing report is incomplete; see {}",
+                    report.display()
+                ));
+            }
+            timing
         } else {
             diagnostics.push(format!(
                 "Yosys+ABC mapped-netlist timing analysis failed; see {}",

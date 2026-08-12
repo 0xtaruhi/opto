@@ -278,7 +278,9 @@ fn verify_reset_latch_negative_control(
         )
         .into());
     }
-    let transcript = String::from_utf8_lossy(&proof.stderr);
+    let mut combined = proof.stdout.clone();
+    combined.extend_from_slice(&proof.stderr);
+    let transcript = String::from_utf8_lossy(&combined);
     if !transcript.contains("unproven $equiv") {
         return Err(format!(
             "formal negative control failed before proving the intended reset-latch mismatch; see {}",

@@ -285,3 +285,24 @@ pub(super) struct ResultDocument {
     pub(super) yosys: Option<ToolIdentity>,
     pub(super) results: Vec<ResultEntry>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::CaseSpec;
+
+    #[test]
+    fn case_spec_defaults_omitted_covers_to_empty() {
+        let spec: CaseSpec = toml::from_str("format = 1\nid = 'case'\nkind = 'regression'\n")
+            .expect("deserialize case without covers");
+        assert!(spec.covers.is_empty());
+    }
+
+    #[test]
+    fn case_spec_deserializes_populated_covers() {
+        let spec: CaseSpec = toml::from_str(
+            "format = 1\nid = 'case'\nkind = 'regression'\ncovers = ['first', 'second']\n",
+        )
+        .expect("deserialize case with covers");
+        assert_eq!(spec.covers, ["first", "second"]);
+    }
+}

@@ -61,25 +61,48 @@ def ignored_tests(path: Path, errors: list[str]) -> list[str]:
         location = f"{relative(path)}:{index + 1}"
         if reason is None or len(reason.strip()) < 8:
             errors.append(f"{location}: ignored test requires a specific reason")
+        attached = False
         for candidate in lines[index + 1 : index + 8]:
             function = FUNCTION.match(candidate)
             if function is not None:
                 names.append(function.group(1))
+                attached = True
                 break
-            if candidate.strip() and not candidate.lstrip().startswith("#["):
-                break
-        else:
+            stripped = candidate.strip()
+            if not stripped or stripped.startswith(("#[", "//")):
+                continue
+            break
+        if not attached:
             errors.append(f"{location}: ignored attribute is not attached to a test function")
     return names
+
+
+def integration_test_target(path: Path) -> str | None:
+    """Return the Cargo integration-test target that owns a Rust test file."""
+
+    parts = path.relative_to(ROOT).parts
+    try:
+        tests_index = parts.index("tests")
+    except ValueError:
+        return None
+    relative_parts = parts[tests_index + 1 :]
+    if not relative_parts:
+        return None
+    if len(relative_parts) == 1:
+        return Path(relative_parts[0]).stem
+    return relative_parts[0]
 
 
 def check_ignored_tests(paths: list[Path], errors: list[str]) -> None:
     """Require every ignored test to have a reason and a scheduled CI owner."""
 
-    workflows = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted((ROOT / ".github/workflows").glob("*.yml"))
+    workflow_root = ROOT / ".github/workflows"
+    workflow_paths = sorted(
+        path
+        for path in workflow_root.iterdir()
+        if path.is_file() and path.suffix in {".yml", ".yaml"}
     )
+    workflows = "\n".join(path.read_text(encoding="utf-8") for path in workflow_paths)
     for path in paths:
         if path.suffix != ".rs":
             continue
@@ -91,9 +114,10 @@ def check_ignored_tests(paths: list[Path], errors: list[str]) -> None:
             )
         for name in ignored_tests(path, errors):
             names_function = re.search(rf"\b{re.escape(name)}\b", workflows) is not None
+            target = integration_test_target(path)
             runs_complete_target = (
-                path.name != "main.rs"
-                and f"--test {path.stem}" in workflows
+                target is not None
+                and f"--test {target}" in workflows
                 and "--ignored" in workflows
             )
             if not names_function and not runs_complete_target:
