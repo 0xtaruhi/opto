@@ -25,6 +25,14 @@ struct ChoiceProposal {
     roots: Box<[LogicNodeId]>,
 }
 
+type LogicRoots = (LogicGraph, Box<[LogicNodeId]>);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyStyle {
+    Preserve,
+    DecomposeMux,
+}
+
 pub(super) struct TransformProduct {
     pub(super) network: LogicGraph,
     pub(super) remap: Box<[Option<LogicNodeId>]>,
@@ -102,8 +110,69 @@ pub(super) fn optimize(
         runtime,
         incremental,
     )?;
-    let alternatives = functional.into_iter().collect();
+    let mut alternatives = functional.into_iter().collect::<Vec<_>>();
+    alternatives.extend(decomposed_choice(
+        &source,
+        roots,
+        requirements,
+        diagnostics,
+        runtime,
+    )?);
     finish(baseline, roots, alternatives)
+}
+
+fn decomposed_choice(
+    source: &LogicGraph,
+    roots: &[LogicNodeId],
+    requirements: &[Option<f64>],
+    diagnostics: crate::SynthesisDiagnostics,
+    runtime: &ExecutionContext,
+) -> Result<Option<ChoiceProposal>, crate::SynthError> {
+    let Some((network, roots)) = decompose_muxes(source, roots)? else {
+        return Ok(None);
+    };
+    let first = optimize_factored(&network, &roots, requirements, diagnostics, runtime)?;
+    let first_roots = map_roots(&first.remap, &roots)?;
+    let (optimized, roots) = if let Some((network, roots)) =
+        decompose_muxes(&first.network, &first_roots)?
+    {
+        let optimized = optimize_factored(&network, &roots, requirements, diagnostics, runtime)?;
+        let roots = map_roots(&optimized.remap, &roots)?;
+        (optimized, roots)
+    } else {
+        (first, first_roots)
+    };
+    Ok(Some(ChoiceProposal {
+        pass: "mux_decomposition",
+        network: optimized.network,
+        roots,
+    }))
+}
+
+fn decompose_muxes(
+    source: &LogicGraph,
+    roots: &[LogicNodeId],
+) -> Result<Option<LogicRoots>, crate::SynthError> {
+    if !(0..source.node_count()).any(|index| {
+        matches!(
+            source.node(LogicNodeId::from_index(index)),
+            LogicNode::Mux { .. }
+        )
+    }) {
+        return Ok(None);
+    }
+    let mut network = LogicGraph::new();
+    let mut variables = HashMap::new();
+    let remap = copy_graph(
+        source,
+        None,
+        &mut network,
+        &mut variables,
+        CopyStyle::DecomposeMux,
+    )?;
+    let roots = map_roots(&remap, roots)?;
+    network.freeze();
+    Ok(Some((network, roots)))
 }
 
 fn small_support_choice(
@@ -167,8 +236,7 @@ pub(super) fn optimize_baseline(
             requirements,
             diagnostics,
             runtime,
-            incremental,
-            super::rewrite::resynthesize,
+            (incremental, super::rewrite::resynthesize, false),
         )
     } else {
         let cache = super::rewrite::RewriteRecipeCache::default();
@@ -179,8 +247,11 @@ pub(super) fn optimize_baseline(
             requirements,
             diagnostics,
             runtime,
-            RewriteIncremental::new(&cache, &metrics),
-            super::rewrite::resynthesize,
+            (
+                RewriteIncremental::new(&cache, &metrics),
+                super::rewrite::resynthesize,
+                false,
+            ),
         )
     }
 }
@@ -200,8 +271,11 @@ fn optimize_factored(
         requirements,
         diagnostics,
         runtime,
-        RewriteIncremental::new(&cache, &metrics),
-        super::rewrite::normalize,
+        (
+            RewriteIncremental::new(&cache, &metrics),
+            super::rewrite::normalize,
+            true,
+        ),
     )
 }
 
@@ -213,20 +287,22 @@ type RewriteStage = fn(
     RewriteIncremental<'_>,
 ) -> Result<(), crate::SynthError>;
 
+type OptimizationStage<'a> = (RewriteIncremental<'a>, RewriteStage, bool);
+
 fn optimize_with(
     network: &LogicGraph,
     roots: &[LogicNodeId],
     requirements: &[Option<f64>],
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
-    incremental: RewriteIncremental<'_>,
-    rewrite: RewriteStage,
+    options: OptimizationStage<'_>,
 ) -> Result<TransformProduct, crate::SynthError> {
     if roots.len() != requirements.len() {
         return Err(crate::SynthError::invariant(
             "AXM pass requirements do not align with roots",
         ));
     }
+    let (incremental, rewrite, balance_unconstrained) = options;
     let mut state = TransformState::start(roots, copy_active(network, roots)?)?;
     rewrite(&mut state, requirements, diagnostics, runtime, incremental)?;
     state.network.freeze();
@@ -235,8 +311,15 @@ fn optimize_with(
     let started = std::time::Instant::now();
     let balanced = super::balance::balance(&state.network, &state.roots);
     let balanced_roots = map_roots(&balanced.remap, &state.roots)?;
-    let accepted = super::rewrite::timing_profile(&balanced.network, &balanced_roots, requirements)
-        < super::rewrite::timing_profile(&state.network, &state.roots, requirements);
+    let profile = |network, roots| {
+        if balance_unconstrained {
+            super::rewrite::balance_profile(network, roots, requirements)
+        } else {
+            super::rewrite::timing_profile(network, roots, requirements)
+        }
+    };
+    let accepted =
+        profile(&balanced.network, &balanced_roots) < profile(&state.network, &state.roots);
     if accepted {
         state.apply(balanced)?;
     }
@@ -265,7 +348,13 @@ fn finish(
 
     let mut network = LogicGraph::new();
     let mut variables = HashMap::new();
-    let baseline_remap = copy_graph(&baseline.network, None, &mut network, &mut variables)?;
+    let baseline_remap = copy_graph(
+        &baseline.network,
+        None,
+        &mut network,
+        &mut variables,
+        CopyStyle::Preserve,
+    )?;
     let remap = compose_remaps(&baseline.remap, &baseline_remap);
     map_roots(&remap, source_roots)?;
 
@@ -277,6 +366,7 @@ fn finish(
             Some(&live),
             &mut network,
             &mut variables,
+            CopyStyle::Preserve,
         )?;
         installed.push(LogicAlternative {
             pass: alternative.pass,
@@ -309,7 +399,13 @@ fn copy_active(
     let live = live_nodes(network, roots);
     let mut copied = LogicGraph::new();
     let mut variables = HashMap::new();
-    let remap = copy_graph(network, Some(&live), &mut copied, &mut variables)?;
+    let remap = copy_graph(
+        network,
+        Some(&live),
+        &mut copied,
+        &mut variables,
+        CopyStyle::Preserve,
+    )?;
     copied.freeze();
     Ok(TransformProduct {
         network: copied,
@@ -358,6 +454,7 @@ fn copy_graph(
     live: Option<&[bool]>,
     target: &mut LogicGraph,
     variables: &mut HashMap<u32, LogicNodeId>,
+    style: CopyStyle,
 ) -> Result<Box<[Option<LogicNodeId>]>, crate::SynthError> {
     let mut remap = vec![None; source.node_count()];
     for index in 0..source.node_count() {
@@ -384,11 +481,18 @@ fn copy_graph(
                 cond,
                 then_value,
                 else_value,
-            } => target.mux(
-                mapped_literal(&remap, cond)?,
-                mapped_literal(&remap, then_value)?,
-                mapped_literal(&remap, else_value)?,
-            ),
+            } => {
+                let cond = mapped_literal(&remap, cond)?;
+                let then_value = mapped_literal(&remap, then_value)?;
+                let else_value = mapped_literal(&remap, else_value)?;
+                if style == CopyStyle::DecomposeMux {
+                    let selected = target.and(cond, then_value);
+                    let rejected = target.and(cond.inverted(), else_value);
+                    target.or(selected, rejected)
+                } else {
+                    target.mux(cond, then_value, else_value)
+                }
+            }
         };
         remap[index] = Some(mapped);
     }
@@ -407,6 +511,7 @@ fn mapped_literal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opto_formal::prove_logic_network_equivalence;
 
     fn graph(
         gate: fn(&mut LogicGraph, LogicNodeId, LogicNodeId) -> LogicNodeId,
@@ -477,5 +582,37 @@ mod tests {
         for (&actual, expected) in outcome.alternatives[0].roots.iter().zip(expected) {
             assert_eq!(outcome.network.truth_table(actual, 3), expected);
         }
+    }
+
+    #[test]
+    fn mux_decomposition_preserves_a_wide_multi_output_graph() {
+        let mut source = LogicGraph::new();
+        let inputs = (0..9)
+            .map(|origin| source.variable(origin).unwrap())
+            .collect::<Vec<_>>();
+        let left = source.mux(inputs[0], inputs[1], inputs[2]);
+        let right = source.mux(inputs[3], inputs[4], inputs[5]);
+        let roots = [
+            source.mux(inputs[6], left, right),
+            source.xor(left, inputs[7]),
+            source.mux(inputs[8], right, left),
+        ];
+        source.freeze();
+        let (decomposed, decomposed_roots) = decompose_muxes(&source, &roots)
+            .unwrap()
+            .expect("test graph contains genuine MUX nodes");
+        let proof = prove_logic_network_equivalence(
+            source.storage_network(),
+            &roots.map(LogicNodeId::lit),
+            decomposed.storage_network(),
+            &decomposed_roots
+                .iter()
+                .copied()
+                .map(LogicNodeId::lit)
+                .collect::<Vec<_>>(),
+        )
+        .expect("formal engine accepts the decomposition miter");
+
+        assert!(proof.require_proved().is_ok());
     }
 }

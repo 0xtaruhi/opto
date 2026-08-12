@@ -402,6 +402,14 @@ independent design representations. Liberty cover evaluates the actual target
 cells and may choose NAND/NOR, AOI/OAI, XOR/XNOR, MUX, or another exact cut; an
 AXM node is never assumed to correspond one-for-one with a physical cell.
 
+Large AXM subjects also publish one bounded representation proposal. Genuine
+MUX nodes are expanded into equivalent AND/inverter structure, while XOR
+remains first-class, and the ordinary local normalizer and structural balancer
+run after each of at most two expansion rounds. A second round is attempted
+only when normalization creates another MUX. This exposes NAND/NOR sharing to
+Liberty cover without changing the canonical baseline, recognizing an RTL
+pattern, or creating another synthesis pipeline.
+
 Small-support multi-output logic adds one bounded functional normalization:
 complete truth evaluation, shared-cube factoring, root-to-root resubstitution,
 then local AXM normalization. Global sharing census remains part of the ordinary
@@ -420,22 +428,24 @@ divided among remaining roots so an early combinatorial search cannot starve
 later roots.
 Functional dependency is proved by bit-parallel separation before a projected
 truth table is constructed, so rejected feature sets do not repeat the exact
-projection work. No RTL operator or benchmark pattern is recognized. Liberty
-constraint violation is compared first; equivalent feasible implementations
-then minimize area-delay product, followed by area, delay, and cell count as
-deterministic ties. Post-map MFS remains local cell/MFFC cleanup and incrementally
-refines care-set partitions while visiting larger input sets; it does not
-reconstruct a second global factoring engine.
+projection work. No RTL operator or benchmark pattern is recognized. With
+finite required times, Liberty constraint violation is compared first;
+equivalent feasible implementations then minimize area-delay product, followed
+by area, delay, and cell count as deterministic ties. Without a finite required
+time, each bounded proposal receives exact reference recovery and the portfolio
+minimizes mapped area before delay and cell count. Post-map MFS remains local
+cell/MFFC cleanup and incrementally refines care-set partitions while visiting
+larger input sets; it does not reconstruct a second global factoring engine.
 
 AXM optimization is scheduled statically by a typed pass pipeline. Destructive
 passes return a `TransformProduct`; `TransformState` alone composes node maps,
 checks that active roots survive, and carries typed reusable analyses. Optional
 passes return equivalent proposals. The pipeline installs retained proposals
-once into the shared graph. The mapper first flow-covers the generic
-implementation list with real Liberty cells, ranks constraint violation before
-area-delay product, then runs exact reference recovery only for the selected
-implementation. Adding proposals therefore adds bounded flow evaluation, not
-another full exact-recovery fixpoint. Pass names, remap composition, analysis
+once into the shared graph. The mapper covers the generic implementation list
+with real Liberty cells. Timing-driven portfolios use bounded flow ranking
+before exact recovery of the selected implementation; unconstrained portfolios
+compare exact mapped area because that is their stated objective. Pass names,
+remap composition, analysis
 invalidation, and proposal handling do not leak into candidate enumeration.
 Dispatch remains monomorphic, with no per-node pass objects or virtual calls.
 
