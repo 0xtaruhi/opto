@@ -82,7 +82,7 @@ pub use regional::{
 };
 
 #[cfg(test)]
-mod tests;
+mod test_support;
 
 #[cfg(test)]
 fn test_runtime() -> &'static opto_runtime::ExecutionContext {

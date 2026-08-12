@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Incremental timing generations, regional edits, rollback, and optimization.
+//!
+//! Exact propagation semantics remain owned by `analysis::tests`; this suite
+//! proves equivalence to full recomputation and transactional engine behavior.
+
 use super::*;
 use crate::test_library::{ClockToQArc, TimingArc, TimingCell, test_cells, test_instance};
 use crate::{

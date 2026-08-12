@@ -34,6 +34,9 @@ jobs:
       - name: Reject private and proprietary artifacts
         run: python3 tools/check_public_repository.py
 
+      - name: Check test ownership and execution policy
+        run: python3 tools/check_test_policy.py
+
       - name: Validate pinned real-world benchmark suite
         run: |
           python3 tools/check_real_benchmarks.py benchmarks/real/medium.toml
@@ -117,15 +120,23 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Run tests
+      - name: Run domain and library tests
         if: runner.os == 'Linux'
-        run: cargo test --workspace --all-targets --all-features --locked
+        run: cargo test --workspace --lib --bins --all-features --locked
+
+      - name: Run product CLI tests
+        if: runner.os == 'Linux'
+        run: cargo test -p opto --test cli --all-features --locked
+
+      - name: Run presubmit qualification
+        if: runner.os == 'Linux'
+        run: cargo test -p opto --test qualification --all-features --locked
 
       - name: Verify portable build, embedded Tcl and CLI
         if: runner.os != 'Linux'
         run: |
           cargo test -p opto-tcl-sys --locked
-          cargo test -p opto --test integration cli:: --locked
+          cargo test -p opto --test cli --locked
 
       - name: Build runtime benchmarks
         if: runner.os == 'Linux'

@@ -86,8 +86,8 @@ pub use scenario::{
 mod test_support;
 #[cfg(test)]
 pub(crate) use test_support::{
-    test_analyze_timing, test_clock_id, test_design_id, test_library, test_object_uid, test_port,
-    test_port_id, test_timing_model,
+    assert_path_summary, test_analyze_timing, test_clock_id, test_design_id, test_library,
+    test_library_units, test_object_uid, test_port, test_port_id, test_timing_model,
 };
 #[cfg(test)]
 mod tests;

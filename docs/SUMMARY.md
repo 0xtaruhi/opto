@@ -5,6 +5,7 @@
 
 - [Architecture](architecture.md)
 - [Rust API and documentation policy](api.md)
+- [Testing policy](testing.md)
 - [Regional synthesis cutover record](refactoring.md)
 - [Versioning and releases](versioning.md)
 - [Public QoR trends](qor.md)

@@ -1149,9 +1149,103 @@ mod word_tests {
     use super::*;
     use opto_ir::ConstBits;
     use opto_ir::word::{
-        AnnotationTarget, AnnotationValueSpec, DefinitionKind, PortDirection, SourceSpan,
-        WordModule, WordType,
+        AnnotationTarget, AnnotationValueSpec, DefinitionKind, LValue, LogicStateKind,
+        PortDirection, SourceSpan, UnaryOp, WordModule, WordType,
     };
+
+    fn verilog_text(module: &WordModule) -> String {
+        let mut output = Vec::new();
+        write_verilog(&mut output, module).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn writes_structural_assigns_and_instance_connections() {
+        let bit = WordType::bits(1).unwrap();
+        let span = SourceSpan::default();
+        let mut module = WordModule::new("top");
+        let a = module
+            .add_port("a", PortDirection::Input, bit, span.clone())
+            .unwrap();
+        let y = module
+            .add_port("y", PortDirection::Output, bit, span.clone())
+            .unwrap();
+        let n = module.add_wire("n", bit, span.clone()).unwrap();
+        let a_value = module
+            .read_signal(module.port(a).unwrap().signal, span.clone())
+            .unwrap();
+        let not_a = module
+            .unary(UnaryOp::BitNot, a_value, span.clone())
+            .unwrap();
+        module
+            .connect(LValue::signal(n), not_a, span.clone())
+            .unwrap();
+        let n_value = module.read_signal(n, span.clone()).unwrap();
+        let y_value = module
+            .read_signal(module.port(y).unwrap().signal, span.clone())
+            .unwrap();
+        module
+            .add_instance(
+                "u_child",
+                "child",
+                vec![
+                    ("i".to_string(), n_value, span.clone()),
+                    ("o".to_string(), y_value, span.clone()),
+                ],
+                span,
+            )
+            .unwrap();
+
+        let text = verilog_text(&module);
+        assert!(text.contains("assign n = ~a;"));
+        assert!(text.contains("child u_child(.i(n), .o(y));"));
+    }
+
+    #[test]
+    fn writes_sized_constants() {
+        let mut module = WordModule::new("top");
+        let ty = WordType::new(4, false, LogicStateKind::FourState).unwrap();
+        let span = SourceSpan::default();
+        let y = module
+            .add_port("y", PortDirection::Output, ty, span.clone())
+            .unwrap();
+        let value = module
+            .constant(ConstBits::from_bin_str("1010").unwrap(), ty, span.clone())
+            .unwrap();
+        module
+            .connect(LValue::signal(module.port(y).unwrap().signal), value, span)
+            .unwrap();
+
+        assert!(verilog_text(&module).contains("assign y = 4'b1010;"));
+    }
+
+    #[test]
+    fn word_area_report_counts_port_and_net_bits() {
+        let mut module = WordModule::new("top");
+        let vector = WordType::new(2, false, LogicStateKind::FourState).unwrap();
+        let span = SourceSpan::default();
+        let input = module
+            .add_port("input_bus", PortDirection::Input, vector, span.clone())
+            .unwrap();
+        let output = module
+            .add_port("output_bus", PortDirection::Output, vector, span.clone())
+            .unwrap();
+        let input_value = module
+            .read_signal(module.port(input).unwrap().signal, span.clone())
+            .unwrap();
+        module
+            .connect(
+                LValue::signal(module.port(output).unwrap().signal),
+                input_value,
+                span,
+            )
+            .unwrap();
+
+        let report =
+            crate::report_area(&module, &crate::AreaReportContext::default()).render_plain();
+        assert!(report.contains("Number of ports: 4"));
+        assert!(report.contains("Number of nets: 2"));
+    }
 
     #[test]
     fn writes_evaluated_module_annotations_and_black_box_interfaces() {

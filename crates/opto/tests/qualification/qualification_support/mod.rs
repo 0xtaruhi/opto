@@ -6,9 +6,11 @@ mod formal;
 mod inventory;
 mod medium;
 mod process;
+mod qor;
 mod schema;
 mod semantics;
 mod sv_tests;
+mod upstream;
 mod yosys_tests;
 
 use process::run;
@@ -361,6 +363,18 @@ fn validate_case(case: &Case) {
         assert!(
             case.spec.equivalence && case.spec.sequential,
             "equivalence_initial_state requires sequential equivalence"
+        );
+    }
+    if case.spec.equivalence && case.spec.kind == CaseKind::Regression {
+        assert!(
+            case.spec.library.is_some(),
+            "equivalence regression case {} must declare a library",
+            case.spec.id
+        );
+        assert!(
+            case.spec.flow.command().is_some(),
+            "equivalence regression case {} must run a mapping flow that writes mapped.v",
+            case.spec.id
         );
     }
     match case.spec.kind {
@@ -919,6 +933,3 @@ fn run_upstream_case(case: &Case, opto: &Path, output_root: &Path) -> ResultEntr
 fn run_qor_case(case: &Case, opto: &Path, yosys: &Path, output_root: &Path) -> ResultEntry {
     qor::run(case, opto, yosys, output_root)
 }
-
-mod qor;
-mod upstream;

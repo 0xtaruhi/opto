@@ -319,6 +319,7 @@ fn parse_test(relative: String, source: PathBuf, text: &str, category: String) -
     let top = metadata(text, "top_module")
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+        .or_else(|| explicit_top(&relative).map(str::to_string))
         .or_else(|| infer_top(text));
     let defines = metadata(text, "defines")
         .map(|value| value.split_whitespace().map(str::to_string).collect())
@@ -333,6 +334,13 @@ fn parse_test(relative: String, source: PathBuf, text: &str, category: String) -
         defines,
         tags,
         category,
+    }
+}
+
+fn explicit_top(relative: &str) -> Option<&'static str> {
+    match relative {
+        "chapter-6/6.10--implicit_port_connection.sv" => Some("top"),
+        _ => None,
     }
 }
 
@@ -405,9 +413,7 @@ fn run_one(test: &SvTest, index: usize, opto: &Path, output: &Path) -> SvTestRes
     );
     let passed = process.status.success();
     if passed {
-        std::fs::remove_file(directory.join("opto.log")).expect("remove passing sv-tests log");
-        std::fs::remove_file(script).expect("remove passing sv-tests script");
-        std::fs::remove_dir(directory).expect("remove passing sv-tests directory");
+        std::fs::remove_dir_all(&directory).expect("remove passing sv-tests directory");
     }
     SvTestResult {
         relative: test.relative.clone(),
@@ -449,4 +455,19 @@ fn validate_baseline(report: &Report) {
     assert_eq!(baseline.required_cases, report.required_cases);
     assert_eq!(baseline.passing_cases, report.passing_cases);
     assert_eq!(baseline.required_sha256, report.required_sha256);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{explicit_top, infer_top};
+
+    #[test]
+    fn implicit_port_connection_uses_the_design_under_test() {
+        let source = "module top; test helper(); endmodule\nmodule test; endmodule\n";
+        assert_eq!(infer_top(source).as_deref(), Some("test"));
+        assert_eq!(
+            explicit_top("chapter-6/6.10--implicit_port_connection.sv"),
+            Some("top")
+        );
+    }
 }

@@ -32,8 +32,8 @@ OPTO_LIBRARY_REAL_MEDIUM=/var/tmp/sky130-hd.lib \
 OPTO_QOR_BASELINE_BINARY=/path/to/base/opto \
 OPTO_QOR_BINARY=/path/to/head/opto \
 OPTO_REGRESSION_OUTPUT=/var/tmp/opto-regression \
-  cargo test -p opto --test integration \
-    qualification::real_medium_qor_regression \
+  cargo test -p opto --test qualification \
+    real_medium_qor_regression \
     -- --exact --ignored --nocapture
 ```
 

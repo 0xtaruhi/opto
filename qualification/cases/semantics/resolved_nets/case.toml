@@ -4,6 +4,7 @@
 format = 1
 id = "semantics-resolved-nets"
 kind = "regression"
+covers = ["Multiple continuous drivers on wand and wor nets preserve resolved AND and OR semantics."]
 category = "semantics"
 language = "verilog"
 top = "top"

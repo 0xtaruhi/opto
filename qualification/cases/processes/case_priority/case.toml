@@ -4,6 +4,7 @@
 format = 1
 id = "processes-priority-case"
 kind = "regression"
+covers = ["SystemVerilog priority casez wildcard ordering remains correct under an outer enable and explicit default."]
 category = "processes"
 language = "sverilog"
 top = "top"

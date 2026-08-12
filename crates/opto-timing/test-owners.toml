@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+suite = "opto-timing"
+expected_tests = 114
+
+[[owners]]
+path = "src/tests.rs"
+owner = "timing-context"
+tests = 28
+contract = "Public timing state, stable identity, constraint application, and top-level STA observations."
+
+[[owners]]
+path = "src/analysis"
+owner = "analysis"
+tests = 16
+contract = "Topology, propagation, path extraction, checks, and deterministic analysis semantics."
+
+[[owners]]
+path = "src/constraints"
+owner = "constraints"
+tests = 9
+contract = "Typed constraint validation, exception arbitration, priority, and removal semantics."
+
+[[owners]]
+path = "src/engine"
+owner = "incremental-engine"
+tests = 41
+contract = "Transactional incremental edits, rollback, dirty closure, bindings, and optimization quality."
+
+[[owners]]
+path = "src/model.rs"
+owner = "timing-model"
+tests = 2
+contract = "Canonical timing-model identity, topology digest, and dense position invariants."
+
+[[owners]]
+path = "src/model"
+owner = "timing-model"
+tests = 4
+contract = "Canonical timing-model construction and mapped-netlist conversion invariants."
+
+[[owners]]
+path = "src/parasitics"
+owner = "parasitics"
+tests = 11
+contract = "RC validation, Elmore and Arnoldi evaluation, overlays, and parasitic fingerprints."
+
+[[owners]]
+path = "src/scenario.rs"
+owner = "scenario"
+tests = 3
+contract = "Sparse scenario identity, validation, and deterministic ordering."

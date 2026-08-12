@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Transactional post-map repair contracts.
+//!
+//! This suite owns candidate isolation, incremental timing/power evaluation,
+//! atomic mapped edits, rollback, and deterministic closure ordering. Region
+//! identity and initial technology cover remain owned by their domains.
+
 use super::candidate::{CandidateDisposition, PostmapCandidate};
 use super::candidates::sizing_regions;
 use super::objective::mapped_physical_objective;

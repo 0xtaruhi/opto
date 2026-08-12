@@ -4,6 +4,7 @@
 format = 1
 id = "sequential-dff-enable"
 kind = "regression"
+covers = ["An eight-bit inferred clock-enable register maps and remains sequentially equivalent."]
 category = "sequential"
 language = "sverilog"
 top = "top"

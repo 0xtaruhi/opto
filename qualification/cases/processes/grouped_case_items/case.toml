@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 format = 1
-id = "smoke-boolean5"
+id = "processes-grouped-case-items"
 kind = "regression"
-category = "smoke"
+covers = ["Verilog always-at-star lowering preserves grouped case items and the default branch."]
+category = "processes"
 language = "verilog"
 top = "top"
 sources = ["top.v"]
@@ -13,6 +14,5 @@ library = "../../../libraries/opto_test.lib"
 equivalence = true
 
 [assertions]
-min_ports = 6
-min_nets = 1
+min_ports = 5
 min_cells = 1

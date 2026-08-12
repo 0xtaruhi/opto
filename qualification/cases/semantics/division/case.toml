@@ -4,6 +4,7 @@
 format = 1
 id = "semantics-division"
 kind = "regression"
+covers = ["Guarded signed and unsigned division and remainder preserve four related operator semantics together."]
 category = "semantics"
 language = "sverilog"
 top = "top"

@@ -39,6 +39,10 @@ pub(super) fn run(mode: RunMode) {
             format: super::schema::FORMAT_VERSION,
             id: format!("generated-{}", batch.id),
             kind: CaseKind::Regression,
+            covers: vec![format!(
+                "Generated {} semantic matrix with {} labeled points.",
+                batch.id, batch.points
+            )],
             category: Some("generated_semantics".to_string()),
             class: None,
             scenario: None,

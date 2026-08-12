@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Full-analysis propagation, path selection, and sequential timing semantics.
+//!
+//! These tests own scalar analysis behavior. Incremental engine transactions
+//! and public context mutation are covered by their respective sibling suites.
+
 use super::*;
 use crate::test_library::{
     ClockToQArc, TimingArc, TimingCell, TimingConstraintArc, test_cells, test_instance,
@@ -10,7 +15,7 @@ use crate::{
     ClockSpec, CornerSelection, EdgeQualifier, EdgeSelection, ExceptionCorner, ExceptionFilter,
     LatencySide, LookupTable, PathException, TargetCell, TargetSequential, TargetSequentialKind,
     TargetTimingType, TimingConnection, TimingInstance, TimingInstanceId, TimingObjectBindings,
-    TimingSense, test_clock_id, test_design_id, test_port, test_port_id,
+    TimingSense, assert_path_summary, test_clock_id, test_design_id, test_port, test_port_id,
 };
 use opto_core::ObjectUid;
 use opto_library::BooleanFunction;
@@ -21,16 +26,12 @@ fn analyzes_register_to_register_setup_path() {
     let model = crate::test_timing_model(&design, &library);
     let analysis = analyze_timing(&timing, &model, &ReportTimingOptions::default()).unwrap();
 
-    assert_eq!(analysis.startpoint(), "launch_reg");
-    assert_eq!(analysis.endpoint(), "capture_reg");
+    assert_path_summary(&analysis, "launch_reg", "capture_reg", 0.07, 0.98, 0.91);
     assert!(
         analysis
             .path_instances()
             .any(|instance| instance == TimingInstanceId::from_raw(1))
     );
-    assert!((analysis.arrival() - 0.07).abs() < 1e-12);
-    assert!((analysis.required().unwrap() - 0.98).abs() < 1e-12);
-    assert!((analysis.slack().unwrap() - 0.91).abs() < 1e-12);
     assert_eq!(
         analysis.startpoint_description(),
         "rising edge-triggered flip-flop clocked by clk"
@@ -60,11 +61,7 @@ fn analyzes_register_to_register_hold_path() {
     let model = crate::test_timing_model(&design, &library);
     let analysis = analyze_timing(&timing, &model, &options).unwrap();
 
-    assert_eq!(analysis.startpoint(), "launch_reg");
-    assert_eq!(analysis.endpoint(), "capture_reg");
-    assert!((analysis.arrival() - 0.07).abs() < 1e-12);
-    assert!((analysis.required().unwrap() - 0.01).abs() < 1e-12);
-    assert!((analysis.slack().unwrap() - 0.06).abs() < 1e-12);
+    assert_path_summary(&analysis, "launch_reg", "capture_reg", 0.07, 0.01, 0.06);
     assert_eq!(analysis.delay_type(), DelayType::Min);
     assert!(matches!(
         analysis.requirement(),

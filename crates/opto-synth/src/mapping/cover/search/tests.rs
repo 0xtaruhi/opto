@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Minimal target-cover search contracts.
+//!
+//! These tests own library matching, candidate costs, observability care, and
+//! deterministic joint selection. Materialization and post-map repair retain
+//! their own artifact and transactional oracles.
+
 use super::*;
 use crate::boolean::logic::MAX_MATCH_INPUTS;
 use crate::planning::mapping_policy::{compare_cell_cost, compare_mapping_cost_with_required_time};

@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Synthesis qualification, formal adapters, and reproducible `QoR` gates.
+
+mod qualification_support;
+
 use crate::qualification_support::{
     RunMode, run_generated_differential, run_mapping_fixture_gate, run_named_suite,
     run_real_medium_gate, run_semantic_matrix, run_sv_tests, run_yosys_tests, validate_inventory,

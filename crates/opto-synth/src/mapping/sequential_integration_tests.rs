@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::*;
+//! Cross-stage tests owned by sequential target mapping and materialization.
+
+use crate::test_support::*;
 
 fn mux_target_cell(area: f64) -> TargetCell {
     target_cell(

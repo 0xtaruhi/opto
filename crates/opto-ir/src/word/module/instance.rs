@@ -330,6 +330,40 @@ impl WordModule {
 }
 
 #[cfg(test)]
+mod duplicate_name_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_duplicate_rtl_instance_names_before_mutation() {
+        let mut module = WordModule::new("top");
+        module
+            .add_instance(
+                "u0",
+                "child",
+                Vec::<(String, ValueId, SourceSpan)>::new(),
+                SourceSpan::default(),
+            )
+            .unwrap();
+
+        let error = module
+            .add_instance(
+                "u0",
+                "child",
+                Vec::<(String, ValueId, SourceSpan)>::new(),
+                SourceSpan::default(),
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate RTL instance name 'u0'")
+        );
+        assert_eq!(module.instances().len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 format = 1
-id = "smoke-add4"
+id = "semantics-multilevel-boolean-cover"
 kind = "regression"
-category = "arithmetic"
+covers = ["A five-input two-level AND-OR expression exercises shared multi-cut Boolean cover through the product path."]
+category = "semantics"
 language = "verilog"
 top = "top"
 sources = ["top.v"]
@@ -13,5 +14,6 @@ library = "../../../libraries/opto_test.lib"
 equivalence = true
 
 [assertions]
-min_ports = 3
+min_ports = 6
+min_nets = 1
 min_cells = 1

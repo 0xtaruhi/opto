@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 format = 1
-id = "smoke-add32"
+id = "semantics-verilog-truncating-add"
 kind = "regression"
+covers = ["Verilog-2005 non-ANSI declarations preserve four-bit truncating addition through mapped synthesis."]
 category = "arithmetic"
 language = "verilog"
 top = "top"

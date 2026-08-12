@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Stable region-graph and boundary-identity contracts.
+//!
+//! These tests own partition atoms, deterministic region/port identities, and
+//! hard state boundaries. They do not assert cover choice or post-map repair.
+
 use super::*;
 use opto_ir::word::{
     BinaryOp, Edge, LValue, MemoryReadPort, MemoryReadTiming, OpId, PortDirection, ReadDuringWrite,

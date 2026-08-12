@@ -184,6 +184,7 @@ change, run the complete Linux quality gate when available:
 python3 tools/check_license_headers.py
 python3 tools/check_public_repository.py
 python3 tools/check_architecture.py
+python3 tools/check_test_policy.py
 python3 tools/check_rust_documentation.py
 python3 tools/check_real_benchmarks.py benchmarks/real/medium.toml
 python3 tools/check_real_benchmarks.py benchmarks/real/gate.toml

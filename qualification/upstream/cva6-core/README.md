@@ -19,7 +19,7 @@ To run full synthesis without writing the large netlist:
 CVA6_COMPILE=1 \
 OPTO_SOURCE_CVA6=/path/to/cva6 \
 OPTO_REGRESSION_OUTPUT=/path/to/results \
-cargo test -p opto --test integration qualification::upstream_cva6 \
+cargo test -p opto --test qualification upstream_cva6 \
   --locked -- --exact --ignored --nocapture
 ```
 

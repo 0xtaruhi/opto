@@ -4,6 +4,7 @@
 format = 1
 id = "sequential-fsm-sparse-timing"
 kind = "regression"
+covers = ["The sparse FSM contract remains equivalent when an explicit clock drives timing-aware synthesis."]
 category = "sequential"
 language = "sverilog"
 top = "top"

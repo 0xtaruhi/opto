@@ -4,6 +4,7 @@
 format = 1
 id = "sequential-fsm-equivalent-states"
 kind = "regression"
+covers = ["Equivalent sparse FSM states may merge while zero-initial-state sequential equivalence is preserved."]
 category = "sequential"
 language = "sverilog"
 top = "top"

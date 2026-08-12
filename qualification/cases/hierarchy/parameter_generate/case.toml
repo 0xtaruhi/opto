@@ -4,6 +4,7 @@
 format = 1
 id = "hierarchy-parameter-generate"
 kind = "regression"
+covers = ["Parameterized indexed part-selects and generated child instances survive mapped hierarchy synthesis."]
 category = "hierarchy"
 language = "sverilog"
 top = "top"

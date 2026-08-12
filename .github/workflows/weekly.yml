@@ -121,13 +121,13 @@ jobs:
         env:
           OPTO_SOURCE_IBEX: ${{ github.workspace }}/.external/ibex
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::upstream_ibex --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification upstream_ibex --locked -- --exact --ignored --nocapture
 
       - name: Elaborate pinned CVA6 configurations
         env:
           OPTO_SOURCE_CVA6: ${{ github.workspace }}/.external/cva6
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::upstream_cva6 --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification upstream_cva6 --locked -- --exact --ignored --nocapture
 
       - name: Upload upstream reports
         if: always()
@@ -187,14 +187,14 @@ jobs:
           OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
           OPTO_LIBRARY_SKY130_HD: ${{ runner.temp }}/sky130.lib
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::public_qor --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification public_qor --locked -- --exact --ignored --nocapture
 
       - name: Run extended self-contained QoR suite
         env:
           OPTO_QOR_BINARY: ${{ github.workspace }}/target/fast-release/opto
           OPTO_YOSYS: /tmp/opto-yosys/bin/yosys
           OPTO_REGRESSION_OUTPUT: ${{ runner.temp }}/opto-regression
-        run: cargo test -p opto --test integration qualification::extended_qor --locked -- --exact --ignored --nocapture
+        run: cargo test -p opto --test qualification extended_qor --locked -- --exact --ignored --nocapture
 
       - name: Append measurement and render QoR dashboard
         run: >-
