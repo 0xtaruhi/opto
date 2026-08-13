@@ -856,7 +856,8 @@ OptoSlangEffectData lower_loop_variable_assignment(
     lhs.signal_name = intern_string(design, registered_value_name(design, variable));
     OptoSlangExpr rhs;
     rhs.kind = OPTO_SLANG_EXPR_CONSTANT;
-    auto bits = value.integer().resize(variable.getType().getBitstreamWidth());
+    const auto width = checked_width(variable.getType().getBitstreamWidth(), variable.name);
+    auto bits = value.integer().resize(width);
     bits.setSigned(variable.getType().isSigned());
     rhs.constant_has_width = true;
     rhs.constant_width = checked_width(bits.getBitWidth(), variable.name);
