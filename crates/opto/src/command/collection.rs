@@ -4,9 +4,16 @@
 use super::*;
 
 macro_rules! collection_query_args {
-    ($name:ident, $command:literal, $hint:expr, $handler:ident) => {
+    ($name:ident, $command:literal, $summary:literal, $example:literal, $hint:expr, $handler:ident) => {
         #[derive(TclCommand)]
-        #[command(name = $command, handler = $handler, sdc)]
+        #[command(
+            name = $command,
+            handler = $handler,
+            sdc,
+            summary = $summary,
+            requires = "A current design is required; filters and related objects must use live typed handles.",
+            example = $example
+        )]
         pub(crate) struct $name<'a> {
             #[arg(long = "-of_objects")]
             of_objects: Option<TclArg<'a>>,
@@ -18,13 +25,48 @@ macro_rules! collection_query_args {
     };
 }
 
-collection_query_args!(GetPortsArgs, "get_ports", ValueHint::Port, get_ports);
-collection_query_args!(GetCellsArgs, "get_cells", ValueHint::Cell, get_cells);
-collection_query_args!(GetPinsArgs, "get_pins", ValueHint::Pin, get_pins);
-collection_query_args!(GetNetsArgs, "get_nets", ValueHint::Net, get_nets);
+collection_query_args!(
+    GetPortsArgs,
+    "get_ports",
+    "Query current-design ports by name, relationship, and property filter.",
+    "get_ports -filter {.direction == input} data_*",
+    ValueHint::Port,
+    get_ports
+);
+collection_query_args!(
+    GetCellsArgs,
+    "get_cells",
+    "Query current-design cells by name, relationship, and property filter.",
+    "get_cells -filter {.ref_name =~ DFF*} *",
+    ValueHint::Cell,
+    get_cells
+);
+collection_query_args!(
+    GetPinsArgs,
+    "get_pins",
+    "Query current-design pins by name, relationship, and property filter.",
+    "get_pins -of_objects [get_cells alu_*] *",
+    ValueHint::Pin,
+    get_pins
+);
+collection_query_args!(
+    GetNetsArgs,
+    "get_nets",
+    "Query current-design nets by name, relationship, and property filter.",
+    "get_nets -of_objects [get_pins U0/Y] *",
+    ValueHint::Net,
+    get_nets
+);
 
 #[derive(TclCommand)]
-#[command(name = "get_clocks", handler = get_clocks, sdc)]
+#[command(
+    name = "get_clocks",
+    handler = get_clocks,
+    sdc,
+    summary = "Query clocks by name and property filter.",
+    requires = "Referenced clocks and filters must be valid in the current constraint state.",
+    example = "get_clocks -filter {.period != 0} sys_*"
+)]
 pub(crate) struct GetClocksArgs<'a> {
     #[arg(long = "-filter")]
     filter: Option<TclArg<'a>>,
@@ -33,18 +75,37 @@ pub(crate) struct GetClocksArgs<'a> {
 }
 
 #[derive(TclCommand)]
-#[command(name = "all_inputs", handler = all_inputs, sdc)]
+#[command(
+    name = "all_inputs",
+    handler = all_inputs,
+    sdc,
+    summary = "Return all current-design input ports, optionally excluding clock inputs.",
+    requires = "A current design is required."
+)]
 pub(crate) struct AllInputsArgs {
     #[arg(long = "-no_clocks")]
     no_clocks: bool,
 }
 
 #[derive(TclCommand)]
-#[command(name = "all_outputs", handler = all_outputs, sdc)]
+#[command(
+    name = "all_outputs",
+    handler = all_outputs,
+    sdc,
+    summary = "Return all current-design output ports.",
+    requires = "A current design is required."
+)]
 pub(crate) struct AllOutputsArgs {}
 
 #[derive(TclCommand)]
-#[command(name = "all_registers", handler = all_registers, sdc)]
+#[command(
+    name = "all_registers",
+    handler = all_registers,
+    sdc,
+    summary = "Return sequential cells selected by trigger style.",
+    requires = "A current elaborated or synthesized design is required.",
+    example = "all_registers -edge_triggered"
+)]
 pub(crate) struct AllRegistersArgs {
     #[arg(long = "-edge_triggered")]
     edge_triggered: bool,
@@ -53,7 +114,13 @@ pub(crate) struct AllRegistersArgs {
 }
 
 #[derive(TclCommand)]
-#[command(name = "all_clocks", handler = all_clocks, sdc)]
+#[command(
+    name = "all_clocks",
+    handler = all_clocks,
+    sdc,
+    summary = "Return every clock in the current constraint state.",
+    requires = "A current design is required."
+)]
 pub(crate) struct AllClocksArgs {}
 
 pub(crate) fn parse_filter(
@@ -109,7 +176,7 @@ fn query<'a>(
 }
 
 macro_rules! object_query_handler {
-    ($handler:ident, $args:ident, $plain:ident, $related:ident) => {
+    ($handler:ident, $args:ident, $kind:expr) => {
         pub(crate) fn $handler(
             state: &ShellState,
             interp: *mut TclInterp,
@@ -117,27 +184,30 @@ macro_rules! object_query_handler {
             args: $args<'_>,
         ) -> Result<CommandResult, crate::ShellError> {
             let query = query(interp, command, args.pattern, args.of_objects, args.filter)?;
-            let collection = {
-                let mut session = state.session.borrow_mut();
-                if let Some(objects) = query.of_objects {
-                    session.$related(objects.as_str(), &query.pattern)?
-                } else {
-                    session.$plain(&query.pattern)?
-                }
-            };
-            let handles = state
-                .session
-                .borrow()
-                .collection_handles_filtered(collection, query.filter.as_ref());
+            let handles = super::database::query_objects(
+                &mut state.session.borrow_mut(),
+                $kind,
+                &query.pattern,
+                query.of_objects.as_ref().map(TclArg::as_str),
+                query.filter.as_ref(),
+            )?;
             Ok(CommandResult::List(handles))
         }
     };
 }
 
-object_query_handler!(get_ports, GetPortsArgs, get_ports, get_ports_of_objects);
-object_query_handler!(get_cells, GetCellsArgs, get_cells, get_cells_of_objects);
-object_query_handler!(get_pins, GetPinsArgs, get_pins, get_pins_of_objects);
-object_query_handler!(get_nets, GetNetsArgs, get_nets, get_nets_of_objects);
+object_query_handler!(
+    get_ports,
+    GetPortsArgs,
+    super::database::ObjectQueryKind::Port
+);
+object_query_handler!(
+    get_cells,
+    GetCellsArgs,
+    super::database::ObjectQueryKind::Cell
+);
+object_query_handler!(get_pins, GetPinsArgs, super::database::ObjectQueryKind::Pin);
+object_query_handler!(get_nets, GetNetsArgs, super::database::ObjectQueryKind::Net);
 
 pub(crate) fn get_clocks(
     state: &ShellState,
@@ -146,11 +216,13 @@ pub(crate) fn get_clocks(
     args: GetClocksArgs<'_>,
 ) -> Result<CommandResult, crate::ShellError> {
     let query = query(interp, command, args.pattern, None, args.filter)?;
-    let collection = state.session.borrow_mut().get_clocks(&query.pattern)?;
-    let handles = state
-        .session
-        .borrow()
-        .collection_handles_filtered(collection, query.filter.as_ref());
+    let handles = super::database::query_objects(
+        &mut state.session.borrow_mut(),
+        super::database::ObjectQueryKind::Clock,
+        &query.pattern,
+        None,
+        query.filter.as_ref(),
+    )?;
     Ok(CommandResult::List(handles))
 }
 

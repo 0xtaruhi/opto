@@ -34,6 +34,7 @@ pub struct TimingObjectBindings {
     cells: Box<[NamedBinding<CellId>]>,
     pins: Box<[PinBinding]>,
     nets: Box<[NamedBinding<NetId>]>,
+    nets_by_object: Box<[u32]>,
 }
 
 impl Default for TimingObjectBindings {
@@ -43,6 +44,7 @@ impl Default for TimingObjectBindings {
             cells: Box::new([]),
             pins: Box::new([]),
             nets: Box::new([]),
+            nets_by_object: Box::new([]),
         }
     }
 }
@@ -88,6 +90,17 @@ impl TimingObjectBindings {
         lookup(&self.names, &self.nets, name).map(TimingEndpoint::Net)
     }
 
+    #[must_use]
+    /// Resolves the current flat name of a persistent logical-net identity.
+    pub fn net_name(&self, object: NetId) -> Option<&str> {
+        let position = self
+            .nets_by_object
+            .binary_search_by_key(&object, |&index| self.nets[index as usize].object)
+            .ok()?;
+        let row = self.nets[self.nets_by_object[position] as usize];
+        self.names.resolve(row.name)
+    }
+
     pub(crate) fn cell(&self, name: &str) -> Option<TimingEndpoint> {
         self.cell_endpoint(name)
     }
@@ -112,6 +125,9 @@ impl TimingObjectBindings {
             ))
             .saturating_add(opto_core::resident::slice_bytes::<NamedBinding<NetId>>(
                 self.nets.len(),
+            ))
+            .saturating_add(opto_core::resident::slice_bytes::<u32>(
+                self.nets_by_object.len(),
             ))
     }
 }
@@ -215,12 +231,35 @@ impl TimingObjectBindingsBuilder {
         canonicalize(&mut self.cells, "cell")?;
         canonicalize_pins(&mut self.pins)?;
         canonicalize(&mut self.nets, "net")?;
+        let mut nets_by_object = Vec::new();
+        nets_by_object
+            .try_reserve_exact(self.nets.len())
+            .map_err(|_| crate::TimingModelError::Capacity {
+                resource: "timing net object index",
+            })?;
+        for index in 0..self.nets.len() {
+            nets_by_object.push(u32::try_from(index).map_err(|_| {
+                crate::TimingModelError::Capacity {
+                    resource: "timing net object index",
+                }
+            })?);
+        }
+        nets_by_object.sort_unstable_by_key(|&index| self.nets[index as usize].object);
+        if nets_by_object
+            .windows(2)
+            .any(|pair| self.nets[pair[0] as usize].object == self.nets[pair[1] as usize].object)
+        {
+            return Err(
+                crate::TimingModelError::DuplicateObjectBinding { kind: "net object" }.into(),
+            );
+        }
         self.names.compact();
         Ok(TimingObjectBindings {
             names: self.names,
             cells: self.cells.into_boxed_slice(),
             pins: self.pins.into_boxed_slice(),
             nets: self.nets.into_boxed_slice(),
+            nets_by_object: nets_by_object.into_boxed_slice(),
         })
     }
 
@@ -260,4 +299,41 @@ fn canonicalize_pins(rows: &mut Vec<PinBinding>) -> Result<(), crate::TimingErro
     }
     rows.dedup_by(|left, right| left.instance == right.instance && left.pin == right.pin);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistent_net_identity_has_a_canonical_reverse_lookup() {
+        let first = NetId::from_uid(opto_core::ObjectUid::from_raw(11).unwrap());
+        let second = NetId::from_uid(opto_core::ObjectUid::from_raw(7).unwrap());
+        let mut builder = TimingObjectBindings::builder();
+        builder.bind_net("z_net", first).unwrap();
+        builder.bind_net("a_net", second).unwrap();
+        let bindings = builder.finish().unwrap();
+
+        assert_eq!(bindings.net_name(first), Some("z_net"));
+        assert_eq!(bindings.net_name(second), Some("a_net"));
+        assert_eq!(
+            bindings.net_name(NetId::from_uid(opto_core::ObjectUid::from_raw(99).unwrap())),
+            None
+        );
+    }
+
+    #[test]
+    fn persistent_net_identity_rejects_multiple_names() {
+        let net = NetId::from_uid(opto_core::ObjectUid::from_raw(11).unwrap());
+        let mut builder = TimingObjectBindings::builder();
+        builder.bind_net("first", net).unwrap();
+        builder.bind_net("second", net).unwrap();
+
+        assert!(matches!(
+            builder.finish(),
+            Err(crate::TimingError::Model(
+                crate::TimingModelError::DuplicateObjectBinding { kind: "net object" }
+            ))
+        ));
+    }
 }

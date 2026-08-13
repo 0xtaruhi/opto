@@ -27,6 +27,7 @@ pub(super) struct CommandSpec {
     summary: &'static str,
     requires: &'static str,
     example: Option<&'static str>,
+    pub validation: ValidationBehavior,
     syntax: fn() -> CommandSyntax,
 }
 
@@ -168,18 +169,17 @@ impl CommandSpec {
         name: &'static str,
         handler: ParsedCommandHandler,
         sdc_since: Option<SdcVersion>,
-        summary: &'static str,
-        requires: &'static str,
-        example: Option<&'static str>,
+        metadata: CommandMetadata,
         syntax: fn() -> CommandSyntax,
     ) -> Self {
         Self {
             name,
             executor: handler,
             sdc_since,
-            summary,
-            requires,
-            example,
+            summary: metadata.summary,
+            requires: metadata.requires,
+            example: metadata.example,
+            validation: metadata.validation,
             syntax,
         }
     }
@@ -187,6 +187,21 @@ impl CommandSpec {
     fn command_syntax(&self) -> CommandSyntax {
         (self.syntax)()
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CommandMetadata {
+    pub summary: &'static str,
+    pub requires: &'static str,
+    pub example: Option<&'static str>,
+    pub validation: ValidationBehavior,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ValidationBehavior {
+    Noop,
+    SourceFile,
+    ReturnFromScript,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,20 +234,86 @@ pub(super) struct OptionHint {
     pub name: &'static str,
     pub value: Option<ValueHint>,
     repeatable: bool,
+    help: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PositionalLexeme {
+    Text,
+    Numeric,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PositionalHint {
+    pub name: &'static str,
+    pub value: ValueHint,
+    pub lexeme: PositionalLexeme,
+    pub min: usize,
+    pub max: usize,
+    pub before_options: bool,
+    pub help: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PositionalPolicy {
+    Declared,
+    ConditionalOnAnyOption {
+        options: &'static [OptionId],
+        present: PositionalArity,
+        absent: PositionalArity,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct CommandSyntax {
     pub options: Vec<OptionHint>,
     pub unsupported_options: Vec<OptionHint>,
-    pub positional: Option<ValueHint>,
-    pub positional_label: Option<&'static str>,
+    pub positionals: Vec<PositionalHint>,
     pub positional_arity: Option<PositionalArity>,
     pub sdc_positional_arity: Option<PositionalArity>,
     pub required_options: &'static [&'static str],
     pub option_or_positional: Option<&'static str>,
-    pub leading_positionals: usize,
+    pub positional_policy: PositionalPolicy,
     pub mutually_exclusive_options: &'static [&'static [OptionId]],
+}
+
+impl CommandSyntax {
+    fn leading_positionals(&self) -> usize {
+        self.positionals
+            .iter()
+            .take_while(|positional| positional.before_options)
+            .count()
+    }
+
+    fn positional_at(&self, index: usize) -> Option<&PositionalHint> {
+        let mut start = 0usize;
+        for positional in &self.positionals {
+            let end = start.saturating_add(positional.max);
+            if index < end {
+                return Some(positional);
+            }
+            start = end;
+        }
+        None
+    }
+
+    fn positional_arity(&self, seen_options: &[OptionId], sdc: bool) -> Option<PositionalArity> {
+        if sdc && self.sdc_positional_arity.is_some() {
+            return self.sdc_positional_arity;
+        }
+        match self.positional_policy {
+            PositionalPolicy::Declared => self.positional_arity,
+            PositionalPolicy::ConditionalOnAnyOption {
+                options,
+                present,
+                absent,
+            } => Some(if seen_options.iter().any(|seen| options.contains(seen)) {
+                present
+            } else {
+                absent
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,21 +339,28 @@ impl PositionalArity {
     }
 }
 
-pub(crate) const fn typed_flag(id: OptionId, name: &'static str) -> OptionHint {
+pub(crate) const fn typed_flag(id: OptionId, name: &'static str, help: &'static str) -> OptionHint {
     OptionHint {
         id,
         name,
         value: None,
         repeatable: false,
+        help,
     }
 }
 
-pub(crate) const fn typed_value(id: OptionId, name: &'static str, hint: ValueHint) -> OptionHint {
+pub(crate) const fn typed_value(
+    id: OptionId,
+    name: &'static str,
+    hint: ValueHint,
+    help: &'static str,
+) -> OptionHint {
     OptionHint {
         id,
         name,
         value: Some(hint),
         repeatable: false,
+        help,
     }
 }
 
@@ -280,12 +368,14 @@ pub(crate) const fn typed_repeated_value(
     id: OptionId,
     name: &'static str,
     hint: ValueHint,
+    help: &'static str,
 ) -> OptionHint {
     OptionHint {
         id,
         name,
         value: Some(hint),
         repeatable: true,
+        help,
     }
 }
 
@@ -300,14 +390,12 @@ fn format_command_help(spec: &CommandSpec, syntax: &CommandSyntax) -> String {
         spec.summary,
         command_usage(name, syntax),
     );
-    if let Some(positional) = syntax.positional {
-        write!(
-            text,
-            "\n\nArguments:\n  <{}> — {}",
-            value_hint_label(positional),
-            positional_description(positional),
-        )
-        .expect("writing to a String cannot fail");
+    if !syntax.positionals.is_empty() {
+        text.push_str("\n\nArguments:");
+        for positional in &syntax.positionals {
+            write!(text, "\n  <{}> — {}", positional.name, positional.help)
+                .expect("writing to a String cannot fail");
+        }
     }
     if !syntax.options.is_empty() || !syntax.unsupported_options.is_empty() {
         text.push_str("\n\nOptions:");
@@ -323,8 +411,7 @@ fn format_command_help(spec: &CommandSpec, syntax: &CommandSyntax) -> String {
             write!(
                 text,
                 "\n  {}{value}{required} — {}",
-                option.name,
-                option_description(option.value),
+                option.name, option.help,
             )
             .expect("writing to a String cannot fail");
         }
@@ -356,43 +443,17 @@ fn command_usage(name: &str, syntax: &CommandSyntax) -> String {
     if !syntax.options.is_empty() || !syntax.unsupported_options.is_empty() {
         usage.push_str(" [options]");
     }
-    if let Some(positional) = syntax.positional {
-        let label = value_hint_label(positional).to_ascii_lowercase();
-        let arity = syntax
-            .positional_arity
-            .unwrap_or(PositionalArity::exactly(0));
-        if arity.min == 0 {
-            write!(usage, " [<{label}>]").expect("writing to a String cannot fail");
+    for positional in &syntax.positionals {
+        if positional.min == 0 {
+            write!(usage, " [<{}>]", positional.name).expect("writing to a String cannot fail");
         } else {
-            write!(usage, " <{label}>").expect("writing to a String cannot fail");
+            write!(usage, " <{}>", positional.name).expect("writing to a String cannot fail");
         }
-        if arity.max == usize::MAX || arity.max > 1 {
+        if positional.max == usize::MAX || positional.max > 1 {
             usage.push_str("...");
         }
     }
     usage
-}
-
-fn positional_description(hint: ValueHint) -> &'static str {
-    match hint {
-        ValueHint::File => "One or more filesystem paths.",
-        ValueHint::Directory => "A filesystem directory.",
-        ValueHint::Design => "A design name already known to the session.",
-        ValueHint::Port => "A port name or port collection.",
-        ValueHint::Cell => "A cell name or cell collection.",
-        ValueHint::Pin => "A pin name or pin collection.",
-        ValueHint::Net => "A net name or net collection.",
-        ValueHint::Clock => "A clock name or clock collection.",
-        ValueHint::OneOf { .. } | ValueHint::Suggested(_) => "A value from the displayed set.",
-        ValueHint::Text => "A Tcl value required by this command.",
-    }
-}
-
-fn option_description(value: Option<ValueHint>) -> &'static str {
-    match value {
-        Some(hint) => positional_description(hint),
-        None => "Enable this command behavior.",
-    }
 }
 
 fn command_example(name: &str, syntax: &CommandSyntax) -> String {
@@ -410,10 +471,11 @@ fn command_example(name: &str, syntax: &CommandSyntax) -> String {
             }
         }
     }
-    if let Some(positional) = syntax.positional
-        && syntax.positional_arity.is_some_and(|arity| arity.min != 0)
-    {
-        write!(example, " {}", example_value(positional)).expect("writing to a String cannot fail");
+    for positional in &syntax.positionals {
+        for _ in 0..positional.min {
+            write!(example, " {}", example_value(positional.value))
+                .expect("writing to a String cannot fail");
+        }
     }
     example
 }

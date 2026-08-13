@@ -459,18 +459,21 @@ fn validation_command_trampoline_impl(
     if let Err(error) = command_catalog::validate_sdc_invocation(command, command_args) {
         return set_error(interp, &error.to_string());
     }
-    if spec.name == "source" {
-        let path = &command_args[0];
-        let Ok(path) = CString::new(path.as_str()) else {
-            return set_error(interp, "source: file name contains NUL");
-        };
-        // SAFETY: the safe interpreter is live and `path` is NUL-terminated. Nested scripts use
-        // the same restricted command set, so reading them cannot expose host-side operations.
-        return eval_file(interp, &path);
-    }
-    if spec.name == "exit" {
-        set_result(interp, "");
-        return TCL_RETURN;
+    match spec.validation {
+        command_catalog::ValidationBehavior::Noop => {}
+        command_catalog::ValidationBehavior::SourceFile => {
+            let path = &command_args[0];
+            let Ok(path) = CString::new(path.as_str()) else {
+                return set_error(interp, "source: file name contains NUL");
+            };
+            // SAFETY: the safe interpreter is live and `path` is NUL-terminated. Nested scripts
+            // use the same restricted command set, so reading them cannot expose host operations.
+            return eval_file(interp, &path);
+        }
+        command_catalog::ValidationBehavior::ReturnFromScript => {
+            set_result(interp, "");
+            return TCL_RETURN;
+        }
     }
     set_result(interp, "");
     TCL_OK

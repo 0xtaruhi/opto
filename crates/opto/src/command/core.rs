@@ -8,6 +8,7 @@ use super::*;
     name = "help",
     handler = help,
     summary = "List registered commands or explain one command's public syntax.",
+    requires = "No design or library state is required.",
     example = "help read_hdl"
 )]
 pub(crate) struct HelpArgs {
@@ -16,7 +17,13 @@ pub(crate) struct HelpArgs {
 }
 
 #[derive(TclCommand)]
-#[command(name = "echo", handler = echo)]
+#[command(
+    name = "echo",
+    handler = echo,
+    summary = "Return the supplied Tcl words as one space-separated string.",
+    requires = "No design or library state is required.",
+    example = "echo synthesis complete"
+)]
 pub(crate) struct EchoArgs<'a> {
     #[arg(positional)]
     words: Vec<TclArg<'a>>,
@@ -26,7 +33,12 @@ pub(crate) struct EchoArgs<'a> {
 #[command(
     name = "redirect",
     handler = redirect,
-    summary = "Evaluate a Tcl command and redirect its result to a file or variable."
+    summary = "Evaluate a Tcl command and redirect its result to a file or variable.",
+    requires = "The nested command must be valid; file targets must be writable.",
+    example = "redirect -file reports/area.rpt {report_area}",
+    positional_if_any = "-file,-variable",
+    positional_present = 1,
+    positional_absent = 2
 )]
 pub(crate) struct RedirectArgs<'a> {
     #[arg(long = "-append")]
@@ -54,7 +66,10 @@ pub(crate) struct RedirectArgs<'a> {
     name = "source",
     handler = source,
     sdc,
-    requires = "The referenced Tcl input must exist and be readable."
+    validation = crate::command_catalog::ValidationBehavior::SourceFile,
+    summary = "Evaluate commands from a Tcl script in the current session.",
+    requires = "The referenced Tcl input must exist and be readable.",
+    example = "source scripts/setup.tcl"
 )]
 pub(crate) struct SourceArgs {
     #[arg(positional, value_hint = ValueHint::File)]
@@ -62,7 +77,15 @@ pub(crate) struct SourceArgs {
 }
 
 #[derive(TclCommand)]
-#[command(name = "exit", handler = exit, sdc)]
+#[command(
+    name = "exit",
+    handler = exit,
+    sdc,
+    validation = crate::command_catalog::ValidationBehavior::ReturnFromScript,
+    summary = "Stop the current script and return an optional process status.",
+    requires = "The optional status must be an integer.",
+    example = "exit 0"
+)]
 pub(crate) struct ExitArgs {
     #[arg(positional)]
     code: Option<i32>,

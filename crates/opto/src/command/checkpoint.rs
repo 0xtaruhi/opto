@@ -6,14 +6,26 @@
 use super::*;
 
 #[derive(TclCommand)]
-#[command(name = "save", handler = save)]
+#[command(
+    name = "save",
+    handler = save,
+    summary = "Write the complete validated session state to an Opto checkpoint.",
+    requires = "The destination path must be writable.",
+    example = "save build/top.ock"
+)]
 pub(crate) struct SaveArgs {
     #[arg(positional, value_hint = ValueHint::File)]
     file: PathBuf,
 }
 
 #[derive(TclCommand)]
-#[command(name = "resume", handler = resume)]
+#[command(
+    name = "resume",
+    handler = resume,
+    summary = "Replace the current session with a validated Opto checkpoint.",
+    requires = "The checkpoint must exist and match the current schema and ABI.",
+    example = "resume build/top.ock"
+)]
 pub(crate) struct ResumeArgs {
     #[arg(positional, value_hint = ValueHint::File)]
     file: PathBuf,

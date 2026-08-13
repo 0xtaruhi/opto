@@ -624,7 +624,7 @@ impl Completer for OptoCompleter {
             .as_deref()
             .and_then(|previous| spec.options.iter().find(|option| option.name == previous))
             .and_then(|option| option.value)
-            .or(spec.positional);
+            .or_else(|| spec.positionals.first().map(|positional| positional.value));
         let Some(hint) = hint else {
             return Vec::new();
         };

@@ -107,6 +107,7 @@ impl RegionContractSet {
                         port.value(),
                         timing_port,
                         scenario,
+                        object_bindings,
                         budgets[scenario_index][region.row().index()],
                     )?;
                     for timing_tag in tags {
@@ -301,6 +302,7 @@ impl PortScenarioLimits {
         value: word::ValueId,
         timing_port: Option<opto_timing::PortId>,
         scenario: &opto_timing::Scenario,
+        object_bindings: &opto_timing::TimingObjectBindings,
         budget: (Option<f64>, Option<f64>),
     ) -> Result<Self, crate::SynthError> {
         let constraints = scenario.constraints();
@@ -315,7 +317,7 @@ impl PortScenarioLimits {
                 .and_then(|port| constraints.input_transition_on(port))
                 .map(finite)
                 .transpose()?,
-            activity: boundary_activity(module, value, timing_port, scenario),
+            activity: boundary_activity(module, value, timing_port, scenario, object_bindings),
             load: timing_port
                 .and_then(|port| constraints.load_on(port))
                 .map(finite)
@@ -861,6 +863,7 @@ fn boundary_activity(
     value: word::ValueId,
     port: Option<opto_timing::PortId>,
     scenario: &Scenario,
+    object_bindings: &opto_timing::TimingObjectBindings,
 ) -> Option<opto_timing::ScenarioSwitchingActivity> {
     if let Some(port) = port
         && let Some(activity) = scenario
@@ -874,16 +877,12 @@ fn boundary_activity(
     };
     let signal = module.signal(reference.signal)?;
     let name = signal.name.map(|name| module.name_str(name))?;
+    let opto_timing::TimingEndpoint::Net(net) = object_bindings.net_endpoint(name)? else {
+        return None;
+    };
     scenario
         .power()
-        .activities()
-        .iter()
-        .find_map(|(target, activity)| match target {
-            opto_timing::ScenarioActivityTarget::Net(candidate) if candidate.as_ref() == name => {
-                Some(*activity)
-            }
-            _ => None,
-        })
+        .activity(&opto_timing::ScenarioActivityTarget::Net(net))
 }
 
 fn enabled_checks(checks: ScenarioCheckSet) -> impl Iterator<Item = BoundaryCheckKind> {

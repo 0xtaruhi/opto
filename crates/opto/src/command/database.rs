@@ -4,7 +4,13 @@
 use super::*;
 
 #[derive(TclCommand)]
-#[command(name = "get_db", handler = get_db)]
+#[command(
+    name = "get_db",
+    handler = get_db,
+    summary = "Read a typed root property, query an object class, or project object properties.",
+    requires = "Requested properties and object handles must be available in the current lifecycle.",
+    example = "get_db insts * -if {.ref_name =~ DFF*}"
+)]
 pub(crate) struct GetDbArgs<'a> {
     #[arg(long = "-if")]
     filter: Option<TclArg<'a>>,
@@ -15,10 +21,205 @@ pub(crate) struct GetDbArgs<'a> {
 }
 
 #[derive(TclCommand)]
-#[command(name = "set_db", handler = set_db)]
+#[command(
+    name = "set_db",
+    handler = set_db,
+    summary = "Atomically update a writable typed database property.",
+    requires = "The property must be writable and the complete value must satisfy its schema.",
+    example = "set_db synth_effort high"
+)]
 pub(crate) struct SetDbArgs<'a> {
     #[arg(positional, min = 2, max = 3)]
     terms: Vec<TclArg<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootPropertyKind {
+    ClockGating,
+    ClockGatingLatchBased,
+    ClockGatingMinimumBitwidth,
+    CurrentDesign,
+    HdlSearchPath,
+    LibSearchPath,
+    SynthEffort,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootPropertyType {
+    Boolean,
+    DesignHandle,
+    PathList,
+    PositiveInteger,
+    SynthesisEffort,
+}
+
+impl RootPropertyKind {
+    const fn value_type(self) -> RootPropertyType {
+        match self {
+            Self::ClockGating | Self::ClockGatingLatchBased => RootPropertyType::Boolean,
+            Self::ClockGatingMinimumBitwidth => RootPropertyType::PositiveInteger,
+            Self::CurrentDesign => RootPropertyType::DesignHandle,
+            Self::HdlSearchPath | Self::LibSearchPath => RootPropertyType::PathList,
+            Self::SynthEffort => RootPropertyType::SynthesisEffort,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RootPropertySpec {
+    name: &'static str,
+    kind: RootPropertyKind,
+    value_type: RootPropertyType,
+    readable: bool,
+    writable: bool,
+    help: &'static str,
+}
+
+const ROOT_PROPERTIES: &[RootPropertySpec] = &[
+    RootPropertySpec {
+        name: "clock_gating",
+        kind: RootPropertyKind::ClockGating,
+        value_type: RootPropertyType::Boolean,
+        readable: true,
+        writable: true,
+        help: "Enable or disable synthesis clock gating.",
+    },
+    RootPropertySpec {
+        name: "clock_gating_latch_based",
+        kind: RootPropertyKind::ClockGatingLatchBased,
+        value_type: RootPropertyType::Boolean,
+        readable: true,
+        writable: true,
+        help: "Select latch-based rather than combinational clock gating.",
+    },
+    RootPropertySpec {
+        name: "clock_gating_minimum_bitwidth",
+        kind: RootPropertyKind::ClockGatingMinimumBitwidth,
+        value_type: RootPropertyType::PositiveInteger,
+        readable: true,
+        writable: true,
+        help: "Minimum register width eligible for clock gating.",
+    },
+    RootPropertySpec {
+        name: "current_design",
+        kind: RootPropertyKind::CurrentDesign,
+        value_type: RootPropertyType::DesignHandle,
+        readable: true,
+        writable: true,
+        help: "The design selected for subsequent commands.",
+    },
+    RootPropertySpec {
+        name: "hdl_search_path",
+        kind: RootPropertyKind::HdlSearchPath,
+        value_type: RootPropertyType::PathList,
+        readable: true,
+        writable: true,
+        help: "Ordered directories searched for HDL inputs.",
+    },
+    RootPropertySpec {
+        name: "lib_search_path",
+        kind: RootPropertyKind::LibSearchPath,
+        value_type: RootPropertyType::PathList,
+        readable: true,
+        writable: true,
+        help: "Ordered directories searched for Liberty inputs.",
+    },
+    RootPropertySpec {
+        name: "synth_effort",
+        kind: RootPropertyKind::SynthEffort,
+        value_type: RootPropertyType::SynthesisEffort,
+        readable: true,
+        writable: true,
+        help: "Deterministic synthesis search effort: low, medium, or high.",
+    },
+];
+
+fn root_property(name: &str) -> Option<&'static RootPropertySpec> {
+    let property = ROOT_PROPERTIES
+        .binary_search_by_key(&name, |property| property.name)
+        .ok()
+        .map(|index| &ROOT_PROPERTIES[index])?;
+    debug_assert_eq!(property.value_type, property.kind.value_type());
+    debug_assert!(!property.help.is_empty());
+    Some(property)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectQueryKind {
+    Clock,
+    Design,
+    Cell,
+    Library,
+    LibraryCell,
+    Net,
+    Pin,
+    Port,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ObjectQuerySpec {
+    name: &'static str,
+    kind: ObjectQueryKind,
+    related: bool,
+    filter: bool,
+}
+
+const OBJECT_QUERIES: &[ObjectQuerySpec] = &[
+    ObjectQuerySpec {
+        name: "clocks",
+        kind: ObjectQueryKind::Clock,
+        related: false,
+        filter: true,
+    },
+    ObjectQuerySpec {
+        name: "designs",
+        kind: ObjectQueryKind::Design,
+        related: false,
+        filter: true,
+    },
+    ObjectQuerySpec {
+        name: "insts",
+        kind: ObjectQueryKind::Cell,
+        related: true,
+        filter: true,
+    },
+    ObjectQuerySpec {
+        name: "lib_cells",
+        kind: ObjectQueryKind::LibraryCell,
+        related: false,
+        filter: false,
+    },
+    ObjectQuerySpec {
+        name: "libraries",
+        kind: ObjectQueryKind::Library,
+        related: false,
+        filter: false,
+    },
+    ObjectQuerySpec {
+        name: "nets",
+        kind: ObjectQueryKind::Net,
+        related: true,
+        filter: true,
+    },
+    ObjectQuerySpec {
+        name: "pins",
+        kind: ObjectQueryKind::Pin,
+        related: true,
+        filter: true,
+    },
+    ObjectQuerySpec {
+        name: "ports",
+        kind: ObjectQueryKind::Port,
+        related: true,
+        filter: true,
+    },
+];
+
+fn object_query(name: &str) -> Option<&'static ObjectQuerySpec> {
+    OBJECT_QUERIES
+        .binary_search_by_key(&name, |query| query.name)
+        .ok()
+        .map(|index| &OBJECT_QUERIES[index])
 }
 
 pub(crate) fn get_db(
@@ -56,73 +257,12 @@ fn get_root_or_objects(
     pattern: &str,
     args: &GetDbArgs<'_>,
 ) -> Result<CommandResult, crate::ShellError> {
-    if pattern == "*" && args.filter.is_none() && args.of_objects.is_none() {
-        match term.as_str() {
-            "current_design" => {
-                if state.session.borrow().current_design().is_none() {
-                    return Ok(CommandResult::List(Vec::new()));
-                }
-                let handle = state
-                    .session
-                    .borrow_mut()
-                    .store_current_design_collection()?;
-                return Ok(CommandResult::List(vec![handle]));
-            }
-            "hdl_search_path" => {
-                return Ok(CommandResult::List(
-                    state
-                        .session
-                        .borrow()
-                        .hdl_search_path()
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect(),
-                ));
-            }
-            "lib_search_path" => {
-                return Ok(CommandResult::List(
-                    state
-                        .session
-                        .borrow()
-                        .lib_search_path()
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect(),
-                ));
-            }
-            "synth_effort" => {
-                let value = match state.session.borrow().synth_effort() {
-                    SynthesisEffort::Low => "low",
-                    SynthesisEffort::Medium => "medium",
-                    SynthesisEffort::High => "high",
-                };
-                return Ok(CommandResult::Complete(value.to_string()));
-            }
-            "clock_gating" => {
-                return Ok(CommandResult::Complete(
-                    state.session.borrow().clock_gating_enabled().to_string(),
-                ));
-            }
-            "clock_gating_minimum_bitwidth" => {
-                return Ok(CommandResult::Complete(
-                    state
-                        .session
-                        .borrow()
-                        .clock_gating_minimum_bitwidth()
-                        .to_string(),
-                ));
-            }
-            "clock_gating_latch_based" => {
-                return Ok(CommandResult::Complete(
-                    state
-                        .session
-                        .borrow()
-                        .clock_gating_latch_based()
-                        .to_string(),
-                ));
-            }
-            _ => {}
-        }
+    if pattern == "*"
+        && args.filter.is_none()
+        && args.of_objects.is_none()
+        && let Some(property) = root_property(term.as_str()).filter(|property| property.readable)
+    {
+        return get_root_property(state, property.kind);
     }
 
     let filter = args
@@ -131,77 +271,155 @@ fn get_root_or_objects(
         .map(|raw| super::collection::parse_filter(interp, command, raw))
         .transpose()?;
     let related = args.of_objects.as_ref().map(TclArg::as_str);
-    let mut session = state.session.borrow_mut();
-    let handles = match term.as_str() {
-        "designs" => {
-            if related.is_some() {
-                return Err(crate::ShellError::command(
-                    "get_db: designs does not support -of",
-                ));
+    let Some(query) = object_query(term.as_str()) else {
+        return Err(crate::ShellError::command(format!(
+            "get_db: unknown root property or object class '{}'",
+            term.as_str()
+        )));
+    };
+    if related.is_some() && !query.related {
+        return Err(crate::ShellError::command(format!(
+            "get_db: {} does not support -of",
+            query.name
+        )));
+    }
+    if filter.is_some() && !query.filter {
+        return Err(crate::ShellError::command(format!(
+            "get_db: {} currently supports name patterns only",
+            query.name
+        )));
+    }
+    let handles = query_objects(
+        &mut state.session.borrow_mut(),
+        query.kind,
+        pattern,
+        related,
+        filter.as_ref(),
+    )?;
+    Ok(CommandResult::List(handles))
+}
+
+fn get_root_property(
+    state: &ShellState,
+    property: RootPropertyKind,
+) -> Result<CommandResult, crate::ShellError> {
+    match property {
+        RootPropertyKind::CurrentDesign => {
+            if state.session.borrow().current_design().is_none() {
+                return Ok(CommandResult::List(Vec::new()));
             }
+            let handle = state
+                .session
+                .borrow_mut()
+                .store_current_design_collection()?;
+            Ok(CommandResult::List(vec![handle]))
+        }
+        RootPropertyKind::HdlSearchPath => Ok(CommandResult::List(
+            state
+                .session
+                .borrow()
+                .hdl_search_path()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        )),
+        RootPropertyKind::LibSearchPath => Ok(CommandResult::List(
+            state
+                .session
+                .borrow()
+                .lib_search_path()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        )),
+        RootPropertyKind::SynthEffort => {
+            let value = match state.session.borrow().synth_effort() {
+                SynthesisEffort::Low => "low",
+                SynthesisEffort::Medium => "medium",
+                SynthesisEffort::High => "high",
+            };
+            Ok(CommandResult::Complete(value.to_string()))
+        }
+        RootPropertyKind::ClockGating => Ok(CommandResult::Complete(
+            state.session.borrow().clock_gating_enabled().to_string(),
+        )),
+        RootPropertyKind::ClockGatingMinimumBitwidth => Ok(CommandResult::Complete(
+            state
+                .session
+                .borrow()
+                .clock_gating_minimum_bitwidth()
+                .to_string(),
+        )),
+        RootPropertyKind::ClockGatingLatchBased => Ok(CommandResult::Complete(
+            state
+                .session
+                .borrow()
+                .clock_gating_latch_based()
+                .to_string(),
+        )),
+    }
+}
+
+pub(crate) fn query_objects(
+    session: &mut opto_session::Session,
+    kind: ObjectQueryKind,
+    pattern: &str,
+    related: Option<&str>,
+    filter: Option<&CollectionFilter>,
+) -> Result<Vec<String>, crate::ShellError> {
+    let handles = match kind {
+        ObjectQueryKind::Design => {
             let objects = session.get_designs(pattern)?;
-            session.collection_handles_filtered(objects, filter.as_ref())
+            session.collection_handles_filtered(objects, filter)
         }
-        "ports" => {
-            let objects = match related {
-                Some(objects) => session.get_ports_of_objects(objects, pattern)?,
-                None => session.get_ports(pattern)?,
-            };
-            session.collection_handles_filtered(objects, filter.as_ref())
-        }
-        "insts" => {
-            let objects = match related {
-                Some(objects) => session.get_cells_of_objects(objects, pattern)?,
-                None => session.get_cells(pattern)?,
-            };
-            session.collection_handles_filtered(objects, filter.as_ref())
-        }
-        "pins" => {
-            let objects = match related {
-                Some(objects) => session.get_pins_of_objects(objects, pattern)?,
-                None => session.get_pins(pattern)?,
-            };
-            session.collection_handles_filtered(objects, filter.as_ref())
-        }
-        "nets" => {
-            let objects = match related {
-                Some(objects) => session.get_nets_of_objects(objects, pattern)?,
-                None => session.get_nets(pattern)?,
-            };
-            session.collection_handles_filtered(objects, filter.as_ref())
-        }
-        "clocks" => {
-            if related.is_some() {
-                return Err(crate::ShellError::command(
-                    "get_db: clocks does not support -of",
-                ));
+        ObjectQueryKind::Port => {
+            if let Some(related) = related {
+                let objects = session.get_ports_of_objects(related, pattern)?;
+                session.collection_handles_filtered(objects, filter)
+            } else {
+                let objects = session.get_ports(pattern)?;
+                session.collection_handles_filtered(objects, filter)
             }
+        }
+        ObjectQueryKind::Cell => {
+            if let Some(related) = related {
+                let objects = session.get_cells_of_objects(related, pattern)?;
+                session.collection_handles_filtered(objects, filter)
+            } else {
+                let objects = session.get_cells(pattern)?;
+                session.collection_handles_filtered(objects, filter)
+            }
+        }
+        ObjectQueryKind::Pin => {
+            if let Some(related) = related {
+                let objects = session.get_pins_of_objects(related, pattern)?;
+                session.collection_handles_filtered(objects, filter)
+            } else {
+                let objects = session.get_pins(pattern)?;
+                session.collection_handles_filtered(objects, filter)
+            }
+        }
+        ObjectQueryKind::Net => {
+            if let Some(related) = related {
+                let objects = session.get_nets_of_objects(related, pattern)?;
+                session.collection_handles_filtered(objects, filter)
+            } else {
+                let objects = session.get_nets(pattern)?;
+                session.collection_handles_filtered(objects, filter)
+            }
+        }
+        ObjectQueryKind::Clock => {
             let objects = session.get_clocks(pattern)?;
-            session.collection_handles_filtered(objects, filter.as_ref())
+            session.collection_handles_filtered(objects, filter)
         }
-        "libraries" => {
-            if related.is_some() || filter.is_some() {
-                return Err(crate::ShellError::command(
-                    "get_db: libraries currently supports name patterns only",
-                ));
-            }
-            session.library_names_matching(pattern)
-        }
-        "lib_cells" => {
-            if related.is_some() || filter.is_some() {
-                return Err(crate::ShellError::command(
-                    "get_db: lib_cells currently supports name patterns only",
-                ));
-            }
-            session.library_cell_names_matching(pattern)?
-        }
-        other => {
-            return Err(crate::ShellError::command(format!(
-                "get_db: unknown root property or object class '{other}'"
-            )));
+        ObjectQueryKind::Library => return Ok(session.library_names_matching(pattern)),
+        ObjectQueryKind::LibraryCell => {
+            return session
+                .library_cell_names_matching(pattern)
+                .map_err(Into::into);
         }
     };
-    Ok(CommandResult::List(handles))
+    Ok(handles)
 }
 
 pub(crate) fn set_db(
@@ -249,20 +467,30 @@ fn set_root(
     property: &str,
     value: &TclArg<'_>,
 ) -> Result<usize, crate::ShellError> {
-    match property {
-        "hdl_search_path" => Ok(state.session.borrow_mut().set_hdl_search_path(
+    let Some(spec) = root_property(property) else {
+        return Err(crate::ShellError::command(format!(
+            "set_db: unknown or read-only root property '{property}'"
+        )));
+    };
+    if !spec.writable {
+        return Err(crate::ShellError::command(format!(
+            "set_db: root property '{property}' is read-only"
+        )));
+    }
+    match spec.kind {
+        RootPropertyKind::HdlSearchPath => Ok(state.session.borrow_mut().set_hdl_search_path(
             split_tcl_list(interp, value)?
                 .into_iter()
                 .map(PathBuf::from)
                 .collect(),
         )),
-        "lib_search_path" => Ok(state.session.borrow_mut().set_lib_search_path(
+        RootPropertyKind::LibSearchPath => Ok(state.session.borrow_mut().set_lib_search_path(
             split_tcl_list(interp, value)?
                 .into_iter()
                 .map(PathBuf::from)
                 .collect(),
         )),
-        "synth_effort" => {
+        RootPropertyKind::SynthEffort => {
             let effort = match value.as_str() {
                 "low" => SynthesisEffort::Low,
                 "medium" => SynthesisEffort::Medium,
@@ -275,11 +503,11 @@ fn set_root(
             };
             Ok(state.session.borrow_mut().set_synth_effort(effort))
         }
-        "clock_gating" => Ok(state
+        RootPropertyKind::ClockGating => Ok(state
             .session
             .borrow_mut()
             .set_clock_gating_enabled(parse_boolean(value.as_str())?)),
-        "clock_gating_minimum_bitwidth" => {
+        RootPropertyKind::ClockGatingMinimumBitwidth => {
             let width = value.parse::<usize>().map_err(|_| {
                 crate::ShellError::command(format!(
                     "set_db: clock_gating_minimum_bitwidth expects an integer; got '{value}'"
@@ -291,11 +519,11 @@ fn set_root(
                 .set_clock_gating_minimum_bitwidth(width)
                 .map_err(Into::into)
         }
-        "clock_gating_latch_based" => Ok(state
+        RootPropertyKind::ClockGatingLatchBased => Ok(state
             .session
             .borrow_mut()
             .set_clock_gating_latch_based(parse_boolean(value.as_str())?)),
-        "current_design" => {
+        RootPropertyKind::CurrentDesign => {
             let values = split_tcl_list(interp, value)?;
             let [handle] = values.as_slice() else {
                 return Err(crate::ShellError::command(
@@ -318,9 +546,6 @@ fn set_root(
                 Ok(1)
             }
         }
-        other => Err(crate::ShellError::command(format!(
-            "set_db: unknown or read-only root property '{other}'"
-        ))),
     }
 }
 
@@ -331,5 +556,50 @@ fn parse_boolean(value: &str) -> Result<bool, crate::ShellError> {
         other => Err(crate::ShellError::command(format!(
             "set_db: expected boolean true or false; got '{other}'"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn root_property_schema_is_sorted_unique_and_type_complete() {
+        let mut names = BTreeSet::new();
+        for pair in ROOT_PROPERTIES.windows(2) {
+            assert!(
+                pair[0].name < pair[1].name,
+                "root properties must stay sorted"
+            );
+        }
+        for property in ROOT_PROPERTIES {
+            assert!(names.insert(property.name));
+            assert_eq!(property.value_type, property.kind.value_type());
+            assert!(property.readable || property.writable);
+            assert!(!property.help.trim().is_empty());
+            assert!(root_property(property.name).is_some());
+        }
+    }
+
+    #[test]
+    fn object_query_schema_is_sorted_unique_and_capability_complete() {
+        let mut names = BTreeSet::new();
+        for pair in OBJECT_QUERIES.windows(2) {
+            assert!(
+                pair[0].name < pair[1].name,
+                "object queries must stay sorted"
+            );
+        }
+        for query in OBJECT_QUERIES {
+            assert!(names.insert(query.name));
+            assert_eq!(
+                object_query(query.name).map(|found| found.kind),
+                Some(query.kind)
+            );
+        }
+        assert!(object_query("ports").unwrap().related);
+        assert!(!object_query("libraries").unwrap().related);
+        assert!(!object_query("lib_cells").unwrap().filter);
     }
 }

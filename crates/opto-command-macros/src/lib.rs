@@ -84,19 +84,12 @@ fn command_syntax_tokens(
         .filter(|field| field.unsupported)
         .flat_map(FieldConfig::option_hint_tokens)
         .collect::<Vec<_>>();
-    let positional = fields.iter().find(|field| field.positional);
-    let positional_hint = positional.map_or_else(
-        || quote!(None),
-        |field| {
-            let hint = field.hint_tokens();
-            quote!(Some(#hint))
-        },
-    );
-    let positional_label = positional
-        .and_then(|field| field.label.as_ref())
-        .map_or_else(|| quote!(None), |label| quote!(Some(#label)));
+    let positionals = fields
+        .iter()
+        .filter(|field| field.positional)
+        .map(FieldConfig::positional_hint_tokens)
+        .collect::<Vec<_>>();
     let (positional_min, positional_max) = positional_arity(fields);
-    let leading_positionals = fields.iter().filter(|field| field.before_options).count();
     let required_options = fields
         .iter()
         .filter(|field| field.is_required_option())
@@ -107,6 +100,7 @@ fn command_syntax_tokens(
         .as_ref()
         .map_or_else(|| quote!(None), |name| quote!(Some(#name)));
     let conflict_groups = conflict_groups(fields)?;
+    let positional_policy = command.positional_policy_tokens(fields)?;
     let sdc_positional_arity = if command.sdc_no_positionals {
         quote!(Some(crate::command_catalog::PositionalArity::exactly(0)))
     } else {
@@ -116,15 +110,14 @@ fn command_syntax_tokens(
         crate::command_catalog::CommandSyntax {
             options: vec![#(#option_hints),*],
             unsupported_options: vec![#(#unsupported_hints),*],
-            positional: #positional_hint,
-            positional_label: #positional_label,
+            positionals: vec![#(#positionals),*],
             positional_arity: Some(
                 crate::command_catalog::PositionalArity::range(#positional_min, #positional_max),
             ),
             sdc_positional_arity: #sdc_positional_arity,
             required_options: &[#(#required_options),*],
             option_or_positional: #option_or_positional,
-            leading_positionals: #leading_positionals,
+            positional_policy: #positional_policy,
             mutually_exclusive_options: &[#(#conflict_groups),*],
         }
     })
@@ -221,6 +214,25 @@ fn expand_tcl_command(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let command = CommandConfig::parse(input)?;
     validate_fields(&fields)?;
     validate_option_or_positional(&command, &fields)?;
+    let requires_example = fields.iter().any(|field| field.positional)
+        || fields
+            .iter()
+            .filter(|field| !field.positional && !field.unsupported)
+            .map(|field| field.names.len())
+            .sum::<usize>()
+            > 1;
+    if requires_example && command.example.is_none() {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "commands with positional arguments or multiple options require an explicit example",
+        ));
+    }
+    if requires_example && command.names.len() > 1 && command.variant_examples.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "commands with variants require an explicit example for every variant",
+        ));
+    }
 
     let syntax = command_syntax_tokens(&command, &fields)?;
     let generics = generic_context(input)?;
@@ -256,35 +268,42 @@ fn expand_tcl_command(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
     } else {
         quote!(None)
     };
-    let command_specs = command.names.iter().map(|command_name| {
-        let summary = command.summary.clone().unwrap_or_else(|| {
-            LitStr::new(
-                &format!("Execute the public `{}` command.", command_name.value()),
-                command_name.span(),
-            )
+    let validation = &command.validation;
+    let command_specs = command
+        .names
+        .iter()
+        .enumerate()
+        .map(|(index, command_name)| {
+            let summary = index
+                .checked_sub(1)
+                .and_then(|index| command.variant_summaries.get(index))
+                .cloned()
+                .unwrap_or_else(|| command.summary.clone());
+            let requires = index
+                .checked_sub(1)
+                .and_then(|index| command.variant_requires.get(index))
+                .cloned()
+                .unwrap_or_else(|| command.requires.clone());
+            let example = index
+                .checked_sub(1)
+                .and_then(|index| command.variant_examples.get(index))
+                .or(command.example.as_ref())
+                .map_or_else(|| quote!(None), |value| quote!(Some(#value)));
+            quote! {
+                crate::command_catalog::CommandSpec::typed(
+                    #command_name,
+                    #dispatch,
+                    #sdc_since,
+                    crate::command_catalog::CommandMetadata {
+                        summary: #summary,
+                        requires: #requires,
+                        example: #example,
+                        validation: #validation,
+                    },
+                    #schema_type::command_syntax,
+                )
+            }
         });
-        let requires = command.requires.clone().unwrap_or_else(|| {
-            LitStr::new(
-                "The declared arguments and referenced session objects must be valid.",
-                command_name.span(),
-            )
-        });
-        let example = command
-            .example
-            .as_ref()
-            .map_or_else(|| quote!(None), |value| quote!(Some(#value)));
-        quote! {
-            crate::command_catalog::CommandSpec::typed(
-                #command_name,
-                #dispatch,
-                #sdc_since,
-                #summary,
-                #requires,
-                #example,
-                #schema_type::command_syntax,
-            )
-        }
-    });
     let command_definitions = command_definitions(&command, &schema_type)?;
     let GenericContext {
         impl_generics,
@@ -358,9 +377,16 @@ struct CommandConfig {
     sdc: bool,
     sdc_no_positionals: bool,
     option_or_positional: Option<LitStr>,
-    summary: Option<LitStr>,
-    requires: Option<LitStr>,
+    summary: LitStr,
+    requires: LitStr,
     example: Option<LitStr>,
+    variant_summaries: Vec<LitStr>,
+    variant_requires: Vec<LitStr>,
+    variant_examples: Vec<LitStr>,
+    validation: ExprPath,
+    positional_if_any: Vec<LitStr>,
+    positional_present: Option<usize>,
+    positional_absent: Option<usize>,
 }
 
 impl CommandConfig {
@@ -374,6 +400,14 @@ impl CommandConfig {
         let mut summary: Option<LitStr> = None;
         let mut requires: Option<LitStr> = None;
         let mut example: Option<LitStr> = None;
+        let mut variant_summaries = Vec::new();
+        let mut variant_requires = Vec::new();
+        let mut variant_examples = Vec::new();
+        let mut validation: ExprPath =
+            syn::parse_quote!(crate::command_catalog::ValidationBehavior::Noop);
+        let mut positional_if_any = Vec::new();
+        let mut positional_present = None;
+        let mut positional_absent = None;
         let mut command_attributes = 0usize;
         for attribute in &input.attrs {
             if !attribute.path().is_ident("command") {
@@ -405,11 +439,40 @@ impl CommandConfig {
                 } else if meta.path.is_ident("summary") {
                     summary = Some(meta.value()?.parse()?);
                     Ok(())
+                } else if meta.path.is_ident("variant_summary") {
+                    variant_summaries.push(meta.value()?.parse()?);
+                    Ok(())
                 } else if meta.path.is_ident("requires") {
                     requires = Some(meta.value()?.parse()?);
                     Ok(())
+                } else if meta.path.is_ident("variant_requires") {
+                    variant_requires.push(meta.value()?.parse()?);
+                    Ok(())
                 } else if meta.path.is_ident("example") {
                     example = Some(meta.value()?.parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("variant_example") {
+                    variant_examples.push(meta.value()?.parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("validation") {
+                    validation = meta.value()?.parse()?;
+                    Ok(())
+                } else if meta.path.is_ident("positional_if_any") {
+                    let names: LitStr = meta.value()?.parse()?;
+                    positional_if_any.extend(
+                        names
+                            .value()
+                            .split(',')
+                            .map(|name| LitStr::new(name.trim(), names.span())),
+                    );
+                    Ok(())
+                } else if meta.path.is_ident("positional_present") {
+                    let value: LitInt = meta.value()?.parse()?;
+                    positional_present = Some(value.base10_parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("positional_absent") {
+                    let value: LitInt = meta.value()?.parse()?;
+                    positional_absent = Some(value.base10_parse()?);
                     Ok(())
                 } else {
                     Err(meta.error("unsupported command attribute"))
@@ -431,16 +494,46 @@ impl CommandConfig {
         let handler = handler.ok_or_else(|| {
             syn::Error::new_spanned(&input.ident, "command requires handler = path")
         })?;
+        let summary = summary.ok_or_else(|| {
+            syn::Error::new_spanned(&input.ident, "public command requires an explicit summary")
+        })?;
+        let requires = requires.ok_or_else(|| {
+            syn::Error::new_spanned(
+                &input.ident,
+                "public command requires explicit preconditions",
+            )
+        })?;
         if !kinds.is_empty() && kinds.len() != names.len() {
             return Err(syn::Error::new_spanned(
                 &input.ident,
                 "command kind and variant_kind values must match name and variant values",
             ));
         }
+        for (values, label) in [
+            (&variant_summaries, "variant_summary"),
+            (&variant_requires, "variant_requires"),
+            (&variant_examples, "variant_example"),
+        ] {
+            if !values.is_empty() && values.len() != names.len().saturating_sub(1) {
+                return Err(syn::Error::new_spanned(
+                    &input.ident,
+                    format!("{label} values must cover every declared variant"),
+                ));
+            }
+        }
         if sdc_no_positionals && !sdc {
             return Err(syn::Error::new_spanned(
                 &input.ident,
                 "sdc_no_positionals requires sdc",
+            ));
+        }
+        let conditional_count = usize::from(!positional_if_any.is_empty())
+            + usize::from(positional_present.is_some())
+            + usize::from(positional_absent.is_some());
+        if conditional_count != 0 && conditional_count != 3 {
+            return Err(syn::Error::new_spanned(
+                &input.ident,
+                "positional_if_any, positional_present, and positional_absent must be declared together",
             ));
         }
         let mut unique_names = BTreeSet::new();
@@ -459,6 +552,48 @@ impl CommandConfig {
             summary,
             requires,
             example,
+            variant_summaries,
+            variant_requires,
+            variant_examples,
+            validation,
+            positional_if_any,
+            positional_present,
+            positional_absent,
+        })
+    }
+
+    fn positional_policy_tokens(
+        &self,
+        fields: &[FieldConfig<'_>],
+    ) -> syn::Result<proc_macro2::TokenStream> {
+        if self.positional_if_any.is_empty() {
+            return Ok(quote!(crate::command_catalog::PositionalPolicy::Declared));
+        }
+        let mut options = Vec::new();
+        for name in &self.positional_if_any {
+            let field = fields
+                .iter()
+                .find(|field| {
+                    field
+                        .names
+                        .iter()
+                        .any(|candidate| candidate.value() == name.value())
+                })
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(name, "positional_if_any names an unknown option")
+                })?;
+            options.push(field.id_tokens());
+        }
+        let present = self
+            .positional_present
+            .expect("validated conditional arity");
+        let absent = self.positional_absent.expect("validated conditional arity");
+        Ok(quote! {
+            crate::command_catalog::PositionalPolicy::ConditionalOnAnyOption {
+                options: &[#(#options),*],
+                present: crate::command_catalog::PositionalArity::exactly(#present),
+                absent: crate::command_catalog::PositionalArity::exactly(#absent),
+            }
         })
     }
 }
@@ -491,6 +626,7 @@ struct FieldConfig<'a> {
     before_options: bool,
     value_hint: Option<Expr>,
     label: Option<LitStr>,
+    help: Option<LitStr>,
     conflicts_with: Vec<Ident>,
     min: Option<usize>,
     max: Option<usize>,
@@ -529,6 +665,7 @@ impl<'a> FieldConfig<'a> {
             before_options: false,
             value_hint: None,
             label: None,
+            help: None,
             conflicts_with: Vec::new(),
             min: None,
             max: None,
@@ -585,6 +722,11 @@ impl<'a> FieldConfig<'a> {
                     ));
                 }
                 self.label = Some(label);
+            } else if meta.path.is_ident("help") {
+                if self.help.is_some() {
+                    return Err(meta.error("duplicate argument help"));
+                }
+                self.help = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("conflicts_with") {
                 let field: LitStr = meta.value()?.parse()?;
                 self.conflicts_with.push(format_ident!("{}", field.value()));
@@ -639,21 +781,90 @@ impl<'a> FieldConfig<'a> {
     fn option_hint_tokens(&self) -> Vec<proc_macro2::TokenStream> {
         let id = self.id_tokens();
         let hint = self.hint_tokens();
+        let help = self.help_text();
         self.names
             .iter()
             .map(|name| match self.shape {
                 Shape::Bool | Shape::Unit if self.value_hint.is_none() => {
-                    quote!(crate::command_catalog::typed_flag(#id, #name))
+                    quote!(crate::command_catalog::typed_flag(#id, #name, #help))
                 }
                 Shape::Repeated
                     if self.repetition == Repetition::Repeatable
                         || self.repetition == Repetition::PathPoints =>
                 {
-                    quote!(crate::command_catalog::typed_repeated_value(#id, #name, #hint))
+                    quote!(crate::command_catalog::typed_repeated_value(#id, #name, #hint, #help))
                 }
-                _ => quote!(crate::command_catalog::typed_value(#id, #name, #hint)),
+                _ => quote!(crate::command_catalog::typed_value(#id, #name, #hint, #help)),
             })
             .collect()
+    }
+
+    fn positional_hint_tokens(&self) -> proc_macro2::TokenStream {
+        let name = self.label.as_ref().map_or_else(
+            || LitStr::new(&self.ident.to_string(), self.ident.span()),
+            Clone::clone,
+        );
+        let value = self.hint_tokens();
+        let lexeme = if is_numeric_type(self.value_ty) {
+            quote!(crate::command_catalog::PositionalLexeme::Numeric)
+        } else {
+            quote!(crate::command_catalog::PositionalLexeme::Text)
+        };
+        let (min, max) = match self.shape {
+            Shape::Required => (1usize, quote!(1usize)),
+            Shape::Optional => (0usize, quote!(1usize)),
+            Shape::Repeated => {
+                let min = self.min.unwrap_or(0);
+                let max = self
+                    .max
+                    .map_or_else(|| quote!(usize::MAX), |max| quote!(#max));
+                (min, max)
+            }
+            Shape::Bool | Shape::Unit => unreachable!("validated positional shape"),
+        };
+        let before_options = self.before_options;
+        let help = self.help_text();
+        quote! {
+            crate::command_catalog::PositionalHint {
+                name: #name,
+                value: #value,
+                lexeme: #lexeme,
+                min: #min,
+                max: #max,
+                before_options: #before_options,
+                help: #help,
+            }
+        }
+    }
+
+    fn help_text(&self) -> LitStr {
+        self.help.clone().unwrap_or_else(|| {
+            let identifier = self.ident.to_string();
+            let words = identifier.trim_start_matches('_').replace('_', " ");
+            let text = match identifier.trim_start_matches('_') {
+                "rise" => "Apply the command to rising transitions.".to_string(),
+                "fall" => "Apply the command to falling transitions.".to_string(),
+                "min" => "Apply the command to minimum-delay analysis.".to_string(),
+                "max" => "Apply the command to maximum-delay analysis.".to_string(),
+                "early" => "Apply the command to the early analysis side.".to_string(),
+                "late" => "Apply the command to the late analysis side.".to_string(),
+                "setup" => "Apply the command to setup analysis.".to_string(),
+                "hold" => "Apply the command to hold analysis.".to_string(),
+                "from" => "Select the path startpoint objects.".to_string(),
+                "through" => "Select path-through objects in traversal order.".to_string(),
+                "to" => "Select the path endpoint objects.".to_string(),
+                "filter" => "Filter matching objects by a typed property expression.".to_string(),
+                "of_objects" => "Query objects related to this object collection.".to_string(),
+                _ if self.positional => format!("The command's {words} argument."),
+                _ if matches!(self.shape, Shape::Bool | Shape::Unit)
+                    && self.value_hint.is_none() =>
+                {
+                    format!("Enable the {words} mode described by this command.")
+                }
+                _ => format!("The value for the {words} option."),
+            };
+            LitStr::new(&text, self.ident.span())
+        })
     }
 
     fn is_required_option(&self) -> bool {
@@ -1016,6 +1227,15 @@ fn type_shape(ty: &Type) -> (Shape, &Type) {
     (Shape::Required, ty)
 }
 
+fn is_numeric_type(ty: &Type) -> bool {
+    [
+        "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64",
+        "u128", "usize",
+    ]
+    .iter()
+    .any(|name| is_type(ty, name))
+}
+
 fn wrapper_type<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
     let Type::Path(path) = ty else {
         return None;
@@ -1069,7 +1289,13 @@ mod tests {
                 variant = "sample_variant",
                 variant_kind = SampleKind::Variant,
                 handler = execute,
-                sdc
+                sdc,
+                summary = "Run a sample command.",
+                requires = "Sample inputs must be valid.",
+                example = "sample -period 1 object",
+                variant_summary = "Run the sample variant.",
+                variant_requires = "Variant inputs must be valid.",
+                variant_example = "sample_variant -period 1 object"
             )]
             struct SampleArgs<'a> {
                 #[arg(long = "-period")]
@@ -1086,7 +1312,13 @@ mod tests {
     #[test]
     fn rejects_an_alias_for_a_required_field() {
         let input: DeriveInput = syn::parse_quote! {
-            #[command(name = "sample", handler = execute)]
+            #[command(
+                name = "sample",
+                handler = execute,
+                summary = "Run a sample command.",
+                requires = "Sample inputs must be valid.",
+                example = "sample -period 1"
+            )]
             struct SampleArgs {
                 #[arg(long = "-period", alias = "-p")]
                 period: f64,
@@ -1098,7 +1330,13 @@ mod tests {
     #[test]
     fn accepts_a_leading_positional_before_options() {
         let input: DeriveInput = syn::parse_quote! {
-            #[command(name = "sample", handler = execute)]
+            #[command(
+                name = "sample",
+                handler = execute,
+                summary = "Run a sample command.",
+                requires = "Sample inputs must be valid.",
+                example = "sample 1 object"
+            )]
             struct SampleArgs {
                 #[arg(positional, before_options)]
                 value: f64,
@@ -1114,7 +1352,13 @@ mod tests {
     #[test]
     fn rejects_before_options_on_an_optional_positional() {
         let input: DeriveInput = syn::parse_quote! {
-            #[command(name = "sample", handler = execute)]
+            #[command(
+                name = "sample",
+                handler = execute,
+                summary = "Run a sample command.",
+                requires = "Sample inputs must be valid.",
+                example = "sample 1"
+            )]
             struct SampleArgs {
                 #[arg(positional, before_options)]
                 value: Option<f64>,
@@ -1128,7 +1372,13 @@ mod tests {
     #[test]
     fn rejects_positional_bounds_on_a_scalar() {
         let input: DeriveInput = syn::parse_quote! {
-            #[command(name = "sample", handler = execute)]
+            #[command(
+                name = "sample",
+                handler = execute,
+                summary = "Run a sample command.",
+                requires = "Sample inputs must be valid.",
+                example = "sample object"
+            )]
             struct SampleArgs {
                 #[arg(positional, min = 1)]
                 object: String,
@@ -1136,5 +1386,41 @@ mod tests {
         };
         let error = expand_tcl_command(&input).expect_err("scalar bounds must be rejected");
         assert!(error.to_string().contains("only valid for repeated"));
+    }
+
+    #[test]
+    fn rejects_public_commands_without_help_contracts() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[command(name = "sample", handler = execute)]
+            struct SampleArgs {}
+        };
+        assert!(
+            expand_tcl_command(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("explicit summary")
+        );
+    }
+
+    #[test]
+    fn rejects_complex_commands_without_explicit_examples() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[command(
+                name = "sample",
+                handler = execute,
+                summary = "Run a sample command.",
+                requires = "Sample inputs must be valid."
+            )]
+            struct SampleArgs {
+                #[arg(positional)]
+                object: String,
+            }
+        };
+        assert!(
+            expand_tcl_command(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("require an explicit example")
+        );
     }
 }

@@ -7,6 +7,7 @@ use super::*;
 #[command(
     name = "read_libs",
     handler = read_libs,
+    summary = "Read and atomically publish one or more Liberty libraries.",
     requires = "Every referenced library file must exist and be readable.",
     example = "read_libs cells.lib"
 )]
@@ -19,6 +20,7 @@ pub(crate) struct ReadLibsArgs<'a> {
 #[command(
     name = "read_hdl",
     handler = read_hdl,
+    summary = "Parse and record one or more SystemVerilog source files.",
     requires = "Every referenced HDL file must exist and be readable.",
     example = "read_hdl rtl/top.sv"
 )]

@@ -14,15 +14,31 @@ use super::*;
 pub(crate) struct SynthArgs {}
 
 #[derive(TclCommand)]
-#[command(name = "report_area", handler = report_area)]
+#[command(
+    name = "report_area",
+    handler = report_area,
+    summary = "Report mapped cell area for the current synthesized design.",
+    requires = "The current design must be synthesized with a loaded target library."
+)]
 pub(crate) struct ReportAreaArgs {}
 
 #[derive(TclCommand)]
-#[command(name = "report_qor", handler = report_qor)]
+#[command(
+    name = "report_qor",
+    handler = report_qor,
+    summary = "Report the current synthesis quality-of-results summary.",
+    requires = "A completed synthesis result is required."
+)]
 pub(crate) struct ReportQorArgs {}
 
 #[derive(TclCommand)]
-#[command(name = "report_resources", handler = report_resources)]
+#[command(
+    name = "report_resources",
+    handler = report_resources,
+    summary = "Report inferred implementation resources for selected designs.",
+    requires = "Selected designs must be elaborated; mapped details require synthesis.",
+    example = "report_resources -hierarchy [get_db current_design]"
+)]
 pub(crate) struct ReportResourcesArgs<'a> {
     #[arg(long = "-hierarchy")]
     hierarchy: bool,
