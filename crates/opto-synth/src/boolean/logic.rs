@@ -17,7 +17,7 @@ mod subject;
 mod proptests;
 
 pub(crate) use rewrite::{CoverageCheck, RewriteIncremental, RewriteRecipeCache, window_cares};
-pub(crate) use subject::{RegionLogicGraph, RegionLogicOptions, subject_leaves};
+pub(crate) use subject::{CanonicalRegionLogic, RegionLogicGraph, RegionLogicOptions};
 
 pub(crate) fn inverter_truth() -> TruthTable {
     TruthTable {

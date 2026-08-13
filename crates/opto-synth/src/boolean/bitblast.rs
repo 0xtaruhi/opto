@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod arithmetic;
+mod backend;
 mod compressor;
 mod division;
 mod dynamic;
@@ -23,6 +24,8 @@ use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
+
+use backend::{AxmBackend, BitBackend, ScalarBit, WordBackend};
 
 pub(crate) fn validate_synthesizable_constants(
     module: &word::WordModule,
@@ -94,32 +97,6 @@ impl LoweredRegionOwnership {
             ));
         }
         *slot = Some(owner);
-        Ok(())
-    }
-
-    fn set_batch(
-        &mut self,
-        values: &[word::ValueId],
-        owner: crate::RegionRowId,
-    ) -> Result<(), crate::SynthError> {
-        if let Some(last) = values.last() {
-            let required = last
-                .index()
-                .checked_add(1)
-                .ok_or_else(|| crate::SynthError::capacity("lowered ownership value batch"))?;
-            if self.owners.len() < required {
-                self.owners.resize(required, None);
-            }
-        }
-        for &value in values {
-            let slot = &mut self.owners[value.index()];
-            if slot.is_some_and(|current| current != owner) {
-                return Err(crate::SynthError::invariant(
-                    "lowered value batch crosses synthesis-region ownership",
-                ));
-            }
-            *slot = Some(owner);
-        }
         Ok(())
     }
 
@@ -205,7 +182,8 @@ impl LoweredRegionOwnership {
     fn capture_lowered_values(
         &mut self,
         cache: &[Option<BitSpan>],
-        arena: &[word::ValueId],
+        arena: &[ScalarBit],
+        backend: &impl BitBackend,
     ) -> Result<(), crate::SynthError> {
         self.lowered_values.resize(cache.len(), None);
         for (index, span) in cache.iter().copied().enumerate() {
@@ -217,7 +195,17 @@ impl LoweredRegionOwnership {
             let bits = arena.get(start..end).ok_or_else(|| {
                 crate::SynthError::invariant("lowered bit span is outside its local arena")
             })?;
-            self.lowered_values[index] = Some(bits.into());
+            self.lowered_values[index] = Some(
+                bits.iter()
+                    .map(|&bit| {
+                        backend.word_value(bit).ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "non-Word backend cannot publish scalar Word ownership",
+                            )
+                        })
+                    })
+                    .collect::<Result<Box<[_]>, _>>()?,
+            );
         }
         Ok(())
     }
@@ -247,7 +235,7 @@ pub(crate) fn bitblast_module_with_regions(
         ));
     }
     let frozen_semantics = freeze_regional_semantics(module, operation_regions, scope)?;
-    let mut blaster = BitBlaster::new(
+    let mut blaster = BitBlaster::<WordBackend>::new(
         module,
         BitBlasterRequest {
             plan,
@@ -257,11 +245,10 @@ pub(crate) fn bitblast_module_with_regions(
             boundary_inputs: &[],
             source_operations: None,
             source_values: None,
-            runtime: None,
             global_scope: scope,
             frozen_semantics,
         },
-    );
+    )?;
     for connect in connects {
         blaster.lower_connect(&connect)?;
     }
@@ -271,40 +258,45 @@ pub(crate) fn bitblast_module_with_regions(
     for &value in required_values {
         blaster.value(value)?;
     }
-    blaster
-        .lowered_owners
-        .capture_lowered_values(&blaster.cache, &blaster.arena)?;
+    blaster.lowered_owners.capture_lowered_values(
+        &blaster.cache,
+        &blaster.arena,
+        &blaster.backend,
+    )?;
     Ok(blaster.lowered_owners)
 }
 
-pub(crate) struct LocalRegionBitblastRequest<'a> {
+pub(crate) struct LocalRegionBooleanLowering {
+    pub(crate) ownership: LoweredRegionOwnership,
+    pub(crate) subject: crate::boolean::logic::CanonicalRegionLogic,
+}
+
+pub(crate) struct LocalRegionBooleanRequest<'a> {
     pub(crate) plan: &'a ArchitectureDecisions,
     pub(crate) operators: &'a crate::DurableOperatorArena,
     pub(crate) provenance: &'a mut ProvenanceBuilder,
     pub(crate) owner: crate::RegionRowId,
     pub(crate) boundary_inputs: &'a [word::ValueId],
     pub(crate) roots: &'a [word::ValueId],
-    pub(crate) runtime: &'a opto_runtime::ExecutionContext,
+    pub(crate) binding_values: &'a [word::ValueId],
 }
 
-pub(crate) fn bitblast_local_region_values(
+pub(crate) fn lower_local_region_boolean(
     module: &mut word::WordModule,
-    request: LocalRegionBitblastRequest<'_>,
-) -> Result<LoweredRegionOwnership, crate::SynthError> {
-    let LocalRegionBitblastRequest {
+    request: LocalRegionBooleanRequest<'_>,
+) -> Result<LocalRegionBooleanLowering, crate::SynthError> {
+    let LocalRegionBooleanRequest {
         plan,
         operators,
         provenance,
         owner,
         boundary_inputs,
         roots,
-        runtime,
+        binding_values,
     } = request;
     operators.validate_decisions(plan, module.operations().len())?;
-    let connects = module.take_connects();
-    let instance_connections = crate::word::instances::snapshot(module);
     let operation_regions = vec![Some(owner); module.operations().len()];
-    let mut blaster = BitBlaster::new(
+    let mut blaster = BitBlaster::<AxmBackend>::new(
         module,
         BitBlasterRequest {
             plan,
@@ -314,24 +306,117 @@ pub(crate) fn bitblast_local_region_values(
             boundary_inputs,
             source_operations: None,
             source_values: None,
-            runtime: Some(runtime),
             global_scope: GlobalBitblastScope::Complete,
             frozen_semantics: FrozenSubstrateSemantics::default(),
         },
-    );
-    for connect in connects {
-        blaster.lower_connect(&connect)?;
-    }
-    for (instance_index, port, value, source) in instance_connections {
-        blaster.lower_instance_connection(instance_index, port, value, source)?;
-    }
+    )?;
     for &root in roots {
         blaster.value(root)?;
     }
-    blaster
-        .lowered_owners
-        .capture_lowered_values(&blaster.cache, &blaster.arena)?;
-    Ok(blaster.lowered_owners)
+    for &value in binding_values {
+        blaster.value(value)?;
+    }
+    let mut bindings = roots
+        .iter()
+        .chain(binding_values)
+        .copied()
+        .collect::<Vec<_>>();
+    bindings.sort_unstable();
+    bindings.dedup();
+    let mut value_nodes = Vec::new();
+    for original in bindings {
+        let span = blaster
+            .cache
+            .get(original.index())
+            .copied()
+            .flatten()
+            .ok_or_else(|| crate::SynthError::invariant("regional AXM binding was not lowered"))?;
+        let mut lowered = Vec::with_capacity(span.len() as usize);
+        for bit_index in 0..span.len() {
+            let bit = blaster.bit(span, bit_index);
+            let ScalarBit::Logic(node) = bit else {
+                return Err(crate::SynthError::invariant(
+                    "regional AXM binding contains a scalar Word value",
+                ));
+            };
+            let handle = if node.index() == 0 {
+                blaster.binding_constant(original, node.is_inverted())?
+            } else {
+                match blaster.backend.binding_value(bit) {
+                    Some(value)
+                        if binding_represents_original_bit(
+                            blaster.module,
+                            original,
+                            bit_index,
+                            value,
+                        ) =>
+                    {
+                        value
+                    }
+                    Some(_) | None => blaster.binding_projection(original, bit_index)?,
+                }
+            };
+            blaster.lowered_owners.set(handle, owner)?;
+            lowered.push(handle);
+            value_nodes.push((handle, node));
+        }
+        if blaster.lowered_owners.lowered_values.len() <= original.index() {
+            blaster
+                .lowered_owners
+                .lowered_values
+                .resize(original.index() + 1, None);
+        }
+        blaster.lowered_owners.lowered_values[original.index()] = Some(lowered.into_boxed_slice());
+    }
+    value_nodes.sort_by_key(|&(value, _)| value);
+    value_nodes.dedup_by_key(|(value, _)| *value);
+    let (network, inputs) = std::mem::take(&mut blaster.backend).finish();
+    Ok(LocalRegionBooleanLowering {
+        ownership: blaster.lowered_owners,
+        subject: crate::boolean::logic::CanonicalRegionLogic {
+            network,
+            value_nodes: value_nodes.into_boxed_slice(),
+            inputs,
+        },
+    })
+}
+
+fn binding_represents_original_bit(
+    module: &word::WordModule,
+    original: word::ValueId,
+    bit: u32,
+    representative: word::ValueId,
+) -> bool {
+    let Some(original_value) = module.value(original) else {
+        return false;
+    };
+    if original_value.ty.width() == 1 {
+        return bit == 0 && representative == original;
+    }
+    let Some(representative_value) = module.value(representative) else {
+        return false;
+    };
+    match (&original_value.kind, &representative_value.kind) {
+        (word::ValueKind::Signal(original), word::ValueKind::Signal(representative)) => {
+            representative.width() == 1
+                && representative.signal == original.signal
+                && original.lsb.checked_add(bit) == Some(representative.lsb)
+        }
+        (_, word::ValueKind::Operation(operation)) => {
+            module.operation(*operation).is_some_and(|operation| {
+                matches!(
+                    operation.kind,
+                    word::OpKind::Extract {
+                        value,
+                        lsb,
+                        width,
+                    } if value == original && lsb == bit && width.get() == 1
+                )
+            })
+        }
+        (word::ValueKind::Constant(_) | word::ValueKind::Operation(_), _)
+        | (word::ValueKind::Signal(_), word::ValueKind::Constant(_)) => false,
+    }
 }
 
 type FrozenBitConstants = BTreeMap<word::ValueId, Box<[Option<BitVal>]>>;
@@ -401,7 +486,7 @@ struct BitSpan {
     len: NonZeroU32,
 }
 
-type BitColumn = SmallVec<[word::ValueId; 4]>;
+type BitColumn = SmallVec<[ScalarBit; 4]>;
 type BitColumns = Vec<BitColumn>;
 
 impl BitSpan {
@@ -410,7 +495,7 @@ impl BitSpan {
     }
 }
 
-pub(crate) struct BitBlaster<'a> {
+pub(super) struct BitBlaster<'a, B: BitBackend = WordBackend> {
     module: &'a mut word::WordModule,
     plan: &'a ArchitectureDecisions,
     operator_lookup: OperatorLookup<'a>,
@@ -419,15 +504,17 @@ pub(crate) struct BitBlaster<'a> {
     active_region: Option<crate::RegionRowId>,
     operation_regions: &'a [Option<crate::RegionRowId>],
     boundary_inputs: BTreeSet<word::ValueId>,
+    signal_drivers: crate::word::signal_driver::SignalDriverIndex,
+    active_values: BTreeSet<word::ValueId>,
     lowered_owners: LoweredRegionOwnership,
-    arena: Vec<word::ValueId>,
+    arena: Vec<ScalarBit>,
     cache: Vec<Option<BitSpan>>,
-    constants: [Option<word::ValueId>; 8],
+    constants: [Option<ScalarBit>; 8],
     source_operations: Option<&'a [Option<word::OpId>]>,
     source_values: Option<&'a BTreeMap<word::ValueId, word::ValueId>>,
-    runtime: Option<&'a opto_runtime::ExecutionContext>,
     global_scope: GlobalBitblastScope,
     frozen_semantics: FrozenSubstrateSemantics,
+    backend: B,
 }
 
 struct BitBlasterRequest<'a> {
@@ -438,7 +525,6 @@ struct BitBlasterRequest<'a> {
     boundary_inputs: &'a [word::ValueId],
     source_operations: Option<&'a [Option<word::OpId>]>,
     source_values: Option<&'a BTreeMap<word::ValueId, word::ValueId>>,
-    runtime: Option<&'a opto_runtime::ExecutionContext>,
     global_scope: GlobalBitblastScope,
     frozen_semantics: FrozenSubstrateSemantics,
 }
@@ -449,8 +535,11 @@ enum OperatorLookup<'a> {
     Durable(&'a crate::DurableOperatorArena),
 }
 
-impl<'a> BitBlaster<'a> {
-    fn new(module: &'a mut word::WordModule, request: BitBlasterRequest<'a>) -> Self {
+impl<'a, B: BitBackend> BitBlaster<'a, B> {
+    fn new(
+        module: &'a mut word::WordModule,
+        request: BitBlasterRequest<'a>,
+    ) -> Result<Self, crate::SynthError> {
         let BitBlasterRequest {
             plan,
             operator_lookup,
@@ -459,12 +548,12 @@ impl<'a> BitBlaster<'a> {
             boundary_inputs,
             source_operations,
             source_values,
-            runtime,
             global_scope,
             frozen_semantics,
         } = request;
         let value_count = module.values().len();
-        Self {
+        let signal_drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
+        Ok(Self {
             module,
             plan,
             operator_lookup,
@@ -473,16 +562,18 @@ impl<'a> BitBlaster<'a> {
             active_region: None,
             operation_regions,
             boundary_inputs: boundary_inputs.iter().copied().collect(),
+            signal_drivers,
+            active_values: BTreeSet::new(),
             lowered_owners: LoweredRegionOwnership::new(value_count),
             arena: Vec::new(),
             cache: Vec::new(),
             constants: [None; 8],
             source_operations,
             source_values,
-            runtime,
             global_scope,
             frozen_semantics,
-        }
+            backend: B::default(),
+        })
     }
 
     pub(super) fn source_operation(
@@ -570,12 +661,12 @@ pub(super) struct ImplementationRequest<'a> {
     pub(super) source: &'a word::SourceSpan,
 }
 
-fn lower_implementation(
+fn lower_implementation<B: BitBackend>(
     provider: ImplementationProviderId,
     recipe: ProviderRecipeId,
-    blaster: &mut BitBlaster<'_>,
+    blaster: &mut BitBlaster<'_, B>,
     request: ImplementationRequest<'_>,
-) -> Result<Vec<word::ValueId>, crate::SynthError> {
+) -> Result<Vec<ScalarBit>, crate::SynthError> {
     match provider.index() {
         0 => arithmetic::lower_implementation(recipe, blaster, request),
         1 => dynamic::lower_implementation(recipe, blaster, request),

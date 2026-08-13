@@ -136,6 +136,19 @@ impl SignalDriverIndex {
         Some(bits)
     }
 
+    /// Resolves one signal bit to its unique driver and source-bit offset.
+    pub(crate) fn resolve_bit(
+        &self,
+        signal: word::SignalId,
+        bit: u32,
+    ) -> Option<(word::ValueId, u32)> {
+        let row = self.resolved.get(signal.index())?;
+        match *row.get(bit as usize)? {
+            ResolvedDriver::Unique { value, bit } => Some((value, bit)),
+            ResolvedDriver::Missing | ResolvedDriver::Multiple | ResolvedDriver::Opaque => None,
+        }
+    }
+
     /// Resolves an exact scalar signal read to its scalar driving value.
     pub(crate) fn scalar_driver(
         &self,

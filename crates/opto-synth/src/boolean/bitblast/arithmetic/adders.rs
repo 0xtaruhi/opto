@@ -1,17 +1,17 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, BitVal, word};
+use super::{BitBackend, BitBlaster, BitVal, ScalarBit, word};
 
 #[derive(Clone)]
 struct PrefixNetwork {
-    propagate: Vec<word::ValueId>,
-    generate: Vec<word::ValueId>,
+    propagate: Vec<ScalarBit>,
+    generate: Vec<ScalarBit>,
 }
 
-type PrefixInputs = (Vec<word::ValueId>, PrefixNetwork);
+type PrefixInputs = (Vec<ScalarBit>, PrefixNetwork);
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(in crate::boolean::bitblast) fn constant_add_sub_bits(
         &mut self,
         left: word::ValueId,
@@ -20,7 +20,7 @@ impl BitBlaster<'_> {
         prefix: bool,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let left_bits = self.resized_value_bits(left, result_ty, source)?;
         let right_bits = self.resized_value_bits(right, result_ty, source)?;
         let left_constant = self.bool_vector(&left_bits);
@@ -59,7 +59,7 @@ impl BitBlaster<'_> {
         value: word::ValueId,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let span = self.value(value)?;
         let ty = self.value_type(value)?;
         (0..result_ty.width())
@@ -67,18 +67,18 @@ impl BitBlaster<'_> {
             .collect()
     }
 
-    fn bool_vector(&self, bits: &[word::ValueId]) -> Option<Vec<bool>> {
+    fn bool_vector(&self, bits: &[ScalarBit]) -> Option<Vec<bool>> {
         bits.iter().map(|&bit| self.scalar_constant(bit)).collect()
     }
 
     fn ripple_add_constant(
         &mut self,
-        variable: &[word::ValueId],
+        variable: &[ScalarBit],
         constant: &[bool],
         carry: bool,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let mut carry = self.constant(
             if carry { BitVal::One } else { BitVal::Zero },
             result_ty.state(),
@@ -100,12 +100,12 @@ impl BitBlaster<'_> {
 
     fn prefix_add_constant(
         &mut self,
-        variable: &[word::ValueId],
+        variable: &[ScalarBit],
         constant: &[bool],
         carry_in: bool,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let zero = self.constant(BitVal::Zero, result_ty.state(), source)?;
         let one = self.constant(BitVal::One, result_ty.state(), source)?;
         let prefix_len = variable.len().saturating_sub(1);
@@ -151,7 +151,7 @@ impl BitBlaster<'_> {
         subtract: bool,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let left_span = self.value(left)?;
         let right_span = self.value(right)?;
         let left_ty = self.value_type(left)?;
@@ -182,7 +182,7 @@ impl BitBlaster<'_> {
         subtract: bool,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let (propagate, mut prefix) =
             self.prefix_adder_inputs(left, right, subtract, result_ty, source)?;
         let mut next = prefix.clone();
@@ -208,7 +208,7 @@ impl BitBlaster<'_> {
         subtract: bool,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let (propagate, mut prefix) =
             self.prefix_adder_inputs(left, right, subtract, result_ty, source)?;
         self.brent_kung_prefix(&mut prefix, source)?;
@@ -263,7 +263,7 @@ impl BitBlaster<'_> {
         result_ty: word::WordType,
         requested_ripple_width: u32,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let width = result_ty.width();
         let ripple_width = requested_ripple_width.max(2).min(width - 2);
         let left_span = self.value(left)?;
@@ -348,8 +348,8 @@ impl BitBlaster<'_> {
 
     fn prefix_inputs_from_bits(
         &mut self,
-        left: &[word::ValueId],
-        right: &[word::ValueId],
+        left: &[ScalarBit],
+        right: &[ScalarBit],
         source: &word::SourceSpan,
     ) -> Result<PrefixInputs, crate::SynthError> {
         if left.len() != right.len() || left.len() < 2 {
@@ -404,11 +404,11 @@ impl BitBlaster<'_> {
 
     fn prefix_adder_sum(
         &mut self,
-        propagate: &[word::ValueId],
+        propagate: &[ScalarBit],
         prefix: &PrefixNetwork,
         subtract: bool,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let width = propagate.len();
 
         let mut sum = Vec::with_capacity(width);
@@ -435,11 +435,11 @@ impl BitBlaster<'_> {
 
     fn prefix_adder_sum_with_carry(
         &mut self,
-        propagate: &[word::ValueId],
+        propagate: &[ScalarBit],
         prefix: &PrefixNetwork,
-        carry_in: word::ValueId,
+        carry_in: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let first = *propagate.first().ok_or_else(|| {
             crate::SynthError::invariant("hybrid prefix sum has no propagate bits")
         })?;
@@ -465,11 +465,11 @@ impl BitBlaster<'_> {
 
     pub(in crate::boolean::bitblast) fn add_vectors(
         &mut self,
-        left: &[word::ValueId],
-        right: &[word::ValueId],
-        mut carry: word::ValueId,
+        left: &[ScalarBit],
+        right: &[ScalarBit],
+        mut carry: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         if left.len() != right.len() || left.is_empty() {
             return Err(crate::SynthError::invariant(
                 "adder inputs must have equal non-zero widths",
@@ -495,11 +495,11 @@ impl BitBlaster<'_> {
 
     pub(in crate::boolean::bitblast) fn brent_kung_add_vectors(
         &mut self,
-        left: &[word::ValueId],
-        right: &[word::ValueId],
-        carry: word::ValueId,
+        left: &[ScalarBit],
+        right: &[ScalarBit],
+        carry: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         if left.len() < 2 {
             return self.add_vectors(left, right, carry, source);
         }
@@ -510,11 +510,11 @@ impl BitBlaster<'_> {
 
     fn add_vectors_with_carry(
         &mut self,
-        left: &[word::ValueId],
-        right: &[word::ValueId],
-        mut carry: word::ValueId,
+        left: &[ScalarBit],
+        right: &[ScalarBit],
+        mut carry: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<(Vec<word::ValueId>, word::ValueId), crate::SynthError> {
+    ) -> Result<(Vec<ScalarBit>, ScalarBit), crate::SynthError> {
         if left.len() != right.len() || left.is_empty() {
             return Err(crate::SynthError::invariant(
                 "carry-producing adder inputs must have equal non-zero widths",

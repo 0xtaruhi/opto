@@ -29,6 +29,97 @@ mod dynamic;
 mod operations;
 
 #[test]
+fn axm_import_keeps_unknown_constants_symbolic() {
+    let mut module = word::WordModule::new("unknown_axm_constant");
+    let value = module
+        .constant(
+            ConstBits::from_bits(vec![BitVal::X]).unwrap(),
+            word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let mut backend = AxmBackend::default();
+
+    let bit = backend.import_word(&module, value);
+    let (network, inputs) = backend.finish();
+
+    assert!(matches!(bit, ScalarBit::Logic(node) if node.index() != 0));
+    assert_eq!(inputs.as_ref(), &[value]);
+    assert_eq!(network.node_count(), 2);
+}
+
+#[test]
+fn regional_boolean_lowering_builds_axm_without_scalar_boolean_word_ops() {
+    let mut module = word::WordModule::new("regional_axm");
+    let a = add_input(&mut module, "a", 8);
+    let b = add_input(&mut module, "b", 8);
+    let a = read_port(&mut module, a);
+    let b = read_port(&mut module, b);
+    let result = module
+        .binary(word::BinaryOp::BitXor, a, b, word::SourceSpan::default())
+        .unwrap();
+    let scalar = module
+        .extract(a, 0, 1, word::SourceSpan::default())
+        .unwrap();
+    let scalar_cast = module
+        .cast(
+            word::CastKind::SignExtend,
+            scalar,
+            word::WordType::new(1, true, word::LogicStateKind::TwoState).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let shifted = module
+        .binary(
+            word::BinaryOp::Ashr,
+            scalar_cast,
+            b,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    add_output(&mut module, "y", 8, result);
+    let plan = crate::planning::operator::ArchitectureDecisions::for_private_region(
+        &module,
+        implementation_providers().into(),
+    )
+    .unwrap();
+    let operators = crate::DurableOperatorArena::capture(&module, &plan, &[], |_| {
+        Err(crate::SynthError::invariant(
+            "unexpected arithmetic operator",
+        ))
+    })
+    .unwrap();
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::for_regional_candidate(&module);
+    let original_operations = module.operations().len();
+    let owner = crate::RegionRowId::from_index(0).unwrap();
+
+    let lowered = lower_local_region_boolean(
+        &mut module,
+        LocalRegionBooleanRequest {
+            plan: &plan,
+            operators: &operators,
+            provenance: &mut provenance,
+            owner,
+            boundary_inputs: &[a, b],
+            roots: &[shifted],
+            binding_values: &[a, b, result, scalar_cast, shifted],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(lowered.subject.inputs.len(), 16);
+    assert_eq!(lowered.ownership.lowered_bits(result).unwrap().len(), 8);
+    assert_eq!(lowered.ownership.lowered_bits(shifted).unwrap(), &[shifted]);
+    assert!(lowered.subject.network.node_count() > lowered.subject.inputs.len());
+    assert!(
+        module.operations()[original_operations..]
+            .iter()
+            .all(|operation| matches!(operation.kind, word::OpKind::Extract { .. }))
+    );
+}
+
+#[test]
 fn frozen_ownership_follows_static_signal_drivers() {
     let mut module = word::WordModule::new("owned_connectivity");
     let bit = word::WordType::bits(1).unwrap();

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::BitBlaster;
 use super::ImplementationRequest;
 use super::compressor::{BitMatrix, CompressionSchedule};
 use super::multiplier::ProductEncoding;
+use super::{BitBackend, BitBlaster, ScalarBit};
 use crate::OperatorKind;
 use crate::planning::architecture::ArithmeticTerm;
 use crate::planning::provider::{ImplementationProvider, ProviderRecipeId, StructuralEstimate};
@@ -365,12 +365,12 @@ impl ImplementationProvider for AddSubProvider {
 }
 
 impl AddSubProvider {
-    fn lower(
+    fn lower<B: BitBackend>(
         &self,
         recipe: ProviderRecipeId,
-        blaster: &mut BitBlaster<'_>,
+        blaster: &mut BitBlaster<'_, B>,
         request: ImplementationRequest<'_>,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let [left, right] = request.operator.inputs();
         let subtract = request.operator.kind() == OperatorKind::Subtract;
         if let Some(region) = region_recipe(recipe) {
@@ -612,14 +612,14 @@ fn arithmetic_region_structural_estimate(
     })
 }
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     fn arithmetic_region_bits(
         &mut self,
         operator: crate::SemanticOperator,
         recipe: RegionRecipe,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let plan = self.plan;
         let terms = plan.arithmetic_terms(operator.id());
         if terms.len() < 2
@@ -781,10 +781,10 @@ pub(super) fn implementation_provider() -> &'static dyn ImplementationProvider {
     &AddSubProvider
 }
 
-pub(super) fn lower_implementation(
+pub(super) fn lower_implementation<B: BitBackend>(
     recipe: ProviderRecipeId,
-    blaster: &mut BitBlaster<'_>,
+    blaster: &mut BitBlaster<'_, B>,
     request: ImplementationRequest<'_>,
-) -> Result<Vec<word::ValueId>, crate::SynthError> {
+) -> Result<Vec<ScalarBit>, crate::SynthError> {
     AddSubProvider.lower(recipe, blaster, request)
 }

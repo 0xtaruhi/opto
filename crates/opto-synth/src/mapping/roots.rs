@@ -113,11 +113,17 @@ impl<'a> FullDomainRootSemantics<'a> {
                     crate::SynthError::invariant("publication root operation is unknown")
                 })?;
                 match &operation.kind {
-                    word::OpKind::Register(_)
-                    | word::OpKind::Latch(_)
-                    | word::OpKind::Cast { .. }
-                    | word::OpKind::Extract { .. }
-                    | word::OpKind::Concat { .. } => false,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_) => false,
+                    word::OpKind::Cast { value, .. } | word::OpKind::Extract { value, .. } => {
+                        self.prove(*value, active)?
+                    }
+                    word::OpKind::Concat { parts } => {
+                        let mut required = false;
+                        for &part in parts {
+                            required |= self.prove(part, active)?;
+                        }
+                        required
+                    }
                     word::OpKind::Unary { .. }
                     | word::OpKind::Binary { .. }
                     | word::OpKind::Mux { .. }
@@ -532,7 +538,7 @@ mod tests {
 
         let full_domain = FullDomainRootSemantics::new(&module).unwrap();
         assert!(full_domain.requires_artifact(read).unwrap());
-        assert!(!full_domain.requires_artifact(packed).unwrap());
+        assert!(full_domain.requires_artifact(packed).unwrap());
     }
 
     #[test]

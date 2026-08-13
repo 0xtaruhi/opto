@@ -1,16 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, word};
+use super::{BitBackend, BitBlaster, ScalarBit, word};
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(in crate::boolean::bitblast) fn compare_bits(
         &mut self,
         op: word::BinaryOp,
         left: word::ValueId,
         right: word::ValueId,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let left_span = self.value(left)?;
         let right_span = self.value(right)?;
         let left_ty = self.value_type(left)?;
@@ -53,10 +53,10 @@ impl BitBlaster<'_> {
 
     pub(in crate::boolean::bitblast) fn unsigned_less(
         &mut self,
-        left: &[word::ValueId],
-        right: &[word::ValueId],
+        left: &[ScalarBit],
+        right: &[ScalarBit],
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         let mut bits = left.iter().zip(right);
         let Some((&left, &right)) = bits.next() else {
             return Err(crate::SynthError::invariant(

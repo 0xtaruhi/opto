@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, BitColumn, BitColumns};
+use super::{BitBackend, BitBlaster, BitColumn, BitColumns, ScalarBit};
 use opto_ir::word;
 
-pub(in crate::boolean::bitblast) type BitRow = Vec<Option<word::ValueId>>;
+pub(in crate::boolean::bitblast) type BitRow = Vec<Option<ScalarBit>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::boolean::bitblast) enum CompressionSchedule {
@@ -59,7 +59,7 @@ impl BitMatrix {
         }
     }
 
-    fn take_rows_with_correction(&mut self, one: word::ValueId) -> Vec<BitRow> {
+    fn take_rows_with_correction(&mut self, one: ScalarBit) -> Vec<BitRow> {
         if self.correction.iter().any(|bit| *bit) {
             self.rows.push(
                 self.correction
@@ -72,7 +72,7 @@ impl BitMatrix {
     }
 }
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(in crate::boolean::bitblast) fn append_matrix(
         &mut self,
         target: &mut BitMatrix,
@@ -130,10 +130,10 @@ impl BitBlaster<'_> {
         &mut self,
         mut matrix: BitMatrix,
         schedule: CompressionSchedule,
-        zero: word::ValueId,
-        one: word::ValueId,
+        zero: ScalarBit,
+        one: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<(Vec<word::ValueId>, Vec<word::ValueId>), crate::SynthError> {
+    ) -> Result<(Vec<ScalarBit>, Vec<ScalarBit>), crate::SynthError> {
         let rows = matrix.take_rows_with_correction(one);
         let rows = match schedule {
             CompressionSchedule::Serial => self.reduce_rows_serial(rows, matrix.width, source)?,
@@ -200,9 +200,9 @@ impl BitBlaster<'_> {
 
     fn compress_row_triplet(
         &mut self,
-        left: &[Option<word::ValueId>],
-        right: &[Option<word::ValueId>],
-        third: &[Option<word::ValueId>],
+        left: &[Option<ScalarBit>],
+        right: &[Option<ScalarBit>],
+        third: &[Option<ScalarBit>],
         width: usize,
         source: &word::SourceSpan,
     ) -> Result<Vec<BitRow>, crate::SynthError> {
@@ -325,11 +325,11 @@ impl BitBlaster<'_> {
 
     pub(in crate::boolean::bitblast) fn full_adder(
         &mut self,
-        left: word::ValueId,
-        right: word::ValueId,
-        carry_in: word::ValueId,
+        left: ScalarBit,
+        right: ScalarBit,
+        carry_in: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<(word::ValueId, word::ValueId), crate::SynthError> {
+    ) -> Result<(ScalarBit, ScalarBit), crate::SynthError> {
         let propagate = self.emit_binary(word::BinaryOp::BitXor, left, right, source)?;
         let sum = self.emit_binary(word::BinaryOp::BitXor, propagate, carry_in, source)?;
         let generate = self.emit_binary(word::BinaryOp::BitAnd, left, right, source)?;
@@ -340,10 +340,10 @@ impl BitBlaster<'_> {
 
     fn half_adder(
         &mut self,
-        left: word::ValueId,
-        right: word::ValueId,
+        left: ScalarBit,
+        right: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<(word::ValueId, word::ValueId), crate::SynthError> {
+    ) -> Result<(ScalarBit, ScalarBit), crate::SynthError> {
         Ok((
             self.emit_binary(word::BinaryOp::BitXor, left, right, source)?,
             self.emit_binary(word::BinaryOp::BitAnd, left, right, source)?,
@@ -382,8 +382,8 @@ fn columns_to_rows(columns: BitColumns) -> Result<Vec<BitRow>, crate::SynthError
 fn rows_to_vectors(
     mut rows: Vec<BitRow>,
     width: usize,
-    zero: word::ValueId,
-) -> Result<(Vec<word::ValueId>, Vec<word::ValueId>), crate::SynthError> {
+    zero: ScalarBit,
+) -> Result<(Vec<ScalarBit>, Vec<ScalarBit>), crate::SynthError> {
     if rows.len() > 2 {
         return Err(crate::SynthError::invariant(
             "arithmetic compression left more than two rows",
