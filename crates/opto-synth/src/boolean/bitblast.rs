@@ -334,31 +334,39 @@ pub(crate) fn lower_local_region_boolean(
         let mut lowered = Vec::with_capacity(span.len() as usize);
         for bit_index in 0..span.len() {
             let bit = blaster.bit(span, bit_index);
-            let ScalarBit::Logic(node) = bit else {
-                return Err(crate::SynthError::invariant(
-                    "regional AXM binding contains a scalar Word value",
-                ));
-            };
-            let handle = if node.index() == 0 {
-                blaster.binding_constant(original, node.is_inverted())?
-            } else {
-                match blaster.backend.binding_value(bit) {
-                    Some(value)
-                        if binding_represents_original_bit(
-                            blaster.module,
-                            original,
-                            bit_index,
-                            value,
-                        ) =>
-                    {
-                        value
-                    }
-                    Some(_) | None => blaster.binding_projection(original, bit_index)?,
+            let (handle, node) = match bit {
+                ScalarBit::Logic(node) => {
+                    let handle = if node.index() == 0 {
+                        blaster.binding_constant(original, node.is_inverted())?
+                    } else {
+                        match blaster.backend.binding_value(bit) {
+                            Some(value)
+                                if binding_represents_original_bit(
+                                    blaster.module,
+                                    original,
+                                    bit_index,
+                                    value,
+                                ) =>
+                            {
+                                value
+                            }
+                            Some(_) | None => blaster.binding_projection(original, bit_index)?,
+                        }
+                    };
+                    (handle, Some(node))
+                }
+                ScalarBit::DontCare(value) => (value, None),
+                ScalarBit::Word(_) => {
+                    return Err(crate::SynthError::invariant(
+                        "regional AXM binding contains a scalar Word value",
+                    ));
                 }
             };
             blaster.lowered_owners.set(handle, owner)?;
             lowered.push(handle);
-            value_nodes.push((handle, node));
+            if let Some(node) = node {
+                value_nodes.push((handle, node));
+            }
         }
         if blaster.lowered_owners.lowered_values.len() <= original.index() {
             blaster

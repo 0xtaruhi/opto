@@ -12,6 +12,9 @@ No PDK or foundry standard-cell library is committed here.
 `fetch_sky130.sh` downloads one Liberty view from an immutable
 OpenROAD-flow-scripts revision and rejects any content whose SHA-256 is not
 `ec0e1067a35c8bf20b11e58d1e8ac53326067e4dac84a125cc1b917a3518d0d9`.
+Checksum failures are retried as bounded transport faults; the file is
+published only after the pinned digest matches, so a retry cannot change the
+benchmark library or its baseline.
 
 Provenance:
 

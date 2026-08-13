@@ -15,6 +15,7 @@ mod normalizer;
 mod predicate;
 mod resolved_net;
 mod rewrite;
+mod sealing;
 mod state;
 mod validation;
 
@@ -28,6 +29,7 @@ use opto_ir::{BitVal, ConstBits, proc, rtl::RtlModule, word};
 use predicate::{MaterializedPredicate, Predicate, PredicateArena};
 use resolved_net::lower_resolved_nets;
 use rewrite::{RewriteScratch, rewrite_value};
+use sealing::seal_observable_dont_cares;
 use state::{Assignment, Coverage, FrameId, ResetList, Slot, StateArena, TargetKey};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::num::NonZeroU32;

@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 394
+expected_tests = 396
 
 [[owners]]
 path = "src/api"
@@ -20,7 +20,7 @@ contract = "Stage ordering, immutable states, publication, determinism, and repo
 [[owners]]
 path = "src/frontend"
 owner = "frontend"
-tests = 27
+tests = 28
 contract = "Procedural normalization and the single validated Word-IR entry boundary."
 
 [[owners]]
@@ -56,7 +56,7 @@ contract = "Fingerprints, recipe caches, source metrics, snapshots, and portable
 [[owners]]
 path = "src/mapping"
 owner = "mapping"
-tests = 88
+tests = 89
 contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and materialization."
 
 [[owners]]

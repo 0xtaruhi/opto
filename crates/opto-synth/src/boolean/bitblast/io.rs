@@ -56,8 +56,13 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                 let bit = bits.bit_lsb(bit).ok_or_else(|| {
                     crate::SynthError::invariant("AXM constant binding bit is absent")
                 })?;
-                let bit =
-                    crate::boolean::resolve_synthesis_bit(bit, self.module.name(), &stored.source)?;
+                if bit == BitVal::Z {
+                    return Err(crate::SynthError::invalid(format!(
+                        "tri-state constant in design '{}' at {:?} is not supported",
+                        self.module.name(),
+                        stored.source
+                    )));
+                }
                 let ty = word::WordType::new(1, false, stored.ty.state())
                     .map_err(crate::SynthError::from)?;
                 self.module
@@ -515,20 +520,17 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                         "constant has no bit {index} during bitblast"
                     ))
                 })?;
-                let resolved =
-                    crate::boolean::resolve_synthesis_bit(bit, self.module.name(), source)?;
-                match (bit, resolved) {
-                    (BitVal::Zero | BitVal::One, _) if ty.width() == 1 => {
+                match bit {
+                    BitVal::Zero | BitVal::One | BitVal::X if ty.width() == 1 => {
                         Ok(self.backend.import_word(self.module, original))
                     }
-                    (BitVal::X, BitVal::Zero) if ty.width() == 1 => {
-                        let original = self.backend.import_word(self.module, original);
-                        self.zero_for_scalar(original, source)
+                    BitVal::Zero | BitVal::One | BitVal::X => {
+                        self.constant(bit, ty.state(), source)
                     }
-                    (_, BitVal::Zero | BitVal::One) => self.constant(resolved, ty.state(), source),
-                    (_, BitVal::X | BitVal::Z) => {
-                        unreachable!("the synthesis constant policy returns only two-state values")
-                    }
+                    BitVal::Z => Err(crate::SynthError::invalid(format!(
+                        "tri-state constant in design '{}' at {source:?} is not supported",
+                        self.module.name()
+                    ))),
                 }
             })
             .collect()

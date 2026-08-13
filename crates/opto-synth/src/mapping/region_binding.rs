@@ -337,7 +337,6 @@ pub(crate) struct CandidateBindingInputs<'a> {
     pub(crate) local_module: &'a word::WordModule,
     pub(crate) source_to_local: &'a std::collections::BTreeMap<word::ValueId, word::ValueId>,
     pub(crate) boundary_bindings: &'a [(word::ValueId, word::ValueId)],
-    pub(crate) observations: &'a [word::ValueId],
     pub(crate) memory_values: &'a [RegionalMemoryValueBinding],
     pub(crate) operation_sources: &'a [Option<word::OpId>],
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
@@ -414,7 +413,6 @@ pub(crate) fn build_candidate_binding<'a>(
         local_module,
         source_to_local,
         boundary_bindings,
-        observations,
         memory_values,
         operation_sources,
         root_bindings,
@@ -422,26 +420,13 @@ pub(crate) fn build_candidate_binding<'a>(
     } = inputs;
     let output_values = output_values.into_iter().collect::<Vec<_>>();
     let mut local_to_sources = BindingMap::new();
-    // Input identities describe every immutable value imported into the private
-    // cone. Output identities are deliberately narrower: only explicit owned
-    // roots and owned sequential endpoints may be published by this region.
-    // Keeping the maps separate prevents a local canonicalization from turning
-    // an imported boundary input into an additional global output alias.
+    // Input identities come only from the region graph's frozen boundary
+    // contract. The complete source-to-local provenance map also contains
+    // owned operations, observations, and publication roots, none of which are
+    // immutable inputs. Output identities are similarly limited to explicit
+    // owned roots and sequential endpoints.
     let mut local_to_outputs = BindingMap::new();
-    let root_sources = root_bindings
-        .iter()
-        .map(|&(source, _)| source)
-        .collect::<std::collections::BTreeSet<_>>();
-    let observations = observations
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    for (source, local) in source_to_local
-        .iter()
-        .filter(|(source, _)| !root_sources.contains(source) && !observations.contains(source))
-        .map(|(&source, &local)| (source, local))
-        .chain(boundary_bindings.iter().copied())
-    {
+    for &(source, local) in boundary_bindings {
         let bits = match ownership.lowered_bits(local) {
             Some(bits) => bits,
             None if local_module

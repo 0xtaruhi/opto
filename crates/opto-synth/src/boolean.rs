@@ -10,12 +10,12 @@
 pub(crate) mod bitblast;
 pub(crate) mod logic;
 
-/// Resolves one four-state HDL constant at the synthesis-to-Boolean boundary.
+/// Resolves one four-state HDL constant at final physical publication.
 ///
 /// `X` is a synthesis don't-care and is filled deterministically with zero.
 /// `Z` requires a real tri-state implementation and therefore remains an
 /// explicit unsupported construct instead of being silently weakened.
-pub(crate) fn resolve_synthesis_bit(
+pub(crate) fn resolve_publication_bit(
     bit: opto_ir::BitVal,
     design: &str,
     source: &opto_ir::word::SourceSpan,

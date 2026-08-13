@@ -164,6 +164,55 @@ fn elaborates_empty_synthesizable_definitions_instead_of_guessing_black_boxes() 
 }
 
 #[test]
+fn unconnected_inlined_input_becomes_a_care_free_ssa_value() {
+    let mut child = WordModule::new("child");
+    let a = child
+        .add_port("a", PortDirection::Input, bits(1), SourceSpan::default())
+        .unwrap();
+    let y = child
+        .add_port("y", PortDirection::Output, bits(1), SourceSpan::default())
+        .unwrap();
+    let a = child
+        .read_signal(child.port(a).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    child
+        .connect(
+            LValue::signal(child.port(y).unwrap().signal),
+            a,
+            SourceSpan::default(),
+        )
+        .unwrap();
+
+    let mut top = WordModule::new("top");
+    let y = top
+        .add_port("y", PortDirection::Output, bits(1), SourceSpan::default())
+        .unwrap();
+    let y = top
+        .read_signal(top.port(y).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    top.add_instance(
+        "u_child",
+        "child",
+        vec![("y".to_string(), y, SourceSpan::default())],
+        SourceSpan::default(),
+    )
+    .unwrap();
+
+    let flat = elaborate_linked_root(&top, [&top, &child]).unwrap();
+    let input = flat.signal_id("u_child/a").unwrap();
+    let driver = flat
+        .connects()
+        .iter()
+        .find(|connect| connect.target.signal == input)
+        .unwrap();
+
+    assert!(matches!(
+        &flat.value(driver.value).unwrap().kind,
+        ValueKind::Constant(value) if value.bit_lsb(0) == Some(BitVal::X)
+    ));
+}
+
+#[test]
 fn preserves_hierarchy_selected_by_typed_directives() {
     let mut child = leaf();
     child

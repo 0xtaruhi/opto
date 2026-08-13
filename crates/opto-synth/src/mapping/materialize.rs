@@ -800,7 +800,7 @@ fn scalar_signal(
             .map(ScalarSignal::Bit)
             .ok_or_else(|| crate::SynthError::invariant("mapped value bit offset overflow")),
         word::ValueKind::Constant(constant) => match constant.bit_lsb(0) {
-            Some(bit) => crate::boolean::resolve_synthesis_bit(bit, module.name(), &value.source)
+            Some(bit) => crate::boolean::resolve_publication_bit(bit, module.name(), &value.source)
                 .map(|resolved| ScalarSignal::Constant(resolved == BitVal::One)),
             None => Err(crate::SynthError::invariant(format!(
                 "mapped netlist for '{}' cannot read constant value {value_id:?} at {:?}",

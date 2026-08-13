@@ -102,6 +102,6 @@ fn scalar_constant(
             "substrate constant {value:?} is not scalar"
         )));
     };
-    crate::boolean::resolve_synthesis_bit(*bit, module.name(), &stored.source)
+    crate::boolean::resolve_publication_bit(*bit, module.name(), &stored.source)
         .map(|resolved| resolved == opto_ir::BitVal::One)
 }
