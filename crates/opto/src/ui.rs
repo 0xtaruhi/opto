@@ -16,7 +16,7 @@ use reedline::{
     default_emacs_keybindings,
 };
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal};
@@ -851,33 +851,73 @@ fn clean_token(token: &str) -> String {
         .to_string()
 }
 
+#[derive(Debug)]
+struct PathCompletionQuery<'a> {
+    explicit_directory: Option<&'a Path>,
+    name_prefix: &'a str,
+}
+
+impl<'a> PathCompletionQuery<'a> {
+    fn parse(prefix: &'a str) -> Self {
+        let path = Path::new(prefix);
+        if prefix
+            .chars()
+            .next_back()
+            .is_some_and(std::path::is_separator)
+        {
+            return Self {
+                explicit_directory: Some(path),
+                name_prefix: "",
+            };
+        }
+
+        let name_prefix = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        match path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            Some(parent) => Self {
+                explicit_directory: Some(parent),
+                name_prefix,
+            },
+            None => Self {
+                explicit_directory: None,
+                name_prefix,
+            },
+        }
+    }
+
+    fn directory(&self) -> &Path {
+        self.explicit_directory.unwrap_or_else(|| Path::new("."))
+    }
+
+    fn candidate(&self, name: &str) -> PathBuf {
+        self.explicit_directory
+            .map_or_else(|| PathBuf::from(name), |directory| directory.join(name))
+    }
+}
+
 fn path_suggestions(context: &CursorContext, hint: ValueHint, palette: Palette) -> Vec<Suggestion> {
-    let raw = Path::new(&context.prefix);
-    let directory = raw
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let file_prefix = raw.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    let Ok(read_dir) = std::fs::read_dir(directory) else {
+    let query = PathCompletionQuery::parse(&context.prefix);
+    let Ok(read_dir) = std::fs::read_dir(query.directory()) else {
         return Vec::new();
     };
-    let mut values = Vec::new();
+    let mut values = BinaryHeap::new();
     for entry in read_dir.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !name.starts_with(file_prefix) {
+        if !name.starts_with(query.name_prefix) {
             continue;
         }
         let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
         if hint == ValueHint::Directory && !is_dir {
             continue;
         }
-        let value = if directory == Path::new(".") {
-            name
-        } else {
-            directory.join(name).to_string_lossy().into_owned()
-        };
+        let value = query.candidate(&name).to_string_lossy().into_owned();
         let value = if is_dir {
             format!("{value}{}", std::path::MAIN_SEPARATOR)
         } else if context.grouped || !value.contains(char::is_whitespace) {
@@ -886,8 +926,11 @@ fn path_suggestions(context: &CursorContext, hint: ValueHint, palette: Palette) 
             format!("{{{value}}}")
         };
         values.push(value);
+        if values.len() > COMPLETION_LIMIT {
+            values.pop();
+        }
     }
-    values.sort();
+    let values = values.into_sorted_vec();
     suggestions(
         values,
         context.span,
@@ -931,6 +974,38 @@ mod tests {
         let matches = data.matches(CandidateKind::Port, "p");
         assert_eq!(matches.len(), COMPLETION_LIMIT);
         assert_eq!(matches.first().map(String::as_str), Some("p000"));
+    }
+
+    #[test]
+    fn path_completion_descends_into_a_prefix_ending_in_a_separator() {
+        let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+        let prefix = format!("{}{}", docs.display(), std::path::MAIN_SEPARATOR);
+        let context = CursorContext {
+            command: "read_hdl".to_string(),
+            at_command: false,
+            previous: Some("read_hdl".to_string()),
+            prefix: prefix.clone(),
+            span: Span::new(0, prefix.len()),
+            grouped: true,
+        };
+
+        let values = path_suggestions(&context, ValueHint::File, Theme::Dark.palette())
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+
+        assert!(values.contains(&format!("{prefix}architecture.md")));
+        assert!(!values.contains(&prefix));
+    }
+
+    #[test]
+    fn path_completion_query_retains_an_explicit_current_directory() {
+        let prefix = format!(".{}", std::path::MAIN_SEPARATOR);
+        let query = PathCompletionQuery::parse(&prefix);
+
+        assert_eq!(query.explicit_directory, Some(Path::new(".")));
+        assert_eq!(query.name_prefix, "");
+        assert_eq!(query.candidate("top.sv"), Path::new(".").join("top.sv"));
     }
 
     #[test]
