@@ -75,6 +75,32 @@ fn mapped_vector_addition_drives_every_output_bit() {
     let report = synthesize_test_module(&mut module, options).unwrap();
 
     assert!(report.report.cells > 0);
+    let (index, _) = report
+        .mapped
+        .ports()
+        .iter()
+        .enumerate()
+        .find(|(_, port)| report.mapped.names().resolve(port.name) == Some("y"))
+        .expect("mapped output port exists");
+    let output = report
+        .mapped
+        .port_nets(opto_ir::mapped::PortId::from_index(index).unwrap())
+        .expect("mapped output port has scalar nets");
+    assert_eq!(output.len(), 4);
+    for &net in &output[2..] {
+        assert!(
+            report
+                .mapped
+                .pins_on_net(net)
+                .expect("mapped output net is live")
+                .filter_map(|pin| report.mapped.connection(pin))
+                .any(|connection| report.mapped.pin_name(connection) == Some("Y")),
+            "nonconstant sum bit {net:?} has no mapped driver"
+        );
+    }
+    for &net in &output[..2] {
+        assert!(report.mapped.constant_drivers().contains(&(net, false)));
+    }
 }
 
 fn target_options(cells: Vec<TargetCell>) -> SynthesisOptions {

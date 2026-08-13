@@ -368,7 +368,7 @@ pub(crate) fn lower_local_region_boolean(
         }
         blaster.lowered_owners.lowered_values[original.index()] = Some(lowered.into_boxed_slice());
     }
-    value_nodes.sort_unstable_by_key(|&(value, _)| value);
+    value_nodes.sort_by_key(|&(value, _)| value);
     value_nodes.dedup_by_key(|(value, _)| *value);
     let (network, inputs) = std::mem::take(&mut blaster.backend).finish();
     Ok(LocalRegionBooleanLowering {

@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 392
+expected_tests = 393
 
 [[owners]]
 path = "src/api"
@@ -38,7 +38,7 @@ contract = "Region-owned Word optimization, recognition, resource choice, and ar
 [[owners]]
 path = "src/boolean"
 owner = "boolean"
-tests = 92
+tests = 93
 contract = "Bit lowering, canonical Boolean subject construction, rewriting, and graph analysis."
 
 [[owners]]

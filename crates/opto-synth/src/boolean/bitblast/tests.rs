@@ -29,6 +29,26 @@ mod dynamic;
 mod operations;
 
 #[test]
+fn axm_import_keeps_unknown_constants_symbolic() {
+    let mut module = word::WordModule::new("unknown_axm_constant");
+    let value = module
+        .constant(
+            ConstBits::from_bits(vec![BitVal::X]).unwrap(),
+            word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let mut backend = AxmBackend::default();
+
+    let bit = backend.import_word(&module, value);
+    let (network, inputs) = backend.finish();
+
+    assert!(matches!(bit, ScalarBit::Logic(node) if node.index() != 0));
+    assert_eq!(inputs.as_ref(), &[value]);
+    assert_eq!(network.node_count(), 2);
+}
+
+#[test]
 fn regional_boolean_lowering_builds_axm_without_scalar_boolean_word_ops() {
     let mut module = word::WordModule::new("regional_axm");
     let a = add_input(&mut module, "a", 8);

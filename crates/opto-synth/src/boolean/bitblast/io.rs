@@ -151,7 +151,10 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             .collect::<Vec<_>>();
         let lowered = if bits.len() == 1 {
             self.backend.word_value(bits[0]).ok_or_else(|| {
-                crate::SynthError::invariant("AXM instance binding cannot be a Word value")
+                crate::SynthError::invariant(format!(
+                    "instance {instance_index} port '{}' requires a Word value; an AXM literal cannot cross this boundary",
+                    self.module.name_str(port)
+                ))
             })?
         } else {
             bits.reverse();
@@ -159,7 +162,10 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                 .into_iter()
                 .map(|bit| {
                     self.backend.word_value(bit).ok_or_else(|| {
-                        crate::SynthError::invariant("AXM instance binding cannot be a Word value")
+                        crate::SynthError::invariant(format!(
+                            "instance {instance_index} port '{}' requires Word values; AXM literals cannot cross this boundary",
+                            self.module.name_str(port)
+                        ))
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;

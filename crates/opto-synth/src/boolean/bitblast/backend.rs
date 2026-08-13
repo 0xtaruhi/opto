@@ -258,12 +258,13 @@ impl AxmBackend {
 
 impl BitBackend for AxmBackend {
     fn import_word(&mut self, module: &word::WordModule, value: word::ValueId) -> ScalarBit {
-        let stored = module
-            .value(value)
-            .expect("bit lowering imports only validated Word values");
+        let Some(stored) = module.value(value) else {
+            return self.input(value, None);
+        };
         if let word::ValueKind::Constant(bits) = &stored.kind
             && stored.ty.width() == 1
             && let Some(bit) = bits.bit_lsb(0)
+            && matches!(bit, opto_ir::BitVal::Zero | opto_ir::BitVal::One)
         {
             return ScalarBit::Logic(crate::boolean::logic::network::LogicGraph::constant(
                 matches!(bit, opto_ir::BitVal::One),
