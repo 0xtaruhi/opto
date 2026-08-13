@@ -41,6 +41,7 @@ fn write_hdl_emits_requested_hierarchy() {
             DbUpdate {
                 modules: vec![rtl(top), rtl(child)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )

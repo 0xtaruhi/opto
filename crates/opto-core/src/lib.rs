@@ -20,7 +20,9 @@ mod paged;
 pub mod resident;
 mod rows;
 
-pub use diagnostic::{Diagnostic, DiagnosticLabel, DiagnosticLocation, DiagnosticSource};
+pub use diagnostic::{
+    Diagnostic, DiagnosticLabel, DiagnosticLocation, DiagnosticSeverity, DiagnosticSource,
+};
 pub use names::{NameCheckpoint, NameError, NameId, NameTable};
 pub use paged::PagedCowVec;
 pub use rows::{PackedRows, PackedRowsBuilder, PackedRowsError, RowArena, RowArenaBuilder};

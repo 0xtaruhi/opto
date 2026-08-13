@@ -31,6 +31,7 @@
 #include "slang/ast/statements/MiscStatements.h"
 #include "slang/ast/types/Type.h"
 #include "slang/diagnostics/DiagnosticEngine.h"
+#include "slang/diagnostics/DiagnosticClient.h"
 #include "slang/driver/CompatSettings.h"
 #include "slang/driver/Driver.h"
 #include "slang/numeric/SVInt.h"
@@ -90,6 +91,93 @@ std::string copy_string(std::string_view text) {
         return {};
     }
     return std::string(text.data(), text.size());
+}
+
+class OptoDiagnosticClient final : public DiagnosticClient {
+public:
+    explicit OptoDiagnosticClient(std::vector<OptoSlangDiagnostic>& diagnostics) :
+        diagnostics(diagnostics) {}
+
+    void report(const ReportedDiagnostic& reported) override {
+        OptoSlangDiagnostic diagnostic;
+        switch (reported.severity) {
+            case DiagnosticSeverity::Note:
+                diagnostic.severity = OPTO_SLANG_DIAGNOSTIC_NOTE;
+                break;
+            case DiagnosticSeverity::Warning:
+                diagnostic.severity = OPTO_SLANG_DIAGNOSTIC_WARNING;
+                break;
+            case DiagnosticSeverity::Error:
+            case DiagnosticSeverity::Fatal:
+                diagnostic.severity = OPTO_SLANG_DIAGNOSTIC_ERROR;
+                break;
+            case DiagnosticSeverity::Ignored:
+                return;
+        }
+        const auto code = reported.originalDiagnostic.code;
+        diagnostic.subsystem = static_cast<uint16_t>(code.getSubsystem());
+        diagnostic.code = code.getCode();
+        diagnostic.message = copy_string(reported.formattedMessage);
+        diagnostic.option_name = copy_string(engine->getOptionName(code));
+        if (reported.location) {
+            const auto location = reported.location;
+            diagnostic.file = sourceManager->getFullPath(location.buffer()).string();
+            diagnostic.line = static_cast<uint32_t>(std::min<size_t>(
+                sourceManager->getLineNumber(location), UINT32_MAX));
+            diagnostic.column = static_cast<uint32_t>(std::min<size_t>(
+                sourceManager->getColumnNumber(location), UINT32_MAX));
+            for (const auto range : reported.ranges) {
+                if (range.start().buffer() == location.buffer() &&
+                    range.end().buffer() == location.buffer() &&
+                    range.end().offset() > range.start().offset()) {
+                    diagnostic.length = static_cast<uint32_t>(std::min<size_t>(
+                        range.end().offset() - range.start().offset(), UINT32_MAX));
+                    break;
+                }
+            }
+        }
+        diagnostics.push_back(std::move(diagnostic));
+    }
+
+private:
+    std::vector<OptoSlangDiagnostic>& diagnostics;
+};
+
+std::vector<OptoSlangDiagnostic> collect_diagnostics(
+    Driver& driver, const Diagnostics& diagnostics) {
+    std::vector<OptoSlangDiagnostic> result;
+    auto client = std::make_shared<OptoDiagnosticClient>(result);
+    driver.diagEngine.clearClients();
+    driver.diagEngine.addClient(client);
+    driver.diagEngine.issue(diagnostics);
+    driver.diagEngine.clearClients();
+    return result;
+}
+
+bool contains_error(const std::vector<OptoSlangDiagnostic>& diagnostics) {
+    return std::ranges::any_of(diagnostics, [](const OptoSlangDiagnostic& diagnostic) {
+        return diagnostic.severity == OPTO_SLANG_DIAGNOSTIC_ERROR;
+    });
+}
+
+OptoSlangStatus diagnostic_view(
+    const std::vector<OptoSlangDiagnostic>* diagnostics,
+    size_t index,
+    OptoSlangDiagnosticView* view) {
+    if (!diagnostics || !view || index >= diagnostics->size()) {
+        return OPTO_SLANG_ERROR;
+    }
+    const auto& diagnostic = (*diagnostics)[index];
+    view->severity = diagnostic.severity;
+    view->subsystem = diagnostic.subsystem;
+    view->code = diagnostic.code;
+    view->message = diagnostic.message.c_str();
+    view->option_name = diagnostic.option_name.c_str();
+    view->file = diagnostic.file.c_str();
+    view->line = diagnostic.line;
+    view->column = diagnostic.column;
+    view->length = diagnostic.length;
+    return OPTO_SLANG_OK;
 }
 
 struct Verilog2005SyntaxValidator : SyntaxVisitor<Verilog2005SyntaxValidator> {
@@ -185,7 +273,7 @@ bool has_source_files(const OptoSlangCompiler& compiler) {
 }
 
 std::unique_ptr<Compilation> create_compilation(
-    const OptoSlangCompiler& compiler,
+    OptoSlangCompiler& compiler,
     Driver& driver) {
     driver.addStandardArgs();
     switch (compiler.language) {
@@ -338,9 +426,8 @@ std::unique_ptr<Compilation> create_compilation(
         compilation->addSyntaxTree(std::move(tree));
     }
     const auto& parse_diagnostics = compilation->getParseDiagnostics();
-    if (std::ranges::any_of(
-            parse_diagnostics,
-            [](const Diagnostic& diagnostic) { return diagnostic.isError(); })) {
+    compiler.diagnostics = collect_diagnostics(driver, parse_diagnostics);
+    if (contains_error(compiler.diagnostics)) {
         throw std::runtime_error(diagnostics_to_string(driver, parse_diagnostics));
     }
     return compilation;
@@ -596,6 +683,7 @@ OptoSlangStatus opto_slang_compiler_compile(
         return fail(compiler, "output design pointer is null");
     }
     *design = nullptr;
+    compiler->diagnostics.clear();
     if (!has_source_files(*compiler)) {
         return fail(compiler, "slang compile requires at least one input file");
     }
@@ -628,12 +716,14 @@ OptoSlangStatus opto_slang_compiler_compile(
         } catch (...) {
             return fail(compiler, "unknown slang diagnostic collection failure");
         }
-        if (compilation->hasIssuedErrors() || compilation->hasFatalErrors()) {
+        compiler->diagnostics = collect_diagnostics(*driver, *diagnostics);
+        if (contains_error(compiler->diagnostics)) {
             return fail(compiler, diagnostics_to_string(*driver, *diagnostics));
         }
 
         auto lowered = std::make_unique<OptoSlangSnapshot>();
         lowered->source_manager = &driver->sourceManager;
+        lowered->diagnostics = compiler->diagnostics;
         opto_slang_prepare_module_names(*lowered, root->topInstances);
         for (auto* top : root->topInstances) {
             if (!top) {
@@ -672,6 +762,7 @@ OptoSlangStatus opto_slang_compiler_analyze(
         return fail(compiler, "output analysis pointer is null");
     }
     *analysis = nullptr;
+    compiler->diagnostics.clear();
     if (!has_source_files(*compiler)) {
         return fail(compiler, "slang analyze requires at least one input file");
     }
@@ -694,6 +785,7 @@ OptoSlangStatus opto_slang_compiler_analyze(
                 result->packages.push_back(copy_string(package->name));
             }
         }
+        result->diagnostics = compiler->diagnostics;
         std::ranges::sort(result->definitions);
         result->definitions.erase(
             std::ranges::unique(result->definitions).begin(),
@@ -736,6 +828,17 @@ const char* opto_slang_compiler_last_error(const OptoSlangCompiler* compiler) {
         return "native slang compiler is null";
     }
     return compiler->last_error.c_str();
+}
+
+size_t opto_slang_compiler_diagnostic_count(const OptoSlangCompiler* compiler) {
+    return compiler ? compiler->diagnostics.size() : 0;
+}
+
+OptoSlangStatus opto_slang_compiler_diagnostic_view(
+    const OptoSlangCompiler* compiler,
+    size_t index,
+    OptoSlangDiagnosticView* view) {
+    return diagnostic_view(compiler ? &compiler->diagnostics : nullptr, index, view);
 }
 
 void opto_slang_analysis_free(OptoSlangAnalysis* analysis) {
@@ -783,6 +886,28 @@ OptoSlangStatus opto_slang_analysis_dependency_view(
         dependency.text ? dependency.text->c_str() : nullptr,
     };
     return OPTO_SLANG_OK;
+}
+
+size_t opto_slang_analysis_diagnostic_count(const OptoSlangAnalysis* analysis) {
+    return analysis ? analysis->diagnostics.size() : 0;
+}
+
+OptoSlangStatus opto_slang_analysis_diagnostic_view(
+    const OptoSlangAnalysis* analysis,
+    size_t index,
+    OptoSlangDiagnosticView* view) {
+    return diagnostic_view(analysis ? &analysis->diagnostics : nullptr, index, view);
+}
+
+size_t opto_slang_snapshot_diagnostic_count(const OptoSlangSnapshot* design) {
+    return design ? design->diagnostics.size() : 0;
+}
+
+OptoSlangStatus opto_slang_snapshot_diagnostic_view(
+    const OptoSlangSnapshot* design,
+    size_t index,
+    OptoSlangDiagnosticView* view) {
+    return diagnostic_view(design ? &design->diagnostics : nullptr, index, view);
 }
 
 } // extern "C"

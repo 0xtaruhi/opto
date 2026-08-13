@@ -115,6 +115,7 @@ void add_value_as_net(
             ? net_resolution(symbol.as<NetSymbol>())
             : OPTO_SLANG_NET_SINGLE_DRIVER,
         intern_type_layout(design, symbol.getType()),
+        {},
     };
     net.attributes = lower_symbol_attributes(design, symbol);
     module.nets.push_back(std::move(net));
@@ -433,6 +434,7 @@ void lower_body(
                             ? net_resolution(signal.value->as<NetSymbol>())
                             : OPTO_SLANG_NET_SINGLE_DRIVER,
                         intern_type_layout(design, type),
+                        {},
                     };
                     lowered.attributes = lower_symbol_attributes(design, port);
                     module.ports.push_back(std::move(lowered));
@@ -464,6 +466,7 @@ void lower_body(
                 ? net_resolution(port.internalSymbol->as<NetSymbol>())
                 : OPTO_SLANG_NET_SINGLE_DRIVER,
             intern_type_layout(design, port.getType()),
+            {},
         };
         lowered.attributes = lower_port_attributes(design, port);
         module.ports.push_back(std::move(lowered));
@@ -523,6 +526,7 @@ void lower_body(
             true,
             net_resolution(*net),
             intern_type_layout(design, net->getType()),
+            {},
         };
         lowered.attributes = lower_symbol_attributes(design, *net);
         module.nets.push_back(std::move(lowered));
@@ -541,6 +545,7 @@ void lower_body(
             var->lifetime == VariableLifetime::Automatic,
             OPTO_SLANG_NET_SINGLE_DRIVER,
             intern_type_layout(design, var->getType()),
+            {},
         };
         lowered.attributes = lower_symbol_attributes(design, *var);
         module.nets.push_back(std::move(lowered));
@@ -736,7 +741,7 @@ void collect_module_jobs(
         collect_elaborated_members(body, body, members);
     }
     auto children = members.instances;
-    jobs.push_back(ModuleLoweringJob{&body, std::move(members)});
+    jobs.push_back(ModuleLoweringJob{&body, std::move(members), {}});
     for (auto* child : children) {
         collect_module_jobs(design, child->body, seen, jobs);
     }

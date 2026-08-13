@@ -115,6 +115,7 @@ fn synthesize_updates_implementation_and_object_index_for_always_comb_processes(
             DbUpdate {
                 modules: vec![module],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )

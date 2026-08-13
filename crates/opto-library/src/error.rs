@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+use opto_core::{Diagnostic, DiagnosticLabel, DiagnosticLocation, DiagnosticSource};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -172,4 +173,44 @@ pub enum LibraryError {
     /// A library-store revision counter is exhausted.
     #[error(transparent)]
     Revision(#[from] opto_core::RevisionExhausted),
+}
+
+impl DiagnosticSource for LibraryError {
+    fn diagnostic(&self) -> Option<Diagnostic> {
+        let mut diagnostic = match self {
+            Self::Syntax {
+                source_name,
+                line,
+                column,
+                kind,
+            } => Diagnostic::new("OPT-LIB-001", kind.to_string()).with_primary(
+                DiagnosticLabel::new(
+                    DiagnosticLocation::new(
+                        source_name,
+                        u32::try_from(*line).unwrap_or(u32::MAX),
+                        Some(u32::try_from(*column).unwrap_or(u32::MAX)),
+                    ),
+                    "Liberty syntax error occurs here",
+                ),
+            ),
+            Self::UnsupportedInput { .. } | Self::UnsupportedConstruct { .. } => {
+                Diagnostic::new("OPT-LIB-003", self.to_string()).with_help(
+                    "use a Liberty .lib file containing constructs supported by Opto's documented library subset",
+                )
+            }
+            Self::Read { .. } => Diagnostic::new("OPT-LIB-004", self.to_string()),
+            Self::ArenaCapacity { .. } | Self::PinCountCapacity { .. } => {
+                Diagnostic::new("OPT-LIB-005", self.to_string())
+            }
+            Self::Revision(_) => Diagnostic::new("OPT-LIB-900", self.to_string()).with_help(
+                "retain the library and diagnostic code when reporting this internal capacity failure",
+            ),
+            _ => Diagnostic::new("OPT-LIB-002", self.to_string()),
+        };
+        if matches!(self, Self::BooleanFunction { .. }) {
+            diagnostic = diagnostic
+                .with_help("check the failing Liberty function expression and its quoting");
+        }
+        Some(diagnostic)
+    }
 }

@@ -9,7 +9,7 @@
 
 use crate::bridge::{read, read_invariant};
 use crate::ffi;
-use crate::{SlangError, SlangPortDirection};
+use crate::{SlangDiagnostic, SlangError, SlangPortDirection};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -36,6 +36,7 @@ use convert::{has_flag, map_port_direction, optional_str, required_str};
 /// Owning handle to a frozen native Slang compilation snapshot.
 pub struct SlangCompilation {
     raw: NonNull<ffi::Snapshot>,
+    diagnostics: Vec<SlangDiagnostic>,
 }
 
 impl SlangCompilation {
@@ -43,7 +44,8 @@ impl SlangCompilation {
         let raw = NonNull::new(raw).ok_or_else(|| {
             SlangError::BridgeInvariant("native slang bridge returned a null design".to_string())
         })?;
-        Ok(Self { raw })
+        let diagnostics = crate::compiler::copy_snapshot_diagnostics(raw)?;
+        Ok(Self { raw, diagnostics })
     }
 
     fn view(&self) -> ffi::SnapshotView {
@@ -78,6 +80,12 @@ impl SlangCompilation {
         unsafe { optional_str(self.view().top, "top module name") }
     }
 
+    /// Returns structured warnings emitted while compiling and elaborating.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[SlangDiagnostic] {
+        &self.diagnostics
+    }
+
     pub(crate) fn materialize_all(&self) -> Result<(), SlangError> {
         for module in self.modules() {
             drop(module.materialize()?);
@@ -90,6 +98,7 @@ impl fmt::Debug for SlangCompilation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SlangCompilation")
             .field("module_count", &self.module_count())
+            .field("diagnostics", &self.diagnostics)
             .finish_non_exhaustive()
     }
 }

@@ -20,6 +20,11 @@ cd opto
 cargo build --locked
 ```
 
+Set `OPTO_PYTHON` to an explicit Python 3.11-or-newer executable when CMake
+cannot use the host's default Python. Opto's first-party native C++ bridge is
+built with compiler warnings enabled and treated as errors; do not weaken that
+gate to accept a change.
+
 ## Required checks
 
 Run these checks before submitting a pull request:

@@ -41,6 +41,11 @@ add_library(
 target_compile_features(opto_slang_bridge PRIVATE cxx_std_20)
 target_include_directories(opto_slang_bridge PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(opto_slang_bridge PRIVATE slang::slang)
+if(MSVC)
+  target_compile_options(opto_slang_bridge PRIVATE /W4 /WX)
+else()
+  target_compile_options(opto_slang_bridge PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
 set_target_properties(
   opto_slang_bridge
   PROPERTIES

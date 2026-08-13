@@ -72,7 +72,12 @@ pub(super) fn dispatch(
     }
     let invocation =
         command_catalog::parse_invocation(registered, args, state.domain.get().is_sdc())?;
-    (spec.executor)(state, interp, spec.name, &invocation)
+    let result = (spec.executor)(state, interp, spec.name, &invocation);
+    let diagnostics = state.session.borrow_mut().take_diagnostics();
+    for diagnostic in diagnostics {
+        crate::diagnostic::print_diagnostic(&diagnostic, state.ui);
+    }
+    result
 }
 
 fn command_result_from_eval(result: EvalResult) -> CommandResult {

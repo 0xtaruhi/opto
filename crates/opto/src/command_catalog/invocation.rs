@@ -125,19 +125,24 @@ fn parse_layout<T: AsRef<str>>(
             .iter()
             .any(|option| option.name == argument.as_ref())
         {
-            return Err(crate::ShellError::command(format!(
-                "{command}: value must precede options"
-            )));
+            return Err(invocation_error(
+                command,
+                format!("{command}: value must precede options"),
+                syntax,
+                None,
+            ));
         }
         if let Some(option) = syntax
             .unsupported_options
             .iter()
             .find(|option| option.name == argument.as_ref())
         {
-            return Err(crate::ShellError::command(format!(
-                "{command}: option '{}' is not implemented yet",
-                option.name
-            )));
+            return Err(invocation_error(
+                command,
+                format!("{command}: option '{}' is not implemented yet", option.name),
+                syntax,
+                None,
+            ));
         }
         positional_indices.push(index);
         index += 1;
@@ -152,9 +157,12 @@ fn parse_layout<T: AsRef<str>>(
             continue;
         }
         if syntax.leading_positionals != 0 && saw_trailing_positional {
-            return Err(crate::ShellError::command(format!(
-                "{command}: unexpected option '{raw}' after object list"
-            )));
+            return Err(invocation_error(
+                command,
+                format!("{command}: unexpected option '{raw}' after object list"),
+                syntax,
+                None,
+            ));
         }
         let Some(option) = syntax.options.iter().find(|option| option.name == raw) else {
             if let Some(option) = syntax
@@ -162,47 +170,67 @@ fn parse_layout<T: AsRef<str>>(
                 .iter()
                 .find(|option| option.name == raw)
             {
-                return Err(crate::ShellError::command(format!(
-                    "{command}: option '{}' is not implemented yet",
-                    option.name
-                )));
+                return Err(invocation_error(
+                    command,
+                    format!("{command}: option '{}' is not implemented yet", option.name),
+                    syntax,
+                    None,
+                ));
             }
             if syntax.options.is_empty() && syntax.unsupported_options.is_empty() {
                 if syntax.leading_positionals != 0 {
-                    return Err(crate::ShellError::command(format!(
-                        "{command}: unsupported option '{raw}'"
-                    )));
+                    return Err(invocation_error(
+                        command,
+                        format!("{command}: unsupported option '{raw}'"),
+                        syntax,
+                        Some(raw),
+                    ));
                 }
                 positional_indices.push(index);
                 saw_trailing_positional = true;
                 index += 1;
                 continue;
             }
-            return Err(crate::ShellError::command(format!(
-                "{command}: unsupported option '{raw}'"
-            )));
+            return Err(invocation_error(
+                command,
+                format!("{command}: unsupported option '{raw}'"),
+                syntax,
+                Some(raw),
+            ));
         };
         seen_options.push(option.name);
         let value_index = if let Some(value_hint) = option.value {
             explicit_redirect_target |=
                 command == "redirect" && matches!(option.name, "-file" | "-variable");
             index = index.checked_add(1).ok_or_else(|| {
-                crate::ShellError::command(format!("{command}: argument count overflow"))
+                invocation_error(
+                    command,
+                    format!("{command}: argument count overflow"),
+                    syntax,
+                    None,
+                )
             })?;
             if index == args.len() {
-                return Err(crate::ShellError::command(format!(
-                    "{command}: missing value for {}",
-                    option.name
-                )));
+                return Err(invocation_error(
+                    command,
+                    format!("{command}: missing value for {}", option.name),
+                    syntax,
+                    None,
+                ));
             }
             if let ValueHint::OneOf { accepted, .. } = value_hint {
                 let value = args[index].as_ref();
                 if !accepted.contains(&value) {
-                    return Err(crate::ShellError::command(format!(
-                        "{command}: value for {} must be {}",
-                        option.name,
-                        accepted.join(" or ")
-                    )));
+                    return Err(invocation_error(
+                        command,
+                        format!(
+                            "{command}: value for {} must be {}",
+                            option.name,
+                            accepted.join(" or ")
+                        ),
+                        syntax,
+                        None,
+                    ));
                 }
             }
             Some(index)
@@ -232,19 +260,30 @@ fn parse_layout<T: AsRef<str>>(
         && !arity.accepts(positional_indices.len())
     {
         if let Some(&extra) = positional_indices.get(arity.max) {
-            return Err(crate::ShellError::command(format!(
-                "{command}: wrong number of arguments: extra positional option '{}'",
-                args[extra].as_ref()
-            )));
+            return Err(invocation_error(
+                command,
+                format!(
+                    "{command}: wrong number of arguments: extra positional option '{}'",
+                    args[extra].as_ref()
+                ),
+                syntax,
+                None,
+            ));
         }
         if let Some(label) = syntax.positional_label {
-            return Err(crate::ShellError::command(format!(
-                "{command}: missing {label}"
-            )));
+            return Err(invocation_error(
+                command,
+                format!("{command}: missing {label}"),
+                syntax,
+                None,
+            ));
         }
-        return Err(crate::ShellError::command(format!(
-            "{command}: wrong number of arguments"
-        )));
+        return Err(invocation_error(
+            command,
+            format!("{command}: wrong number of arguments"),
+            syntax,
+            None,
+        ));
     }
     for required in syntax.required_options {
         let required_hint = syntax
@@ -258,9 +297,12 @@ fn parse_layout<T: AsRef<str>>(
             options.iter().any(|option| option.id == required_hint.id)
         };
         if !present {
-            return Err(crate::ShellError::command(format!(
-                "{command}: missing {required} <value>"
-            )));
+            return Err(invocation_error(
+                command,
+                format!("{command}: missing {required} <value>"),
+                syntax,
+                None,
+            ));
         }
     }
     if let Some(option) = syntax.option_or_positional
@@ -277,9 +319,12 @@ fn parse_layout<T: AsRef<str>>(
             options.iter().any(|seen| seen.id == option_hint.id)
         };
         if !present {
-            return Err(crate::ShellError::command(format!(
-                "{command}: missing {option} for virtual object"
-            )));
+            return Err(invocation_error(
+                command,
+                format!("{command}: missing {option} for virtual object"),
+                syntax,
+                None,
+            ));
         }
     }
     for group in syntax.mutually_exclusive_options {
@@ -290,9 +335,12 @@ fn parse_layout<T: AsRef<str>>(
                 .map(|option| option.name)
         });
         if let (Some(left), Some(right)) = (present.next(), present.next()) {
-            return Err(crate::ShellError::command(format!(
-                "{command}: {left} and {right} are mutually exclusive"
-            )));
+            return Err(invocation_error(
+                command,
+                format!("{command}: {left} and {right} are mutually exclusive"),
+                syntax,
+                None,
+            ));
         }
     }
 
@@ -300,4 +348,50 @@ fn parse_layout<T: AsRef<str>>(
         options,
         positional_indices,
     })
+}
+
+fn invocation_error(
+    command: &str,
+    message: String,
+    syntax: &CommandSyntax,
+    unknown_option: Option<&str>,
+) -> crate::ShellError {
+    let suggestion = unknown_option.and_then(|unknown| closest_option(unknown, syntax));
+    let help = suggestion.map_or_else(
+        || format!("run 'help {command}' to see accepted arguments and examples"),
+        |suggestion| {
+            format!(
+                "did you mean '{suggestion}'? Run 'help {command}' to see accepted arguments and examples"
+            )
+        },
+    );
+    crate::ShellError::usage(message, help)
+}
+
+fn closest_option<'a>(unknown: &str, syntax: &'a CommandSyntax) -> Option<&'a str> {
+    syntax
+        .options
+        .iter()
+        .chain(&syntax.unsupported_options)
+        .map(|option| (edit_distance(unknown, option.name), option.name))
+        .min_by_key(|(distance, option)| (*distance, *option))
+        .filter(|(distance, _)| *distance <= 2)
+        .map(|(_, option)| option)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let mut previous = (0..=right.chars().count()).collect::<Vec<_>>();
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut current = Vec::with_capacity(previous.len());
+        current.push(left_index + 1);
+        for (right_index, right_char) in right.chars().enumerate() {
+            current.push(
+                (previous[right_index + 1] + 1)
+                    .min(current[right_index] + 1)
+                    .min(previous[right_index] + usize::from(left_char != right_char)),
+            );
+        }
+        previous = current;
+    }
+    previous.last().copied().unwrap_or(left.chars().count())
 }

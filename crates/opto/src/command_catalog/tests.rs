@@ -150,6 +150,12 @@ fn help_is_an_exact_view_of_registered_declarative_syntax() {
         let help = registry
             .command_help_text(name)
             .expect("registered command has help");
+        for section in ["Summary:", "Usage:", "Requires:", "Example:"] {
+            assert!(
+                help.contains(section),
+                "help for '{name}' omitted section '{section}'"
+            );
+        }
         for (option, unsupported) in syntax.options.iter().map(|option| (option, false)).chain(
             syntax
                 .unsupported_options
@@ -175,6 +181,20 @@ fn help_is_an_exact_view_of_registered_declarative_syntax() {
             );
         }
     }
+}
+
+#[test]
+fn misspelled_option_has_structured_help_and_a_nearby_spelling() {
+    use opto_core::DiagnosticSource;
+
+    let registry = registry();
+    let read_hdl = registry.find("read_hdl").unwrap();
+    let error = validate_invocation(read_hdl, &["-incdr", "rtl", "top.sv"]).unwrap_err();
+    let diagnostic = error.diagnostic().expect("usage diagnostic");
+
+    assert_eq!(diagnostic.code(), "OPT-CLI-001");
+    assert!(diagnostic.help()[0].contains("did you mean '-incdir'?"));
+    assert!(diagnostic.help()[0].contains("help read_hdl"));
 }
 
 #[test]

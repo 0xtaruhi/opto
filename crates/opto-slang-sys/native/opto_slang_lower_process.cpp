@@ -856,7 +856,8 @@ OptoSlangEffectData lower_loop_variable_assignment(
     lhs.signal_name = intern_string(design, registered_value_name(design, variable));
     OptoSlangExpr rhs;
     rhs.kind = OPTO_SLANG_EXPR_CONSTANT;
-    auto bits = value.integer().resize(variable.getType().getBitstreamWidth());
+    const auto width = checked_width(variable.getType().getBitstreamWidth(), variable.name);
+    auto bits = value.integer().resize(width);
     bits.setSigned(variable.getType().isSigned());
     rhs.constant_has_width = true;
     rhs.constant_width = checked_width(bits.getBitWidth(), variable.name);
@@ -1514,7 +1515,8 @@ OptoSlangExpr* lower_function_call(ModuleLoweringContext& design, const CallExpr
         constant_actuals.push_back(evaluate_lowering_constant(design, *actual));
     }
     constexpr size_t max_recursive_depth = 256;
-    if (std::ranges::count(design.function_stack, &function) >= max_recursive_depth) {
+    if (static_cast<size_t>(std::ranges::count(design.function_stack, &function)) >=
+        max_recursive_depth) {
         throw std::runtime_error(
             "recursive synthesizable function '" + copy_string(function.name) +
             "' does not reach a constant base case within " +
@@ -1743,7 +1745,8 @@ CfgFragment lower_subroutine_call_statement(
             "task or void function call argument count does not match its declaration");
     }
     constexpr size_t max_recursive_depth = 256;
-    if (std::ranges::count(design.function_stack, &function) >= max_recursive_depth) {
+    if (static_cast<size_t>(std::ranges::count(design.function_stack, &function)) >=
+        max_recursive_depth) {
         throw std::runtime_error(
             "recursive synthesizable subroutine '" + copy_string(function.name) +
             "' does not reach a constant base case within " +

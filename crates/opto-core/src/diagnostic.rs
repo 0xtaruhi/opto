@@ -23,6 +23,13 @@ impl DiagnosticLocation {
         }
     }
 
+    /// Sets the highlighted character count, clamped to at least one.
+    #[must_use]
+    pub fn with_length(mut self, length: u32) -> Self {
+        self.length = length.max(1);
+        self
+    }
+
     /// Returns the source path.
     #[must_use]
     pub fn path(&self) -> &str {
@@ -80,7 +87,8 @@ impl DiagnosticLabel {
 /// A stable, structured error report independent of terminal or GUI rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
-    code: &'static str,
+    severity: DiagnosticSeverity,
+    code: String,
     title: String,
     primary: Option<DiagnosticLabel>,
     related: Vec<DiagnosticLabel>,
@@ -90,15 +98,35 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     /// Creates a diagnostic with a stable searchable code and concise title.
-    pub fn new(code: &'static str, title: impl Into<String>) -> Self {
+    pub fn new(code: impl Into<String>, title: impl Into<String>) -> Self {
         Self {
-            code,
+            severity: DiagnosticSeverity::Error,
+            code: code.into(),
             title: title.into(),
             primary: None,
             related: Vec::new(),
             notes: Vec::new(),
             help: Vec::new(),
         }
+    }
+
+    /// Creates a warning diagnostic that does not make the surrounding operation fail.
+    pub fn warning(code: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Warning,
+            code: code.into(),
+            title: title.into(),
+            primary: None,
+            related: Vec::new(),
+            notes: Vec::new(),
+            help: Vec::new(),
+        }
+    }
+
+    /// Returns the diagnostic severity.
+    #[must_use]
+    pub fn severity(&self) -> DiagnosticSeverity {
+        self.severity
     }
 
     /// Sets the source location that should receive primary visual emphasis.
@@ -131,8 +159,8 @@ impl Diagnostic {
 
     /// Returns the stable diagnostic code.
     #[must_use]
-    pub fn code(&self) -> &'static str {
-        self.code
+    pub fn code(&self) -> &str {
+        &self.code
     }
 
     /// Returns the concise primary message.
@@ -164,6 +192,15 @@ impl Diagnostic {
     pub fn help(&self) -> &[String] {
         &self.help
     }
+}
+
+/// User-facing diagnostic severity independent of any presentation backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    /// A recoverable condition that may make results incomplete or surprising.
+    Warning,
+    /// A condition that prevents the requested operation from succeeding.
+    Error,
 }
 
 /// Converts a typed subsystem error into a presentation-independent diagnostic.

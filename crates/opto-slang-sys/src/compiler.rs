@@ -4,8 +4,8 @@
 use crate::bridge::read;
 use crate::ffi;
 use crate::{
-    SlangAnalysis, SlangCompilation, SlangCompileOptions, SlangError, SlangLanguage,
-    SlangSourceFile, SlangSourceUnit,
+    SlangAnalysis, SlangCompilation, SlangCompileOptions, SlangDiagnostic, SlangDiagnosticLocation,
+    SlangDiagnosticSeverity, SlangError, SlangLanguage, SlangSourceFile, SlangSourceUnit,
 };
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
@@ -316,10 +316,19 @@ impl Compiler {
                 })
             })
             .collect::<Result<Vec<_>, SlangError>>()?;
+        let diagnostics = copy_diagnostics(
+            // SAFETY: `handle` owns a live analysis for the duration of this call.
+            unsafe { ffi::opto_slang_analysis_diagnostic_count(handle.0.as_ptr()) },
+            |index, view| {
+                // SAFETY: the analysis is live and `index` is bounded by the paired count.
+                unsafe { ffi::opto_slang_analysis_diagnostic_view(handle.0.as_ptr(), index, view) }
+            },
+        )?;
         Ok(SlangAnalysis {
             definitions,
             packages,
             dependencies,
+            diagnostics,
         })
     }
 
@@ -327,7 +336,19 @@ impl Compiler {
         if status == ffi::OK {
             return Ok(());
         }
-        Err(SlangError::CompileFailed(self.last_error()))
+        let diagnostics = copy_diagnostics(
+            // SAFETY: the compiler is live for the duration of status translation.
+            unsafe { ffi::opto_slang_compiler_diagnostic_count(self.raw.as_ptr()) },
+            |index, view| {
+                // SAFETY: the compiler is live and `index` is bounded by the paired count.
+                unsafe { ffi::opto_slang_compiler_diagnostic_view(self.raw.as_ptr(), index, view) }
+            },
+        )?;
+        if diagnostics.is_empty() {
+            Err(SlangError::CompileFailed(self.last_error()))
+        } else {
+            Err(SlangError::Diagnostics(diagnostics))
+        }
     }
 
     fn last_error(&self) -> String {
@@ -341,6 +362,57 @@ impl Compiler {
             .to_string_lossy()
             .into_owned()
     }
+}
+
+pub(crate) fn copy_snapshot_diagnostics(
+    raw: NonNull<ffi::Snapshot>,
+) -> Result<Vec<SlangDiagnostic>, SlangError> {
+    copy_diagnostics(
+        // SAFETY: `raw` is a live snapshot owned by the caller.
+        unsafe { ffi::opto_slang_snapshot_diagnostic_count(raw.as_ptr()) },
+        |index, view| {
+            // SAFETY: the snapshot is live and `index` is bounded by the paired count.
+            unsafe { ffi::opto_slang_snapshot_diagnostic_view(raw.as_ptr(), index, view) }
+        },
+    )
+}
+
+fn copy_diagnostics(
+    count: usize,
+    mut get: impl FnMut(usize, *mut ffi::DiagnosticView) -> std::ffi::c_int,
+) -> Result<Vec<SlangDiagnostic>, SlangError> {
+    (0..count)
+        .map(|index| {
+            // SAFETY: each accessor initializes the complete view on success.
+            let view = unsafe { read("diagnostic", |view| get(index, view)) }?;
+            let severity = match view.severity {
+                ffi::DIAGNOSTIC_NOTE => SlangDiagnosticSeverity::Note,
+                ffi::DIAGNOSTIC_WARNING => SlangDiagnosticSeverity::Warning,
+                ffi::DIAGNOSTIC_ERROR => SlangDiagnosticSeverity::Error,
+                raw => {
+                    return Err(SlangError::BridgeInvariant(format!(
+                        "native slang bridge returned unknown diagnostic severity {raw}"
+                    )));
+                }
+            };
+            let message = copy_required_string(view.message, "diagnostic message")?;
+            let option_name = copy_required_string(view.option_name, "diagnostic option")?;
+            let file = copy_required_string(view.file, "diagnostic file")?;
+            Ok(SlangDiagnostic {
+                severity,
+                subsystem: view.subsystem,
+                code: view.code,
+                message,
+                option_name: (!option_name.is_empty()).then_some(option_name),
+                location: (!file.is_empty()).then(|| SlangDiagnosticLocation {
+                    path: PathBuf::from(file),
+                    line: view.line.max(1),
+                    column: view.column.max(1),
+                    length: view.length.max(1),
+                }),
+            })
+        })
+        .collect()
 }
 
 struct AnalysisHandle(NonNull<ffi::Analysis>);

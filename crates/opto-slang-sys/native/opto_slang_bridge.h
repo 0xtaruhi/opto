@@ -27,6 +27,12 @@ typedef struct OptoSlangProcedureData OptoSlangProcedureData;
 
 typedef enum OptoSlangStatus { OPTO_SLANG_OK = 0, OPTO_SLANG_ERROR = 1 } OptoSlangStatus;
 
+typedef enum OptoSlangDiagnosticSeverity {
+    OPTO_SLANG_DIAGNOSTIC_NOTE = 0,
+    OPTO_SLANG_DIAGNOSTIC_WARNING = 1,
+    OPTO_SLANG_DIAGNOSTIC_ERROR = 2
+} OptoSlangDiagnosticSeverity;
+
 typedef enum OptoSlangPortDirection {
     OPTO_SLANG_PORT_INPUT = 0,
     OPTO_SLANG_PORT_OUTPUT = 1,
@@ -136,6 +142,18 @@ typedef struct OptoSlangSourceFileView {
     const char *path;
     const char *text;
 } OptoSlangSourceFileView;
+
+typedef struct OptoSlangDiagnosticView {
+    OptoSlangDiagnosticSeverity severity;
+    uint16_t subsystem;
+    uint16_t code;
+    const char *message;
+    const char *option_name;
+    const char *file;
+    uint32_t line;
+    uint32_t column;
+    uint32_t length;
+} OptoSlangDiagnosticView;
 
 typedef struct OptoSlangSnapshotView {
     const char *top;
@@ -324,6 +342,9 @@ OptoSlangStatus opto_slang_compiler_compile(
 OptoSlangStatus opto_slang_compiler_analyze(
     OptoSlangCompiler *compiler, OptoSlangAnalysis **analysis);
 const char *opto_slang_compiler_last_error(const OptoSlangCompiler *compiler);
+size_t opto_slang_compiler_diagnostic_count(const OptoSlangCompiler *compiler);
+OptoSlangStatus opto_slang_compiler_diagnostic_view(
+    const OptoSlangCompiler *compiler, size_t index, OptoSlangDiagnosticView *view);
 
 void opto_slang_analysis_free(OptoSlangAnalysis *analysis);
 OptoSlangStatus opto_slang_analysis_view(
@@ -332,10 +353,16 @@ const char *opto_slang_analysis_definition_name(const OptoSlangAnalysis *analysi
 const char *opto_slang_analysis_package_name(const OptoSlangAnalysis *analysis, size_t index);
 OptoSlangStatus opto_slang_analysis_dependency_view(
     const OptoSlangAnalysis *analysis, size_t index, OptoSlangSourceFileView *view);
+size_t opto_slang_analysis_diagnostic_count(const OptoSlangAnalysis *analysis);
+OptoSlangStatus opto_slang_analysis_diagnostic_view(
+    const OptoSlangAnalysis *analysis, size_t index, OptoSlangDiagnosticView *view);
 
 void opto_slang_snapshot_free(OptoSlangSnapshot *design);
 OptoSlangStatus opto_slang_snapshot_view(
     const OptoSlangSnapshot *design, OptoSlangSnapshotView *view);
+size_t opto_slang_snapshot_diagnostic_count(const OptoSlangSnapshot *design);
+OptoSlangStatus opto_slang_snapshot_diagnostic_view(
+    const OptoSlangSnapshot *design, size_t index, OptoSlangDiagnosticView *view);
 OptoSlangStatus opto_slang_module_view(
     const OptoSlangSnapshot *design, size_t module_index, OptoSlangModuleView *view);
 OptoSlangStatus opto_slang_module_info(

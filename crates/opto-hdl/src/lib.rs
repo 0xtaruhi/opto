@@ -19,6 +19,9 @@ pub use error::HdlError;
 use opto_slang_sys::{
     SlangCompileOptions, SlangDefine, SlangLanguage, SlangSourceFile, SlangSourceUnit,
 };
+pub use opto_slang_sys::{
+    SlangDiagnostic, SlangDiagnosticLocation, SlangDiagnosticSeverity, SlangError,
+};
 use std::path::PathBuf;
 
 mod lower;
@@ -56,6 +59,8 @@ pub struct DbUpdate {
     pub modules: Vec<opto_ir::rtl::RtlModule>,
     /// Selected top definition, when elaboration established one.
     pub top: Option<String>,
+    /// Recoverable frontend diagnostics emitted while producing the update.
+    pub diagnostics: Vec<SlangDiagnostic>,
 }
 
 /// Ingested source set retained for later elaboration.
@@ -68,6 +73,7 @@ pub struct VerilogSourceSet {
     source_units: Vec<SlangSourceUnit>,
     definitions: Vec<String>,
     packages: Vec<String>,
+    diagnostics: Vec<SlangDiagnostic>,
 }
 impl VerilogSourceSet {
     /// Returns definition names discovered in this source set.
@@ -80,6 +86,12 @@ impl VerilogSourceSet {
     #[must_use]
     pub fn packages(&self) -> &[String] {
         &self.packages
+    }
+
+    /// Returns recoverable diagnostics emitted while ingesting this source set.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[SlangDiagnostic] {
+        &self.diagnostics
     }
 }
 
@@ -113,6 +125,7 @@ impl Frontend {
             source_units: units,
             definitions: analysis.definitions,
             packages: analysis.packages,
+            diagnostics: analysis.diagnostics,
         })
     }
 
@@ -141,14 +154,17 @@ impl Frontend {
         let compilation =
             opto_slang_sys::compile_units_lazy(&units, top, Some(runtime.parallelism()))
                 .map_err(HdlError::Slang)?;
-        lower::compilation(
+        let diagnostics = compilation.diagnostics().to_vec();
+        let mut update = lower::compilation(
             &compilation,
             &FrontendOptions {
                 top: Some(top.to_string()),
                 ..FrontendOptions::default()
             },
             runtime,
-        )
+        )?;
+        update.diagnostics = diagnostics;
+        Ok(update)
     }
 
     /// Performs analysis and elaboration as one operation.
@@ -170,7 +186,10 @@ impl Frontend {
         let compilation =
             opto_slang_sys::compile_lazy(files, &slang_options(options, runtime.parallelism()))
                 .map_err(HdlError::Slang)?;
-        lower::compilation(&compilation, options, runtime)
+        let diagnostics = compilation.diagnostics().to_vec();
+        let mut update = lower::compilation(&compilation, options, runtime)?;
+        update.diagnostics = diagnostics;
+        Ok(update)
     }
 }
 

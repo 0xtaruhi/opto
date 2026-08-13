@@ -5,7 +5,7 @@ use crate::error::ErrorSource;
 use crate::ui::Palette;
 use crate::{ShellError, UiOptions};
 use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet, renderer::DecorStyle};
-use opto_core::{Diagnostic, DiagnosticLabel, DiagnosticSource};
+use opto_core::{Diagnostic, DiagnosticLabel, DiagnosticSeverity, DiagnosticSource};
 use std::io::{self, IsTerminal};
 use std::path::Path;
 
@@ -18,35 +18,29 @@ pub fn print_error(error: &ShellError, options: UiOptions) {
     anstream::eprintln!("{rendered}");
 }
 
+/// Renders one successful-operation diagnostic to standard error.
+pub(crate) fn print_diagnostic(diagnostic: &Diagnostic, options: UiOptions) {
+    let rendered = render_structured_diagnostic(diagnostic, None, options);
+    anstream::eprintln!("{rendered}");
+}
+
 fn render_error(error: &ShellError, options: UiOptions) -> String {
     if let Some(diagnostic) = error.diagnostic() {
         return render_structured_diagnostic(&diagnostic, error.invocation_context(), options);
     }
     let message = error.to_string();
-    let parsed = parse_slang_diagnostic(&message);
-    let source = parsed
-        .as_ref()
-        .map(|diagnostic| &diagnostic.source)
-        .or_else(|| error.source_context());
-    let title = parsed.as_ref().map_or_else(
-        || message.as_str(),
-        |diagnostic| diagnostic.message.as_str(),
-    );
-
-    if let Some(source) = source {
+    if let Some(source) = error.source_context() {
         render_source_error(
-            title,
-            parsed
-                .as_ref()
-                .map_or("error occurs here", |_| "HDL frontend reported this error"),
+            &message,
+            "error occurs here",
             source,
-            parsed.as_ref().and_then(|_| error.invocation_context()),
+            error.invocation_context(),
             options,
         )
     } else if let Some(invocation) = error.invocation_context() {
-        render_title_with_invocation(title, invocation, options)
+        render_title_with_invocation(&message, invocation, options)
     } else {
-        render_title(title, options)
+        render_title(&message, options)
     }
 }
 
@@ -135,12 +129,11 @@ fn render_structured_diagnostic(
             snippet
         })
         .collect::<Vec<_>>();
-    let mut report = vec![
-        Level::ERROR
-            .primary_title(diagnostic.title())
-            .id(diagnostic.code())
-            .elements(snippets),
-    ];
+    let title = match diagnostic.severity() {
+        DiagnosticSeverity::Warning => Level::WARNING.primary_title(diagnostic.title()),
+        DiagnosticSeverity::Error => Level::ERROR.primary_title(diagnostic.title()),
+    };
+    let mut report = vec![title.id(diagnostic.code()).elements(snippets)];
     for note in diagnostic.notes() {
         report.push(Group::with_title(Level::NOTE.secondary_title(note)));
     }
@@ -281,43 +274,6 @@ fn source_range_at(
     start..end.max((start + 1).min(text.len()))
 }
 
-struct ParsedDiagnostic {
-    message: String,
-    source: ErrorSource,
-}
-
-fn parse_slang_diagnostic(message: &str) -> Option<ParsedDiagnostic> {
-    let report = message
-        .split_once("slang compilation failed: ")
-        .map_or(message, |(_, report)| report);
-    let mut lines = report.lines();
-    let header = lines.next()?;
-    let (location, diagnostic_message) = header.rsplit_once(": error: ")?;
-    let mut location_parts = location.rsplitn(3, ':');
-    let column = location_parts.next()?.parse::<usize>().ok()?;
-    let line = location_parts.next()?.parse::<usize>().ok()?;
-    let name = location_parts.next()?.to_string();
-    let text = std::fs::read_to_string(Path::new(&name)).ok()?;
-    let length = lines
-        .find(|line| line.contains('^'))
-        .map_or(1, |line| {
-            line.chars()
-                .filter(|character| matches!(character, '^' | '~'))
-                .count()
-        })
-        .max(1);
-    Some(ParsedDiagnostic {
-        message: diagnostic_message.to_string(),
-        source: ErrorSource {
-            name,
-            text,
-            line,
-            column: Some(column),
-            length,
-        },
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,22 +288,6 @@ mod tests {
             length: 1,
         };
         assert_eq!(&source.text[source_range(&source)], "好");
-    }
-
-    #[test]
-    fn parses_slang_source_diagnostic() {
-        let path =
-            std::env::temp_dir().join(format!("opto-diagnostic-{}-slang.sv", std::process::id()));
-        std::fs::write(&path, "module top;\n  assign y = ;\nendmodule\n").unwrap();
-        let message = format!(
-            "verilog frontend: slang compilation failed: {}:2:14: error: expected expression\n  assign y = ;\n             ^",
-            path.display()
-        );
-        let diagnostic = parse_slang_diagnostic(&message).unwrap();
-        std::fs::remove_file(path).unwrap();
-        assert_eq!(diagnostic.message, "expected expression");
-        assert_eq!(diagnostic.source.line, 2);
-        assert_eq!(diagnostic.source.column, Some(14));
     }
 
     #[test]
@@ -412,7 +352,7 @@ mod tests {
             },
         );
 
-        assert!(rendered.contains("error: technology mapping failed"));
+        assert!(rendered.contains("error[OPT-SES-002]: technology mapping failed"));
         assert!(rendered.contains("note: command invocation"));
         assert!(rendered.contains("this command triggered the diagnostic"));
         assert!(!rendered.contains("error occurs here"));

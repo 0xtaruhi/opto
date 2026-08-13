@@ -205,6 +205,18 @@ struct OptoSlangModuleData {
 
 struct OptoSlangCompilationState;
 
+struct OptoSlangDiagnostic {
+    OptoSlangDiagnosticSeverity severity = OPTO_SLANG_DIAGNOSTIC_ERROR;
+    uint16_t subsystem = 0;
+    uint16_t code = 0;
+    std::string message;
+    std::string option_name;
+    std::string file;
+    uint32_t line = 0;
+    uint32_t column = 0;
+    uint32_t length = 1;
+};
+
 struct OptoSlangSnapshot {
     OptoSlangSnapshot();
     ~OptoSlangSnapshot();
@@ -215,6 +227,7 @@ struct OptoSlangSnapshot {
     std::mutex materialization_mutex;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::string> body_names;
     const slang::SourceManager* source_manager = nullptr;
+    std::vector<OptoSlangDiagnostic> diagnostics;
 };
 
 struct OptoSlangSourceUnit {
@@ -232,6 +245,7 @@ struct OptoSlangAnalysis {
     std::vector<std::string> definitions;
     std::vector<std::string> packages;
     std::vector<OptoSlangSourceUnit::SourceFile> dependencies;
+    std::vector<OptoSlangDiagnostic> diagnostics;
 };
 
 struct OptoSlangCompiler {
@@ -240,6 +254,7 @@ struct OptoSlangCompiler {
     slang::LanguageVersion language = slang::LanguageVersion::v1800_2017;
     uint32_t max_threads = 0;
     std::string last_error;
+    std::vector<OptoSlangDiagnostic> diagnostics;
 };
 
 void opto_slang_collect_modules(
