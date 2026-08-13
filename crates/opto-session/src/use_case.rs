@@ -17,9 +17,6 @@ pub use frontend::HdlCatalog;
 pub use parasitics::{ReadParasiticsCompletion, ReadParasiticsOptions};
 pub use synthesis::{SynthesisEvent, SynthesisTrace, SynthesisTraceSink};
 
-#[cfg(test)]
-pub(crate) use frontend::CurrentDesignPolicy;
-
 use crate::{Session, SessionError, design_graph};
 use opto_db::{DefinitionId, LinkBinding};
 use std::collections::BTreeSet;

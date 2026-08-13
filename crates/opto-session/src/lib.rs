@@ -81,8 +81,6 @@ use state::{
     SynthesisKey, TimingDesignGeneration, TimingModelCache, TimingModelKey,
 };
 pub use state::{ConstraintCheckpoint, Session, SessionConfig};
-#[cfg(test)]
-use use_case::CurrentDesignPolicy;
 pub use use_case::{
     HdlCatalog, ReadParasiticsCompletion, ReadParasiticsOptions, SynthesisEvent, SynthesisTrace,
     SynthesisTraceSink,

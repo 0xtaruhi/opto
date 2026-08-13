@@ -14,15 +14,16 @@ fn isolates_non_sdc_commands_before_applying_constraints() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 
+    let error = runtime
+        .eval(&format!("read_sdc {}", tcl_path_word(&script)))
+        .expect_err("an unsupported SDC command must fail read_sdc");
     let result = runtime
-        .eval(&format!(
-            "list [read_sdc {}] [llength [get_clocks before_error]] [llength [get_clocks after_error]]",
-            tcl_path_word(&script)
-        ))
+        .eval("list [llength [get_clocks before_error]] [llength [get_clocks after_error]]")
         .unwrap();
     std::fs::remove_file(script).unwrap();
 
-    assert!(matches!(result, EvalResult::Complete(value) if value == "0 0 0"));
+    assert!(error.to_string().contains("synthesis"));
+    assert!(matches!(result, EvalResult::Complete(value) if value == "0 0"));
     assert!(
         runtime.eval("help").is_ok(),
         "shell commands were not restored"
@@ -40,15 +41,17 @@ fn does_not_inherit_shell_tcl_variables() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 
+    runtime.eval("set PERIOD 7").unwrap();
+    let error = runtime
+        .eval(&format!("read_sdc {}", tcl_path_word(&script)))
+        .expect_err("shell variables must not leak into SDC evaluation");
     let result = runtime
-        .eval(&format!(
-            "set PERIOD 7; list [read_sdc {}] [llength [get_clocks inherited_variable_clock]]",
-            tcl_path_word(&script)
-        ))
+        .eval("llength [get_clocks inherited_variable_clock]")
         .unwrap();
     std::fs::remove_file(script).unwrap();
 
-    assert!(matches!(result, EvalResult::Complete(value) if value == "0 0"));
+    assert!(error.to_string().contains("PERIOD"));
+    assert!(matches!(result, EvalResult::Complete(value) if value == "0"));
 }
 
 #[test]
@@ -113,11 +116,11 @@ fn syntax_only_uses_a_safe_interpreter_without_external_side_effects() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 
-    let result = runtime
+    let error = runtime
         .eval(&format!("read_sdc -syntax_only {}", tcl_path_word(&script)))
-        .unwrap();
+        .expect_err("unsafe commands must fail syntax-only validation");
 
-    assert!(matches!(result, EvalResult::Complete(value) if value == "0"));
+    assert!(error.to_string().contains("open"));
     assert!(!marker.exists());
     std::fs::remove_file(script).unwrap();
 }
@@ -137,18 +140,18 @@ fn rejects_command_abbreviations_and_nested_read_sdc() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();
 
-    let result = runtime
-        .eval(&format!(
-            "list [read_sdc {}] [read_sdc {}]",
-            tcl_path_word(&abbreviated),
-            tcl_path_word(&outer)
-        ))
-        .unwrap();
+    let abbreviated_error = runtime
+        .eval(&format!("read_sdc {}", tcl_path_word(&abbreviated)))
+        .expect_err("command abbreviations must fail read_sdc");
+    let nested_error = runtime
+        .eval(&format!("read_sdc {}", tcl_path_word(&outer)))
+        .expect_err("nested read_sdc must fail");
     std::fs::remove_file(nested).unwrap();
     std::fs::remove_file(abbreviated).unwrap();
     std::fs::remove_file(outer).unwrap();
 
-    assert!(matches!(result, EvalResult::Complete(value) if value == "0 0"));
+    assert!(abbreviated_error.to_string().contains("create_cloc"));
+    assert!(nested_error.to_string().contains("read_sdc"));
 }
 
 #[test]
@@ -239,10 +242,6 @@ fn syntax_only_validates_commands_in_unexecuted_tcl_paths() {
     }
 }
 
-fn temp_script_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "{}-{}-sdc-{name}",
-        env!("CARGO_PKG_NAME"),
-        std::process::id()
-    ))
+fn temp_script_path(name: &str) -> crate::test_support::TestPath {
+    crate::test_support::TestPath::new(name)
 }

@@ -1046,6 +1046,18 @@ defect.
   Reports remain flat. Database writes are schema-declared,
   transactional mutations rather than unrestricted path-based assignment.
   RFC 0010 is the normative command-design policy.
+- **One HDL frontend lifecycle.** Rust and Tcl callers ingest source units and
+  then elaborate a named top. Test fixtures use that same two-stage path; no
+  one-shot parse-and-publish frontend remains alongside it.
+- **Command failures remain failures.** `read_sdc` rolls back the constraint
+  checkpoint and raises a Tcl error when any command in the file fails. The
+  caller cannot accidentally continue after a malformed or unsupported
+  constraint file by ignoring a Boolean result.
+- **Typed command variants.** Standard sibling commands may share an argument
+  schema, but their semantic operation is bound as a typed variant when the
+  catalog is generated. Command handlers do not infer their operation from a
+  command-name string. Scalar options are rejected on their second occurrence;
+  only fields declared as repeated accept multiple occurrences.
 
 ## Rejected Architectures
 

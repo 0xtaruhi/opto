@@ -228,6 +228,19 @@ fn expand_tcl_command(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let name = &input.ident;
     let dispatch = format_ident!("__opto_dispatch_{}", snake_case(&name.to_string()));
     let handler = &command.handler;
+    let kind_argument = if command.kinds.is_empty() {
+        quote!()
+    } else {
+        let arms = command
+            .names
+            .iter()
+            .zip(&command.kinds)
+            .map(|(name, kind)| quote!(#name => #kind,));
+        quote!(, match command {
+            #(#arms)*
+            _ => unreachable!("registered command name is generated from this schema"),
+        })
+    };
     let invocation_type = if generics.has_lifetime {
         quote!(#name<'__tcl>)
     } else {
@@ -244,11 +257,30 @@ fn expand_tcl_command(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
         quote!(None)
     };
     let command_specs = command.names.iter().map(|command_name| {
+        let summary = command.summary.clone().unwrap_or_else(|| {
+            LitStr::new(
+                &format!("Execute the public `{}` command.", command_name.value()),
+                command_name.span(),
+            )
+        });
+        let requires = command.requires.clone().unwrap_or_else(|| {
+            LitStr::new(
+                "The declared arguments and referenced session objects must be valid.",
+                command_name.span(),
+            )
+        });
+        let example = command
+            .example
+            .as_ref()
+            .map_or_else(|| quote!(None), |value| quote!(Some(#value)));
         quote! {
             crate::command_catalog::CommandSpec::typed(
                 #command_name,
                 #dispatch,
                 #sdc_since,
+                #summary,
+                #requires,
+                #example,
                 #schema_type::command_syntax,
             )
         }
@@ -293,7 +325,7 @@ fn expand_tcl_command(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 command,
                 invocation,
             )?;
-            #handler(state, interp, command, arguments)
+            #handler(state, interp, command, arguments #kind_argument)
         }
 
         impl #impl_generics #name #ty_generics #where_clause {
@@ -321,19 +353,27 @@ fn command_constant_ident(command_name: &LitStr) -> syn::Result<Ident> {
 
 struct CommandConfig {
     names: Vec<LitStr>,
+    kinds: Vec<ExprPath>,
     handler: ExprPath,
     sdc: bool,
     sdc_no_positionals: bool,
     option_or_positional: Option<LitStr>,
+    summary: Option<LitStr>,
+    requires: Option<LitStr>,
+    example: Option<LitStr>,
 }
 
 impl CommandConfig {
     fn parse(input: &DeriveInput) -> syn::Result<Self> {
         let mut names: Vec<LitStr> = Vec::new();
         let mut handler: Option<ExprPath> = None;
+        let mut kinds: Vec<ExprPath> = Vec::new();
         let mut sdc = false;
         let mut sdc_no_positionals = false;
         let mut option_or_positional: Option<LitStr> = None;
+        let mut summary: Option<LitStr> = None;
+        let mut requires: Option<LitStr> = None;
+        let mut example: Option<LitStr> = None;
         let mut command_attributes = 0usize;
         for attribute in &input.attrs {
             if !attribute.path().is_ident("command") {
@@ -341,8 +381,11 @@ impl CommandConfig {
             }
             command_attributes += 1;
             attribute.parse_nested_meta(|meta| {
-                if meta.path.is_ident("name") || meta.path.is_ident("alias") {
+                if meta.path.is_ident("name") || meta.path.is_ident("variant") {
                     names.push(meta.value()?.parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("kind") || meta.path.is_ident("variant_kind") {
+                    kinds.push(meta.value()?.parse()?);
                     Ok(())
                 } else if meta.path.is_ident("handler") {
                     if handler.is_some() {
@@ -358,6 +401,15 @@ impl CommandConfig {
                     Ok(())
                 } else if meta.path.is_ident("option_or_positional") {
                     option_or_positional = Some(meta.value()?.parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("summary") {
+                    summary = Some(meta.value()?.parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("requires") {
+                    requires = Some(meta.value()?.parse()?);
+                    Ok(())
+                } else if meta.path.is_ident("example") {
+                    example = Some(meta.value()?.parse()?);
                     Ok(())
                 } else {
                     Err(meta.error("unsupported command attribute"))
@@ -379,6 +431,12 @@ impl CommandConfig {
         let handler = handler.ok_or_else(|| {
             syn::Error::new_spanned(&input.ident, "command requires handler = path")
         })?;
+        if !kinds.is_empty() && kinds.len() != names.len() {
+            return Err(syn::Error::new_spanned(
+                &input.ident,
+                "command kind and variant_kind values must match name and variant values",
+            ));
+        }
         if sdc_no_positionals && !sdc {
             return Err(syn::Error::new_spanned(
                 &input.ident,
@@ -393,10 +451,14 @@ impl CommandConfig {
         }
         Ok(Self {
             names,
+            kinds,
             handler,
             sdc,
             sdc_no_positionals,
             option_or_positional,
+            summary,
+            requires,
+            example,
         })
     }
 }
@@ -408,6 +470,13 @@ enum Shape {
     Required,
     Optional,
     Repeated,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Repetition {
+    Single,
+    Repeatable,
+    PathPoints,
 }
 
 struct FieldConfig<'a> {
@@ -425,6 +494,7 @@ struct FieldConfig<'a> {
     conflicts_with: Vec<Ident>,
     min: Option<usize>,
     max: Option<usize>,
+    repetition: Repetition,
 }
 
 /// Every option name an SDC path-exception command accepts for a path point.
@@ -462,6 +532,7 @@ impl<'a> FieldConfig<'a> {
             conflicts_with: Vec::new(),
             min: None,
             max: None,
+            repetition: Repetition::Single,
         };
         let mut edge_aliases = false;
         for attribute in &field.attrs {
@@ -480,11 +551,12 @@ impl<'a> FieldConfig<'a> {
         edge_aliases: &mut bool,
     ) -> syn::Result<()> {
         attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("long") || meta.path.is_ident("alias") {
+            if meta.path.is_ident("long") {
                 self.names.push(meta.value()?.parse()?);
             } else if meta.path.is_ident("edge_aliases") {
                 *edge_aliases = true;
             } else if meta.path.is_ident("path_points") {
+                self.repetition = Repetition::PathPoints;
                 let span = meta.path.span();
                 self.names.extend(
                     PATH_POINT_OPTIONS
@@ -497,6 +569,8 @@ impl<'a> FieldConfig<'a> {
                 self.unsupported = true;
             } else if meta.path.is_ident("before_options") {
                 self.before_options = true;
+            } else if meta.path.is_ident("repeatable") {
+                self.repetition = Repetition::Repeatable;
             } else if meta.path.is_ident("value_hint") {
                 self.value_hint = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("label") {
@@ -570,6 +644,12 @@ impl<'a> FieldConfig<'a> {
             .map(|name| match self.shape {
                 Shape::Bool | Shape::Unit if self.value_hint.is_none() => {
                     quote!(crate::command_catalog::typed_flag(#id, #name))
+                }
+                Shape::Repeated
+                    if self.repetition == Repetition::Repeatable
+                        || self.repetition == Repetition::PathPoints =>
+                {
+                    quote!(crate::command_catalog::typed_repeated_value(#id, #name, #hint))
                 }
                 _ => quote!(crate::command_catalog::typed_value(#id, #name, #hint)),
             })
@@ -785,7 +865,7 @@ fn validate_field_contract(field: &FieldConfig<'_>) -> syn::Result<()> {
     if field.positional != field.names.is_empty() {
         return Err(syn::Error::new_spanned(
             field.ident,
-            "each argument needs either positional or long/alias attributes",
+            "each argument needs either positional or long attributes",
         ));
     }
     if field.label.is_some() && !field.positional {
@@ -810,6 +890,14 @@ fn validate_field_contract(field: &FieldConfig<'_>) -> syn::Result<()> {
         return Err(syn::Error::new_spanned(
             field.ident,
             "before_options requires a required positional argument",
+        ));
+    }
+    if field.repetition == Repetition::Repeatable
+        && (field.positional || !matches!(field.shape, Shape::Repeated))
+    {
+        return Err(syn::Error::new_spanned(
+            field.ident,
+            "repeatable requires a repeated named option field",
         ));
     }
     if (field.min.is_some() || field.max.is_some())
@@ -975,7 +1063,14 @@ mod tests {
     #[test]
     fn accepts_a_clap_style_typed_command_definition() {
         let input: DeriveInput = syn::parse_quote! {
-            #[command(name = "sample", alias = "sample_alias", handler = execute, sdc)]
+            #[command(
+                name = "sample",
+                kind = SampleKind::Primary,
+                variant = "sample_variant",
+                variant_kind = SampleKind::Variant,
+                handler = execute,
+                sdc
+            )]
             struct SampleArgs<'a> {
                 #[arg(long = "-period")]
                 period: f64,
@@ -989,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_an_alias_for_a_required_field() {
+    fn rejects_an_alias_for_a_required_field() {
         let input: DeriveInput = syn::parse_quote! {
             #[command(name = "sample", handler = execute)]
             struct SampleArgs {
@@ -997,7 +1092,7 @@ mod tests {
                 period: f64,
             }
         };
-        assert!(expand_tcl_command(&input).is_ok());
+        assert!(expand_tcl_command(&input).is_err());
     }
 
     #[test]

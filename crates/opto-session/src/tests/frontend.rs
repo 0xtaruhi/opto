@@ -34,7 +34,7 @@ fn read_hdl_stores_templates_until_explicit_elaboration() {
 }
 
 #[test]
-fn internal_import_selects_the_first_loaded_design() {
+fn test_import_uses_the_public_two_stage_lifecycle() {
     let path = temp_file("first-imported-design.v");
     std::fs::write(
             &path,
@@ -48,8 +48,8 @@ fn internal_import_selects_the_first_loaded_design() {
         .unwrap();
     std::fs::remove_file(path).unwrap();
 
-    assert_eq!(message, "child top");
-    assert_eq!(session.current_design(), Some("child"));
+    assert_eq!(message, "1");
+    assert_eq!(session.current_design(), Some("top"));
     assert_eq!(session.state.designs.keys().count(), 2);
 }
 
@@ -111,14 +111,11 @@ fn synthesize_updates_implementation_and_object_index_for_always_comb_processes(
     let mut session = Session::new();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![module],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![module],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     assert_eq!(
         session
@@ -160,9 +157,7 @@ fn synthesize_updates_implementation_and_object_index_for_always_comb_processes(
     assert_eq!(session.synthesize().unwrap(), "1");
 
     let path = temp_file("always-comb-synthesized.v");
-    session
-        .write_hdl_file(Some(path.clone()), &[], false)
-        .unwrap();
+    session.write_hdl_file(&path, false).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::remove_file(path).unwrap();
     assert!(text.contains("assign y = a;"));

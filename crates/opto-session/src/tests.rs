@@ -263,21 +263,49 @@ fn unsupported_tri_state_leaf(name: &str) -> RtlModule {
     rtl(module)
 }
 
-fn temp_file(name: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "{}-{}-{name}",
-        env!("CARGO_PKG_NAME"),
-        std::process::id()
-    ));
-    path
+static TEST_PATH_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Debug)]
+struct TestPath(PathBuf);
+
+impl TestPath {
+    fn new(name: &str) -> Self {
+        let sequence = TEST_PATH_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(std::env::temp_dir().join(format!(
+            "{}-{}-{sequence}-{name}",
+            env!("CARGO_PKG_NAME"),
+            std::process::id(),
+        )))
+    }
 }
 
-fn temp_dir(name: &str) -> PathBuf {
-    let path = temp_file(name);
-    if path.exists() {
-        std::fs::remove_dir_all(&path).unwrap();
+impl std::ops::Deref for TestPath {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
+}
+
+impl AsRef<std::path::Path> for TestPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn temp_file(name: &str) -> TestPath {
+    TestPath::new(name)
+}
+
+fn temp_dir(name: &str) -> TestPath {
+    let path = temp_file(name);
     std::fs::create_dir_all(&path).unwrap();
     path
 }

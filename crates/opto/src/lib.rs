@@ -73,6 +73,8 @@ mod test_tcl;
 #[cfg(test)]
 use test_tcl::{tcl_path_text, tcl_path_word};
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

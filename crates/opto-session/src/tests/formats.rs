@@ -37,20 +37,15 @@ fn write_hdl_emits_requested_hierarchy() {
 
     let mut session = Session::new();
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![rtl(top), rtl(child)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![rtl(top), rtl(child)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
 
     let path = temp_file("hier.v");
-    let message = session
-        .write_hdl_file(Some(path.clone()), &[], true)
-        .unwrap();
+    let message = session.write_hdl_file(&path, true).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::remove_file(path).unwrap();
 

@@ -249,7 +249,7 @@ increasing pass counts when the dominant delay source is unknown.
 supported command surface includes:
 
 - `-from` and `-to` collections;
-- `-delay max|min` and the documented `-delay_type` spelling;
+- the canonical `-delay_type max|min` spelling;
 - a bounded global worst-path count through `-max_paths` (default 1);
 - `-significant_digits`;
 - full path output.

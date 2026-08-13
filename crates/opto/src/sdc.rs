@@ -99,27 +99,21 @@ pub(super) fn read_sdc(
     })();
     let (code, diagnostic, error_line) = evaluation?;
 
-    let success = code == TCL_OK || code == TCL_RETURN;
-    if !success && !diagnostic.is_empty() {
-        let line =
-            std::fs::read_to_string(&options.file)
-                .ok()
-                .map(|source| crate::error::ErrorSource {
-                    name: options.file.to_string_lossy().into_owned(),
-                    text: source,
-                    line: error_line,
-                    column: None,
-                    length: 1,
-                });
-        if let Some(source) = line.as_ref() {
-            crate::diagnostic::print_source_error(&diagnostic, source, state.ui);
+    if code != TCL_OK && code != TCL_RETURN {
+        let message = if diagnostic.is_empty() {
+            format!("read_sdc: failed to evaluate '{}'", options.file.display())
         } else {
-            eprintln!("{}: {diagnostic}", options.file.display());
-        }
+            diagnostic
+        };
+        let error = crate::ShellError::command(message);
+        return match std::fs::read_to_string(&options.file) {
+            Ok(source) => {
+                Err(error.with_source(options.file.to_string_lossy(), source, error_line))
+            }
+            Err(_) => Err(error),
+        };
     }
-    Ok(CommandResult::Complete(
-        if success { "1" } else { "0" }.to_string(),
-    ))
+    Ok(CommandResult::Complete("1".to_owned()))
 }
 
 fn evaluate_file_transactionally(

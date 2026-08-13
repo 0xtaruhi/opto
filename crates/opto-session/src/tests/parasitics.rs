@@ -4,17 +4,11 @@
 use super::*;
 
 struct ParasiticFixture {
-    dir: PathBuf,
+    _dir: TestPath,
     base: PathBuf,
     partial: PathBuf,
     cycle: PathBuf,
     session: Session,
-}
-
-impl Drop for ParasiticFixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
 }
 
 fn fixture(name: &str) -> ParasiticFixture {
@@ -89,7 +83,7 @@ library (demo) {
         .unwrap();
     session.synthesize().unwrap();
     ParasiticFixture {
-        dir,
+        _dir: dir,
         base,
         partial,
         cycle,

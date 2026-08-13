@@ -148,9 +148,7 @@ library (demo) {
     assert_eq!(cell.reference, "DFD1");
 
     let out_path = dir.join("mapped.v");
-    session
-        .write_hdl_file(Some(out_path.clone()), &[], false)
-        .unwrap();
+    session.write_hdl_file(&out_path, false).unwrap();
     let mapped = std::fs::read_to_string(out_path).unwrap();
     let area = session.report_area().unwrap();
     let qor = session.report_qor().unwrap();
@@ -207,9 +205,7 @@ library (demo) {
     assert_eq!(design.cell(0).unwrap().reference, "Z_INV");
 
     let out_path = dir.join("mapped.v");
-    session
-        .write_hdl_file(Some(out_path.clone()), &[], false)
-        .unwrap();
+    session.write_hdl_file(&out_path, false).unwrap();
     let mapped = std::fs::read_to_string(out_path).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 
@@ -276,9 +272,7 @@ library (demo) {
     assert_eq!(design.cell(0).unwrap().reference, "Z_INV");
 
     let out_path = dir.join("mapped.v");
-    session
-        .write_hdl_file(Some(out_path.clone()), &[], false)
-        .unwrap();
+    session.write_hdl_file(&out_path, false).unwrap();
     let mapped = std::fs::read_to_string(out_path).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 
@@ -349,9 +343,7 @@ library (demo) {
     assert_eq!(design.cell(0).unwrap().reference, "Z_INV");
 
     let out_path = dir.join("mapped.v");
-    session
-        .write_hdl_file(Some(out_path.clone()), &[], false)
-        .unwrap();
+    session.write_hdl_file(&out_path, false).unwrap();
     let mapped = std::fs::read_to_string(out_path).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 
@@ -413,9 +405,7 @@ endmodule
 
     assert_eq!(message, "1");
     let out_path = dir.join("costed-covering.v");
-    session
-        .write_hdl_file(Some(out_path.clone()), &[], false)
-        .unwrap();
+    session.write_hdl_file(&out_path, false).unwrap();
     let mapped = std::fs::read_to_string(out_path).unwrap();
     let area = session.report_area().unwrap();
     std::fs::remove_dir_all(dir).unwrap();

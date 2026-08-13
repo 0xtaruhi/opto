@@ -430,14 +430,11 @@ library (demo) {
     drop(hit);
 
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![hierarchy_leaf("unrelated", 1, false)],
-                top: None,
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![hierarchy_leaf("unrelated", 1, false)],
+            top: None,
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     let unaffected = session.current_timing_model().unwrap();
     assert!(std::sync::Arc::ptr_eq(&first, &unaffected));

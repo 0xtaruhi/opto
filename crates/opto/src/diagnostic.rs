@@ -44,11 +44,6 @@ fn render_error(error: &ShellError, options: UiOptions) -> String {
     }
 }
 
-pub(crate) fn print_source_error(message: &str, source: &ErrorSource, options: UiOptions) {
-    let rendered = render_source_error(message, "error occurs here", source, None, options);
-    anstream::eprintln!("{rendered}");
-}
-
 fn render_source_error(
     message: &str,
     label: &str,

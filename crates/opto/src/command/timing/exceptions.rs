@@ -92,7 +92,7 @@ pub(super) fn set_path_exception_command(
         comment: args.comment,
     };
     let mut session = state.session.borrow_mut();
-    if command == "unset_path_exceptions" {
+    if matches!(args.mutation, MutationKind::Unset) {
         if args.start
             || args.end
             || args.reset_path
@@ -154,6 +154,7 @@ pub(super) fn set_io_delay_command(
     interp: *mut TclInterp,
     command: &'static str,
     args: SetIoDelayArgs<'_>,
+    kind: opto_session::IoDelayKind,
 ) -> Result<ConstraintChange, crate::ShellError> {
     let clock = args
         .clock
@@ -171,11 +172,6 @@ pub(super) fn set_io_delay_command(
             .session
             .borrow_mut()
             .resolve_port_ids(command, &names)?
-    };
-    let kind = match command {
-        "set_input_delay" => opto_session::IoDelayKind::Input,
-        "set_output_delay" => opto_session::IoDelayKind::Output,
-        _ => unreachable!("I/O delay parser is bound to fixed commands"),
     };
     state
         .session
@@ -206,6 +202,7 @@ pub(super) fn unset_io_delay_command(
     interp: *mut TclInterp,
     command: &'static str,
     args: UnsetIoDelayArgs<'_>,
+    kind: opto_session::IoDelayKind,
 ) -> Result<ConstraintChange, crate::ShellError> {
     let clock = args
         .clock
@@ -223,11 +220,6 @@ pub(super) fn unset_io_delay_command(
             .session
             .borrow_mut()
             .resolve_port_ids(command, &names)?
-    };
-    let kind = if command == "unset_input_delay" {
-        opto_session::IoDelayKind::Input
-    } else {
-        opto_session::IoDelayKind::Output
     };
     state
         .session

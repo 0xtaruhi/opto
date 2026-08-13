@@ -432,14 +432,11 @@ fn frontend_update_builds_one_canonical_design_record() {
 
     let mut session = Session::new();
     let message = session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![rtl(module)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![rtl(module)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
 
     assert_eq!(message, "top");
