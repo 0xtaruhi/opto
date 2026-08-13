@@ -16,7 +16,7 @@ use reedline::{
     default_emacs_keybindings,
 };
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal};
@@ -905,7 +905,7 @@ fn path_suggestions(context: &CursorContext, hint: ValueHint, palette: Palette) 
     let Ok(read_dir) = std::fs::read_dir(query.directory()) else {
         return Vec::new();
     };
-    let mut values = Vec::new();
+    let mut values = BinaryHeap::new();
     for entry in read_dir.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -926,8 +926,11 @@ fn path_suggestions(context: &CursorContext, hint: ValueHint, palette: Palette) 
             format!("{{{value}}}")
         };
         values.push(value);
+        if values.len() > COMPLETION_LIMIT {
+            values.pop();
+        }
     }
-    values.sort();
+    let values = values.into_sorted_vec();
     suggestions(
         values,
         context.span,
@@ -983,7 +986,7 @@ mod tests {
             previous: Some("read_hdl".to_string()),
             prefix: prefix.clone(),
             span: Span::new(0, prefix.len()),
-            grouped: false,
+            grouped: true,
         };
 
         let values = path_suggestions(&context, ValueHint::File, Theme::Dark.palette())
