@@ -169,12 +169,21 @@ pub(super) fn build_support_index(
                 crate::SynthError::capacity("support truth range exceeds compact capacity")
             })?;
             for cut in cuts.cuts(node).iter().copied() {
-                if cut.contains(node) || cut.len() < 2 {
-                    truths.push(network.truth_table_for_cut(node, cut));
+                let self_cut = cut.contains(node);
+                let truth = if self_cut {
+                    // The self cut is skipped by decision analysis. Preserve
+                    // its compact row slot without evaluating the entire cone.
+                    TruthTable {
+                        input_count: cut.len(),
+                        bits: 0,
+                    }
+                } else {
+                    network.truth_table_for_cut(node, cut)
+                };
+                truths.push(truth);
+                if self_cut || cut.len() < 2 {
                     continue;
                 }
-                let truth = network.truth_table_for_cut(node, cut);
-                truths.push(truth);
                 entries.push(SupportEntry {
                     key: cut,
                     value: (
