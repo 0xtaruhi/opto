@@ -6,7 +6,7 @@ use super::{
     HashMap, HashSet, ImplementationDb, MappedNetlist, NetId, OptimizationContext, PinId,
     PostmapCandidate, ResynthesisCell, ResynthesisCells, RewireReplacement, SmallVec,
     cell_output_pin, collect_window, debug_mfs, driver_mffc, filled, observability_care,
-    replace_driver_candidate, rewire_candidate, sorted_candidate_nets,
+    replace_driver_candidate, rewire_candidate, sorted_candidate_nets, truth_mask,
 };
 
 const DIRECT_REMAP_NET_CAP: usize = 16;
@@ -194,10 +194,16 @@ impl WireReplacementSearch<'_> {
                 else {
                     return;
                 };
-                for candidate in candidates {
-                    if self.resynthesis.allows(candidate, self.current_area)
-                        && candidate.truth & required_one == required_one
+                let range = compatible_candidate_range(
+                    candidates,
+                    positions.len(),
+                    required_one,
+                    required_zero,
+                );
+                for candidate in &candidates[range] {
+                    if candidate.truth & required_one == required_one
                         && candidate.truth & required_zero == 0
+                        && self.resynthesis.allows(candidate, self.current_area)
                         && best
                             .as_ref()
                             .is_none_or(|(chosen, _)| self.resynthesis.precedes(candidate, chosen))
@@ -245,6 +251,21 @@ impl WireReplacementSearch<'_> {
         .map(|candidate| self.guarded(candidate))
     }
 }
+
+fn compatible_candidate_range(
+    candidates: &[ResynthesisCell],
+    input_count: usize,
+    required_one: u64,
+    required_zero: u64,
+) -> std::ops::Range<usize> {
+    if required_one | required_zero == truth_mask(input_count) {
+        return candidates
+            .binary_search_by_key(&required_one, |candidate| candidate.truth)
+            .map_or(0..0, |index| index..index + 1);
+    }
+    0..candidates.len()
+}
+
 fn required_truth(classes: &[u64], output: &[u64]) -> Option<(u64, u64)> {
     let mut required_one = 0u64;
     let mut required_zero = 0u64;
@@ -492,6 +513,36 @@ pub(super) fn wire_replacement_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate(truth: u64) -> ResynthesisCell {
+        ResynthesisCell {
+            name: format!("cell_{truth}"),
+            index: 0,
+            area: 1.0,
+            delay: 1.0,
+            transition: 1.0,
+            truth,
+            pins: Vec::new(),
+            output: "Y".to_string(),
+        }
+    }
+
+    #[test]
+    fn full_truth_compatibility_uses_the_exact_sorted_candidate() {
+        let candidates = [candidate(0b0001), candidate(0b0110), candidate(0b1110)];
+        assert_eq!(
+            compatible_candidate_range(&candidates, 2, 0b0110, 0b1001),
+            1..2
+        );
+        assert_eq!(
+            compatible_candidate_range(&candidates, 2, 0b0010, 0b0001),
+            0..3
+        );
+        assert_eq!(
+            compatible_candidate_range(&candidates, 2, 0b1010, 0b0101),
+            0..0
+        );
+    }
 
     #[test]
     fn direct_remap_derives_four_input_care_truth() {

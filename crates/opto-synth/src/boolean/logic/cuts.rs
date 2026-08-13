@@ -68,32 +68,40 @@ impl KCut {
 
     fn merge(self, other: Self, max_leaves: usize) -> Option<Self> {
         let mut merged = Self::empty();
-        for leaf in self.leaves().iter().chain(other.leaves()) {
-            merged.insert_leaf(*leaf)?;
-            if merged.len() > max_leaves {
+        let left = self.leaves();
+        let right = other.leaves();
+        let mut left_index = 0;
+        let mut right_index = 0;
+        while left_index < left.len() && right_index < right.len() {
+            let leaf = left[left_index].min(right[right_index]);
+            left_index += usize::from(left[left_index] == leaf);
+            right_index += usize::from(right[right_index] == leaf);
+            if merged.len() == max_leaves {
                 return None;
             }
+            merged.leaves[merged.len()] = leaf;
+            merged.len += 1;
+        }
+        for &leaf in left[left_index..].iter().chain(&right[right_index..]) {
+            if merged.len() == max_leaves {
+                return None;
+            }
+            merged.leaves[merged.len()] = leaf;
+            merged.len += 1;
         }
         Some(merged)
     }
 
     fn insert_leaf(&mut self, leaf: LogicNodeId) -> Option<()> {
         let leaf = leaf.positive();
-        if self.leaves().contains(&leaf) {
-            return Some(());
-        }
         let len = self.len();
+        let Err(insert_at) = self.leaves().binary_search(&leaf) else {
+            return Some(());
+        };
         if len == MAX_CUT_LEAVES {
             return None;
         }
-        let insert_at = self
-            .leaves()
-            .iter()
-            .position(|existing| leaf < *existing)
-            .unwrap_or(len);
-        for index in (insert_at..len).rev() {
-            self.leaves[index + 1] = self.leaves[index];
-        }
+        self.leaves.copy_within(insert_at..len, insert_at + 1);
         self.leaves[insert_at] = leaf;
         self.len += 1;
         Some(())
@@ -129,6 +137,7 @@ impl CutSet {
 }
 
 impl CutSet {
+    #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = KCut> + '_ {
         self.cuts[..self.len()].iter().copied()
     }
@@ -151,30 +160,21 @@ impl CutSet {
     }
 
     fn insert(&mut self, candidate: KCut) {
-        if self.iter().any(|existing| existing == candidate) {
+        let len = self.len();
+        let Err(insert_at) =
+            self.cuts[..len].binary_search_by_key(&candidate.rank(), |cut| cut.rank())
+        else {
+            return;
+        };
+        let cap = usize::from(self.cap);
+        if insert_at == cap {
             return;
         }
-        if self.len() < usize::from(self.cap) {
-            self.cuts[self.len()] = candidate;
-            self.len += 1;
-        } else if let Some(worst_index) = self.worst_cut_index()
-            && candidate.rank() < self.cuts[worst_index].rank()
-        {
-            self.cuts[worst_index] = candidate;
-        }
-        self.sort();
-    }
-
-    fn sort(&mut self) {
-        let len = self.len();
-        self.cuts[..len].sort_by_key(|cut| cut.rank());
-    }
-
-    fn worst_cut_index(&self) -> Option<usize> {
-        self.iter()
-            .enumerate()
-            .max_by_key(|(_, cut)| cut.rank())
-            .map(|(index, _)| index)
+        let next_len = (len + 1).min(cap);
+        self.cuts
+            .copy_within(insert_at..next_len - 1, insert_at + 1);
+        self.cuts[insert_at] = candidate;
+        self.len = u8::try_from(next_len).expect("cut-set capacity fits in its compact length");
     }
 }
 
@@ -680,4 +680,44 @@ fn merge_ternary_cuts(
     let mut intermediate = CutSet::default();
     merge_binary_cuts(first, second, max_leaves, &mut intermediate);
     merge_binary_cuts(intermediate.as_slice(), third, max_leaves, out);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CutSet, KCut, LogicNodeId};
+
+    fn cut(leaves: &[u32]) -> KCut {
+        KCut::from_indices(leaves).expect("test cut must fit compact storage")
+    }
+
+    #[test]
+    fn merges_sorted_cuts_with_overlap_and_a_strict_leaf_bound() {
+        let merged = cut(&[1, 3, 5])
+            .merge(cut(&[2, 3, 4]), 5)
+            .expect("five distinct leaves fit the requested bound");
+        assert_eq!(
+            merged.leaves(),
+            [1usize, 2, 3, 4, 5].map(LogicNodeId::from_index).as_slice()
+        );
+        assert!(cut(&[1, 3, 5]).merge(cut(&[2, 4, 6]), 5).is_none());
+    }
+
+    #[test]
+    fn bounded_cut_set_retains_unique_best_ranked_cuts() {
+        let mut cuts = CutSet::with_cap(3);
+        for candidate in [
+            cut(&[7, 8, 9]),
+            cut(&[3, 4]),
+            cut(&[1]),
+            cut(&[5, 6]),
+            cut(&[3, 4]),
+            cut(&[0]),
+        ] {
+            cuts.insert(candidate);
+        }
+        assert_eq!(
+            cuts.iter().collect::<Vec<_>>(),
+            vec![cut(&[0]), cut(&[1]), cut(&[3, 4])]
+        );
+    }
 }
