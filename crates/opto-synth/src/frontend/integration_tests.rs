@@ -5,6 +5,78 @@
 
 use crate::test_support::*;
 
+#[test]
+fn mapped_vector_addition_drives_every_output_bit() {
+    let timed_cell = |name, function: &str, sense| {
+        let mut cell = target_cell(
+            name,
+            1.0,
+            &[
+                ("A", TargetPinDirection::Input, None),
+                ("B", TargetPinDirection::Input, None),
+                ("Y", TargetPinDirection::Output, Some(function)),
+            ],
+        );
+        for related_pin in ["A", "B"] {
+            cell.pins[2]
+                .timing_arcs
+                .push(opto_library::TargetTimingArc {
+                    related_pin: related_pin.to_string(),
+                    timing_type: opto_library::TargetTimingType::Combinational,
+                    timing_sense: sense,
+                    delay_model: Some(opto_library::ArcDelayModel::Nldm(
+                        opto_library::NldmTimingModel::new(
+                            Some(opto_library::LookupTable::scalar(0.1)),
+                            Some(opto_library::LookupTable::scalar(0.1)),
+                            None,
+                            None,
+                        ),
+                    )),
+                    rise_constraint: None,
+                    fall_constraint: None,
+                });
+        }
+        cell
+    };
+    let mut module = WordModule::new("top");
+    let ty = WordType::bits(2).unwrap();
+    let a = module
+        .add_port("a", PortDirection::Input, ty, test_span())
+        .unwrap();
+    let b = module
+        .add_port("b", PortDirection::Input, ty, test_span())
+        .unwrap();
+    let y = module
+        .add_port(
+            "y",
+            PortDirection::Output,
+            WordType::bits(4).unwrap(),
+            test_span(),
+        )
+        .unwrap();
+    let a = read_port(&mut module, a);
+    let b = read_port(&mut module, b);
+    let zero = module
+        .constant(
+            ConstBits::from_bin_str("00").unwrap(),
+            WordType::bits(2).unwrap(),
+            test_span(),
+        )
+        .unwrap();
+    let a = module.concat(vec![a, zero], test_span()).unwrap();
+    let b = module.concat(vec![b, zero], test_span()).unwrap();
+    let sum = module.binary(BinaryOp::Add, a, b, test_span()).unwrap();
+    connect_port(&mut module, y, sum);
+    let options = target_options(vec![
+        timed_cell("AND2", "A*B", opto_library::TimingSense::PositiveUnate),
+        timed_cell("XOR2", "A^B", opto_library::TimingSense::NonUnate),
+    ]);
+
+    let report = synthesize_test_module(&mut module, options).unwrap();
+
+    assert!(report.report.cells > 0);
+}
+
 fn target_options(cells: Vec<TargetCell>) -> SynthesisOptions {
     SynthesisOptions {
         target_cells: cells.into(),

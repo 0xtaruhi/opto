@@ -1,16 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, BitVal, ImplementationRequest, lower_implementation, word};
+use super::{
+    BitBackend, BitBlaster, BitVal, ImplementationRequest, ScalarBit, lower_implementation, word,
+};
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(super) fn operation_bits(
         &mut self,
         operation: word::OpId,
         kind: word::OpKind,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let result = match kind {
             word::OpKind::Unary { op, arg } => self.unary_bits(op, arg, source),
             word::OpKind::Binary { op, left, right } => {
@@ -51,12 +53,13 @@ impl BitBlaster<'_> {
         original: word::ValueId,
         kind: word::OpKind,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
+        let original_bit = self.backend.import_word(self.module, original);
         match kind {
             word::OpKind::Unary { op, arg } => {
                 let rewritten = self.scalar_value(arg)?;
-                if rewritten == arg {
-                    Ok(original)
+                if rewritten == self.backend.import_word(self.module, arg) {
+                    Ok(original_bit)
                 } else {
                     self.emit_unary(op, rewritten, source)
                 }
@@ -64,8 +67,10 @@ impl BitBlaster<'_> {
             word::OpKind::Binary { op, left, right } => {
                 let rewritten_left = self.scalar_value(left)?;
                 let rewritten_right = self.scalar_value(right)?;
-                if rewritten_left == left && rewritten_right == right {
-                    Ok(original)
+                if rewritten_left == self.backend.import_word(self.module, left)
+                    && rewritten_right == self.backend.import_word(self.module, right)
+                {
+                    Ok(original_bit)
                 } else {
                     self.emit_binary(op, rewritten_left, rewritten_right, source)
                 }
@@ -81,18 +86,18 @@ impl BitBlaster<'_> {
                 let rewritten_then = self.scalar_with_type(rewritten_then, result_ty, source)?;
                 let rewritten_else = self.scalar_value(else_value)?;
                 let rewritten_else = self.scalar_with_type(rewritten_else, result_ty, source)?;
-                if rewritten_cond == cond
-                    && rewritten_then == then_value
-                    && rewritten_else == else_value
+                if rewritten_cond == self.backend.import_word(self.module, cond)
+                    && rewritten_then == self.backend.import_word(self.module, then_value)
+                    && rewritten_else == self.backend.import_word(self.module, else_value)
                 {
-                    Ok(original)
+                    Ok(original_bit)
                 } else {
                     self.emit_mux(rewritten_cond, rewritten_then, rewritten_else, source)
                 }
             }
             word::OpKind::Register(register) => {
                 let bits = self.register_bits(&register, source)?;
-                let [value]: [word::ValueId; 1] = bits.try_into().map_err(|bits: Vec<_>| {
+                let [value]: [ScalarBit; 1] = bits.try_into().map_err(|bits: Vec<_>| {
                     crate::SynthError::invariant(format!(
                         "native scalar register legalized to {} bits",
                         bits.len()
@@ -102,7 +107,7 @@ impl BitBlaster<'_> {
             }
             word::OpKind::Latch(latch) => {
                 let bits = self.latch_bits(&latch, source)?;
-                let [value]: [word::ValueId; 1] = bits.try_into().map_err(|bits: Vec<_>| {
+                let [value]: [ScalarBit; 1] = bits.try_into().map_err(|bits: Vec<_>| {
                     crate::SynthError::invariant(format!(
                         "native scalar latch legalized to {} bits",
                         bits.len()
@@ -125,7 +130,7 @@ impl BitBlaster<'_> {
         op: word::UnaryOp,
         arg: word::ValueId,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let span = self.value(arg)?;
         match op {
             word::UnaryOp::BitNot => (0..span.len())
@@ -165,7 +170,7 @@ impl BitBlaster<'_> {
         right: word::ValueId,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         match op {
             word::BinaryOp::Add
             | word::BinaryOp::Sub
@@ -273,7 +278,7 @@ impl BitBlaster<'_> {
         right: word::ValueId,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let left_span = self.value(left)?;
         let right_span = self.value(right)?;
         let left_ty = self.value_type(left)?;
@@ -294,7 +299,7 @@ impl BitBlaster<'_> {
         left: word::ValueId,
         right: word::ValueId,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let left_span = self.value(left)?;
         let right_span = self.value(right)?;
         let left_ty = self.value_type(left)?;
@@ -326,7 +331,7 @@ impl BitBlaster<'_> {
         else_value: word::ValueId,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let cond = self.scalar_value(cond)?;
         let then_span = self.value(then_value)?;
         let else_span = self.value(else_value)?;
@@ -353,7 +358,7 @@ impl BitBlaster<'_> {
     pub(super) fn concat_bits(
         &mut self,
         parts: &[word::ValueId],
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let mut bits = Vec::new();
         for part in parts.iter().rev() {
             let span = self.value(*part)?;
@@ -367,7 +372,7 @@ impl BitBlaster<'_> {
         value: word::ValueId,
         lsb: u32,
         width: u32,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let span = self.value(value)?;
         let end = lsb
             .checked_add(width)
@@ -386,7 +391,7 @@ impl BitBlaster<'_> {
         value: word::ValueId,
         target: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let span = self.value(value)?;
         let source_ty = self.value_type(value)?;
         let mut bits = (0..target.width())
@@ -407,12 +412,15 @@ impl BitBlaster<'_> {
             })
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
         if target.width() == 1 {
-            if self.value_type(bits[0])? != target {
-                bits[0] = self
+            if self.bit_type(bits[0])? != target
+                && let Some(word) = self.backend.word_value(bits[0])
+            {
+                let cast = self
                     .module
-                    .cast(kind, bits[0], target, source.clone())
+                    .cast(kind, word, target, source.clone())
                     .map_err(crate::SynthError::from)?;
-                self.record_generated_value(bits[0])?;
+                self.record_generated_value(cast)?;
+                bits[0] = self.backend.import_word(self.module, cast);
             }
         } else {
             for bit in &mut bits {

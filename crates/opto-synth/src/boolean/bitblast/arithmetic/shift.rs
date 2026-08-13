@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, word};
+use super::{BitBackend, BitBlaster, ScalarBit, word};
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(in crate::boolean::bitblast) fn shift_bits(
         &mut self,
         op: word::BinaryOp,
@@ -11,7 +11,7 @@ impl BitBlaster<'_> {
         amount: word::ValueId,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let value_span = self.value(value)?;
         let value_ty = self.value_type(value)?;
         let amount_span = self.value(amount)?;

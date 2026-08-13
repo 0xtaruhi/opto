@@ -1,50 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, BitSpan, BitVal, ConstBits, NonZeroU32, constant_index, word};
+use super::{
+    BitBackend, BitBlaster, BitSpan, BitVal, ConstBits, NonZeroU32, ScalarBit, constant_index, word,
+};
 
-impl BitBlaster<'_> {
-    pub(super) fn reserve_generated_operations(
-        &mut self,
-        additional: usize,
-    ) -> Result<(), crate::SynthError> {
-        self.module
-            .reserve_generated_operations(additional)
-            .map_err(crate::SynthError::from)?;
-        self.provenance.reserve_generated_values(additional)?;
-        self.lowered_owners
-            .owners
-            .try_reserve(additional)
-            .map_err(|error| {
-                crate::SynthError::capacity(format!(
-                    "cannot reserve generated regional ownership: {error}"
-                ))
-            })?;
-        Ok(())
-    }
-
-    pub(super) fn emit_mux_batch(
-        &mut self,
-        operations: Vec<word::MuxBatchOperation>,
-    ) -> Result<Box<[word::ValueId]>, crate::SynthError> {
-        let values = self
-            .module
-            .append_mux_batch(operations)
-            .map_err(crate::SynthError::from)?;
-        if let Some(operator) = self.active_operator {
-            self.provenance.set_values_operator(&values, operator)?;
-        }
-        if let Some(region) = self.active_region {
-            self.lowered_owners.set_batch(&values, region)?;
-        }
-        Ok(values)
-    }
-
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(super) fn is_native_scalar_operation(
         &self,
         kind: &word::OpKind,
         result_width: u32,
     ) -> Result<bool, crate::SynthError> {
+        if !self.backend.preserves_native_word_operations() {
+            return Ok(false);
+        }
         if result_width != 1 {
             return Ok(false);
         }
@@ -91,19 +60,12 @@ impl BitBlaster<'_> {
             .ok_or_else(|| crate::SynthError::invariant(format!("unknown RTL value {value:?}")))
     }
 
-    pub(super) fn scalar_constant(&self, value: word::ValueId) -> Option<bool> {
-        let stored = self.module.value(value)?;
-        if stored.ty.width() != 1 {
-            return None;
-        }
-        let word::ValueKind::Constant(bits) = &stored.kind else {
-            return None;
-        };
-        match bits.bit_lsb(0)? {
-            BitVal::Zero => Some(false),
-            BitVal::One => Some(true),
-            BitVal::X | BitVal::Z => None,
-        }
+    pub(super) fn bit_type(&self, bit: ScalarBit) -> Result<word::WordType, crate::SynthError> {
+        self.backend.bit_type(self.module, bit)
+    }
+
+    pub(super) fn scalar_constant(&self, value: ScalarBit) -> Option<bool> {
+        self.backend.constant(self.module, value)
     }
 
     pub(super) fn resized_bit(
@@ -113,7 +75,7 @@ impl BitBlaster<'_> {
         index: u32,
         sign_extend: bool,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         if index < span.len() {
             Ok(self.bit(span, index))
         } else if sign_extend && ty.is_signed() {
@@ -126,7 +88,7 @@ impl BitBlaster<'_> {
     pub(super) fn scalar_value(
         &mut self,
         value: word::ValueId,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         let span = self.value(value)?;
         if span.len() != 1 {
             return Err(crate::SynthError::invariant(format!(
@@ -139,49 +101,55 @@ impl BitBlaster<'_> {
 
     pub(super) fn unsigned_bit(
         &mut self,
-        value: word::ValueId,
+        value: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
-        let ty = self.value_type(value)?;
+    ) -> Result<ScalarBit, crate::SynthError> {
+        let ty = self.bit_type(value)?;
         if !ty.is_signed() {
             return Ok(value);
         }
         let target = word::WordType::new(1, false, ty.state()).map_err(crate::SynthError::from)?;
+        let word = self.backend.word_value(value).ok_or_else(|| {
+            crate::SynthError::invariant("AXM scalar sign coercion is not a Word cast")
+        })?;
         let value = self
             .module
-            .cast(word::CastKind::ZeroExtend, value, target, source.clone())
+            .cast(word::CastKind::ZeroExtend, word, target, source.clone())
             .map_err(crate::SynthError::from)?;
         self.record_generated_value(value)?;
-        Ok(value)
+        Ok(self.backend.import_word(self.module, value))
     }
 
     pub(super) fn scalar_with_type(
         &mut self,
-        value: word::ValueId,
+        value: ScalarBit,
         target: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         if target.width() != 1 {
             return Err(crate::SynthError::invariant(
                 "bitblast scalar coercion target is not one bit",
             ));
         }
-        if self.value_type(value)? == target {
+        if self.bit_type(value)? == target {
             return Ok(value);
         }
+        let Some(word) = self.backend.word_value(value) else {
+            return Ok(value);
+        };
         let value = self
             .module
-            .cast(word::CastKind::ZeroExtend, value, target, source.clone())
+            .cast(word::CastKind::ZeroExtend, word, target, source.clone())
             .map_err(crate::SynthError::from)?;
         self.record_generated_value(value)?;
-        Ok(value)
+        Ok(self.backend.import_word(self.module, value))
     }
 
     pub(super) fn logical_value(
         &mut self,
         value: word::ValueId,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         let span = self.value(value)?;
         self.reduce_span(span, word::BinaryOp::BitOr, source)
     }
@@ -191,17 +159,17 @@ impl BitBlaster<'_> {
         span: BitSpan,
         op: word::BinaryOp,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         let values = (0..span.len()).map(|index| self.bit(span, index)).collect();
         self.reduce_values(values, op, source)
     }
 
     pub(super) fn reduce_values(
         &mut self,
-        mut values: Vec<word::ValueId>,
+        mut values: Vec<ScalarBit>,
         op: word::BinaryOp,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         if values.is_empty() {
             return Err(crate::SynthError::invariant(
                 "cannot reduce an empty bit vector",
@@ -224,41 +192,41 @@ impl BitBlaster<'_> {
     pub(super) fn emit_unary(
         &mut self,
         op: word::UnaryOp,
-        arg: word::ValueId,
+        arg: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
-        let value = self
-            .module
-            .unary(op, arg, source.clone())
-            .map_err(crate::SynthError::from)?;
-        self.record_generated_value(value)?;
-        Ok(value)
+    ) -> Result<ScalarBit, crate::SynthError> {
+        let (bit, generated) = self.backend.emit_unary(self.module, op, arg, source)?;
+        if let Some(value) = generated {
+            self.record_generated_value(value)?;
+        }
+        Ok(bit)
     }
 
     pub(super) fn emit_binary(
         &mut self,
         op: word::BinaryOp,
-        left: word::ValueId,
-        right: word::ValueId,
+        left: ScalarBit,
+        right: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
-        let value = self
-            .module
-            .binary(op, left, right, source.clone())
-            .map_err(crate::SynthError::from)?;
-        self.record_generated_value(value)?;
-        Ok(value)
+    ) -> Result<ScalarBit, crate::SynthError> {
+        let (bit, generated) = self
+            .backend
+            .emit_binary(self.module, op, left, right, source)?;
+        if let Some(value) = generated {
+            self.record_generated_value(value)?;
+        }
+        Ok(bit)
     }
 
     pub(super) fn emit_mux(
         &mut self,
-        cond: word::ValueId,
-        mut then_value: word::ValueId,
-        mut else_value: word::ValueId,
+        cond: ScalarBit,
+        mut then_value: ScalarBit,
+        mut else_value: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
-        let then_ty = self.value_type(then_value)?;
-        let else_ty = self.value_type(else_value)?;
+    ) -> Result<ScalarBit, crate::SynthError> {
+        let then_ty = self.bit_type(then_value)?;
+        let else_ty = self.bit_type(else_value)?;
         if then_ty != else_ty {
             if then_ty.width() != 1 || else_ty.width() != 1 {
                 return Err(crate::SynthError::invariant(
@@ -276,17 +244,13 @@ impl BitBlaster<'_> {
             then_value = self.scalar_with_type(then_value, target, source)?;
             else_value = self.scalar_with_type(else_value, target, source)?;
         }
-        let module_name = self.module.name().to_string();
-        let value = self
-            .module
-            .mux(cond, then_value, else_value, source.clone())
-            .map_err(|error| {
-                crate::SynthError::invariant(format!(
-                    "bitblast mux in design '{module_name}' at {source:?}: {error}"
-                ))
-            })?;
-        self.record_generated_value(value)?;
-        Ok(value)
+        let (bit, generated) =
+            self.backend
+                .emit_mux(self.module, cond, then_value, else_value, source)?;
+        if let Some(value) = generated {
+            self.record_generated_value(value)?;
+        }
+        Ok(bit)
     }
 
     pub(super) fn record_generated_value(
@@ -307,7 +271,7 @@ impl BitBlaster<'_> {
         bit: BitVal,
         state: word::LogicStateKind,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         let index = constant_index(bit, state);
         if let Some(value) = self.constants[index] {
             return Ok(value);
@@ -321,16 +285,17 @@ impl BitBlaster<'_> {
                 source.clone(),
             )
             .map_err(crate::SynthError::from)?;
-        self.constants[index] = Some(value);
-        Ok(value)
+        let bit = self.backend.import_word(self.module, value);
+        self.constants[index] = Some(bit);
+        Ok(bit)
     }
 
     pub(super) fn zero_for_scalar(
         &mut self,
-        value: word::ValueId,
+        value: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
-        let ty = self.value_type(value)?;
+    ) -> Result<ScalarBit, crate::SynthError> {
+        let ty = self.bit_type(value)?;
         if ty.width() != 1 {
             return Err(crate::SynthError::invariant(format!(
                 "zero fill expected a scalar value, got width {}",
@@ -349,15 +314,15 @@ impl BitBlaster<'_> {
             )
             .map_err(crate::SynthError::from)?;
         self.record_generated_value(value)?;
-        Ok(value)
+        Ok(self.backend.import_word(self.module, value))
     }
 
-    pub(super) fn bit(&self, span: BitSpan, index: u32) -> word::ValueId {
+    pub(super) fn bit(&self, span: BitSpan, index: u32) -> ScalarBit {
         assert!(index < span.len());
         self.arena[(span.start + index) as usize]
     }
 
-    pub(super) fn store(&mut self, bits: &[word::ValueId]) -> Result<BitSpan, crate::SynthError> {
+    pub(super) fn store(&mut self, bits: &[ScalarBit]) -> Result<BitSpan, crate::SynthError> {
         let len = NonZeroU32::new(bits.len().try_into().map_err(|_| {
             crate::SynthError::capacity("bit vector exceeds 32-bit width capacity")
         })?)

@@ -3,7 +3,7 @@
 
 //! Canonical integer division and remainder implementation provider.
 
-use super::{BitBlaster, ImplementationRequest};
+use super::{BitBackend, BitBlaster, ImplementationRequest, ScalarBit};
 use crate::planning::provider::{ImplementationProvider, ProviderRecipeId, StructuralEstimate};
 use crate::{OperatorKind, SemanticOperator};
 
@@ -88,11 +88,11 @@ pub(super) fn implementation_provider() -> &'static dyn ImplementationProvider {
     &DivisionProvider
 }
 
-pub(super) fn lower_implementation(
+pub(super) fn lower_implementation<B: BitBackend>(
     recipe: ProviderRecipeId,
-    blaster: &mut BitBlaster<'_>,
+    blaster: &mut BitBlaster<'_, B>,
     request: ImplementationRequest<'_>,
-) -> Result<Vec<opto_ir::word::ValueId>, crate::SynthError> {
+) -> Result<Vec<ScalarBit>, crate::SynthError> {
     if recipe != CANONICAL {
         return Err(crate::SynthError::invariant(
             "division lowering received an unknown recipe",

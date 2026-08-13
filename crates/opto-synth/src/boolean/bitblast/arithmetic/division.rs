@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, BitVal, word};
+use super::{BitBackend, BitBlaster, BitVal, ScalarBit, word};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnsignedMagic {
@@ -10,7 +10,7 @@ struct UnsignedMagic {
     add: bool,
 }
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(in crate::boolean::bitblast) fn divide_bits(
         &mut self,
         left: word::ValueId,
@@ -18,7 +18,7 @@ impl BitBlaster<'_> {
         remainder: bool,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let width = result_ty.width() as usize;
         let left_ty = self.value_type(left)?;
         let right_ty = self.value_type(right)?;
@@ -79,12 +79,12 @@ impl BitBlaster<'_> {
 
     fn divide_by_constant(
         &mut self,
-        dividend: &[word::ValueId],
+        dividend: &[ScalarBit],
         divisor: &[bool],
         need_remainder: bool,
         state: word::LogicStateKind,
         source: &word::SourceSpan,
-    ) -> Result<(Vec<word::ValueId>, Vec<word::ValueId>), crate::SynthError> {
+    ) -> Result<(Vec<ScalarBit>, Vec<ScalarBit>), crate::SynthError> {
         let width = dividend.len();
         let zero = self.constant(BitVal::Zero, state, source)?;
         let Some(divisor_value) = bits_to_u64(divisor) else {
@@ -183,10 +183,10 @@ impl BitBlaster<'_> {
     fn divide_constant_numerator(
         &mut self,
         dividend: &[bool],
-        divisor: &[word::ValueId],
+        divisor: &[ScalarBit],
         state: word::LogicStateKind,
         source: &word::SourceSpan,
-    ) -> Result<(Vec<word::ValueId>, Vec<word::ValueId>), crate::SynthError> {
+    ) -> Result<(Vec<ScalarBit>, Vec<ScalarBit>), crate::SynthError> {
         let width = divisor.len();
         let zero = self.constant(BitVal::Zero, state, source)?;
         let significant = significant_bits(dividend).max(1);
@@ -226,11 +226,11 @@ impl BitBlaster<'_> {
 
     fn restoring_divide_constant(
         &mut self,
-        dividend: &[word::ValueId],
+        dividend: &[ScalarBit],
         divisor: &[bool],
         state: word::LogicStateKind,
         source: &word::SourceSpan,
-    ) -> Result<(Vec<word::ValueId>, Vec<word::ValueId>), crate::SynthError> {
+    ) -> Result<(Vec<ScalarBit>, Vec<ScalarBit>), crate::SynthError> {
         let zero = self.constant(BitVal::Zero, state, source)?;
         let divisor = divisor
             .iter()
@@ -259,11 +259,11 @@ impl BitBlaster<'_> {
 
     fn restoring_divide(
         &mut self,
-        dividend: &[word::ValueId],
-        divisor: &[word::ValueId],
+        dividend: &[ScalarBit],
+        divisor: &[ScalarBit],
         state: word::LogicStateKind,
         source: &word::SourceSpan,
-    ) -> Result<(Vec<word::ValueId>, Vec<word::ValueId>), crate::SynthError> {
+    ) -> Result<(Vec<ScalarBit>, Vec<ScalarBit>), crate::SynthError> {
         if dividend.len() != divisor.len() || dividend.is_empty() {
             return Err(crate::SynthError::invariant(
                 "divider operands must have equal nonzero widths",
@@ -290,12 +290,12 @@ impl BitBlaster<'_> {
 
     fn add_sub_vectors(
         &mut self,
-        left: &[word::ValueId],
-        right: &[word::ValueId],
+        left: &[ScalarBit],
+        right: &[ScalarBit],
         subtract: bool,
         state: word::LogicStateKind,
         source: &word::SourceSpan,
-    ) -> Result<(Vec<word::ValueId>, word::ValueId), crate::SynthError> {
+    ) -> Result<(Vec<ScalarBit>, ScalarBit), crate::SynthError> {
         if left.len() != right.len() || left.is_empty() {
             return Err(crate::SynthError::invariant(
                 "vector adder operands must have equal nonzero widths",
@@ -324,10 +324,10 @@ impl BitBlaster<'_> {
 
     fn conditional_negate_vector(
         &mut self,
-        value: &[word::ValueId],
-        negative: word::ValueId,
+        value: &[ScalarBit],
+        negative: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let mut carry = negative;
         let mut result = Vec::with_capacity(value.len());
         for &bit in value {
@@ -338,7 +338,7 @@ impl BitBlaster<'_> {
         Ok(result)
     }
 
-    fn constant_vector(&self, bits: &[word::ValueId]) -> Option<Vec<bool>> {
+    fn constant_vector(&self, bits: &[ScalarBit]) -> Option<Vec<bool>> {
         bits.iter().map(|&bit| self.scalar_constant(bit)).collect()
     }
 }

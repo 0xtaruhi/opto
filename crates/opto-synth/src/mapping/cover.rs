@@ -257,6 +257,7 @@ pub(crate) struct RegionCoverRequest<'a> {
 pub(crate) fn analyze_region_cover(
     module: &word::WordModule,
     request: RegionCoverRequest<'_>,
+    canonical: crate::boolean::logic::CanonicalRegionLogic,
 ) -> Result<RegionCoverAnalysis, crate::SynthError> {
     if request.roots.is_empty() {
         return Ok(RegionCoverAnalysis::NoCombinationalLogic);
@@ -271,8 +272,12 @@ pub(crate) fn analyze_region_cover(
         .iter()
         .map(|root| root.required_time)
         .collect::<Vec<_>>();
-    let subject =
-        RegionLogicGraph::new_cached(module, &root_values, &root_requirements, request.options)?;
+    let subject = RegionLogicGraph::from_canonical(
+        canonical,
+        &root_values,
+        &root_requirements,
+        request.options,
+    )?;
     let inputs = subject.inputs().to_vec().into_boxed_slice();
     let cuts =
         CutDatabase::build_parallel(subject.network(), MAX_MATCH_INPUTS, request.options.runtime)?;

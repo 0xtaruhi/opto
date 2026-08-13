@@ -28,6 +28,16 @@ struct ContractProjection {
     input_transitions: Box<[(word::ValueId, f64)]>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RegionLogicCandidateInputs<'a> {
+    pub(crate) module: &'a word::WordModule,
+    pub(crate) subject_inputs: &'a [word::ValueId],
+    pub(crate) source_to_local: &'a BTreeMap<word::ValueId, word::ValueId>,
+    pub(crate) ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
+    pub(crate) contracts: &'a [crate::BoundaryContract],
+    pub(crate) roots: &'a [(MappingRoot, word::ValueId)],
+}
+
 impl ContractProjection {
     fn build<'contract, 'bits>(
         topology_roots: &[MappingRoot],
@@ -117,15 +127,19 @@ impl ContractProjection {
 
 impl RegionLogicSlice {
     pub(crate) fn build_candidate(
-        module: &word::WordModule,
         region: crate::RegionAnchorId,
         decision_key: [u8; 32],
-        source_to_local: &std::collections::BTreeMap<word::ValueId, word::ValueId>,
-        ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
-        contracts: &[crate::BoundaryContract],
-        roots: &[(MappingRoot, word::ValueId)],
+        inputs: RegionLogicCandidateInputs<'_>,
     ) -> Result<Self, crate::SynthError> {
-        let mut inputs = BTreeSet::new();
+        let RegionLogicCandidateInputs {
+            module,
+            subject_inputs,
+            source_to_local,
+            ownership,
+            contracts,
+            roots,
+        } = inputs;
+        let mut inputs = subject_inputs.iter().copied().collect::<BTreeSet<_>>();
         let mut topology_roots = Vec::new();
         for &(root, local) in roots {
             let bits = ownership
@@ -177,7 +191,7 @@ impl RegionLogicSlice {
         // observable output to its input instead of silently dropping it.
         topology_roots
             .retain(|root| !inputs.contains(&root.value) || output_bits.contains(&root.value));
-        Self::from_resolved(module, &inputs, topology_roots, &resolved, |value| {
+        Self::from_resolved(&inputs, topology_roots, &resolved, |value| {
             let stored = module.value(value).ok_or_else(|| {
                 crate::SynthError::invariant(
                     "regional binding identity references an unknown local value",
@@ -217,7 +231,6 @@ impl RegionLogicSlice {
     }
 
     fn from_resolved(
-        module: &word::WordModule,
         inputs: &BTreeSet<word::ValueId>,
         topology_roots: Vec<MappingRoot>,
         resolved: &[(&crate::BoundaryContract, Box<[word::ValueId]>)],
@@ -245,29 +258,14 @@ impl RegionLogicSlice {
         boundary_inputs.sort_by_key(|(key, _)| *key);
         boundary_outputs.sort_by_key(|(key, _)| *key);
         let input_aliases = boundary_aliases(&boundary_inputs)?;
-        // The canonical layout below indexes inputs by their boundary binding,
-        // so the dataflow inputs and the frozen input contract bits must name
-        // exactly the same values.
-        // The interface is what the Boolean subject will actually see. Cross-
-        // region dataflow and the frozen contract each describe part of it, but
-        // neither can name a region-local wire read, so the leaf rule the
-        // subject applies is the authority. Enumerating it here means a cover
-        // input can never be absent from its own slice.
+        // The direct AXM subject is authoritative for its logic inputs. Frozen
+        // boundary rows are retained as timing/publication aliases even when a
+        // canonical AXM variable already chose an equivalent signal identity.
         let boundary_values = input_aliases.keys().copied().collect::<BTreeSet<_>>();
-        let mut inputs = inputs
+        let inputs = inputs
             .union(&boundary_values)
             .copied()
             .collect::<BTreeSet<_>>();
-        let declared = inputs.iter().copied().collect::<Vec<_>>();
-        let root_values = topology_roots
-            .iter()
-            .map(|root| root.value)
-            .collect::<Vec<_>>();
-        inputs.extend(crate::boolean::logic::subject_leaves(
-            module,
-            &root_values,
-            &declared,
-        )?);
         let mut input_occurrences = ContentOccurrences::default();
         let mut canonical_inputs = inputs
             .into_iter()
@@ -332,10 +330,6 @@ impl RegionLogicSlice {
             boundary_inputs: boundary_inputs.into_boxed_slice(),
             boundary_outputs: boundary_outputs.into_boxed_slice(),
         })
-    }
-
-    pub(crate) fn inputs(&self) -> &[word::ValueId] {
-        &self.inputs
     }
 
     pub(crate) fn roots(&self) -> &[MappingRoot] {

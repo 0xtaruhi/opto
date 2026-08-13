@@ -378,6 +378,14 @@ used. The worker then performs, in that module:
 2. semantic operator discovery and architecture choice;
 3. selected-recipe bit lowering and Liberty Boolean cover.
 
+Selected recipes emit canonical AXM literals through the shared bit-lowering
+algorithms. Region lowering retains only scalar Word identities needed for
+typed input, root, ownership, provenance, and publication bindings; it does not
+materialize an intermediate scalar-Word Boolean network and rebuild AXM from
+that network. The global sequential shell uses the same algorithms with a Word
+backend because its state cells and structural connections remain publication
+objects.
+
 The sequential shell is selected before Boolean cover establishes its timing
 coordinates. Cover guidance and substrate materialization call one deterministic
 register-cell selector: the selected flip-flop's characterized clock-to-Q delay

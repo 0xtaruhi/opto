@@ -404,23 +404,33 @@ impl RegionArchitectureMaterializer<'_> {
             .iter()
             .map(|(_, local)| *local)
             .collect::<Vec<_>>();
-        let ownership = {
+        let mut binding_values = local_boundary_inputs
+            .iter()
+            .chain(&local_root_values)
+            .chain(boundary_bindings.iter().map(|(_, local)| local))
+            .chain(memory_values.iter().map(|binding| &binding.local))
+            .copied()
+            .collect::<Vec<_>>();
+        binding_values.sort_unstable();
+        binding_values.dedup();
+        let lowering = {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("logic_lowering.region[{row}].bitblast")
             });
-            crate::boolean::bitblast::bitblast_local_region_values(
+            crate::boolean::bitblast::lower_local_region_boolean(
                 &mut module,
-                crate::boolean::bitblast::LocalRegionBitblastRequest {
+                crate::boolean::bitblast::LocalRegionBooleanRequest {
                     plan: &local_decisions,
                     operators: &operators,
                     provenance: &mut provenance,
                     owner: region.row(),
                     boundary_inputs: &local_boundary_inputs,
                     roots: &local_root_values,
-                    runtime,
+                    binding_values: &binding_values,
                 },
             )
         }?;
+        let ownership = lowering.ownership;
         let local_semantics = super::roots::FullDomainRootSemantics::new(&module)?;
         let substrate_outputs = target_output_artifact_keys(
             &module,
@@ -451,21 +461,32 @@ impl RegionArchitectureMaterializer<'_> {
             &empty_port_bindings,
             Some(&sequential_timing),
         )? {
-            let key = mapping_root_pair_key(&module, &local_semantics, root.value)?;
+            let bits = ownership
+                .lowered_bits(root.value)
+                .map_or_else(|| vec![root.value], <[word::ValueId]>::to_vec);
+            let all_outputs_are_substrate = bits
+                .into_iter()
+                .map(|bit| mapping_root_pair_key(&module, &local_semantics, bit))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .all(|key| substrate_outputs.contains(&key));
             root.requires_combinational_cover =
-                local_semantics.requires_artifact(root.value)? && !substrate_outputs.contains(&key);
+                local_semantics.requires_artifact(root.value)? && !all_outputs_are_substrate;
             root_pairs.push((root, root.value));
         }
         let root_pairs = merge_mapping_root_pairs(&module, &local_semantics, root_pairs)?;
         let decision_key = crate::planning::regional::decision_key(memory_implementations);
         let mut slice = super::logic_partition::RegionLogicSlice::build_candidate(
-            &module,
             region.id(),
             decision_key,
-            &source_to_local,
-            &ownership,
-            self.contracts.contracts(region.row()),
-            &root_pairs,
+            super::logic_partition::RegionLogicCandidateInputs {
+                module: &module,
+                subject_inputs: &lowering.subject.inputs,
+                source_to_local: &source_to_local,
+                ownership: &ownership,
+                contracts: self.contracts.contracts(region.row()),
+                roots: &root_pairs,
+            },
         )?;
         slice.project_sequential_timing(&sequential_timing);
         let analysis = super::cover::analyze_region_cover(
@@ -487,10 +508,10 @@ impl RegionArchitectureMaterializer<'_> {
                         self.config.rewrite_recipes,
                         self.config.incremental_metrics,
                     )),
-                    boundary_inputs: slice.inputs(),
                 },
                 regional_slice: &slice,
             },
+            lowering.subject,
         )?;
         let (rematerialized, binding) = match analysis {
             super::cover::RegionCoverAnalysis::Covered(mut analysis) => {

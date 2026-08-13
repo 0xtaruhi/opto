@@ -482,6 +482,9 @@ pub(crate) fn build_candidate_binding<'a>(
             };
             match memory_value.kind {
                 RegionalMemoryValueKind::Operation => {
+                    // A macro read is published by the memory substrate and is
+                    // simultaneously an immutable input to its Boolean fanout.
+                    local_to_sources.entry(lowered).or_default().push(binding);
                     local_to_outputs.entry(lowered).or_default().push(binding);
                 }
                 RegionalMemoryValueKind::State => {

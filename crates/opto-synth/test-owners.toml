@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 393
+expected_tests = 392
 
 [[owners]]
 path = "src/api"
@@ -20,7 +20,7 @@ contract = "Stage ordering, immutable states, publication, determinism, and repo
 [[owners]]
 path = "src/frontend"
 owner = "frontend"
-tests = 26
+tests = 27
 contract = "Procedural normalization and the single validated Word-IR entry boundary."
 
 [[owners]]
@@ -38,7 +38,7 @@ contract = "Region-owned Word optimization, recognition, resource choice, and ar
 [[owners]]
 path = "src/boolean"
 owner = "boolean"
-tests = 94
+tests = 92
 contract = "Bit lowering, canonical Boolean subject construction, rewriting, and graph analysis."
 
 [[owners]]

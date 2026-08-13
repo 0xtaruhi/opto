@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, BitSpan, BitVal, ImplementationRequest, word};
+use super::{BitBackend, BitBlaster, BitSpan, BitVal, ImplementationRequest, ScalarBit, word};
 use crate::OperatorKind;
 use crate::planning::provider::{ImplementationProvider, ProviderRecipeId, StructuralEstimate};
 
@@ -145,12 +145,12 @@ impl ImplementationProvider for DynamicExtractProvider {
 }
 
 impl DynamicExtractProvider {
-    fn lower(
+    fn lower<B: BitBackend>(
         &self,
         recipe: ProviderRecipeId,
-        blaster: &mut BitBlaster<'_>,
+        blaster: &mut BitBlaster<'_, B>,
         request: ImplementationRequest<'_>,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         match recipe {
             ONE_HOT | BARREL => blaster.lower_dynamic_extract_architecture(
                 request.operator,
@@ -170,21 +170,21 @@ pub(super) fn implementation_provider() -> &'static dyn ImplementationProvider {
     &DynamicExtractProvider
 }
 
-pub(super) fn lower_implementation(
+pub(super) fn lower_implementation<B: BitBackend>(
     recipe: ProviderRecipeId,
-    blaster: &mut BitBlaster<'_>,
+    blaster: &mut BitBlaster<'_, B>,
     request: ImplementationRequest<'_>,
-) -> Result<Vec<word::ValueId>, crate::SynthError> {
+) -> Result<Vec<ScalarBit>, crate::SynthError> {
     DynamicExtractProvider.lower(recipe, blaster, request)
 }
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(super) fn dynamic_extract_bits(
         &mut self,
         operation: word::OpId,
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let source_operation = self.source_operation(operation)?.ok_or_else(|| {
             crate::SynthError::invariant(
                 "region-local generated dynamic extract has no architecture decision",
@@ -258,7 +258,7 @@ impl BitBlaster<'_> {
         operator: crate::SemanticOperator,
         one_hot: bool,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let [value, offset] = operator.inputs();
         let width = operator.width();
         let extract = operator.dynamic_extract().ok_or_else(|| {
@@ -323,35 +323,11 @@ impl BitBlaster<'_> {
             }
         }
 
-        let mut generated_muxes = 0usize;
+        let mut result = Vec::with_capacity(width as usize);
         for result_bit in 0..width {
-            let candidate_count = (result_bit..value.len()).take(prefix).count();
-            for (&(_, shift, constant), &needed_len) in stages.iter().zip(&needed) {
-                if constant.is_none() {
-                    generated_muxes = generated_muxes
-                        .checked_add(needed_len.min(candidate_count.saturating_sub(shift)))
-                        .ok_or_else(|| {
-                            crate::SynthError::capacity("dynamic extract generated mux batch")
-                        })?;
-                }
-            }
-        }
-        self.reserve_generated_operations(generated_muxes)?;
-
-        let plan_result_bit = |result_bit: u32| {
-            let candidate_count = (result_bit..value.len()).take(prefix).count();
-            let operation_count = stages
-                .iter()
-                .zip(&needed)
-                .filter(|((_, _, constant), _)| constant.is_none())
-                .map(|((_, shift, _), &needed_len)| {
-                    needed_len.min(candidate_count.saturating_sub(*shift))
-                })
-                .sum();
-            let mut operations = Vec::with_capacity(operation_count);
             let mut candidates = (result_bit..value.len())
                 .take(prefix)
-                .map(|index| word::BatchValue::Existing(self.bit(value, index)))
+                .map(|index| self.bit(value, index))
                 .collect::<Vec<_>>();
             for (&(stage, shift, constant), &needed_len) in stages.iter().zip(&needed) {
                 let limit = needed_len.min(candidates.len().saturating_sub(shift));
@@ -363,85 +339,22 @@ impl BitBlaster<'_> {
                         }
                     }
                     None => {
-                        let control = word::BatchValue::Existing(self.bit(offset, stage));
+                        let control = self.bit(offset, stage);
                         for index in 0..limit {
-                            let ordinal = u32::try_from(operations.len()).map_err(|_| {
-                                crate::SynthError::capacity("dynamic extract mux batch ordinal")
-                            })?;
-                            operations.push(word::MuxBatchOperation {
-                                cond: control,
-                                then_value: candidates[index + shift],
-                                else_value: candidates[index],
-                                source: source.clone(),
-                            });
-                            candidates[index] = word::BatchValue::Generated(ordinal);
+                            candidates[index] = self.emit_mux(
+                                control,
+                                candidates[index + shift],
+                                candidates[index],
+                                source,
+                            )?;
                         }
                     }
                 }
             }
-            let output = candidates.first().copied().ok_or_else(|| {
+            result.push(candidates.first().copied().ok_or_else(|| {
                 crate::SynthError::invariant("dynamic extract has no source candidate")
-            })?;
-            Ok::<_, crate::SynthError>((operations, output))
-        };
-        let plans = match self.runtime {
-            Some(runtime) => runtime.analyze_indexed_with_grain(
-                width as usize,
-                std::num::NonZeroUsize::MIN,
-                |result_bit| {
-                    let result_bit = u32::try_from(result_bit).map_err(|_| {
-                        crate::SynthError::capacity("dynamic extract result-bit task")
-                    })?;
-                    plan_result_bit(result_bit)
-                },
-            )?,
-            None => (0..width)
-                .map(plan_result_bit)
-                .collect::<Result<Vec<_>, crate::SynthError>>()?,
-        };
-        let operation_count = plans.iter().map(|(operations, _)| operations.len()).sum();
-        let mut operations = Vec::with_capacity(operation_count);
-        let mut outputs = Vec::with_capacity(plans.len());
-        let offset_generated =
-            |value: word::BatchValue, offset: u32| -> Result<word::BatchValue, crate::SynthError> {
-                match value {
-                    word::BatchValue::Existing(value) => Ok(word::BatchValue::Existing(value)),
-                    word::BatchValue::Generated(ordinal) => ordinal
-                        .checked_add(offset)
-                        .map(word::BatchValue::Generated)
-                        .ok_or_else(|| {
-                            crate::SynthError::capacity("combined dynamic extract mux batch")
-                        }),
-                }
-            };
-        for (batch, output) in plans {
-            let offset = u32::try_from(operations.len()).map_err(|_| {
-                crate::SynthError::capacity("combined dynamic extract mux batch offset")
-            })?;
-            for mut operation in batch {
-                operation.cond = offset_generated(operation.cond, offset)?;
-                operation.then_value = offset_generated(operation.then_value, offset)?;
-                operation.else_value = offset_generated(operation.else_value, offset)?;
-                operations.push(operation);
-            }
-            outputs.push(offset_generated(output, offset)?);
+            })?);
         }
-        let generated = self.emit_mux_batch(operations)?;
-        let result = outputs
-            .into_iter()
-            .map(|output| {
-                Ok(match output {
-                    word::BatchValue::Existing(value) => value,
-                    word::BatchValue::Generated(ordinal) => {
-                        generated.get(ordinal as usize).copied().ok_or_else(|| {
-                            crate::SynthError::invariant(
-                                "dynamic extract output is outside its mux batch",
-                            )
-                        })?
-                    }
-                })
-            })
-            .collect::<Result<Vec<_>, crate::SynthError>>()?;
         self.zero_out_of_range_extract(
             result,
             offset,
@@ -454,13 +367,13 @@ impl BitBlaster<'_> {
 
     fn zero_out_of_range_extract(
         &mut self,
-        result: Vec<word::ValueId>,
+        result: Vec<ScalarBit>,
         offset: BitSpan,
         maximum: u32,
         state: word::LogicStateKind,
         required: bool,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         if !required {
             return Ok(result);
         }
@@ -489,15 +402,7 @@ impl BitBlaster<'_> {
 
     pub(super) fn offset_bit_constant(&self, offset: BitSpan, index: u32) -> Option<bool> {
         let bit = self.bit(offset, index);
-        let constant = self.module.value(bit).and_then(|value| match &value.kind {
-            word::ValueKind::Constant(bits) => bits.bit_lsb(0),
-            _ => None,
-        })?;
-        match constant {
-            BitVal::Zero => Some(false),
-            BitVal::One => Some(true),
-            BitVal::X | BitVal::Z => None,
-        }
+        self.scalar_constant(bit)
     }
 
     /// Enumerate the offsets a bounded dynamic extract can select. The
@@ -543,7 +448,7 @@ impl BitBlaster<'_> {
         alignment: u32,
         width: u32,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let tap_bit = |tap: u128, result_bit: u32| -> Result<u32, crate::SynthError> {
             u32::try_from(tap)
                 .ok()
@@ -577,7 +482,7 @@ impl BitBlaster<'_> {
         taps: &[u128],
         alignment: u32,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let indices = (alignment.min(offset.len())..offset.len())
             .rev()
             .filter(|&index| self.offset_bit_constant(offset, index).is_none())
@@ -655,10 +560,10 @@ impl BitBlaster<'_> {
 
     fn reduce_balanced(
         &mut self,
-        mut values: Vec<word::ValueId>,
+        mut values: Vec<ScalarBit>,
         op: word::BinaryOp,
         source: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
+    ) -> Result<ScalarBit, crate::SynthError> {
         while values.len() > 1 {
             let mut next = Vec::with_capacity(values.len().div_ceil(2));
             for pair in values.chunks(2) {
@@ -682,7 +587,7 @@ impl BitBlaster<'_> {
         offset: word::ValueId,
         replacement: word::ValueId,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let original = self.value(value)?;
         let offset = self.value(offset)?;
         let replacement = self.value(replacement)?;

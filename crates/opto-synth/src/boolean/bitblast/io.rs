@@ -1,9 +1,82 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitBlaster, BitSpan, BitVal, ConstBits, word};
+use super::{BitBackend, BitBlaster, BitSpan, BitVal, ConstBits, ScalarBit, word};
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
+    pub(super) fn binding_constant(
+        &mut self,
+        original: word::ValueId,
+        bit: bool,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let stored = self
+            .module
+            .value(original)
+            .ok_or_else(|| crate::SynthError::invariant("unknown AXM constant binding value"))?
+            .clone();
+        let ty =
+            word::WordType::new(1, false, stored.ty.state()).map_err(crate::SynthError::from)?;
+        let value = self
+            .module
+            .constant(
+                ConstBits::from_bits(vec![if bit { BitVal::One } else { BitVal::Zero }])
+                    .map_err(crate::SynthError::from)?,
+                ty,
+                stored.source,
+            )
+            .map_err(crate::SynthError::from)?;
+        self.provenance.copy_value_origin(original, value)?;
+        Ok(value)
+    }
+
+    pub(super) fn binding_projection(
+        &mut self,
+        original: word::ValueId,
+        bit: u32,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let stored = self
+            .module
+            .value(original)
+            .ok_or_else(|| crate::SynthError::invariant("unknown AXM binding value"))?
+            .clone();
+        if stored.ty.width() == 1 {
+            return Ok(original);
+        }
+        let value = match stored.kind {
+            word::ValueKind::Signal(reference) => {
+                let lsb = reference
+                    .lsb
+                    .checked_add(bit)
+                    .ok_or_else(|| crate::SynthError::capacity("AXM signal binding bit"))?;
+                self.module
+                    .read_signal_slice(reference.signal, lsb, 1, stored.source.clone())
+                    .map_err(crate::SynthError::from)?
+            }
+            word::ValueKind::Constant(bits) => {
+                let bit = bits.bit_lsb(bit).ok_or_else(|| {
+                    crate::SynthError::invariant("AXM constant binding bit is absent")
+                })?;
+                let bit =
+                    crate::boolean::resolve_synthesis_bit(bit, self.module.name(), &stored.source)?;
+                let ty = word::WordType::new(1, false, stored.ty.state())
+                    .map_err(crate::SynthError::from)?;
+                self.module
+                    .constant(
+                        ConstBits::from_bits(vec![bit]).map_err(crate::SynthError::from)?,
+                        ty,
+                        stored.source.clone(),
+                    )
+                    .map_err(crate::SynthError::from)?
+            }
+            word::ValueKind::Operation(_) => self
+                .module
+                .extract(original, bit, 1, stored.source.clone())
+                .map_err(crate::SynthError::from)?,
+        };
+        self.provenance.copy_value_origin(original, value)?;
+        Ok(value)
+    }
+
     pub(super) fn lower_connect(
         &mut self,
         connect: &word::Connect,
@@ -22,9 +95,12 @@ impl BitBlaster<'_> {
             let target = self.scalar_lvalue(&connect.target, offset)?;
             let mut value = self.bit(span, offset);
             let target_ty = self.scalar_lvalue_type(&target)?;
-            let value_ty = self.value_type(value)?;
+            let value_ty = self.bit_type(value)?;
             if value_ty != target_ty {
-                value = self
+                let word_value = self.backend.word_value(value).ok_or_else(|| {
+                    crate::SynthError::invariant("AXM boundary cannot be written as a Word connect")
+                })?;
+                let cast = self
                     .module
                     .cast(
                         if value_ty.is_signed() {
@@ -32,20 +108,24 @@ impl BitBlaster<'_> {
                         } else {
                             word::CastKind::ZeroExtend
                         },
-                        value,
+                        word_value,
                         target_ty,
                         connect.source.clone(),
                     )
                     .map_err(crate::SynthError::from)?;
-                self.record_generated_value(value)?;
+                self.record_generated_value(cast)?;
+                value = self.backend.import_word(self.module, cast);
             }
-            let lowered_ty = self.value_type(value)?;
+            let lowered_ty = self.bit_type(value)?;
             if lowered_ty != target_ty {
                 return Err(crate::SynthError::invariant(format!(
                     "bitblast failed to legalize scalar connect {:?}: target {target_ty:?}, value {lowered_ty:?}",
                     target.signal
                 )));
             }
+            let value = self.backend.word_value(value).ok_or_else(|| {
+                crate::SynthError::invariant("AXM boundary cannot be written as a Word connect")
+            })?;
             self.module
                 .connect(target, value, connect.source.clone())
                 .map_err(|error| {
@@ -70,9 +150,19 @@ impl BitBlaster<'_> {
             .map(|offset| self.bit(span, offset))
             .collect::<Vec<_>>();
         let lowered = if bits.len() == 1 {
-            bits[0]
+            self.backend.word_value(bits[0]).ok_or_else(|| {
+                crate::SynthError::invariant("AXM instance binding cannot be a Word value")
+            })?
         } else {
             bits.reverse();
+            let bits = bits
+                .into_iter()
+                .map(|bit| {
+                    self.backend.word_value(bit).ok_or_else(|| {
+                        crate::SynthError::invariant("AXM instance binding cannot be a Word value")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             self.module
                 .concat(bits, source)
                 .map_err(crate::SynthError::from)?
@@ -149,6 +239,17 @@ impl BitBlaster<'_> {
         if let Some(span) = self.cache.get(value_id.index()).and_then(|entry| *entry) {
             return Ok(span);
         }
+        if !self.active_values.insert(value_id) {
+            return Err(crate::SynthError::invariant(
+                "bit lowering encountered a static value cycle",
+            ));
+        }
+        let result = self.value_uncached(value_id);
+        self.active_values.remove(&value_id);
+        result
+    }
+
+    fn value_uncached(&mut self, value_id: word::ValueId) -> Result<BitSpan, crate::SynthError> {
         let value = self
             .module
             .value(value_id)
@@ -168,9 +269,11 @@ impl BitBlaster<'_> {
                     let bit = reference.lsb.checked_add(offset).ok_or_else(|| {
                         crate::SynthError::capacity("regional boundary bit index")
                     })?;
-                    self.module
+                    let value = self
+                        .module
                         .read_signal_slice(reference.signal, bit, 1, value.source.clone())
-                        .map_err(crate::SynthError::from)
+                        .map_err(crate::SynthError::from)?;
+                    Ok::<_, crate::SynthError>(self.backend.import_word(self.module, value))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let span = self.store(&bits)?;
@@ -198,7 +301,14 @@ impl BitBlaster<'_> {
                         ))
                     })?
                     .clone();
-                if self.global_scope == super::GlobalBitblastScope::RegionalShell
+                if self.backend.treats_state_as_input()
+                    && matches!(
+                        operation.kind,
+                        word::OpKind::Register(_) | word::OpKind::Latch(_)
+                    )
+                {
+                    self.opaque_bits(value_id, value.ty.width(), &value.source)?
+                } else if self.global_scope == super::GlobalBitblastScope::RegionalShell
                     && self
                         .operation_regions
                         .get(operation_id.index())
@@ -243,7 +353,9 @@ impl BitBlaster<'_> {
                             // producer bit across a hard region boundary. The
                             // producer remains its unique owner; freshly emitted
                             // values were assigned strictly when constructed.
-                            self.lowered_owners.claim(bit, owner);
+                            if let Some(value) = self.backend.word_value(bit) {
+                                self.lowered_owners.claim(value, owner);
+                            }
                         }
                     }
                     self.active_region = previous_region;
@@ -265,7 +377,7 @@ impl BitBlaster<'_> {
         original: word::ValueId,
         ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         if let Some(alias) = self.frozen_semantics.aliases.get(&original).copied() {
             let span = self.value(alias)?;
             return Ok((0..span.len()).map(|bit| self.bit(span, bit)).collect());
@@ -303,7 +415,9 @@ impl BitBlaster<'_> {
             bits.push(bit);
         }
         for &bit in &bits {
-            self.provenance.copy_value_origin(original, bit)?;
+            if let Some(value) = self.backend.word_value(bit) {
+                self.provenance.copy_value_origin(original, value)?;
+            }
         }
         Ok(bits)
     }
@@ -313,9 +427,38 @@ impl BitBlaster<'_> {
         original: word::ValueId,
         reference: word::SignalRef,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
+        if self.backend.follows_signal_drivers() {
+            let mut bits = Vec::with_capacity(reference.width() as usize);
+            for offset in 0..reference.width() {
+                let lsb = reference
+                    .lsb
+                    .checked_add(offset)
+                    .ok_or_else(|| crate::SynthError::invariant("signal bit index overflow"))?;
+                if let Some((driver, bit)) = self.signal_drivers.resolve_bit(reference.signal, lsb)
+                {
+                    let span = self.value(driver)?;
+                    if bit >= span.len() {
+                        return Err(crate::SynthError::invariant(
+                            "signal driver bit exceeds its lowered value",
+                        ));
+                    }
+                    bits.push(self.bit(span, bit));
+                } else {
+                    let input = if reference.width() == 1 {
+                        original
+                    } else {
+                        self.module
+                            .read_signal_slice(reference.signal, lsb, 1, source.clone())
+                            .map_err(crate::SynthError::from)?
+                    };
+                    bits.push(self.backend.import_word(self.module, input));
+                }
+            }
+            return Ok(bits);
+        }
         if reference.width() == 1 {
-            return Ok(vec![original]);
+            return Ok(vec![self.backend.import_word(self.module, original)]);
         }
         (0..reference.width())
             .map(|offset| {
@@ -323,9 +466,31 @@ impl BitBlaster<'_> {
                     .lsb
                     .checked_add(offset)
                     .ok_or_else(|| crate::SynthError::invariant("signal bit index overflow"))?;
-                self.module
+                let value = self
+                    .module
                     .read_signal_slice(reference.signal, bit, 1, source.clone())
-                    .map_err(crate::SynthError::from)
+                    .map_err(crate::SynthError::from)?;
+                Ok(self.backend.import_word(self.module, value))
+            })
+            .collect()
+    }
+
+    fn opaque_bits(
+        &mut self,
+        original: word::ValueId,
+        width: u32,
+        source: &word::SourceSpan,
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
+        (0..width)
+            .map(|bit| {
+                let value = if width == 1 {
+                    original
+                } else {
+                    self.module
+                        .extract(original, bit, 1, source.clone())
+                        .map_err(crate::SynthError::from)?
+                };
+                Ok(self.backend.import_word(self.module, value))
             })
             .collect()
     }
@@ -336,7 +501,7 @@ impl BitBlaster<'_> {
         constant: &ConstBits,
         ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         (0..ty.width())
             .map(|index| {
                 let bit = constant.bit_lsb(index).ok_or_else(|| {
@@ -347,8 +512,11 @@ impl BitBlaster<'_> {
                 let resolved =
                     crate::boolean::resolve_synthesis_bit(bit, self.module.name(), source)?;
                 match (bit, resolved) {
-                    (BitVal::Zero | BitVal::One, _) if ty.width() == 1 => Ok(original),
+                    (BitVal::Zero | BitVal::One, _) if ty.width() == 1 => {
+                        Ok(self.backend.import_word(self.module, original))
+                    }
                     (BitVal::X, BitVal::Zero) if ty.width() == 1 => {
+                        let original = self.backend.import_word(self.module, original);
                         self.zero_for_scalar(original, source)
                     }
                     (_, BitVal::Zero | BitVal::One) => self.constant(resolved, ty.state(), source),

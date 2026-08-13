@@ -288,25 +288,6 @@ impl PrivateArchitecturePublication {
 }
 
 impl ProvenanceBuilder {
-    pub(crate) fn reserve_generated_values(
-        &mut self,
-        additional: usize,
-    ) -> Result<(), crate::SynthError> {
-        self.value_origins
-            .try_reserve(additional)
-            .map_err(|error| {
-                crate::SynthError::capacity(format!(
-                    "cannot reserve generated provenance values: {error}"
-                ))
-            })?;
-        self.visit_epochs.try_reserve(additional).map_err(|error| {
-            crate::SynthError::capacity(format!(
-                "cannot reserve generated provenance visits: {error}"
-            ))
-        })?;
-        Ok(())
-    }
-
     pub(crate) fn for_regional_candidate(module: &word::WordModule) -> Self {
         let empty = OriginSetId::EMPTY;
         let mut origin_ids = HashMap::new();
@@ -447,27 +428,6 @@ impl ProvenanceBuilder {
         operators.push(operator);
         let origin = self.intern(operators)?;
         self.set_value_origin(value, origin);
-        Ok(())
-    }
-
-    pub(crate) fn set_values_operator(
-        &mut self,
-        values: &[word::ValueId],
-        operator: OperatorId,
-    ) -> Result<(), crate::SynthError> {
-        let singleton = self.intern(vec![operator])?;
-        if let Some(last) = values.last() {
-            let required = last
-                .index()
-                .checked_add(1)
-                .ok_or_else(|| crate::SynthError::capacity("generated provenance value batch"))?;
-            if self.value_origins.len() < required {
-                self.value_origins.resize(required, OriginSetId::EMPTY);
-            }
-        }
-        for &value in values {
-            self.value_origins[value.index()] = singleton;
-        }
         Ok(())
     }
 

@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::BitBlaster;
 use super::ImplementationRequest;
 use super::compressor::{BitMatrix, CompressionSchedule};
+use super::{BitBackend, BitBlaster, ScalarBit};
 use crate::OperatorKind;
 use crate::planning::architecture::ArithmeticTerm;
 use crate::planning::provider::{ImplementationProvider, ProviderRecipeId, StructuralEstimate};
@@ -19,10 +19,10 @@ struct MultiplyProvider;
 
 #[derive(Clone, Copy)]
 struct BoothDigit {
-    bits: [word::ValueId; 3],
+    bits: [ScalarBit; 3],
     shift: u32,
     magnitude_width: u32,
-    zero: word::ValueId,
+    zero: ScalarBit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,12 +157,12 @@ impl ImplementationProvider for MultiplyProvider {
 }
 
 impl MultiplyProvider {
-    fn lower(
+    fn lower<B: BitBackend>(
         &self,
         recipe: ProviderRecipeId,
-        blaster: &mut BitBlaster<'_>,
+        blaster: &mut BitBlaster<'_, B>,
         request: ImplementationRequest<'_>,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         if recipe == ARRAY_WALLACE {
             let [left, right] = request.operator.inputs();
             return blaster.array_wallace_multiply_bits(
@@ -205,11 +205,11 @@ pub(super) fn implementation_provider() -> &'static dyn ImplementationProvider {
     &MultiplyProvider
 }
 
-pub(super) fn lower_implementation(
+pub(super) fn lower_implementation<B: BitBackend>(
     recipe: ProviderRecipeId,
-    blaster: &mut BitBlaster<'_>,
+    blaster: &mut BitBlaster<'_, B>,
     request: ImplementationRequest<'_>,
-) -> Result<Vec<word::ValueId>, crate::SynthError> {
+) -> Result<Vec<ScalarBit>, crate::SynthError> {
     MultiplyProvider.lower(recipe, blaster, request)
 }
 
@@ -253,16 +253,16 @@ fn array_structural_estimate(
     })
 }
 
-impl BitBlaster<'_> {
+impl<B: BitBackend> BitBlaster<'_, B> {
     pub(in crate::boolean::bitblast) fn constant_multiply_vector(
         &mut self,
-        multiplicand: &[word::ValueId],
+        multiplicand: &[ScalarBit],
         constant: &[bool],
         output_width: usize,
-        addend: Option<&[word::ValueId]>,
+        addend: Option<&[ScalarBit]>,
         state: word::LogicStateKind,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         if multiplicand.is_empty() || output_width == 0 {
             return Err(crate::SynthError::invariant(
                 "constant multiplier requires nonempty input and output",
@@ -333,7 +333,7 @@ impl BitBlaster<'_> {
 
     fn constant_coefficient_matrix(
         &mut self,
-        multiplicand: &[word::ValueId],
+        multiplicand: &[ScalarBit],
         constant: &[bool],
         width: usize,
         source: &word::SourceSpan,
@@ -389,7 +389,7 @@ impl BitBlaster<'_> {
         input_types: [word::WordType; 2],
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let matrix = self.constant_product_matrix([left, right], input_types, result_ty, source)?;
         let zero = self.constant(BitVal::Zero, result_ty.state(), source)?;
         let one = self.constant(BitVal::One, result_ty.state(), source)?;
@@ -403,7 +403,7 @@ impl BitBlaster<'_> {
         input_types: [word::WordType; 2],
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let matrix = self.radix4_product_matrix([left, right], input_types, result_ty, source)?;
         let zero = self.constant(BitVal::Zero, result_ty.state(), source)?;
         let one = self.constant(BitVal::One, result_ty.state(), source)?;
@@ -495,7 +495,7 @@ impl BitBlaster<'_> {
         input_types: [word::WordType; 2],
         result_ty: word::WordType,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let matrix = self.array_product_matrix([left, right], input_types, result_ty, source)?;
         let zero = self.constant(BitVal::Zero, result_ty.state(), source)?;
         let one = self.constant(BitVal::One, result_ty.state(), source)?;
@@ -586,7 +586,7 @@ impl BitBlaster<'_> {
     fn append_booth_row(
         &mut self,
         matrix: &mut BitMatrix,
-        multiplicand: &[word::ValueId],
+        multiplicand: &[ScalarBit],
         digit: BoothDigit,
         source: &word::SourceSpan,
     ) -> Result<(), crate::SynthError> {
@@ -633,10 +633,10 @@ impl BitBlaster<'_> {
     fn wallace_reduce(
         &mut self,
         matrix: BitMatrix,
-        zero: word::ValueId,
-        one: word::ValueId,
+        zero: ScalarBit,
+        one: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let (left, right) =
             self.reduce_matrix(matrix, CompressionSchedule::Wallace, zero, one, source)?;
         self.add_vectors(&left, &right, zero, source)
@@ -669,11 +669,11 @@ fn nonadjacent_digits(bits: &[bool]) -> Vec<(usize, bool)> {
 }
 
 fn booth_multiplier_bit(
-    bits: &[word::ValueId],
+    bits: &[ScalarBit],
     index: i64,
     signed: bool,
-    zero: word::ValueId,
-) -> word::ValueId {
+    zero: ScalarBit,
+) -> ScalarBit {
     if index < 0 {
         return zero;
     }
