@@ -184,6 +184,19 @@ fn help_is_an_exact_view_of_registered_declarative_syntax() {
 }
 
 #[test]
+fn help_uses_metadata_bound_to_the_command_spec() {
+    let registry = registry();
+    let elaborate = registry.command_help_text("elaborate").unwrap();
+    assert!(elaborate.contains("Elaborate an ingested HDL definition"));
+    assert!(elaborate.contains("must have been ingested with read_hdl"));
+    assert!(elaborate.contains("elaborate top"));
+
+    let synth = registry.command_help_text("synth").unwrap();
+    assert!(synth.contains("single mapping pipeline"));
+    assert!(synth.contains("non-empty target library"));
+}
+
+#[test]
 fn misspelled_option_has_structured_help_and_a_nearby_spelling() {
     use opto_core::DiagnosticSource;
 
@@ -315,6 +328,21 @@ fn invocation_preflight_matches_audited_command_contracts() {
             command: "create_clock",
             args: &["-period", "-1", "-name", "clk"],
             expected_error: None,
+        },
+        Case {
+            command: "create_clock",
+            args: &["-period", "1", "-period", "10", "-name", "clk"],
+            expected_error: Some("option '-period' may be specified only once"),
+        },
+        Case {
+            command: "set_clock_groups",
+            args: &["-group", "a", "-group", "b"],
+            expected_error: None,
+        },
+        Case {
+            command: "report_power",
+            args: &["-analysis_effort", "low", "-analysis_effort", "low"],
+            expected_error: Some("option '-analysis_effort' may be specified only once"),
         },
     ];
 

@@ -139,7 +139,6 @@ fn report_timing_accepts_documented_delay_type_selectors() {
     runtime.register_commands().unwrap();
 
     for command in [
-        "report_timing -delay min",
         "report_timing -delay_type min",
         "report_timing -max_paths 2",
         "report_timing -significant_digits 6",
@@ -150,6 +149,8 @@ fn report_timing_accepts_documented_delay_type_selectors() {
                 .contains("no current design; use elaborate or set_db current_design")
         );
     }
+    let err = runtime.eval("report_timing -delay min").unwrap_err();
+    assert!(err.to_string().contains("unsupported option '-delay'"));
     let err = runtime
         .eval("report_timing -delay_type earliest")
         .unwrap_err();
@@ -161,6 +162,14 @@ fn report_timing_accepts_documented_delay_type_selectors() {
     assert!(
         err.to_string()
             .contains("report_timing: -delay_type min_max is not implemented yet")
+    );
+
+    let err = runtime
+        .eval("report_timing -max_paths 2 -max_paths 3")
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("option '-max_paths' may be specified only once")
     );
 
     let err = runtime.eval("report_timing -max_paths 0").unwrap_err();

@@ -3,7 +3,7 @@
 
 use super::*;
 
-fn install_hierarchy(runtime: &mut Runtime, name: &str) -> PathBuf {
+fn install_hierarchy(runtime: &mut Runtime, name: &str) -> crate::test_support::TestPath {
     let source = temp_script_path(name);
     std::fs::write(
         &source,

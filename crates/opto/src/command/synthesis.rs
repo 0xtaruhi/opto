@@ -4,7 +4,13 @@
 use super::*;
 
 #[derive(TclCommand)]
-#[command(name = "synth", handler = synth)]
+#[command(
+    name = "synth",
+    handler = synth,
+    summary = "Synthesize the current design through Opto's single mapping pipeline.",
+    requires = "A current elaborated design and a non-empty target library are required.",
+    example = "synth"
+)]
 pub(crate) struct SynthArgs {}
 
 #[derive(TclCommand)]

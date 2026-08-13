@@ -1090,17 +1090,7 @@ fn top_option_selects_requested_module() {
 
 #[test]
 fn analysis_owns_primary_and_include_source_snapshots() {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "opto-hdl-analysis-snapshot-{}-{unique}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TestDirectory::new("analysis-snapshot");
     let include = dir.join("width.svh");
     let source = dir.join("top.sv");
     std::fs::write(&include, "`define WIDTH 4\n").unwrap();
@@ -1130,7 +1120,6 @@ fn analysis_owns_primary_and_include_source_snapshots() {
     .unwrap();
     assert_eq!(update.modules[0].word().ports()[0].ty.width(), 4);
     assert_eq!(update.modules[0].word().ports()[1].ty.width(), 4);
-    std::fs::remove_dir(dir).unwrap();
 }
 
 #[test]
@@ -1239,10 +1228,45 @@ struct TestSource {
     path: PathBuf,
 }
 
+static TEST_SOURCE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Debug)]
+struct TestDirectory {
+    path: PathBuf,
+}
+
+impl TestDirectory {
+    fn new(name: &str) -> Self {
+        let sequence = TEST_SOURCE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "{}-{}-{sequence}-{name}",
+            env!("CARGO_PKG_NAME"),
+            std::process::id(),
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self { path }
+    }
+}
+
+impl std::ops::Deref for TestDirectory {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 impl TestSource {
     fn new(name: &str, text: &str) -> Self {
+        let sequence = TEST_SOURCE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "{}-{}-{name}",
+            "{}-{}-{sequence}-{name}",
             env!("CARGO_PKG_NAME"),
             std::process::id()
         ));
@@ -1253,6 +1277,6 @@ impl TestSource {
 
 impl Drop for TestSource {
     fn drop(&mut self) {
-        std::fs::remove_file(&self.path).unwrap();
+        let _ = std::fs::remove_file(&self.path);
     }
 }

@@ -16,9 +16,7 @@ mod error;
 
 pub use error::HdlError;
 
-use opto_slang_sys::{
-    SlangCompileOptions, SlangDefine, SlangLanguage, SlangSourceFile, SlangSourceUnit,
-};
+use opto_slang_sys::{SlangDefine, SlangLanguage, SlangSourceFile, SlangSourceUnit};
 pub use opto_slang_sys::{
     SlangDiagnostic, SlangDiagnosticLocation, SlangDiagnosticSeverity, SlangError,
 };
@@ -167,29 +165,18 @@ impl Frontend {
         Ok(update)
     }
 
-    /// Performs analysis and elaboration as one operation.
-    ///
-    /// When [`FrontendOptions::top`] is absent, slang chooses the unique top or
-    /// reports ambiguity.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same source, option, native frontend, lowering, IR, and
-    /// runtime failures as the separate analysis/elaboration flow.
-    pub fn read_verilog(
+    #[cfg(test)]
+    fn read_verilog(
         files: &[PathBuf],
         options: &FrontendOptions,
         runtime: &opto_runtime::ExecutionContext,
     ) -> Result<DbUpdate, HdlError> {
-        require_files(files)?;
-
-        let compilation =
-            opto_slang_sys::compile_lazy(files, &slang_options(options, runtime.parallelism()))
-                .map_err(HdlError::Slang)?;
-        let diagnostics = compilation.diagnostics().to_vec();
-        let mut update = lower::compilation(&compilation, options, runtime)?;
-        update.diagnostics = diagnostics;
-        Ok(update)
+        let source_set = Self::ingest_verilog(files, options, runtime)?;
+        Self::elaborate_verilog(
+            &[source_set],
+            options.top.as_deref().unwrap_or("top"),
+            runtime,
+        )
     }
 }
 
@@ -228,16 +215,6 @@ fn slang_source_units(
             language: slang_language(options.language),
         })
         .collect())
-}
-
-fn slang_options(options: &FrontendOptions, max_threads: usize) -> SlangCompileOptions {
-    SlangCompileOptions {
-        top: options.top.clone(),
-        include_paths: options.include_paths.clone(),
-        defines: slang_defines(options),
-        language: slang_language(options.language),
-        max_threads: Some(max_threads),
-    }
 }
 
 fn slang_language(language: VerilogLanguage) -> SlangLanguage {

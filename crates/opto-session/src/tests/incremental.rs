@@ -28,14 +28,11 @@ fn hierarchical_synthesis_publishes_one_flat_root_artifact_and_reuses_it() {
     let mut session = Session::new();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![top, child],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![top, child],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
 
     let mut first_events = Vec::new();
@@ -125,9 +122,7 @@ fn hierarchical_synthesis_publishes_one_flat_root_artifact_and_reuses_it() {
     );
 
     let path = temp_file("synthesized-hierarchy.v");
-    session
-        .write_hdl_file(Some(path.clone()), &[], true)
-        .unwrap();
+    session.write_hdl_file(&path, true).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::remove_file(path).unwrap();
     assert!(text.contains("module top"));
@@ -168,14 +163,11 @@ library (demo) {
     session.set_lib_search_path(vec![PathBuf::from(dir.display().to_string())]);
     session.read_libs(&[PathBuf::from("demo.lib")]).unwrap();
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![top, middle, leaf],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![top, middle, leaf],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
 
     let mut events = Vec::new();
@@ -245,9 +237,7 @@ library (demo) {
     assert!(qor.contains("Timing paths: 0"), "{qor}");
     assert!(!qor.contains("Critical Path Length:"), "{qor}");
     let netlist = dir.join("flat.v");
-    session
-        .write_hdl_file(Some(netlist.clone()), &[], true)
-        .unwrap();
+    session.write_hdl_file(&netlist, true).unwrap();
     let netlist = std::fs::read_to_string(netlist).unwrap();
     assert_eq!(netlist.matches("module ").count(), 1);
 
@@ -266,14 +256,11 @@ library (demo) {
     );
 
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![hierarchy_leaf("leaf", 2, false)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![hierarchy_leaf("leaf", 2, false)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     let mut changed_events = Vec::new();
     session
@@ -308,14 +295,11 @@ fn switching_effort_resynthesizes_the_same_canonical_root_artifact() {
     let mut session = Session::new();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![top, leaf],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![top, leaf],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     session.synthesize().unwrap();
 
@@ -358,14 +342,11 @@ fn timing_uses_each_designs_canonical_root_artifact() {
     let mut session = Session::new();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![top, middle, leaf],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![top, middle, leaf],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     session.synthesize().unwrap();
     session.set_current_design("middle").unwrap();
@@ -419,27 +400,21 @@ fn changing_a_leaf_body_resynthesizes_the_root_artifact() {
     let mut session = Session::new();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![top, left, right],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![top, left, right],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     session.synthesize().unwrap();
     let original_top = artifact_revision(&session, "top");
 
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![hierarchy_leaf("left", 1, true)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![hierarchy_leaf("left", 1, true)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     let mut events = Vec::new();
     session
@@ -501,14 +476,11 @@ fn changing_a_child_interface_resynthesizes_the_root_artifact() {
     let mut session = Session::new();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![top, middle, leaf],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![top, middle, leaf],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     session.synthesize().unwrap();
     let original_top = artifact_revision(&session, "top");
@@ -524,14 +496,11 @@ fn changing_a_child_interface_resynthesizes_the_root_artifact() {
         .unwrap();
     let changed_leaf = RtlModule::new(changed_leaf, procedures).unwrap();
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![changed_leaf],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![changed_leaf],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
 
     let mut events = Vec::new();
@@ -610,26 +579,20 @@ library (demo) {
     session.set_lib_search_path(vec![PathBuf::from(dir.display().to_string())]);
     session.read_libs(&[PathBuf::from("demo.lib")]).unwrap();
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![independent_mapping_cones(BinaryOp::BitAnd)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![independent_mapping_cones(BinaryOp::BitAnd)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     session.synthesize().unwrap();
 
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     let mut events = Vec::new();
     session
@@ -670,14 +633,11 @@ library (demo) {
     let mut cold = Session::new();
     cold.set_lib_search_path(vec![PathBuf::from(dir.display().to_string())]);
     cold.read_libs(&[PathBuf::from("demo.lib")]).unwrap();
-    cold.apply_db_update(
-        DbUpdate {
-            modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
-            top: Some("top".to_string()),
-            diagnostics: Vec::new(),
-        },
-        CurrentDesignPolicy::ElaboratedTop,
-    )
+    cold.apply_db_update(DbUpdate {
+        modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
+        top: Some("top".to_string()),
+        diagnostics: Vec::new(),
+    })
     .unwrap();
     cold.synthesize().unwrap();
     let cold = cold
@@ -741,14 +701,11 @@ library (demo) {
     let mut original = Session::new();
     configure(&mut original);
     original
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![independent_mapping_cones(BinaryOp::BitAnd)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![independent_mapping_cones(BinaryOp::BitAnd)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     original.synthesize().unwrap();
     let checkpoint = dir.join("top.ock");
@@ -784,14 +741,11 @@ library (demo) {
     );
 
     restored
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     let mut incremental_events = Vec::new();
     restored
@@ -825,14 +779,11 @@ library (demo) {
 
     let mut cold = Session::new();
     configure(&mut cold);
-    cold.apply_db_update(
-        DbUpdate {
-            modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
-            top: Some("top".to_string()),
-            diagnostics: Vec::new(),
-        },
-        CurrentDesignPolicy::ElaboratedTop,
-    )
+    cold.apply_db_update(DbUpdate {
+        modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
+        top: Some("top".to_string()),
+        diagnostics: Vec::new(),
+    })
     .unwrap();
     cold.synthesize().unwrap();
     let cold_verilog = mapped_verilog_text(
@@ -896,28 +847,22 @@ fn rereading_identical_rtl_keeps_incremental_synthesis_artifacts() {
     let mut session = Session::new();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![hierarchy_leaf("top", 1, true)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![hierarchy_leaf("top", 1, true)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     session.synthesize().unwrap();
     let implementation = artifact_revision(&session, "top");
     let source_revision = session.state.designs.get("top").unwrap().source_revision;
 
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![hierarchy_leaf("top", 1, true)],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![hierarchy_leaf("top", 1, true)],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     let read_revision = session.revision();
     session.synthesize().unwrap();
@@ -935,34 +880,28 @@ fn failed_root_synthesis_does_not_publish_a_partial_artifact() {
     let mut session = Session::new();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![
-                    hierarchy_parent("top", 1, &[("u_left", "left"), ("u_right", "right")]),
-                    hierarchy_leaf("left", 1, false),
-                    hierarchy_leaf("right", 1, false),
-                ],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![
+                hierarchy_parent("top", 1, &[("u_left", "left"), ("u_right", "right")]),
+                hierarchy_leaf("left", 1, false),
+                hierarchy_leaf("right", 1, false),
+            ],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     session.synthesize().unwrap();
     let top_implementation = artifact_revision(&session, "top");
 
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![
-                    hierarchy_leaf("left", 1, true),
-                    unsupported_tri_state_leaf("right"),
-                ],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![
+                hierarchy_leaf("left", 1, true),
+                unsupported_tri_state_leaf("right"),
+            ],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     let read_revision = session.revision();
     assert!(session.synthesize().is_err());
@@ -1000,18 +939,15 @@ fn synthesize_publication_traces_only_the_root_artifact() {
     let mut session = Session::with_parallelism(4).unwrap();
     install_test_mapping_library(&mut session);
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![
-                    hierarchy_parent("top", 1, &[("u_left", "left"), ("u_right", "right")]),
-                    hierarchy_leaf("left", 1, true),
-                    hierarchy_leaf("right", 1, false),
-                ],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![
+                hierarchy_parent("top", 1, &[("u_left", "left"), ("u_right", "right")]),
+                hierarchy_leaf("left", 1, true),
+                hierarchy_leaf("right", 1, false),
+            ],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     let gate = Arc::new((
         std::sync::Mutex::new(GateState::default()),
@@ -1077,18 +1013,15 @@ fn linked_root_synthesis_is_deterministic_across_thread_counts() {
         session.process.runtime =
             ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads }).unwrap();
         session
-            .apply_db_update(
-                DbUpdate {
-                    modules: vec![
-                        hierarchy_parent("top", 1, &[("u_left", "left"), ("u_right", "right")]),
-                        hierarchy_leaf("left", 1, true),
-                        hierarchy_leaf("right", 1, true),
-                    ],
-                    top: Some("top".to_string()),
-                    diagnostics: Vec::new(),
-                },
-                CurrentDesignPolicy::ElaboratedTop,
-            )
+            .apply_db_update(DbUpdate {
+                modules: vec![
+                    hierarchy_parent("top", 1, &[("u_left", "left"), ("u_right", "right")]),
+                    hierarchy_leaf("left", 1, true),
+                    hierarchy_leaf("right", 1, true),
+                ],
+                top: Some("top".to_string()),
+                diagnostics: Vec::new(),
+            })
             .unwrap();
         session.synthesize().unwrap();
         let mut output = Vec::new();

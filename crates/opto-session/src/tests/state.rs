@@ -353,9 +353,7 @@ fn successful_frontend_update_publishes_recoverable_diagnostics_once() {
         }],
     };
 
-    session
-        .apply_db_update(update, CurrentDesignPolicy::ElaboratedTop)
-        .unwrap();
+    session.apply_db_update(update).unwrap();
 
     let diagnostics = session.take_diagnostics();
     assert_eq!(diagnostics.len(), 1);
@@ -377,9 +375,7 @@ fn frontend_batch_publishes_exactly_one_revision() {
         diagnostics: Vec::new(),
     };
 
-    session
-        .apply_db_update(update, CurrentDesignPolicy::ElaboratedTop)
-        .unwrap();
+    session.apply_db_update(update).unwrap();
 
     assert_eq!(session.revision(), initial.next().unwrap());
     assert_eq!(design_names(&session), ["a".to_string(), "b".to_string()]);
@@ -396,10 +392,7 @@ fn rejected_frontend_batch_does_not_publish_partial_state() {
     };
 
     assert_eq!(
-        session
-            .apply_db_update(update, CurrentDesignPolicy::ElaboratedTop)
-            .unwrap_err()
-            .to_string(),
+        session.apply_db_update(update).unwrap_err().to_string(),
         "frontend returned duplicate design 'top'"
     );
     assert_eq!(session.revision(), initial);

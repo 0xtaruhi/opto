@@ -10,6 +10,7 @@ pub(super) fn set_port_constraint_command(
     interp: *mut TclInterp,
     command: &'static str,
     args: PortConstraintCommandArgs<'_>,
+    kind: PortConstraintKind,
 ) -> Result<ConstraintChange, crate::ShellError> {
     let mut ports = Vec::new();
     for object in &args.objects {
@@ -26,17 +27,16 @@ pub(super) fn set_port_constraint_command(
         }
     }
     let mut session = state.session.borrow_mut();
-    match command {
-        "set_input_transition" => session.set_input_transition_slots(
+    match kind {
+        PortConstraintKind::InputTransition => session.set_input_transition_slots(
             args.value, args.rise, args.fall, args.min, args.max, &ports,
         ),
-        "set_load" => {
+        PortConstraintKind::Load => {
             session.set_load_slots(args.value, args.rise, args.fall, args.min, args.max, &ports)
         }
-        "set_drive" => {
+        PortConstraintKind::Drive => {
             session.set_drive(args.value, args.rise, args.fall, args.min, args.max, &ports)
         }
-        _ => unreachable!("port constraint definition uses fixed command names"),
     }
     .map_err(crate::ShellError::from)
 }
@@ -82,21 +82,17 @@ pub(super) fn set_design_rule_command(
     limit: f64,
     object_args: &[TclArg<'_>],
     scope: DesignRuleScope,
+    kind: DesignRuleKind,
 ) -> Result<ConstraintChange, crate::ShellError> {
     let mut objects = Vec::new();
     for object in object_args {
         objects.extend(resolve_design_rule_objects(state, interp, command, object)?);
     }
     let mut session = state.session.borrow_mut();
-    let result = match command {
-        "set_max_transition" => session.set_max_transition(limit, &objects, scope),
-        "set_max_capacitance" => session.set_max_capacitance(limit, &objects, scope),
-        "set_max_fanout" => session.set_max_fanout(limit, &objects),
-        _ => {
-            return Err(crate::ShellError::command(format!(
-                "{command}: internal design-rule dispatch error"
-            )));
-        }
+    let result = match kind {
+        DesignRuleKind::Transition => session.set_max_transition(limit, &objects, scope),
+        DesignRuleKind::Capacitance => session.set_max_capacitance(limit, &objects, scope),
+        DesignRuleKind::Fanout => session.set_max_fanout(limit, &objects),
     };
     result.map_err(crate::ShellError::from)
 }
@@ -160,19 +156,10 @@ pub(super) fn disable_timing_command(
     interp: *mut TclInterp,
     command: &'static str,
     args: DisableTimingArgs<'_>,
+    kind: MutationKind,
 ) -> Result<ConstraintChange, crate::ShellError> {
-    if args.from.len() > 1 {
-        return Err(crate::ShellError::command(format!(
-            "{command}: -from specified more than once"
-        )));
-    }
-    if args.to.len() > 1 {
-        return Err(crate::ShellError::command(format!(
-            "{command}: -to specified more than once"
-        )));
-    }
-    let from = args.from.into_iter().next();
-    let to = args.to.into_iter().next();
+    let from = args.from;
+    let to = args.to;
     let endpoints = if let Some(endpoints) = state
         .session
         .borrow()
@@ -210,7 +197,7 @@ pub(super) fn disable_timing_command(
         })
         .collect::<Vec<_>>();
     let mut session = state.session.borrow_mut();
-    if command == "set_disable_timing" {
+    if matches!(kind, MutationKind::Set) {
         session.set_disable_timing(&constraints)
     } else {
         session.unset_disable_timing(&constraints)
@@ -223,18 +210,18 @@ pub(super) fn set_logic_command(
     interp: *mut TclInterp,
     command: &'static str,
     args: SetLogicArgs<'_>,
+    kind: LogicKind,
 ) -> Result<ConstraintChange, crate::ShellError> {
     let endpoints = resolve_case_analysis_endpoints(state, interp, command, &args.objects)?;
     let mut session = state.session.borrow_mut();
-    match command {
-        "set_logic_zero" => {
+    match kind {
+        LogicKind::Zero => {
             session.set_case_analysis(opto_session::CaseAnalysisValue::Zero, &endpoints)
         }
-        "set_logic_one" => {
+        LogicKind::One => {
             session.set_case_analysis(opto_session::CaseAnalysisValue::One, &endpoints)
         }
-        "set_logic_dc" => session.unset_case_analysis(&endpoints),
-        _ => unreachable!("logic parser is bound to fixed commands"),
+        LogicKind::DontCare => session.unset_case_analysis(&endpoints),
     }
     .map_err(crate::ShellError::from)
 }

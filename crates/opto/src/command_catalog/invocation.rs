@@ -198,6 +198,21 @@ fn parse_layout<T: AsRef<str>>(
                 Some(raw),
             ));
         };
+        if !option.repeatable
+            && options
+                .iter()
+                .any(|seen: &ParsedOptionIndex| seen.id == option.id)
+        {
+            return Err(invocation_error(
+                command,
+                format!(
+                    "{command}: option '{}' may be specified only once",
+                    option.name
+                ),
+                syntax,
+                None,
+            ));
+        }
         seen_options.push(option.name);
         let value_index = if let Some(value_hint) = option.value {
             explicit_redirect_target |=

@@ -24,11 +24,6 @@ impl HdlCatalog {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CurrentDesignPolicy {
-    ElaboratedTop,
-    FirstImported,
-}
 impl Session {
     /// Parse `SystemVerilog` source batches without elaborating a top design.
     pub fn read_hdl(
@@ -92,20 +87,19 @@ impl Session {
         Ok("1".to_string())
     }
 
-    /// Import fully lowered Verilog modules for tests and internal tooling.
-    pub fn import_verilog(
+    #[cfg(test)]
+    pub(crate) fn import_verilog(
         &mut self,
         files: &[PathBuf],
         frontend: &FrontendOptions,
     ) -> Result<String, crate::SessionError> {
-        let update = Frontend::read_verilog(files, frontend, &self.process.runtime)?;
-        self.apply_db_update(update, CurrentDesignPolicy::FirstImported)
+        self.read_hdl(files, frontend)?;
+        self.elaborate(frontend.top.as_deref().unwrap_or("top"))
     }
 
     pub(crate) fn apply_db_update(
         &mut self,
         update: DbUpdate,
-        current_policy: CurrentDesignPolicy,
     ) -> Result<String, crate::SessionError> {
         let DbUpdate {
             modules,
@@ -190,17 +184,10 @@ impl Session {
         }
         debug_assert!(synthesis_detachments.is_empty());
 
-        match current_policy {
-            CurrentDesignPolicy::ElaboratedTop => {
-                if let Some(top) = top {
-                    self.state.current_design = Some(top);
-                } else if self.state.current_design.is_none() && names.len() == 1 {
-                    self.state.current_design = names.first().cloned();
-                }
-            }
-            CurrentDesignPolicy::FirstImported => {
-                self.state.current_design = names.first().cloned();
-            }
+        if let Some(top) = top {
+            self.state.current_design = Some(top);
+        } else if self.state.current_design.is_none() && names.len() == 1 {
+            self.state.current_design = names.first().cloned();
         }
 
         if !changed_names.is_empty() {
@@ -229,7 +216,7 @@ impl Session {
         }) {
             let update =
                 Frontend::elaborate_verilog(&source_sets, design_name, &self.process.runtime)?;
-            self.apply_db_update(update, CurrentDesignPolicy::ElaboratedTop)?;
+            self.apply_db_update(update)?;
             return Ok("1".to_string());
         }
         self.set_current_design(design_name)?;

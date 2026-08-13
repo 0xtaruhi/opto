@@ -4,7 +4,13 @@
 use super::*;
 
 #[derive(TclCommand)]
-#[command(name = "elaborate", handler = elaborate)]
+#[command(
+    name = "elaborate",
+    handler = elaborate,
+    summary = "Elaborate an ingested HDL definition and make it the current design.",
+    requires = "The named definition must have been ingested with read_hdl.",
+    example = "elaborate top"
+)]
 pub(crate) struct ElaborateArgs {
     #[arg(positional, value_hint = ValueHint::Design)]
     design: String,
@@ -15,7 +21,12 @@ pub(crate) struct ElaborateArgs {
 pub(crate) struct CheckDesignArgs {}
 
 #[derive(TclCommand)]
-#[command(name = "write_hdl", handler = write_hdl)]
+#[command(
+    name = "write_hdl",
+    handler = write_hdl,
+    requires = "A current elaborated or synthesized design is required.",
+    example = "write_hdl mapped.v"
+)]
 pub(crate) struct WriteHdlArgs {
     #[arg(long = "-hierarchy")]
     hierarchy: bool,
@@ -60,7 +71,7 @@ pub(crate) fn write_hdl(
     state
         .session
         .borrow()
-        .write_hdl_file(Some(args.file), &[], args.hierarchy)
+        .write_hdl_file(&args.file, args.hierarchy)
         .map(CommandResult::Complete)
         .map_err(Into::into)
 }

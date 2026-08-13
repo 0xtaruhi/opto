@@ -21,7 +21,7 @@ pub(crate) struct ReportPowerArgs {
             suggested: &["low"],
         }
     )]
-    analysis_effort: Vec<String>,
+    analysis_effort: Option<String>,
     #[arg(long = "-groups", unsupported, value_hint = ValueHint::Text)]
     _groups: (),
     #[arg(long = "-only", unsupported, value_hint = ValueHint::Text)]
@@ -160,7 +160,7 @@ pub(crate) fn report_power(
     }
     options.flat = args.flat;
     options.include_input_nets = args.include_input_nets;
-    for value in args.analysis_effort {
+    if let Some(value) = args.analysis_effort {
         match value.as_str() {
             "low" => {}
             "medium" | "high" => {

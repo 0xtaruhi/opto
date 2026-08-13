@@ -24,6 +24,9 @@ pub(super) struct CommandSpec {
     pub name: &'static str,
     pub executor: ParsedCommandHandler,
     pub sdc_since: Option<SdcVersion>,
+    summary: &'static str,
+    requires: &'static str,
+    example: Option<&'static str>,
     syntax: fn() -> CommandSyntax,
 }
 
@@ -156,7 +159,7 @@ impl CommandRegistry {
 
     pub(crate) fn command_help_text(&self, name: &str) -> Option<String> {
         let command = self.find(name)?;
-        Some(format_command_help(command.spec.name, &command.syntax))
+        Some(format_command_help(command.spec, &command.syntax))
     }
 }
 
@@ -165,12 +168,18 @@ impl CommandSpec {
         name: &'static str,
         handler: ParsedCommandHandler,
         sdc_since: Option<SdcVersion>,
+        summary: &'static str,
+        requires: &'static str,
+        example: Option<&'static str>,
         syntax: fn() -> CommandSyntax,
     ) -> Self {
         Self {
             name,
             executor: handler,
             sdc_since,
+            summary,
+            requires,
+            example,
             syntax,
         }
     }
@@ -209,6 +218,7 @@ pub(super) struct OptionHint {
     id: OptionId,
     pub name: &'static str,
     pub value: Option<ValueHint>,
+    repeatable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +263,7 @@ pub(crate) const fn typed_flag(id: OptionId, name: &'static str) -> OptionHint {
         id,
         name,
         value: None,
+        repeatable: false,
     }
 }
 
@@ -261,6 +272,20 @@ pub(crate) const fn typed_value(id: OptionId, name: &'static str, hint: ValueHin
         id,
         name,
         value: Some(hint),
+        repeatable: false,
+    }
+}
+
+pub(crate) const fn typed_repeated_value(
+    id: OptionId,
+    name: &'static str,
+    hint: ValueHint,
+) -> OptionHint {
+    OptionHint {
+        id,
+        name,
+        value: Some(hint),
+        repeatable: true,
     }
 }
 
@@ -268,10 +293,11 @@ pub(super) fn available_in_sdc(spec: &CommandSpec, version: SdcVersion) -> bool 
     spec.sdc_since.is_some_and(|since| since <= version)
 }
 
-fn format_command_help(name: &str, syntax: &CommandSyntax) -> String {
+fn format_command_help(spec: &CommandSpec, syntax: &CommandSyntax) -> String {
+    let name = spec.name;
     let mut text = format!(
         "Command: {name}\n\nSummary:\n  {}\n\nUsage:\n  {}",
-        command_summary(name),
+        spec.summary,
         command_usage(name, syntax),
     );
     if let Some(positional) = syntax.positional {
@@ -298,7 +324,7 @@ fn format_command_help(name: &str, syntax: &CommandSyntax) -> String {
                 text,
                 "\n  {}{value}{required} — {}",
                 option.name,
-                option_description(option.name, option.value),
+                option_description(option.value),
             )
             .expect("writing to a String cannot fail");
         }
@@ -317,8 +343,9 @@ fn format_command_help(name: &str, syntax: &CommandSyntax) -> String {
     write!(
         text,
         "\n\nRequires:\n  {}\n\nExample:\n  {}",
-        command_precondition(name),
-        command_example(name, syntax),
+        spec.requires,
+        spec.example
+            .map_or_else(|| command_example(name, syntax), str::to_owned),
     )
     .expect("writing to a String cannot fail");
     text
@@ -346,41 +373,6 @@ fn command_usage(name: &str, syntax: &CommandSyntax) -> String {
     usage
 }
 
-fn command_summary(name: &str) -> String {
-    let words = name.replace('_', " ");
-    if name == "help" {
-        return "List registered commands or explain one command's public syntax.".to_string();
-    }
-    if name == "elaborate" {
-        return "Elaborate an ingested HDL definition and make it the current design.".to_string();
-    }
-    if name == "synth" {
-        return "Synthesize the current design through Opto's single mapping pipeline.".to_string();
-    }
-    if name == "redirect" {
-        return "Evaluate a Tcl command and redirect its result to a file or variable.".to_string();
-    }
-    let (verb, object) = words.split_once(' ').unwrap_or((&words, "session state"));
-    let action = match verb {
-        "read" => "Read",
-        "write" => "Write",
-        "report" => "Report",
-        "get" => "Query",
-        "set" => "Set",
-        "unset" | "reset" | "delete" => "Remove",
-        "all" => "Return all",
-        "check" => "Check",
-        "create" => "Create",
-        "save" => "Save",
-        "resume" => "Restore",
-        "source" => "Evaluate",
-        "echo" => "Return",
-        "exit" => "Exit from",
-        _ => "Execute",
-    };
-    format!("{action} {object} using the documented Opto command contract.")
-}
-
 fn positional_description(hint: ValueHint) -> &'static str {
     match hint {
         ValueHint::File => "One or more filesystem paths.",
@@ -396,60 +388,14 @@ fn positional_description(hint: ValueHint) -> &'static str {
     }
 }
 
-fn option_description(name: &str, value: Option<ValueHint>) -> &'static str {
-    match name {
-        "-rise" => "Apply the operation to rising transitions.",
-        "-fall" => "Apply the operation to falling transitions.",
-        "-min" => "Select the minimum or early analysis view.",
-        "-max" => "Select the maximum or late analysis view.",
-        "-from" => "Restrict path starts to the supplied objects.",
-        "-through" => "Require paths to pass through the supplied objects in order.",
-        "-to" => "Restrict path endpoints to the supplied objects.",
-        "-quiet" => "Suppress nonessential command output.",
-        "-hierarchical" | "-hierarchy" => "Include hierarchical objects or structure.",
-        "-file" => "Use the supplied filesystem path.",
-        "-variable" => "Store the result in the supplied Tcl variable.",
-        "-append" => "Append instead of replacing existing output.",
-        "-period" => "Set the clock period in active library time units.",
-        "-name" => "Assign the supplied public object name.",
-        _ if value.is_some() => "Provide the typed value shown for this option.",
-        _ => "Enable this command behavior.",
-    }
-}
-
-fn command_precondition(name: &str) -> &'static str {
-    match name {
-        "read_hdl" | "read_libs" | "read_sdc" | "source" | "resume" => {
-            "The referenced input must exist and be readable."
-        }
-        "elaborate" => "The named definition must have been ingested with read_hdl.",
-        "synth" => "A current elaborated design and a non-empty target library are required.",
-        name if name.starts_with("report_") || name.starts_with("write_") => {
-            "A compatible current design or analysis state must already exist."
-        }
-        name if name.starts_with("set_")
-            || name.starts_with("unset_")
-            || name.starts_with("create_")
-            || name.starts_with("delete_") =>
-        {
-            "Referenced objects must resolve in the current session state."
-        }
-        _ => "No additional precondition beyond the arguments shown above.",
+fn option_description(value: Option<ValueHint>) -> &'static str {
+    match value {
+        Some(hint) => positional_description(hint),
+        None => "Enable this command behavior.",
     }
 }
 
 fn command_example(name: &str, syntax: &CommandSyntax) -> String {
-    match name {
-        "read_hdl" => return "read_hdl rtl/top.sv".to_string(),
-        "read_libs" => return "read_libs cells.lib".to_string(),
-        "elaborate" => return "elaborate top".to_string(),
-        "synth" => return "synth".to_string(),
-        "create_clock" => return "create_clock -period 10 -name sys_clk".to_string(),
-        "report_timing" => return "report_timing -max_paths 10".to_string(),
-        "write_hdl" => return "write_hdl mapped.v".to_string(),
-        "help" => return "help read_hdl".to_string(),
-        _ => {}
-    }
     let mut example = name.to_string();
     for required in syntax.required_options {
         if let Some(option) = syntax

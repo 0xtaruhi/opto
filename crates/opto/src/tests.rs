@@ -18,14 +18,8 @@ fn test_commands() -> CommandRegistry {
     registry
 }
 
-fn temp_script_path(name: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "{}-{}-{name}",
-        env!("CARGO_PKG_NAME"),
-        std::process::id()
-    ));
-    path
+fn temp_script_path(name: &str) -> crate::test_support::TestPath {
+    crate::test_support::TestPath::new(name)
 }
 
 fn test_target_setup() -> String {

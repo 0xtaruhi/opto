@@ -25,14 +25,11 @@ library (demo) {
     session.set_lib_search_path(vec![PathBuf::from(dir.display().to_string())]);
     session.read_libs(&[PathBuf::from("demo.lib")]).unwrap();
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![rtl_module_with_instance("top", "INVX1")],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![rtl_module_with_instance("top", "INVX1")],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 
@@ -97,9 +94,7 @@ library (demo) {
     assert_eq!(pins, ["A", "Y"]);
 
     let out_path = dir.join("mapped.v");
-    session
-        .write_hdl_file(Some(out_path.clone()), &[], false)
-        .unwrap();
+    session.write_hdl_file(&out_path, false).unwrap();
     let mapped = std::fs::read_to_string(out_path).unwrap();
     let area = session.report_area().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
@@ -188,9 +183,7 @@ endmodule
 
     assert_eq!(message, "1");
     let out_path = dir.join("basic-mapped.v");
-    session
-        .write_hdl_file(Some(out_path.clone()), &[], false)
-        .unwrap();
+    session.write_hdl_file(&out_path, false).unwrap();
     let mapped = std::fs::read_to_string(out_path).unwrap();
     let area = session.report_area().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
@@ -301,17 +294,14 @@ fn design_definition_before_loaded_library_shadows_the_cell() {
         ])
         .unwrap();
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![
-                    empty_rtl_module("child"),
-                    rtl_module_with_instance("top", "child"),
-                ],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![
+                empty_rtl_module("child"),
+                rtl_module_with_instance("top", "child"),
+            ],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
 
     let graph = session.definition_graph("test").unwrap();
@@ -355,14 +345,11 @@ fn repeated_library_cell_bindings_are_first_wins() {
         ])
         .unwrap();
     session
-        .apply_db_update(
-            DbUpdate {
-                modules: vec![rtl_module_with_instance("top", "SHARED")],
-                top: Some("top".to_string()),
-                diagnostics: Vec::new(),
-            },
-            CurrentDesignPolicy::ElaboratedTop,
-        )
+        .apply_db_update(DbUpdate {
+            modules: vec![rtl_module_with_instance("top", "SHARED")],
+            top: Some("top".to_string()),
+            diagnostics: Vec::new(),
+        })
         .unwrap();
 
     let graph = session.definition_graph("test").unwrap();

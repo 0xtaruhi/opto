@@ -17,7 +17,11 @@ const SDC_VERSIONS: &[&str] = &[
 ];
 
 #[derive(TclCommand)]
-#[command(name = "read_sdc", handler = read_sdc)]
+#[command(
+    name = "read_sdc",
+    handler = read_sdc,
+    requires = "The referenced SDC file must exist and be readable."
+)]
 pub(crate) struct ReadSdcArgs {
     #[arg(long = "-echo")]
     pub(crate) echo: bool,
@@ -71,25 +75,24 @@ pub(crate) struct ReadParasiticsArgs {
 #[derive(TclCommand)]
 #[command(name = "report_timing", handler = report_timing)]
 pub(crate) struct ReportTimingArgs<'a> {
-    #[arg(long = "-from", value_hint = ValueHint::Port)]
+    #[arg(long = "-from", repeatable, value_hint = ValueHint::Port)]
     from: Vec<TclArg<'a>>,
-    #[arg(long = "-to", value_hint = ValueHint::Port)]
+    #[arg(long = "-to", repeatable, value_hint = ValueHint::Port)]
     to: Vec<TclArg<'a>>,
     #[arg(
-        long = "-delay",
-        alias = "-delay_type",
+        long = "-delay_type",
         value_hint = ValueHint::OneOf {
             accepted: &["max", "min", "min_max"],
             suggested: &["max", "min"],
         }
     )]
-    delay: Vec<TclOption<'a>>,
+    delay: Option<String>,
     #[arg(long = "-max_paths", value_hint = ValueHint::Suggested(&["1", "10"]))]
-    max_paths: Vec<usize>,
+    max_paths: Option<usize>,
     #[arg(long = "-significant_digits")]
-    significant_digits: Vec<usize>,
+    significant_digits: Option<usize>,
     #[arg(long = "-path", value_hint = ValueHint::Suggested(&["full"]))]
-    path: Vec<String>,
+    path: Option<String>,
 }
 
 #[derive(TclCommand)]
@@ -97,7 +100,9 @@ pub(crate) struct ReportTimingArgs<'a> {
     name = "create_clock",
     handler = create_clock,
     sdc,
-    option_or_positional = "-name"
+    option_or_positional = "-name",
+    requires = "Referenced source objects must resolve in the current session state.",
+    example = "create_clock -period 10 -name sys_clk"
 )]
 pub(crate) struct CreateClockArgs<'a> {
     #[arg(long = "-period")]
@@ -155,7 +160,9 @@ pub(crate) struct CreateGeneratedClockArgs<'a> {
 #[derive(TclCommand)]
 #[command(
     name = "delete_clock",
-    alias = "delete_generated_clock",
+    kind = DeleteClockKind::Any,
+    variant = "delete_generated_clock",
+    variant_kind = DeleteClockKind::Generated,
     handler = delete_clock,
     sdc
 )]
@@ -167,8 +174,11 @@ pub(crate) struct DeleteClockArgs<'a> {
 #[derive(TclCommand)]
 #[command(
     name = "set_input_transition",
-    alias = "set_load",
-    alias = "set_drive",
+    kind = PortConstraintKind::InputTransition,
+    variant = "set_load",
+    variant_kind = PortConstraintKind::Load,
+    variant = "set_drive",
+    variant_kind = PortConstraintKind::Drive,
     handler = set_port_constraint,
     sdc
 )]
@@ -338,7 +348,7 @@ pub(crate) struct SetClockGroupsArgs<'a> {
     asynchronous: bool,
     #[arg(long = "-comment")]
     comment: Option<String>,
-    #[arg(long = "-group", value_hint = ValueHint::Clock)]
+    #[arg(long = "-group", repeatable, value_hint = ValueHint::Clock)]
     groups: Vec<TclArg<'a>>,
     #[arg(long = "-allow_paths", unsupported)]
     _allow_paths: (),
@@ -388,8 +398,11 @@ pub(crate) struct UnsetCaseAnalysisArgs<'a> {
 #[derive(TclCommand)]
 #[command(
     name = "set_logic_zero",
-    alias = "set_logic_one",
-    alias = "set_logic_dc",
+    kind = LogicKind::Zero,
+    variant = "set_logic_one",
+    variant_kind = LogicKind::One,
+    variant = "set_logic_dc",
+    variant_kind = LogicKind::DontCare,
     handler = set_logic,
     sdc
 )]
@@ -401,15 +414,17 @@ pub(crate) struct SetLogicArgs<'a> {
 #[derive(TclCommand)]
 #[command(
     name = "set_disable_timing",
-    alias = "unset_disable_timing",
+    kind = MutationKind::Set,
+    variant = "unset_disable_timing",
+    variant_kind = MutationKind::Unset,
     handler = disable_timing,
     sdc
 )]
 pub(crate) struct DisableTimingArgs<'a> {
     #[arg(long = "-from")]
-    from: Vec<String>,
+    from: Option<String>,
     #[arg(long = "-to")]
-    to: Vec<String>,
+    to: Option<String>,
     #[arg(positional)]
     objects: TclArg<'a>,
 }
@@ -446,7 +461,9 @@ pub(crate) struct UnsetTimingDerateArgs {}
 #[derive(TclCommand)]
 #[command(
     name = "set_propagated_clock",
-    alias = "unset_propagated_clock",
+    kind = MutationKind::Set,
+    variant = "unset_propagated_clock",
+    variant_kind = MutationKind::Unset,
     handler = propagated_clock,
     sdc
 )]
@@ -471,7 +488,9 @@ pub(crate) struct SetResistanceArgs<'a> {
 #[derive(TclCommand)]
 #[command(
     name = "set_input_delay",
-    alias = "set_output_delay",
+    kind = opto_session::IoDelayKind::Input,
+    variant = "set_output_delay",
+    variant_kind = opto_session::IoDelayKind::Output,
     handler = set_io_delay,
     sdc
 )]
@@ -505,7 +524,9 @@ pub(crate) struct SetIoDelayArgs<'a> {
 #[derive(TclCommand)]
 #[command(
     name = "unset_input_delay",
-    alias = "unset_output_delay",
+    kind = opto_session::IoDelayKind::Input,
+    variant = "unset_output_delay",
+    variant_kind = opto_session::IoDelayKind::Output,
     handler = unset_io_delay,
     sdc
 )]
@@ -529,7 +550,9 @@ pub(crate) struct UnsetIoDelayArgs<'a> {
 #[derive(TclCommand)]
 #[command(
     name = "set_max_transition",
-    alias = "set_max_capacitance",
+    kind = DesignRuleKind::Transition,
+    variant = "set_max_capacitance",
+    variant_kind = DesignRuleKind::Capacitance,
     handler = set_scoped_design_rule,
     sdc
 )]
@@ -590,7 +613,9 @@ pub(crate) struct UnsetPathExceptionsArgs<'a> {
 #[derive(TclCommand)]
 #[command(
     name = "set_max_delay",
-    alias = "set_min_delay",
+    kind = PathDelayKind::Max,
+    variant = "set_min_delay",
+    variant_kind = PathDelayKind::Min,
     handler = set_path_delay,
     sdc
 )]
@@ -651,12 +676,13 @@ fn delete_clock_command(
     interp: *mut TclInterp,
     command: &'static str,
     args: DeleteClockArgs<'_>,
+    kind: DeleteClockKind,
 ) -> Result<ConstraintChange, crate::ShellError> {
     let clocks = resolve_clock_list(state, interp, command, &args.clocks)?;
     state
         .session
         .borrow_mut()
-        .delete_clocks(&clocks, command == "delete_generated_clock")
+        .delete_clocks(&clocks, matches!(kind, DeleteClockKind::Generated))
         .map_err(crate::ShellError::from)
 }
 
@@ -726,6 +752,7 @@ fn set_propagated_clock_command(
     interp: *mut TclInterp,
     command: &'static str,
     args: PropagatedClockArgs<'_>,
+    kind: MutationKind,
 ) -> Result<ConstraintChange, crate::ShellError> {
     let mut clocks = Vec::new();
     for arg in &args.clocks {
@@ -734,7 +761,7 @@ fn set_propagated_clock_command(
     state
         .session
         .borrow_mut()
-        .set_propagated_clock(command == "set_propagated_clock", &clocks)
+        .set_propagated_clock(matches!(kind, MutationKind::Set), &clocks)
         .map_err(crate::ShellError::from)
 }
 
@@ -768,6 +795,45 @@ enum PathPointRole {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) enum DeleteClockKind {
+    Any,
+    Generated,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PortConstraintKind {
+    InputTransition,
+    Load,
+    Drive,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum LogicKind {
+    Zero,
+    One,
+    DontCare,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MutationKind {
+    Set,
+    Unset,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DesignRuleKind {
+    Transition,
+    Capacitance,
+    Fanout,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PathDelayKind {
+    Max,
+    Min,
+}
+
+#[derive(Clone, Copy)]
 enum PathExceptionCommand {
     FalsePath,
     MaxDelay(f64),
@@ -776,6 +842,7 @@ enum PathExceptionCommand {
 }
 
 struct PathExceptionArgs<'a> {
+    mutation: MutationKind,
     kind: PathExceptionCommand,
     points: Vec<TclOption<'a>>,
     setup: bool,
@@ -813,20 +880,19 @@ fn report_timing_command(
             .to
             .extend(resolve_object_names(state, interp, "report_timing", raw)?);
     }
-    for delay in args.delay {
-        options.delay_type = match delay.value().as_str() {
+    if let Some(delay) = args.delay {
+        options.delay_type = match delay.as_str() {
             "max" => DelayType::Max,
             "min" => DelayType::Min,
             "min_max" => {
-                return Err(crate::ShellError::command(format!(
-                    "report_timing: {} min_max is not implemented yet",
-                    delay.name()
-                )));
+                return Err(crate::ShellError::command(
+                    "report_timing: -delay_type min_max is not implemented yet",
+                ));
             }
             _ => unreachable!("derive schema validates report_timing delay type"),
         };
     }
-    for max_paths in args.max_paths {
+    if let Some(max_paths) = args.max_paths {
         if max_paths == 0 {
             return Err(crate::ShellError::command(
                 "report_timing: -max_paths must be greater than zero",
@@ -834,7 +900,7 @@ fn report_timing_command(
         }
         options.max_paths = max_paths;
     }
-    for digits in args.significant_digits {
+    if let Some(digits) = args.significant_digits {
         if digits > 13 {
             return Err(crate::ShellError::command(format!(
                 "report_timing: significant digits value '{digits}' is outside 0..13"
@@ -842,12 +908,12 @@ fn report_timing_command(
         }
         options.significant_digits = digits;
     }
-    for path in args.path {
-        if path != "full" {
-            return Err(crate::ShellError::command(format!(
-                "report_timing: -path {path} is not implemented yet"
-            )));
-        }
+    if let Some(path) = args.path
+        && path != "full"
+    {
+        return Err(crate::ShellError::command(format!(
+            "report_timing: -path {path} is not implemented yet"
+        )));
     }
 
     state
@@ -917,6 +983,19 @@ pub(super) fn resolve_object_names(
 }
 
 macro_rules! timing_handler {
+    ($name:ident, $arguments:ty, $kind_ty:ty, |$state:ident, $interp:ident, $command:ident, $args:ident, $kind:ident| $body:block) => {
+        pub(crate) fn $name(
+            state: &ShellState,
+            interp: *mut TclInterp,
+            command: &'static str,
+            arguments: $arguments,
+            kind: $kind_ty,
+        ) -> Result<CommandResult, crate::ShellError> {
+            let ($state, $interp, $command, $args, $kind) =
+                (state, interp, command, arguments, kind);
+            $body
+        }
+    };
     ($name:ident, $arguments:ty, |$state:ident, $interp:ident, $command:ident, $args:ident| $body:block) => {
         pub(crate) fn $name(
             state: &ShellState,
@@ -972,16 +1051,19 @@ timing_handler!(
 timing_handler!(
     delete_clock,
     DeleteClockArgs<'_>,
-    |state, interp, command, args| {
-        delete_clock_command(state, interp, command, args).map(constraint_change_result)
+    DeleteClockKind,
+    |state, interp, command, args, kind| {
+        delete_clock_command(state, interp, command, args, kind).map(constraint_change_result)
     }
 );
 
 timing_handler!(
     set_port_constraint,
     PortConstraintCommandArgs<'_>,
-    |state, interp, command, args| {
-        set_port_constraint_command(state, interp, command, args).map(constraint_change_result)
+    PortConstraintKind,
+    |state, interp, command, args, kind| {
+        set_port_constraint_command(state, interp, command, args, kind)
+            .map(constraint_change_result)
     }
 );
 
@@ -1073,16 +1155,18 @@ timing_handler!(
 timing_handler!(
     set_logic,
     SetLogicArgs<'_>,
-    |state, interp, command, args| {
-        set_logic_command(state, interp, command, args).map(constraint_change_result)
+    LogicKind,
+    |state, interp, command, args, kind| {
+        set_logic_command(state, interp, command, args, kind).map(constraint_change_result)
     }
 );
 
 timing_handler!(
     disable_timing,
     DisableTimingArgs<'_>,
-    |state, interp, command, args| {
-        disable_timing_command(state, interp, command, args).map(constraint_change_result)
+    MutationKind,
+    |state, interp, command, args, kind| {
+        disable_timing_command(state, interp, command, args, kind).map(constraint_change_result)
     }
 );
 
@@ -1110,8 +1194,10 @@ timing_handler!(
 timing_handler!(
     propagated_clock,
     PropagatedClockArgs<'_>,
-    |state, interp, command, args| {
-        set_propagated_clock_command(state, interp, command, args).map(constraint_change_result)
+    MutationKind,
+    |state, interp, command, args, kind| {
+        set_propagated_clock_command(state, interp, command, args, kind)
+            .map(constraint_change_result)
     }
 );
 
@@ -1126,31 +1212,42 @@ timing_handler!(
 timing_handler!(
     set_io_delay,
     SetIoDelayArgs<'_>,
-    |state, interp, command, args| {
-        set_io_delay_command(state, interp, command, args).map(constraint_change_result)
+    opto_session::IoDelayKind,
+    |state, interp, command, args, kind| {
+        set_io_delay_command(state, interp, command, args, kind).map(constraint_change_result)
     }
 );
 
 timing_handler!(
     unset_io_delay,
     UnsetIoDelayArgs<'_>,
-    |state, interp, command, args| {
-        unset_io_delay_command(state, interp, command, args).map(constraint_change_result)
+    opto_session::IoDelayKind,
+    |state, interp, command, args, kind| {
+        unset_io_delay_command(state, interp, command, args, kind).map(constraint_change_result)
     }
 );
 
 timing_handler!(
     set_scoped_design_rule,
     ScopedDesignRuleArgs<'_>,
-    |state, interp, command, args| {
+    DesignRuleKind,
+    |state, interp, command, args, kind| {
         let scope = match (args.data_path, args.clock_path) {
             (false, false) => DesignRuleScope::All,
             (true, false) => DesignRuleScope::DataPath,
             (false, true) => DesignRuleScope::ClockPath,
             (true, true) => DesignRuleScope::ClockAndData,
         };
-        set_design_rule_command(state, interp, command, args.limit, &args.objects, scope)
-            .map(constraint_change_result)
+        set_design_rule_command(
+            state,
+            interp,
+            command,
+            args.limit,
+            &args.objects,
+            scope,
+            kind,
+        )
+        .map(constraint_change_result)
     }
 );
 
@@ -1165,6 +1262,7 @@ timing_handler!(
             args.limit,
             &args.objects,
             DesignRuleScope::All,
+            DesignRuleKind::Fanout,
         )
         .map(constraint_change_result)
     }
@@ -1173,17 +1271,18 @@ timing_handler!(
 timing_handler!(
     set_path_delay,
     SetPathDelayArgs<'_>,
-    |state, interp, command, args| {
-        let kind = match command {
-            "set_max_delay" => PathExceptionCommand::MaxDelay(args.delay),
-            "set_min_delay" => PathExceptionCommand::MinDelay(args.delay),
-            _ => unreachable!("path-delay parser is bound to fixed commands"),
+    PathDelayKind,
+    |state, interp, command, args, delay_kind| {
+        let kind = match delay_kind {
+            PathDelayKind::Max => PathExceptionCommand::MaxDelay(args.delay),
+            PathDelayKind::Min => PathExceptionCommand::MinDelay(args.delay),
         };
         set_path_exception_command(
             state,
             interp,
             command,
             PathExceptionArgs {
+                mutation: MutationKind::Set,
                 kind,
                 points: args.points,
                 setup: false,
@@ -1210,6 +1309,7 @@ timing_handler!(
             interp,
             command,
             PathExceptionArgs {
+                mutation: MutationKind::Set,
                 kind: PathExceptionCommand::FalsePath,
                 points: args.points,
                 setup: args.setup,
@@ -1236,6 +1336,7 @@ timing_handler!(
             interp,
             command,
             PathExceptionArgs {
+                mutation: MutationKind::Unset,
                 kind: PathExceptionCommand::FalsePath,
                 points: args.points,
                 setup: args.setup,
@@ -1262,6 +1363,7 @@ timing_handler!(
             interp,
             command,
             PathExceptionArgs {
+                mutation: MutationKind::Set,
                 kind: PathExceptionCommand::MultiCycle(args.cycles),
                 points: args.points,
                 setup: args.setup,

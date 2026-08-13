@@ -4,7 +4,12 @@
 use super::*;
 
 #[derive(TclCommand)]
-#[command(name = "help", handler = help)]
+#[command(
+    name = "help",
+    handler = help,
+    summary = "List registered commands or explain one command's public syntax.",
+    example = "help read_hdl"
+)]
 pub(crate) struct HelpArgs {
     #[arg(positional)]
     command: Option<String>,
@@ -18,7 +23,11 @@ pub(crate) struct EchoArgs<'a> {
 }
 
 #[derive(TclCommand)]
-#[command(name = "redirect", handler = redirect)]
+#[command(
+    name = "redirect",
+    handler = redirect,
+    summary = "Evaluate a Tcl command and redirect its result to a file or variable."
+)]
 pub(crate) struct RedirectArgs<'a> {
     #[arg(long = "-append")]
     append: bool,
@@ -41,7 +50,12 @@ pub(crate) struct RedirectArgs<'a> {
 }
 
 #[derive(TclCommand)]
-#[command(name = "source", handler = source, sdc)]
+#[command(
+    name = "source",
+    handler = source,
+    sdc,
+    requires = "The referenced Tcl input must exist and be readable."
+)]
 pub(crate) struct SourceArgs {
     #[arg(positional, value_hint = ValueHint::File)]
     path: PathBuf,

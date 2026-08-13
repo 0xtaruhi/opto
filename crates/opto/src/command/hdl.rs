@@ -4,18 +4,28 @@
 use super::*;
 
 #[derive(TclCommand)]
-#[command(name = "read_libs", handler = read_libs)]
+#[command(
+    name = "read_libs",
+    handler = read_libs,
+    requires = "Every referenced library file must exist and be readable.",
+    example = "read_libs cells.lib"
+)]
 pub(crate) struct ReadLibsArgs<'a> {
     #[arg(positional, min = 1, value_hint = ValueHint::File)]
     files: Vec<TclArg<'a>>,
 }
 
 #[derive(TclCommand)]
-#[command(name = "read_hdl", handler = read_hdl)]
+#[command(
+    name = "read_hdl",
+    handler = read_hdl,
+    requires = "Every referenced HDL file must exist and be readable.",
+    example = "read_hdl rtl/top.sv"
+)]
 pub(crate) struct ReadHdlArgs<'a> {
-    #[arg(long = "-define")]
+    #[arg(long = "-define", repeatable)]
     defines: Vec<TclArg<'a>>,
-    #[arg(long = "-incdir", value_hint = ValueHint::Directory)]
+    #[arg(long = "-incdir", repeatable, value_hint = ValueHint::Directory)]
     include_paths: Vec<TclArg<'a>>,
     #[arg(positional, min = 1, value_hint = ValueHint::File)]
     files: Vec<TclArg<'a>>,
