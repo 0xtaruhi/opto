@@ -32,6 +32,7 @@ fn hierarchical_synthesis_publishes_one_flat_root_artifact_and_reuses_it() {
             DbUpdate {
                 modules: vec![top, child],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -171,6 +172,7 @@ library (demo) {
             DbUpdate {
                 modules: vec![top, middle, leaf],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -268,6 +270,7 @@ library (demo) {
             DbUpdate {
                 modules: vec![hierarchy_leaf("leaf", 2, false)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -309,6 +312,7 @@ fn switching_effort_resynthesizes_the_same_canonical_root_artifact() {
             DbUpdate {
                 modules: vec![top, leaf],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -358,6 +362,7 @@ fn timing_uses_each_designs_canonical_root_artifact() {
             DbUpdate {
                 modules: vec![top, middle, leaf],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -418,6 +423,7 @@ fn changing_a_leaf_body_resynthesizes_the_root_artifact() {
             DbUpdate {
                 modules: vec![top, left, right],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -430,6 +436,7 @@ fn changing_a_leaf_body_resynthesizes_the_root_artifact() {
             DbUpdate {
                 modules: vec![hierarchy_leaf("left", 1, true)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -498,6 +505,7 @@ fn changing_a_child_interface_resynthesizes_the_root_artifact() {
             DbUpdate {
                 modules: vec![top, middle, leaf],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -520,6 +528,7 @@ fn changing_a_child_interface_resynthesizes_the_root_artifact() {
             DbUpdate {
                 modules: vec![changed_leaf],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -605,6 +614,7 @@ library (demo) {
             DbUpdate {
                 modules: vec![independent_mapping_cones(BinaryOp::BitAnd)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -616,6 +626,7 @@ library (demo) {
             DbUpdate {
                 modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -663,6 +674,7 @@ library (demo) {
         DbUpdate {
             modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
             top: Some("top".to_string()),
+            diagnostics: Vec::new(),
         },
         CurrentDesignPolicy::ElaboratedTop,
     )
@@ -733,6 +745,7 @@ library (demo) {
             DbUpdate {
                 modules: vec![independent_mapping_cones(BinaryOp::BitAnd)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -775,6 +788,7 @@ library (demo) {
             DbUpdate {
                 modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -815,6 +829,7 @@ library (demo) {
         DbUpdate {
             modules: vec![independent_mapping_cones(BinaryOp::BitOr)],
             top: Some("top".to_string()),
+            diagnostics: Vec::new(),
         },
         CurrentDesignPolicy::ElaboratedTop,
     )
@@ -885,6 +900,7 @@ fn rereading_identical_rtl_keeps_incremental_synthesis_artifacts() {
             DbUpdate {
                 modules: vec![hierarchy_leaf("top", 1, true)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -898,6 +914,7 @@ fn rereading_identical_rtl_keeps_incremental_synthesis_artifacts() {
             DbUpdate {
                 modules: vec![hierarchy_leaf("top", 1, true)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -926,6 +943,7 @@ fn failed_root_synthesis_does_not_publish_a_partial_artifact() {
                     hierarchy_leaf("right", 1, false),
                 ],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -941,6 +959,7 @@ fn failed_root_synthesis_does_not_publish_a_partial_artifact() {
                     unsupported_tri_state_leaf("right"),
                 ],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -989,6 +1008,7 @@ fn synthesize_publication_traces_only_the_root_artifact() {
                     hierarchy_leaf("right", 1, false),
                 ],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -1065,6 +1085,7 @@ fn linked_root_synthesis_is_deterministic_across_thread_counts() {
                         hierarchy_leaf("right", 1, true),
                     ],
                     top: Some("top".to_string()),
+                    diagnostics: Vec::new(),
                 },
                 CurrentDesignPolicy::ElaboratedTop,
             )

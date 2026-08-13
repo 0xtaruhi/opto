@@ -90,6 +90,50 @@ fn native_snapshot_preserves_source_type_layouts() {
 }
 
 #[test]
+fn successful_compilation_preserves_structured_warnings() {
+    let source =
+        NativeTestSource::new("module top(output logic [3:0] y); assign y = 8'hff; endmodule\n");
+
+    let compilation = compile_source(&source);
+    let warning = compilation
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.severity == SlangDiagnosticSeverity::Warning)
+        .expect("width truncation should remain a successful warning");
+
+    assert_eq!(warning.option_name.as_deref(), Some("constant-conversion"));
+    assert!(warning.message.contains("changes value"));
+    assert!(warning.stable_code().starts_with("OPT-HDL-S"));
+    let location = warning.location.as_ref().expect("warning source location");
+    assert_eq!(location.path, source.path);
+    assert_eq!(location.line, 1);
+    assert!(location.column > 0);
+}
+
+#[test]
+fn rejected_compilation_returns_structured_source_diagnostics() {
+    let source = NativeTestSource::new("module top(output logic y); assign y = ; endmodule\n");
+
+    let SlangError::Diagnostics(diagnostics) = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions::default(),
+    )
+    .expect_err("invalid expression must fail with typed diagnostics") else {
+        panic!("frontend error did not preserve structured diagnostics");
+    };
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.severity == SlangDiagnosticSeverity::Error)
+        .expect("typed error diagnostic");
+
+    assert!(!diagnostic.message.is_empty());
+    assert!(diagnostic.stable_code().starts_with("OPT-HDL-S"));
+    let location = diagnostic.location.as_ref().expect("error source location");
+    assert_eq!(location.path, source.path);
+    assert_eq!(location.line, 1);
+}
+
+#[test]
 fn native_analysis_defers_default_parameter_elaboration() {
     let source = NativeTestSource::new(
         "module invalid_by_default #(parameter type T = logic) (output T y); assign y.member = 1'b0; endmodule\nmodule chosen(output logic y); assign y = 1'b1; endmodule\n",

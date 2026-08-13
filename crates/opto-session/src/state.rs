@@ -319,6 +319,7 @@ pub struct Session {
     constraint_transactions: ConstraintTransactions,
     pub(crate) state: PersistentState,
     pub(crate) process: ProcessState,
+    pub(crate) pending_diagnostics: Vec<opto_core::Diagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,6 +402,7 @@ impl Default for Session {
             constraint_transactions: ConstraintTransactions::default(),
             state: PersistentState::default(),
             process: ProcessState::default(),
+            pending_diagnostics: Vec::new(),
         }
     }
 }
@@ -443,12 +445,18 @@ impl Session {
                 ExecutionContext::new(&execution)?,
                 config.synthesis,
             ),
+            pending_diagnostics: Vec::new(),
         })
     }
 
     /// Return the current monotonic semantic revision.
     pub fn revision(&self) -> RevisionId {
         self.state.revision
+    }
+
+    /// Drains recoverable diagnostics emitted by successful operations.
+    pub fn take_diagnostics(&mut self) -> Vec<opto_core::Diagnostic> {
+        std::mem::take(&mut self.pending_diagnostics)
     }
 
     /// Starts a nested transaction for constraint-owned session state.

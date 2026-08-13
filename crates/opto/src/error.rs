@@ -21,6 +21,14 @@ pub enum ShellError {
     /// Command semantic error without attached source coordinates.
     #[error("{0}")]
     Command(String),
+    /// Invalid command invocation with an actionable route to command help.
+    #[error("{message}")]
+    Usage {
+        /// User-facing argument or option error.
+        message: String,
+        /// Concrete next step or spelling suggestion.
+        help: String,
+    },
     /// Command error annotated with source text and location.
     #[error("{message}")]
     Source {
@@ -110,6 +118,13 @@ impl ShellError {
         Self::Command(message.into())
     }
 
+    pub(crate) fn usage(message: impl Into<String>, help: impl Into<String>) -> Self {
+        Self::Usage {
+            message: message.into(),
+            help: help.into(),
+        }
+    }
+
     pub(crate) fn parse(message: impl Into<String>) -> Self {
         Self::Parse(message.into())
     }
@@ -155,6 +170,9 @@ impl ShellError {
 impl DiagnosticSource for ShellError {
     fn diagnostic(&self) -> Option<Diagnostic> {
         match self {
+            Self::Usage { message, help } => {
+                Some(Diagnostic::new("OPT-CLI-001", message).with_help(help))
+            }
             Self::Invocation { source, .. } => source.diagnostic(),
             Self::Session(source) => source.diagnostic(),
             Self::SessionCommand { source, .. } => source.diagnostic(),

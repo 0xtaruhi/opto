@@ -76,6 +76,7 @@ impl Session {
         frontend: &FrontendOptions,
     ) -> Result<String, crate::SessionError> {
         let source_set = Frontend::ingest_verilog(files, frontend, &self.process.runtime)?;
+        let diagnostics = crate::error::hdl_diagnostics(source_set.diagnostics());
         let next_revision = self.next_revision()?;
         self.state
             .hdl_catalog
@@ -87,6 +88,7 @@ impl Session {
             .extend(source_set.packages().iter().cloned());
         self.state.hdl_catalog.verilog_units.push(source_set);
         self.state.revision = next_revision;
+        self.pending_diagnostics.extend(diagnostics);
         Ok("1".to_string())
     }
 
@@ -105,7 +107,12 @@ impl Session {
         update: DbUpdate,
         current_policy: CurrentDesignPolicy,
     ) -> Result<String, crate::SessionError> {
-        let DbUpdate { modules, top } = update;
+        let DbUpdate {
+            modules,
+            top,
+            diagnostics,
+        } = update;
+        let diagnostics = crate::error::hdl_diagnostics(&diagnostics);
         if modules.is_empty() {
             return Err(crate::SessionError::state("no designs loaded"));
         }
@@ -201,6 +208,7 @@ impl Session {
         }
         self.state.revision = next_revision;
         self.clear_stale_analysis_generation();
+        self.pending_diagnostics.extend(diagnostics);
         Ok(names.join(" "))
     }
 

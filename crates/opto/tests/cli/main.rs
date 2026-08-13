@@ -330,6 +330,32 @@ fn verilog_syntax_errors_point_at_the_exact_column() {
 }
 
 #[test]
+fn successful_verilog_frontend_warnings_are_visible_and_nonfatal() {
+    let source = temp_sv(
+        "cli-source-warning.sv",
+        "module top(output logic [3:0] y); assign y = 8'hff; endmodule\n",
+    );
+    let output = opto()
+        .arg("--no-init")
+        .arg("-x")
+        .arg(format!(
+            "read_hdl {}; elaborate top",
+            tcl_path_word(&source)
+        ))
+        .output()
+        .unwrap();
+    std::fs::remove_file(&source).unwrap();
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert_eq!(normalized_stdout(&output), "1\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("warning[OPT-HDL-S"), "{stderr}");
+    assert!(stderr.contains("changes value"), "{stderr}");
+    assert!(stderr.contains("cli-source-warning.sv:1:"), "{stderr}");
+    assert!(stderr.contains("assign y = 8'hff"), "{stderr}");
+}
+
+#[test]
 fn f_runs_database_configuration_script() {
     let script = temp_tcl(
         "cli-database-settings.tcl",
@@ -881,6 +907,28 @@ fn read_hdl_rejects_unknown_options_before_bridge() {
     assert!(!output.status.success(), "{}", output_text(&output));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("read_hdl: unsupported option '-bad_option'"));
+    assert!(stderr.contains("error[OPT-CLI-001]"));
+    assert!(stderr.contains("help read_hdl"));
+}
+
+#[test]
+fn command_help_explains_usage_preconditions_and_an_example() {
+    let output = opto()
+        .args(["--no-init", "-x", "help read_hdl"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let stdout = normalized_stdout(&output);
+    for expected in [
+        "Summary:",
+        "Usage:\n  read_hdl",
+        "Options:",
+        "Requires:",
+        "Example:\n  read_hdl",
+    ] {
+        assert!(stdout.contains(expected), "{}", output_text(&output));
+    }
 }
 
 #[test]

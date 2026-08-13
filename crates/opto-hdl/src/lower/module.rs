@@ -33,7 +33,11 @@ pub(crate) fn compilation(
         lower_module(&module)
     })?;
 
-    Ok(DbUpdate { modules, top })
+    Ok(DbUpdate {
+        modules,
+        top,
+        diagnostics: Vec::new(),
+    })
 }
 
 fn select_top(

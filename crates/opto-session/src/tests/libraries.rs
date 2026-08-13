@@ -29,6 +29,7 @@ library (demo) {
             DbUpdate {
                 modules: vec![rtl_module_with_instance("top", "INVX1")],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -307,6 +308,7 @@ fn design_definition_before_loaded_library_shadows_the_cell() {
                     rtl_module_with_instance("top", "child"),
                 ],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
@@ -357,6 +359,7 @@ fn repeated_library_cell_bindings_are_first_wins() {
             DbUpdate {
                 modules: vec![rtl_module_with_instance("top", "SHARED")],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )

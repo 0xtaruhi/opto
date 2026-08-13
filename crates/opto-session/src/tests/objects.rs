@@ -436,6 +436,7 @@ fn frontend_update_builds_one_canonical_design_record() {
             DbUpdate {
                 modules: vec![rtl(module)],
                 top: Some("top".to_string()),
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )

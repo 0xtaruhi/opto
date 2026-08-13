@@ -98,6 +98,57 @@ pub struct SlangAnalysis {
     pub packages: Vec<String>,
     /// Transitive include files required by the analyzed units.
     pub dependencies: Vec<SlangSourceFile>,
+    /// Structured diagnostics emitted while analyzing the source units.
+    pub diagnostics: Vec<SlangDiagnostic>,
+}
+
+/// Severity of one structured native frontend diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlangDiagnosticSeverity {
+    /// Secondary explanatory information associated with another diagnostic.
+    Note,
+    /// A recoverable source condition that may be surprising.
+    Warning,
+    /// A source condition that prevents analysis or elaboration.
+    Error,
+}
+
+/// Source coordinate copied out of the native frontend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlangDiagnosticLocation {
+    /// Diagnostic source path.
+    pub path: PathBuf,
+    /// One-based source line.
+    pub line: u32,
+    /// One-based source column.
+    pub column: u32,
+    /// Highlighted byte length, clamped to at least one.
+    pub length: u32,
+}
+
+/// Structured diagnostic copied out of Slang without parsing rendered text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlangDiagnostic {
+    /// Effective severity after Slang's diagnostic mapping.
+    pub severity: SlangDiagnosticSeverity,
+    /// Stable Slang diagnostic subsystem number.
+    pub subsystem: u16,
+    /// Stable diagnostic number within the subsystem.
+    pub code: u16,
+    /// Formatted diagnostic message without a source prefix.
+    pub message: String,
+    /// Optional Slang warning-control name.
+    pub option_name: Option<String>,
+    /// Optional source location for location-free diagnostics.
+    pub location: Option<SlangDiagnosticLocation>,
+}
+
+impl SlangDiagnostic {
+    /// Returns a stable, searchable product-facing code.
+    #[must_use]
+    pub fn stable_code(&self) -> String {
+        format!("OPT-HDL-S{:02}-{:04}", self.subsystem, self.code)
+    }
 }
 
 /// One preprocessor definition passed to slang.
@@ -247,6 +298,8 @@ pub enum SlangError {
     InvalidInput(String),
     /// Slang rejected the source; the string contains copied diagnostics.
     CompileFailed(String),
+    /// Slang rejected the source and returned structured diagnostics.
+    Diagnostics(Vec<SlangDiagnostic>),
     /// Native data violated an invariant required by the Rust view.
     BridgeInvariant(String),
 }
@@ -259,6 +312,16 @@ impl fmt::Display for SlangError {
                 f.write_str("slang compilation failed")
             }
             Self::CompileFailed(message) => write!(f, "slang compilation failed: {message}"),
+            Self::Diagnostics(diagnostics) => {
+                f.write_str("slang compilation failed")?;
+                if let Some(primary) = diagnostics
+                    .iter()
+                    .find(|diagnostic| diagnostic.severity == SlangDiagnosticSeverity::Error)
+                {
+                    write!(f, ": {}", primary.message)?;
+                }
+                Ok(())
+            }
         }
     }
 }

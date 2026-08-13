@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use opto_core::RevisionId;
+use opto_core::{Diagnostic, DiagnosticSource, RevisionId};
 use opto_db::ClockId;
 use opto_ir::mapped::{NetId as MappedNetId, PinId as MappedPinId};
 use thiserror::Error;
@@ -63,6 +63,33 @@ pub enum TimingError {
         /// Failure encountered during rollback.
         rollback: Box<TimingError>,
     },
+}
+
+impl DiagnosticSource for TimingError {
+    fn diagnostic(&self) -> Option<Diagnostic> {
+        let (code, internal) = match self {
+            Self::Constraint(_) => ("OPT-TIM-001", false),
+            Self::Model(_) => ("OPT-TIM-100", false),
+            Self::Analysis(_) => ("OPT-TIM-200", false),
+            Self::Runtime(_) => ("OPT-TIM-500", false),
+            Self::Engine(_)
+            | Self::Revision(_)
+            | Self::Mapped(_)
+            | Self::EnginePoisoned
+            | Self::ObjectRemovalOwnerMismatch
+            | Self::StaleObjectRemoval { .. }
+            | Self::CheckpointOwnerMismatch
+            | Self::StaleCheckpoint
+            | Self::Rollback { .. } => ("OPT-TIM-900", true),
+        };
+        let mut diagnostic = Diagnostic::new(code, self.to_string());
+        if internal {
+            diagnostic = diagnostic.with_help(
+                "retain the timing inputs and diagnostic code when reporting this internal consistency failure",
+            );
+        }
+        Some(diagnostic)
+    }
 }
 
 #[derive(Debug, Error)]

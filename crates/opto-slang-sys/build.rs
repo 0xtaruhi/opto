@@ -15,6 +15,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPTO_SLANG_VENDOR_DIR");
     println!("cargo:rerun-if-env-changed=OPTO_FMT_VENDOR_DIR");
     println!("cargo:rerun-if-env-changed=CXX");
+    println!("cargo:rerun-if-env-changed=OPTO_PYTHON");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=native/CMakeLists.txt");
     println!("cargo:rerun-if-changed=native/opto_slang_bridge.cpp");
@@ -195,6 +196,9 @@ fn configure_native_build(
             archive_dir.display()
         ))
         .arg("-DCMAKE_BUILD_TYPE=Release");
+    if let Some(python) = env::var_os("OPTO_PYTHON") {
+        command.arg(cmake_definition("Python_EXECUTABLE", &python));
+    }
     if let Some(cxx) = selected_cxx {
         command.arg(cmake_definition("CMAKE_CXX_COMPILER", &cxx));
     }

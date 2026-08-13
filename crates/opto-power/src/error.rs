@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+use opto_core::{Diagnostic, DiagnosticSource};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -94,4 +95,31 @@ pub enum PowerError {
         /// Monotonic counter that could not represent the next update.
         metric: &'static str,
     },
+}
+
+impl DiagnosticSource for PowerError {
+    fn diagnostic(&self) -> Option<Diagnostic> {
+        let internal = matches!(
+            self,
+            Self::GenerationMismatch
+                | Self::InvalidTimingNetState { .. }
+                | Self::InvalidInstanceBindings { .. }
+                | Self::EnginePoisoned
+                | Self::MetricOverflow { .. }
+        );
+        let mut diagnostic = Diagnostic::new(
+            if internal {
+                "OPT-PWR-900"
+            } else {
+                "OPT-PWR-001"
+            },
+            self.to_string(),
+        );
+        if internal {
+            diagnostic = diagnostic.with_help(
+                "retain the design and diagnostic code when reporting this internal power-analysis failure",
+            );
+        }
+        Some(diagnostic)
+    }
 }

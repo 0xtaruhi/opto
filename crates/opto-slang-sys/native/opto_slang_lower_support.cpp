@@ -44,7 +44,9 @@ store_type_layout(ModuleLoweringContext& design, OptoSlangTypeLayout layout) {
 const OptoSlangTypeLayout* scalar_type_layout(ModuleLoweringContext& design) {
     if (!design.scalar_type_layout) {
         design.scalar_type_layout =
-            store_type_layout(design, OptoSlangTypeLayout{OPTO_SLANG_TYPE_SCALAR, 1});
+            store_type_layout(
+                design,
+                OptoSlangTypeLayout{OPTO_SLANG_TYPE_SCALAR, 1, 0, 0, false, nullptr, {}});
     }
     return design.scalar_type_layout;
 }
@@ -825,6 +827,7 @@ std::string add_internal_net(
             is_process_local,
             OPTO_SLANG_NET_SINGLE_DRIVER,
             nullptr,
+            {},
         });
     design.value_shapes.insert_or_assign(name, ValueShape{width, is_signed});
     return name;

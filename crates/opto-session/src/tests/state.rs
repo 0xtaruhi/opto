@@ -298,12 +298,83 @@ fn synth_preserves_structured_synthesis_diagnostics() {
 }
 
 #[test]
+fn subsystem_errors_keep_stable_diagnostic_domains_through_session() {
+    use opto_core::DiagnosticSource;
+
+    let cases = [
+        (
+            SessionError::from(opto_hdl::HdlError::NoInputFiles),
+            "OPT-HDL-001",
+        ),
+        (
+            SessionError::from(opto_timing::TimingError::Analysis(
+                opto_timing::TimingAnalysisError::InvalidMaxPaths,
+            )),
+            "OPT-TIM-200",
+        ),
+        (
+            SessionError::from(opto_power::PowerError::MissingLibraryUnit {
+                attribute: "time_unit",
+            }),
+            "OPT-PWR-001",
+        ),
+        (
+            SessionError::from(opto_formats::FormatError::Unsupported(
+                "unsupported test format".to_string(),
+            )),
+            "OPT-FMT-002",
+        ),
+        (
+            SessionError::from(opto_library::LibraryError::UnsupportedInput {
+                path: PathBuf::from("test.txt"),
+            }),
+            "OPT-LIB-003",
+        ),
+    ];
+
+    for (error, expected_code) in cases {
+        assert_eq!(error.diagnostic().unwrap().code(), expected_code);
+    }
+}
+
+#[test]
+fn successful_frontend_update_publishes_recoverable_diagnostics_once() {
+    let mut session = Session::new();
+    let update = DbUpdate {
+        modules: vec![empty_rtl_module("top")],
+        top: Some("top".to_string()),
+        diagnostics: vec![opto_hdl::SlangDiagnostic {
+            severity: opto_hdl::SlangDiagnosticSeverity::Warning,
+            subsystem: 3,
+            code: 1,
+            message: "test frontend warning".to_string(),
+            option_name: Some("test-warning".to_string()),
+            location: None,
+        }],
+    };
+
+    session
+        .apply_db_update(update, CurrentDesignPolicy::ElaboratedTop)
+        .unwrap();
+
+    let diagnostics = session.take_diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code(), "OPT-HDL-S03-0001");
+    assert_eq!(
+        diagnostics[0].severity(),
+        opto_core::DiagnosticSeverity::Warning
+    );
+    assert!(session.take_diagnostics().is_empty());
+}
+
+#[test]
 fn frontend_batch_publishes_exactly_one_revision() {
     let mut session = Session::new();
     let initial = session.revision();
     let update = DbUpdate {
         modules: vec![empty_rtl_module("a"), empty_rtl_module("b")],
         top: Some("a".to_string()),
+        diagnostics: Vec::new(),
     };
 
     session
@@ -321,6 +392,7 @@ fn rejected_frontend_batch_does_not_publish_partial_state() {
     let update = DbUpdate {
         modules: vec![empty_rtl_module("top"), empty_rtl_module("top")],
         top: Some("top".to_string()),
+        diagnostics: Vec::new(),
     };
 
     assert_eq!(

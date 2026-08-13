@@ -1514,7 +1514,8 @@ OptoSlangExpr* lower_function_call(ModuleLoweringContext& design, const CallExpr
         constant_actuals.push_back(evaluate_lowering_constant(design, *actual));
     }
     constexpr size_t max_recursive_depth = 256;
-    if (std::ranges::count(design.function_stack, &function) >= max_recursive_depth) {
+    if (static_cast<size_t>(std::ranges::count(design.function_stack, &function)) >=
+        max_recursive_depth) {
         throw std::runtime_error(
             "recursive synthesizable function '" + copy_string(function.name) +
             "' does not reach a constant base case within " +
@@ -1743,7 +1744,8 @@ CfgFragment lower_subroutine_call_statement(
             "task or void function call argument count does not match its declaration");
     }
     constexpr size_t max_recursive_depth = 256;
-    if (std::ranges::count(design.function_stack, &function) >= max_recursive_depth) {
+    if (static_cast<size_t>(std::ranges::count(design.function_stack, &function)) >=
+        max_recursive_depth) {
         throw std::runtime_error(
             "recursive synthesizable subroutine '" + copy_string(function.name) +
             "' does not reach a constant base case within " +

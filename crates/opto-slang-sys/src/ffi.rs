@@ -4,6 +4,9 @@
 use std::ffi::{c_char, c_int};
 
 pub(crate) const OK: c_int = 0;
+pub(crate) const DIAGNOSTIC_NOTE: c_int = 0;
+pub(crate) const DIAGNOSTIC_WARNING: c_int = 1;
+pub(crate) const DIAGNOSTIC_ERROR: c_int = 2;
 pub(crate) const LANGUAGE_VERILOG_2005: c_int = 0;
 pub(crate) const LANGUAGE_SYSTEM_VERILOG_2017: c_int = 1;
 
@@ -102,6 +105,20 @@ pub(crate) struct AnalysisView {
 pub(crate) struct SourceFileView {
     pub(crate) path: *const c_char,
     pub(crate) text: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DiagnosticView {
+    pub(crate) severity: c_int,
+    pub(crate) subsystem: u16,
+    pub(crate) code: u16,
+    pub(crate) message: *const c_char,
+    pub(crate) option_name: *const c_char,
+    pub(crate) file: *const c_char,
+    pub(crate) line: u32,
+    pub(crate) column: u32,
+    pub(crate) length: u32,
 }
 
 #[repr(C)]
@@ -371,6 +388,12 @@ unsafe extern "C" {
         analysis: *mut *mut Analysis,
     ) -> c_int;
     pub(crate) fn opto_slang_compiler_last_error(compiler: *const Compiler) -> *const c_char;
+    pub(crate) fn opto_slang_compiler_diagnostic_count(compiler: *const Compiler) -> usize;
+    pub(crate) fn opto_slang_compiler_diagnostic_view(
+        compiler: *const Compiler,
+        index: usize,
+        view: *mut DiagnosticView,
+    ) -> c_int;
 
     pub(crate) fn opto_slang_analysis_free(analysis: *mut Analysis);
     pub(crate) fn opto_slang_analysis_view(
@@ -390,11 +413,23 @@ unsafe extern "C" {
         index: usize,
         view: *mut SourceFileView,
     ) -> c_int;
+    pub(crate) fn opto_slang_analysis_diagnostic_count(analysis: *const Analysis) -> usize;
+    pub(crate) fn opto_slang_analysis_diagnostic_view(
+        analysis: *const Analysis,
+        index: usize,
+        view: *mut DiagnosticView,
+    ) -> c_int;
 
     pub(crate) fn opto_slang_snapshot_free(design: *mut Snapshot);
     pub(crate) fn opto_slang_snapshot_view(
         design: *const Snapshot,
         view: *mut SnapshotView,
+    ) -> c_int;
+    pub(crate) fn opto_slang_snapshot_diagnostic_count(design: *const Snapshot) -> usize;
+    pub(crate) fn opto_slang_snapshot_diagnostic_view(
+        design: *const Snapshot,
+        index: usize,
+        view: *mut DiagnosticView,
     ) -> c_int;
     pub(crate) fn opto_slang_module_info(
         design: *const Snapshot,

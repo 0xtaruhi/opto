@@ -104,6 +104,36 @@ opto-formats         Verilog and report rendering
 timing, power, persistence, and user-visible identity. Algorithm crates receive
 typed immutable inputs; they do not receive `Session`.
 
+### Diagnostic contract
+
+`opto-core::Diagnostic` is the presentation-independent user-facing contract.
+It carries a severity, stable product code, title, optional primary and related
+source labels, notes, and remediation help. Owning domains implement
+`DiagnosticSource` where their dependency boundary permits it; the
+`opto-session` coordinator supplies adapters for lower-level HDL and format
+errors, preserves typed diagnostics, and adds command context. `opto` alone
+renders them for a terminal. The
+stable code domains are `OPT-CLI`, `OPT-SES`, `OPT-HDL`, `OPT-LIB`, `OPT-FMT`,
+`OPT-TIM`, `OPT-PWR`, and `OPT-SYN`. Internal and capacity failures use the
+reserved high-numbered codes in their owning domain instead of falling back to
+an unclassified string.
+
+The Slang bridge captures effective severity, numeric diagnostic identity,
+warning-control name, formatted message, source path, line, column, and range
+directly from Slang's diagnostic API. Rust never recovers frontend locations by
+parsing rendered terminal text. Errors abort the operation; warnings remain
+attached to successful analysis or compilation results. `opto-session` queues
+successful-operation warnings only after atomic state publication, and the Tcl
+dispatcher drains and renders them exactly once without changing command
+success or result values.
+
+Command invocation validation also participates in the structured contract.
+Usage errors carry `OPT-CLI-001`, point users to `help <command>`, and suggest a
+nearby declared option for small spelling mistakes. Per-command help is derived
+from the same declarative schema as validation and includes a summary, usage,
+typed arguments and options, preconditions, and an example. Unsupported options
+remain listed explicitly and fail when used.
+
 ### `opto-synth` Internal Domains
 
 `opto-synth` has eleven top-level domains. Top-level modules are architectural
@@ -283,10 +313,9 @@ of being treated as a fixed-point optimization problem. Deterministic zero is
 chosen for a remaining care-free bit only when the final physical netlist is
 published.
 
-Failures carry a diagnostic code, a source location, related locations, notes,
-help, and the Tcl invocation that triggered the work when available. A raw
-`synth` failure string without an actionable RTL or library location is not
-the diagnostic contract.
+Failures carry the structured diagnostic contract defined above, including the
+Tcl invocation that triggered the work when available. A raw failure string
+without a stable owning-domain code is not the diagnostic contract.
 
 ### 2. Establish Ownership And Freeze The Region Graph
 
@@ -1069,7 +1098,7 @@ defect.
 | Selected sequential clock-to-Q/setup projection plus exact mapped checkpoint timing | Implemented |
 | One shared sparse MMMC owner service | Implemented |
 | Transactional mapped optimization and exact STA | Implemented |
-| Structured source diagnostics | Implemented for synthesis/frontend errors carried by typed diagnostics; coverage continues to expand |
+| Structured source diagnostics and successful frontend warnings | Implemented across CLI/session, HDL, Liberty, formats, timing, power, and synthesis domains |
 | Opto `report_timing` core path report | Implemented; unsupported advanced report modes are explicit errors |
 | Flat Opto command policy | Defined by RFC 0010; command cutover, scenarios, and structured reports remain pending |
 | Same-host real medium-scale regression guard | Implemented for 14 executable 353–10,225-cell cases selected from a pinned 30-case public pool |

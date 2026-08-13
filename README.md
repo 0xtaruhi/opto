@@ -284,6 +284,10 @@ directory to avoid rebuilding the pinned C++ frontend for every worktree:
 export CARGO_TARGET_DIR=/tmp/opto-target
 ```
 
+The native frontend discovers Python through CMake. If the default `python3`
+on a development host is not usable, set `OPTO_PYTHON` to a Python 3.11-or-newer
+executable, for example `OPTO_PYTHON=/usr/bin/python3.11 cargo build --locked`.
+
 Core local quality gates are:
 
 ```sh

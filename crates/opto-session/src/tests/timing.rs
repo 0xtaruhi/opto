@@ -434,6 +434,7 @@ library (demo) {
             DbUpdate {
                 modules: vec![hierarchy_leaf("unrelated", 1, false)],
                 top: None,
+                diagnostics: Vec::new(),
             },
             CurrentDesignPolicy::ElaboratedTop,
         )
