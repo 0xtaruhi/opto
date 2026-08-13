@@ -452,10 +452,14 @@ passes return equivalent proposals. Iterative representation proposals use a
 static specification that names the transform, its fixed round budget, and its
 optimization policy; proposal-specific booleans and open-coded retry chains are
 not part of the scheduler. The pipeline installs retained proposals once into
-the shared graph. The mapper covers the generic implementation list with real
-Liberty cells. Timing-driven portfolios use bounded flow ranking before exact
-recovery of the selected implementation; unconstrained portfolios compare
-exact mapped area because that is their stated objective. Pass names, remap
+the shared graph. Independent baseline/proposal transforms and independent
+implementation-cover recoveries run as keyed composite tasks on limited views
+of the same worker pool; results return in implementation order before the
+ordinary deterministic ranking step. The mapper covers the generic
+implementation list with real Liberty cells. Timing-driven portfolios use
+bounded flow ranking before exact recovery of the selected implementation;
+unconstrained portfolios compare exact mapped area because that is their stated
+objective. Pass names, remap
 composition, analysis
 invalidation, and proposal handling do not leak into candidate enumeration.
 Dispatch remains monomorphic, with no per-node pass objects or virtual calls.

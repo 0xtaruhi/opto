@@ -6,7 +6,7 @@
 use super::network::{LogicGraph, LogicNode, LogicNodeId};
 use super::rewrite::{RewriteIncremental, remap_literal};
 use hashbrown::HashMap;
-use opto_runtime::ExecutionContext;
+use opto_runtime::{ExecutionContext, Task, TaskKey};
 
 pub(super) struct LogicPipelineOutcome {
     pub(super) network: LogicGraph,
@@ -119,24 +119,56 @@ pub(super) fn optimize(
         return finish(identity(source), roots, Vec::new());
     }
     let functional = small_support_choice(&source, roots, requirements, diagnostics, runtime)?;
-    let baseline = optimize_baseline(
-        &source,
-        roots,
-        requirements,
-        diagnostics,
-        runtime,
-        incremental,
+    let mut products = runtime.map_ordered_composite(
+        vec![
+            Task::new(TaskKey::new(7, 0), OptimizationTask::Baseline)
+                .with_estimated_work(source.node_count() as u64),
+            Task::new(
+                TaskKey::new(7, 1),
+                OptimizationTask::Proposal(MUX_DECOMPOSITION),
+            )
+            .with_estimated_work(source.node_count() as u64),
+        ],
+        |task, nested| match task {
+            OptimizationTask::Baseline => optimize_baseline(
+                &source,
+                roots,
+                requirements,
+                diagnostics,
+                nested,
+                incremental,
+            )
+            .map(OptimizationProduct::Baseline),
+            OptimizationTask::Proposal(spec) => {
+                build_proposal(spec, &source, roots, requirements, diagnostics, nested)
+                    .map(OptimizationProduct::Proposal)
+            }
+        },
     )?;
+    let OptimizationProduct::Baseline(baseline) = products.remove(0) else {
+        return Err(crate::SynthError::invariant(
+            "AXM optimization portfolio returned products out of order",
+        ));
+    };
+    let OptimizationProduct::Proposal(proposal) = products.remove(0) else {
+        return Err(crate::SynthError::invariant(
+            "AXM optimization portfolio returned products out of order",
+        ));
+    };
     let mut alternatives = functional.into_iter().collect::<Vec<_>>();
-    alternatives.extend(build_proposal(
-        MUX_DECOMPOSITION,
-        &source,
-        roots,
-        requirements,
-        diagnostics,
-        runtime,
-    )?);
+    alternatives.extend(proposal);
     finish(baseline, roots, alternatives)
+}
+
+#[derive(Clone, Copy)]
+enum OptimizationTask {
+    Baseline,
+    Proposal(ProposalSpec),
+}
+
+enum OptimizationProduct {
+    Baseline(TransformProduct),
+    Proposal(Option<ChoiceProposal>),
 }
 
 fn build_proposal(
@@ -644,5 +676,51 @@ mod tests {
         .expect("formal engine accepts the decomposition miter");
 
         assert!(proof.require_proved().is_ok());
+    }
+
+    #[test]
+    fn optimization_portfolio_is_deterministic_across_worker_counts() {
+        let build = || {
+            let mut source = LogicGraph::new();
+            let inputs = (0..6)
+                .map(|origin| source.variable(origin).unwrap())
+                .collect::<Vec<_>>();
+            let mut root = inputs[0];
+            for index in 0..24 {
+                let then_value = source.xor(root, inputs[(index + 1) % inputs.len()]);
+                let else_value = source.and(root, inputs[(index + 2) % inputs.len()]);
+                root = source.mux(inputs[index % inputs.len()], then_value, else_value);
+            }
+            source.freeze();
+            (source, root)
+        };
+        let run = |max_threads| {
+            let (source, root) = build();
+            let runtime = ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads })
+                .expect("test runtime is valid");
+            optimize(
+                source,
+                &[root],
+                &[None],
+                true,
+                crate::SynthesisDiagnostics::default(),
+                &runtime,
+                None,
+            )
+            .expect("optimization portfolio succeeds")
+        };
+
+        let serial = run(1);
+        let parallel = run(4);
+        assert_eq!(serial.remap, parallel.remap);
+        assert_eq!(serial.alternatives.len(), parallel.alternatives.len());
+        for index in 0..serial.network.node_count() {
+            let node = LogicNodeId::from_index(index);
+            assert_eq!(serial.network.node(node), parallel.network.node(node));
+        }
+        for (serial, parallel) in serial.alternatives.iter().zip(&parallel.alternatives) {
+            assert_eq!(serial.pass, parallel.pass);
+            assert_eq!(serial.roots, parallel.roots);
+        }
     }
 }
