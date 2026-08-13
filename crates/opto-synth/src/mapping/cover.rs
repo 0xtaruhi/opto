@@ -313,7 +313,7 @@ fn select_subject_cover(
         module,
         request,
     };
-    let mut implementations = subject.implementations().iter();
+    let implementations = subject.implementations();
     let timing_driven = request
         .roots
         .iter()
@@ -323,22 +323,49 @@ fn select_subject_cover(
     } else {
         CoverSearch::Exact
     };
-    let baseline = implementations.next().ok_or_else(|| {
+    let baseline = implementations.first().ok_or_else(|| {
         crate::SynthError::invariant("regional Boolean subject has no baseline implementation")
     })?;
-    let Some(mut outputs) = analyzed_outputs(request.roots, |value| baseline.node(value))? else {
+    let Some(baseline_outputs) = analyzed_outputs(request.roots, |value| baseline.node(value))?
+    else {
         return Ok(None);
     };
-    let mut selected = selector
-        .select(&outputs, portfolio_search)?
-        .ok_or_else(|| crate::SynthError::mapping("regional Boolean network cannot be covered"))?;
-    let mut selected_pass = baseline.pass();
-    for implementation in implementations {
-        let candidate_outputs =
+    let mut implementation_outputs = Vec::with_capacity(implementations.len());
+    implementation_outputs.push(baseline_outputs);
+    for implementation in &implementations[1..] {
+        implementation_outputs.push(
             analyzed_outputs(request.roots, |value| implementation.node(value))?.ok_or_else(
                 || crate::SynthError::invariant("AXM alternative has no analyzed outputs"),
-            )?;
-        let Some(candidate) = selector.select(&candidate_outputs, portfolio_search)? else {
+            )?,
+        );
+    }
+    let tasks = implementation_outputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, outputs)| {
+            opto_runtime::Task::new(
+                opto_runtime::TaskKey::new(8, index as u64),
+                (index, outputs),
+            )
+            .with_estimated_work(subject.network().node_count() as u64)
+        })
+        .collect();
+    let mut candidates =
+        request
+            .options
+            .runtime
+            .map_ordered_composite(tasks, |(index, outputs), nested| {
+                selector
+                    .select(&outputs, portfolio_search, nested)
+                    .map(|cover| (index, outputs, cover))
+            })?;
+    let (_, mut outputs, baseline_candidate) = candidates.remove(0);
+    let mut selected = baseline_candidate
+        .ok_or_else(|| crate::SynthError::mapping("regional Boolean network cannot be covered"))?;
+    let mut selected_pass = baseline.pass();
+    for (index, candidate_outputs, candidate) in candidates {
+        let implementation = &implementations[index];
+        let Some(candidate) = candidate else {
             crate::api::diagnostics::trace!(
                 crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
                 "cover.logic_alternative",
@@ -367,7 +394,7 @@ fn select_subject_cover(
         selected
     } else {
         selector
-            .select(&outputs, CoverSearch::Exact)?
+            .select(&outputs, CoverSearch::Exact, request.options.runtime)?
             .ok_or_else(|| {
                 crate::SynthError::mapping("selected AXM implementation cannot be covered")
             })?
@@ -421,6 +448,7 @@ impl CoverSelector<'_, '_> {
         &self,
         outputs: &[AnalyzedRegionOutput],
         search_kind: CoverSearch,
+        runtime: &opto_runtime::ExecutionContext,
     ) -> Result<Option<RankedCover>, crate::SynthError> {
         let Self {
             subject,
@@ -507,7 +535,7 @@ impl CoverSelector<'_, '_> {
                 &nodes,
                 request.catalog,
                 timing,
-                request.options.runtime,
+                runtime,
             )?,
             CoverSearch::Exact => search::cover_logic_network_with_truths(
                 subject.network(),
@@ -516,7 +544,7 @@ impl CoverSelector<'_, '_> {
                 &nodes,
                 request.catalog,
                 timing,
-                request.options.runtime,
+                runtime,
             )?,
         };
         let mut cover = cover;
