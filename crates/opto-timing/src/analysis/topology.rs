@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Sealed timing topology and generation-local electrical values.
+//!
+//! Stable timing-net and instance identities are resolved into compact graph
+//! rows. Region edits journal adjacency, arc slots, mapped bindings, and
+//! topological-order state together so a view can commit or roll back without
+//! rebuilding unaffected topology.
+
 use crate::{
     DesignRuleScope, LibraryCellId, PortId, TargetCellRef, TargetPinDirection, TargetPinRef,
     TargetTimingArcRef, TargetTimingType, TimingDesign, TimingEdge, TimingInstanceId,
@@ -25,6 +32,10 @@ pub(crate) use region::InstanceRegionGraphEdit;
 pub(crate) use storage::*;
 
 #[derive(Debug)]
+/// Compact timing graph owned by one analysis view.
+///
+/// Name, ordering, and selected topology allocations may be shared across
+/// sibling views; electrical values and incremental edit state remain private.
 pub(crate) struct TimingGraph {
     net_count: usize,
     port_nets: std::sync::Arc<BTreeMap<PortId, Box<[crate::TimingNetId]>>>,
@@ -188,6 +199,10 @@ pub(super) enum SequentialElement {
 }
 
 impl TimingGraph {
+    /// Compacts a quiescent graph and remaps every adjacency using moved arc IDs.
+    ///
+    /// Callers must not hold a live region edit because its journals use the
+    /// pre-compaction arc and row identities.
     pub(crate) fn compact(&mut self) -> Result<(), crate::TimingError> {
         if let Some(remap) = self.arcs.compact()? {
             self.outgoing = remap_arc_rows(&self.outgoing, &remap)?;
@@ -224,6 +239,7 @@ impl TimingGraph {
         Ok(())
     }
 
+    /// Seals fallible row overlays before an otherwise infallible edit commit.
     pub(crate) fn compact_incremental_rows(&mut self) -> Result<(), crate::TimingError> {
         self.compact_rows()?;
         self.instance_nets.compact().map_err(packed_row_capacity)
@@ -349,6 +365,10 @@ impl TimingGraph {
         reason = "graph construction performs one capacity-preflighted publication of topology, \
                   parasitic values, sequential metadata, and topological order"
     )]
+    /// Builds view-specific graph state from one already sealed topology.
+    ///
+    /// All compact arenas and topological order are capacity-checked before the
+    /// graph becomes visible to propagation.
     pub(crate) fn build_with_topology(
         design: &crate::model::SharedTimingDesign,
         library: &TimingLibrary,

@@ -184,10 +184,12 @@ impl<'a> MappedTimingTransaction<'a> {
         Ok(())
     }
 
+    /// Restores timing views in reverse order before restoring mapped topology.
     pub(crate) fn rollback(self) -> Result<(), crate::SynthError> {
         rollback_applied(self.mapped, self.timing, self.edit)
     }
 
+    /// Returns a primary operation failure while preserving any rollback error.
     pub(crate) fn abort<T>(
         self,
         error: crate::SynthError,

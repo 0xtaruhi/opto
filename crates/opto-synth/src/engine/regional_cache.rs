@@ -9,6 +9,11 @@ use crate::regional::RegionCoverPlanRecord;
 use crate::{RegionContextKey, RegionCoverPlan, SynthError};
 use std::collections::{BTreeMap, btree_map::Entry};
 
+/// Publishes the complete context-sorted cache reachable from this run.
+///
+/// Journaled explorations are retained, while final selected plans overwrite
+/// the same context because they are the authoritative checkpoints. No
+/// process-global cache or unreachable historical context is carried forward.
 pub(super) fn publish(
     base_records: &mut Box<[RegionalCacheRecord]>,
     final_plans: &[RegionCoverPlan],

@@ -319,6 +319,11 @@ pub(crate) fn validate_observable_drivers(
 }
 
 #[derive(Clone, Copy)]
+/// Borrowed inputs needed to freeze the global mapped substrate.
+///
+/// `observed_values` add publication roots but do not transfer their internal
+/// Word topology into the substrate; regional artifacts remain the sole owner
+/// of that implementation.
 pub(crate) struct MappedSubstrateRequest<'a> {
     pub(crate) module: &'a word::WordModule,
     pub(crate) options: &'a SynthesisOptions,
@@ -367,6 +372,11 @@ pub(crate) fn build_test_substrate(
     Ok(output)
 }
 
+/// Builds the immutable global substrate and Word-value net bindings.
+///
+/// Only full-domain aliases, constants, ports, retained instances, state, and
+/// explicitly observed roots enter this owner. Region-local care reductions
+/// cannot create substrate equivalence or erase publication obligations.
 pub(crate) fn build_mapped_substrate(
     request: MappedSubstrateRequest<'_>,
 ) -> Result<MappedSubstrate, crate::SynthError> {

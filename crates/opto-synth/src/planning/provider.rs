@@ -33,9 +33,17 @@ impl ProviderRecipeId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StructuralEstimate {
+/// Architecture-independent, unitless cost summary used before Liberty cover.
+///
+/// These values rank bounded construction choices and allocate work; they are
+/// not physical area, delay, or wire-length predictions and never replace
+/// mapped MMMC evaluation.
+pub(crate) struct StructuralEstimate {
+    /// Longest abstract logic-level path through the construction.
     pub logic_depth: u32,
+    /// Relative amount of Boolean or sequential implementation work.
     pub logic_units: u64,
+    /// Relative amount of internal connectivity exposed by the construction.
     pub wiring_units: u64,
 }
 

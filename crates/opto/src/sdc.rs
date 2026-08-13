@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! SDC evaluation on the declared Opto command catalog.
+//!
+//! Each file uses a fresh Tcl interpreter restricted to commands available in
+//! its selected SDC version. Normal evaluation is wrapped in a constraint
+//! checkpoint; every Tcl error and every Rust-side failure restores the prior
+//! timing state. Syntax-only evaluation uses inert validation callbacks and
+//! never mutates the session.
+
 use crate::command::CommandResult;
 use crate::command::timing::ReadSdcArgs;
 use crate::command_catalog;
@@ -82,6 +90,7 @@ struct ReadSdcOptions {
     version: SdcVersion,
 }
 
+/// Evaluates one SDC file transactionally or validates it without side effects.
 pub(super) fn read_sdc(
     state: &ShellState,
     _interp: *mut TclInterp,
@@ -196,6 +205,7 @@ fn evaluate_syntax_file(
     Ok((code, diagnostic, line))
 }
 
+/// Validates every statically reachable Tcl command path for one SDC version.
 pub(super) fn validate_script_syntax(
     script: &str,
     version: SdcVersion,

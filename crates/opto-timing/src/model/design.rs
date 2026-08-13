@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Compact immutable timing design with sparse region replacements.
+//!
+//! The sealed base interns instance, cell, and pin names once. Region edits own
+//! only changed rows and a hash-narrowed exact-name index; unchanged sibling
+//! views continue sharing the base. Compaction is the explicit boundary that
+//! rebuilds a new base and invalidates no stable instance ID.
+
 use super::{TimingDesign, TimingInstance, TimingPort};
 use opto_core::{NameId, NameTable};
 use std::collections::BTreeMap;
@@ -304,6 +311,7 @@ pub(crate) struct SharedTimingDesign {
 }
 
 impl SharedTimingDesign {
+    /// Consumes an owned construction design into the compact shared base.
     pub(crate) fn seal(design: TimingDesign) -> Result<Self, crate::TimingError> {
         let TimingDesign {
             id,
@@ -343,6 +351,7 @@ impl SharedTimingDesign {
         }
     }
 
+    /// Forks only a quiescent base with no unsealed sparse replacements.
     pub(crate) fn fork_shared(&self) -> Option<Self> {
         self.overrides.is_empty().then(|| Self {
             base: Arc::clone(&self.base),
@@ -386,6 +395,7 @@ impl SharedTimingDesign {
         })
     }
 
+    /// Replaces one dense position while returning an owned rollback row.
     pub(crate) fn replace(
         &mut self,
         position: usize,
@@ -431,6 +441,10 @@ impl SharedTimingDesign {
         Some(removed)
     }
 
+    /// Seals all live rows into a new shared base without changing stable IDs.
+    ///
+    /// Returns the byte size of the replaced base for construction high-water
+    /// accounting; it is not allocator telemetry or retained memory.
     pub(crate) fn compact(&mut self) -> Result<usize, crate::TimingError> {
         if self.overrides.is_empty() && self.len == self.base.instances.len() {
             return Ok(0);

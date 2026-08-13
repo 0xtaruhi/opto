@@ -77,6 +77,7 @@ impl StructuralOwnershipProvenance {
         })
     }
 
+    /// Captures the synchronized operation-arena boundary before a transform.
     pub(crate) fn start(&self, module: &word::WordModule) -> Result<usize, crate::SynthError> {
         if self.owners.len() != module.operations().len() {
             return Err(crate::SynthError::invariant(
@@ -86,6 +87,7 @@ impl StructuralOwnershipProvenance {
         Ok(self.owners.len())
     }
 
+    /// Claims every operation appended since `start` from exact source owners.
     pub(crate) fn claim_since(
         &mut self,
         module: &word::WordModule,
@@ -95,6 +97,10 @@ impl StructuralOwnershipProvenance {
         self.claim_range(module, start, module.operations().len(), sources)
     }
 
+    /// Assigns one common frozen owner to a newly appended operation range.
+    ///
+    /// Sources with absent or different owners are rejected; a transformation
+    /// cannot manufacture ownership for a cross-region semantic candidate.
     pub(crate) fn claim_range(
         &mut self,
         module: &word::WordModule,
@@ -147,6 +153,7 @@ impl StructuralOwnershipProvenance {
         self.owners.len()
     }
 
+    /// Proves that final partitioning preserved every reachable owner atom whole.
     pub(crate) fn verify_frozen(
         &self,
         module: &word::WordModule,

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! One transaction spanning timing design rows, graph topology, and mapped-net bindings.
+
 use super::{
     MappedNetId, OwnedTimingInstance, TimingGeneration, TimingInstanceId, TimingModel, TimingNetId,
     TimingRegionDelta, TimingTopologyState, analysis, mapped_binding_capacity,
@@ -8,6 +10,11 @@ use super::{
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
+/// Rollback journal for an applied instance-region model update.
+///
+/// Dense design rows may move through swap removal, so the journal records
+/// positions as well as stable instance IDs and restores the bidirectional
+/// position index in reverse operation order.
 pub(crate) struct InstanceRegionModelEdit {
     journal: Vec<RegionInstanceOp>,
     mapped_nets: MappedNetModelEdit,
@@ -74,6 +81,11 @@ impl TimingModel {
         reason = "model-region publication preflights compact capacities and journals graph, design, \
                   object-binding, and mapped-net changes as one rollback unit"
     )]
+    /// Applies one mapped-generation region delta across all model owners.
+    ///
+    /// Generation identity and final capacities are checked first. Graph,
+    /// design, stable-position, and mapped-net changes then form one rollback
+    /// unit; any intermediate failure is recovered before returning.
     pub(crate) fn apply_instance_region(
         &mut self,
         delta: TimingRegionDelta,
@@ -212,6 +224,7 @@ impl TimingModel {
         Ok((edit, dirty))
     }
 
+    /// Restores mapped bindings, graph state, dense rows, and topology identity.
     pub(crate) fn rollback_instance_region(
         &mut self,
         edit: InstanceRegionModelEdit,
@@ -271,10 +284,12 @@ impl TimingModel {
         Ok(dirty)
     }
 
+    /// Consumes a prepared journal and releases the graph's deferred removals.
     pub(crate) fn commit_instance_region(&mut self, edit: InstanceRegionModelEdit) {
         self.graph.commit_instance_region(edit.graph);
     }
 
+    /// Completes fallible row compaction before the infallible commit step.
     pub(crate) fn prepare_instance_region_commit(&mut self) -> Result<(), crate::TimingError> {
         self.graph.compact_incremental_rows()
     }

@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Bounded deterministic K-cut and truth-table analysis for the AXM graph.
+//!
+//! Leaves inside a cut are positive, sorted, and unique. Each node retains a
+//! fixed-capacity rank-ordered set, so enumeration has a structural bound and
+//! is independent of hash or worker completion order. Incremental construction
+//! reuses a row only after predecessor identity proves it unchanged.
+
 use super::network::{LogicGraph, LogicNode, LogicNodeId, MAX_CUT_LEAVES, MAX_CUTS_PER_NODE};
 use opto_runtime::ExecutionContext;
 
@@ -17,6 +24,7 @@ fn cut_segment_count(levels: &[Vec<usize>]) -> Result<usize, crate::SynthError> 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Sorted unique positive leaves of one bounded cut.
 pub(crate) struct KCut {
     len: u8,
     leaves: [LogicNodeId; MAX_CUT_LEAVES],
@@ -105,6 +113,7 @@ impl KCut {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Fixed-capacity cuts for one node, ordered by leaf count and identity.
 pub(crate) struct CutSet {
     len: u8,
     cap: u8,
@@ -179,6 +188,7 @@ impl CutSet {
 }
 
 #[derive(Debug)]
+/// Packed cut rows indexed by frozen logic-node ID.
 pub(crate) struct CutDatabase {
     rows: opto_core::PackedRows<KCut>,
 }
@@ -225,6 +235,7 @@ impl CutTruthDatabase {
 }
 
 #[derive(Clone, Copy)]
+/// Identity maps and predecessor evidence required for incremental cut reuse.
 pub(crate) struct IncrementalCutInputs<'a> {
     pub(crate) previous: &'a CutDatabase,
     pub(crate) old_to_new: &'a [Option<LogicNodeId>],
@@ -256,6 +267,10 @@ impl CutDatabase {
         network.parallel_cut_database(max_leaves, max_cuts, runtime)
     }
 
+    /// Rebuilds dirty level segments and returns exact unchanged-node flags.
+    ///
+    /// Nodes at one topological level are analyzed in deterministic fixed-size
+    /// chunks; publication concatenates chunk results in level order.
     pub(crate) fn build_incremental(
         network: &LogicGraph,
         max_leaves: usize,

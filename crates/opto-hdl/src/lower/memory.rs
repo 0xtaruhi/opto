@@ -7,8 +7,17 @@
               does not define a reusable public module boundary"
 )]
 
+//! Lowering of flattened source memory selections into typed Word memory ports.
+//!
+//! Source offsets are measured in flattened bits, while Word memory addresses
+//! select elements. Static and dynamic spans must therefore prove whole-element
+//! alignment before division; partial selections remain within one element.
+//! Concatenation iterates high addresses first so the lowest selected element
+//! remains in the least-significant result bits.
+
 use super::*;
 
+/// Converts a constant flattened bit range into an element address and select.
 pub(super) fn static_memory_select(
     module: &mut ModuleLowerer,
     memory: MemoryId,
@@ -82,6 +91,7 @@ pub(super) enum MemorySelection {
     },
 }
 
+/// Splits an unsigned flattened offset into element address and intra-element offset.
 pub(super) fn dynamic_memory_select(
     module: &mut ModuleLowerer,
     memory: MemoryId,
@@ -251,6 +261,7 @@ fn unsigned_constant(
         .map_err(HdlError::Ir)
 }
 
+/// Reads and concatenates every element in source flattening order.
 pub(super) fn read_whole_memory(
     module: &mut ModuleLowerer,
     memory: MemoryId,
@@ -274,6 +285,7 @@ pub(super) fn read_whole_memory(
     module.concat(elements, source).map_err(HdlError::Ir)
 }
 
+/// Reads a consecutive whole-element span from a dynamic base address.
 pub(super) fn read_memory_span(
     module: &mut ModuleLowerer,
     memory: MemoryId,

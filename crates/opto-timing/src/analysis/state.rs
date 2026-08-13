@@ -159,6 +159,10 @@ impl PathArena {
         Ok(steps)
     }
 
+    /// Rebuilds the predecessor arena from paths still referenced by arrivals.
+    ///
+    /// Every live path ID is remapped together with the arena; compaction may
+    /// not cross an edit journal that still contains old path IDs.
     pub(super) fn compact(
         &mut self,
         arrivals: &mut ArrivalSlotStore,
@@ -411,6 +415,7 @@ impl OriginArena {
             .ok_or_else(|| crate::TimingAnalysisError::UnknownArrivalOrigin { id: id.0 }.into())
     }
 
+    /// Restores overwritten origins and truncates identities created by an edit.
     pub(super) fn restore(
         &mut self,
         len: usize,

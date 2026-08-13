@@ -6,6 +6,11 @@
 use super::{FinalizableState, report};
 use crate::{IncrementalSnapshot, SynthesisMetrics, SynthesisResult};
 
+/// Seals the sole mapped owner and constructs the durable synthesis artifact.
+///
+/// Publication names are assigned before the one-time topology repack; the
+/// resulting cell remap is applied to provenance, after which every persisted
+/// owner is validated against the same compact generation.
 pub(super) fn finalize(
     mut optimized: FinalizableState,
 ) -> Result<SynthesisResult, crate::SynthError> {

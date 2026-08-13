@@ -56,6 +56,7 @@ impl SampledWaveformGrid {
         Self::from_shared(model, index_1.into(), index_2.into(), waveforms)
     }
 
+    /// Validates and packs a grid while retaining shared characterization axes.
     pub(crate) fn from_shared(
         model: &'static str,
         index_1: Arc<[f64]>,
@@ -160,6 +161,11 @@ impl SampledWaveformGrid {
         })
     }
 
+    /// Bilinearly combines corner waveforms on their sorted coordinate union.
+    ///
+    /// Corner waveforms may use different sample coordinates. Each is sampled
+    /// onto the union before weights are applied, avoiding index-wise blending
+    /// of physically different time or voltage points.
     pub(super) fn interpolated_waveform(
         &self,
         index_1: Option<f64>,

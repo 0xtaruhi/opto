@@ -52,6 +52,22 @@ instead of repeating the lower layer's matrix and internal assertions. Follow
 the placement, fixture, ignored-test, consolidation, and review rules in
 [`docs/testing.md`](docs/testing.md).
 
+## Code documentation
+
+Document contracts according to the knowledge they carry, not according to
+whether an API is intended for a third party. Cross-crate APIs, restricted
+interfaces between implementation modules, and private algorithms all require
+documentation when correct maintenance depends on non-obvious ownership,
+identity, phase, ordering, determinism, transaction, invalidation, unit, or
+complexity rules. Put shared invariants on the owning module or type rather
+than copying them onto every helper.
+
+Do not add comments that only restate a name, signature, or the following line
+of code. Simple accessors, direct constructors, representation conversions, and
+narrow test helpers normally need no internal comment. See
+[`docs/api.md`](docs/api.md) for the complete Rustdoc and implementation-comment
+policy.
+
 ## Contributor licensing
 
 Opto uses a contributor license agreement so that accepted contributions can

@@ -24,6 +24,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug)]
+/// Resident source design and its optional published synthesis generation.
+///
+/// A synthesized artifact and its binding are present or absent together. On
+/// invalidation, the artifact's portable incremental snapshot is retained as
+/// the sole cross-run reuse owner while its generation-bound mapped index is
+/// discarded.
 pub(crate) struct DesignRecord {
     pub(crate) source: RtlModule,
     pub(crate) source_revision: RevisionId,
@@ -39,6 +45,7 @@ pub(crate) struct DesignRecord {
 
 #[derive(Debug, Clone, Copy)]
 #[must_use]
+/// Proof that a design's synthesis ownership can be detached infallibly.
 pub(crate) struct PreparedSynthesisDetach(SynthesisDetachKind);
 
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +78,7 @@ impl DesignRecord {
             .or(self.incremental_snapshot.as_ref())
     }
 
+    /// Validates the all-or-nothing synthesis ownership state before mutation.
     pub(crate) fn prepare_synthesis_detach(&self) -> Result<PreparedSynthesisDetach, SessionError> {
         match (
             self.synthesized.as_ref(),
@@ -89,6 +97,10 @@ impl DesignRecord {
         }
     }
 
+    /// Detaches a prevalidated artifact while preserving its incremental owner.
+    ///
+    /// Commit is intentionally infallible; assertions detect mutation between
+    /// preparation and commit rather than permitting a partial session update.
     pub(crate) fn commit_synthesis_detach(&mut self, prepared: PreparedSynthesisDetach) {
         match prepared.0 {
             SynthesisDetachKind::PreserveSnapshot => {

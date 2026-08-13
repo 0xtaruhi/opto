@@ -32,6 +32,7 @@ license = "GPL-3.0-only"
 [workspace.lints.rust]
 warnings = "deny"
 missing_docs = "deny"
+unreachable_pub = "deny"
 unsafe_code = "deny"
 unused_must_use = "deny"
 unused_imports = "deny"

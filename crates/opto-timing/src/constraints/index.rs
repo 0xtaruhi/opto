@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Reverse-index maintenance for transactional timing constraints.
+//!
+//! Every constraint mutation updates its primary owner and object-reference
+//! index together. Preparation may remove or rewrite rows, but rollback must
+//! restore both representations so object deletion never depends on which
+//! query or command ran first.
+
 use super::*;
 
 impl PreparedTimingObjectRemoval {
@@ -34,6 +41,7 @@ pub(super) fn remove_index_reference(
     }
 }
 
+/// Restores a port-keyed value together with its reverse reference.
 pub(super) fn restore_map_value<T>(
     values: &mut BTreeMap<PortId, T>,
     references: &mut BTreeMap<opto_db::AnyObjectId, BTreeSet<TimingReference>>,
@@ -195,6 +203,11 @@ pub(super) fn insert_design_rule<I: DesignRuleSlot>(
     Ok(insertion)
 }
 
+/// Prepares deterministic row rewrites after removing referenced objects.
+///
+/// Empty constraints are deleted; surviving object rows preserve their
+/// original order. Reverse references are updated against the prepared view
+/// and are restored from the returned edits if the outer transaction fails.
 pub(super) fn prepare_design_rule_rows<I: DesignRuleSlot, R: opto_db::ObjectIdSet + ?Sized>(
     arena: &OrderedArena<DesignRuleConstraint>,
     slots: BTreeSet<I>,

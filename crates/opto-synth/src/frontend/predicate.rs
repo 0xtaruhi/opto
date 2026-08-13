@@ -1,11 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Canonical Boolean predicates used while normalizing procedural control.
+//!
+//! Source values that represent the same signal polarity share one AXM literal.
+//! Cofactors and later Word materialization traverse iteratively, preserve
+//! complement edges, and rebuild through canonical constructors so a control
+//! predicate never depends on CFG path duplication or recursion depth.
+
 use super::{BitVal, ConstBits, word};
 use opto_ir::logic::{Lit, LogicBuilder, NodeKind};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy)]
+/// Canonical control condition with explicit constant cases.
 pub(super) enum Predicate {
     Never,
     Always,
@@ -57,6 +65,7 @@ struct Variable {
     source_active_high: bool,
 }
 
+/// Shared canonical graph and sparse Word-value correspondence for one lowering run.
 pub(super) struct PredicateArena {
     builder: LogicBuilder,
     variables: HashMap<Atom, Variable>,
@@ -65,6 +74,7 @@ pub(super) struct PredicateArena {
     represented: HashMap<word::ValueId, Lit>,
 }
 
+/// Cached cofactor of the arena under one literal assignment.
 pub(super) struct PredicateRestriction {
     condition: Lit,
     condition_value: bool,
@@ -314,6 +324,7 @@ impl PredicateArena {
         })
     }
 
+    /// Materializes one predicate into Word IR while preserving shared subgraphs.
     pub(super) fn materialize(
         &mut self,
         module: &mut word::WordModule,

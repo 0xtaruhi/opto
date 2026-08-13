@@ -473,6 +473,7 @@ impl ImplementationDb {
         std::mem::take(&mut self.committed_owner_impact)
     }
 
+    /// Releases spare capacity without changing any stable owner or origin ID.
     pub(crate) fn compact(&mut self) {
         for region in &mut self.regions {
             region.compact();
@@ -554,6 +555,11 @@ impl ImplementationDb {
             )
     }
 
+    /// Validates the complete implementation owner before persistence.
+    ///
+    /// Checkpoints may not retain unconsumed edit impact, generation-mismatched
+    /// cell rows, non-canonical origin sets, or reverse boundary footprints that
+    /// disagree with the primary ownership column.
     pub(crate) fn validate_checkpoint(
         &self,
         mapped: &MappedNetlist,

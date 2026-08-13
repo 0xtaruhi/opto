@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Durable decision and optional plan for one exact regional context.
+///
+/// Memory decisions and topology payloads are shared immutable owners. Records
+/// are valid for reuse only as a strictly context-sorted slice; a context may
+/// never describe two different memory decisions.
 pub(crate) struct RegionalCacheRecord {
     context: RegionContextKey,
     memory_implementations: Arc<[u8]>,
@@ -45,6 +50,10 @@ impl RegionalCacheRecord {
         self.plan.as_ref()
     }
 
+    /// Reuses the immutable decision payload for a new measured context.
+    ///
+    /// The plan is cleared because its contracts and topology remain bound to
+    /// the old context until independently reconstructed and validated.
     pub(crate) fn with_context(&self, context: RegionContextKey) -> Self {
         Self {
             context,
@@ -53,6 +62,7 @@ impl RegionalCacheRecord {
         }
     }
 
+    /// Rejects conflicting decisions assigned to the same context key.
     pub(crate) fn validate_same_decision(&self, other: &Self) -> Result<(), crate::SynthError> {
         if self.context != other.context
             || self.memory_implementations != other.memory_implementations
@@ -76,6 +86,7 @@ impl RegionalCacheRecord {
         Ok(())
     }
 
+    /// Validates payloads and the canonical strict context order used by lookup.
     pub(crate) fn validate_all(records: &[Self]) -> Result<(), crate::SynthError> {
         let mut previous = None;
         for record in records {

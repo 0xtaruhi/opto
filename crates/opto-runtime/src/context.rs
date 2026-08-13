@@ -269,6 +269,12 @@ impl ExecutionContext {
         self.map_ordered_in_scope(tasks, |input| operation(input, &nested))
     }
 
+    /// Executes one ordered batch on this handle's existing pool view.
+    ///
+    /// This is the common implementation for public schedulers. Callbacks may
+    /// complete in any order, but the pre-sorted task vector fixes both returned
+    /// values and error selection; cancellation is checked before admission and
+    /// again immediately before each callback.
     pub(crate) fn map_ordered_in_scope<I, O, E, F>(
         &self,
         tasks: Vec<Task<I>>,

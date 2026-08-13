@@ -94,6 +94,10 @@ impl LookupTable {
         }
     }
 
+    /// Combines exactly aligned characterization grids point by point.
+    ///
+    /// Axis values use IEEE bit equality so a merged table cannot silently
+    /// reinterpret coordinates that merely compare numerically equal.
     pub(crate) fn pointwise_max(&self, other: &Self) -> Option<Self> {
         if !axis_equal(&self.index_1, &other.index_1)
             || !axis_equal(&self.index_2, &other.index_2)
@@ -116,6 +120,7 @@ impl LookupTable {
 }
 
 #[derive(Debug, Default)]
+/// Import-local interner for exactly identical characterization axes.
 pub(crate) struct LookupTableBuilder {
     axes_by_hash: HashMap<u64, Vec<Arc<[f64]>>>,
 }
@@ -134,6 +139,7 @@ impl LookupTableBuilder {
         }
     }
 
+    /// Interns an axis by bit-exact contents, verifying hash collisions.
     pub(crate) fn intern_axis(&mut self, axis: &[f64]) -> Arc<[f64]> {
         let hash = axis_hash(axis);
         let bucket = self.axes_by_hash.entry(hash).or_default();
@@ -210,6 +216,7 @@ fn interpolate_2d(
     Some(lerp(low, high, x_ratio))
 }
 
+/// Selects an interpolation or linear-extrapolation span on a validated axis.
 pub(crate) fn interpolation_bracket(axis: &[f64], target: f64) -> (usize, usize, f64) {
     if axis.len() <= 1 {
         return (0, 0, 0.0);

@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Canonical mutable AXM construction followed by immutable graph analysis.
+//!
+//! Complemented edges encode inversion; AND/XOR operands and MUX polarity are
+//! normalized by the underlying builder. The first analysis freezes storage,
+//! after which node identities and topology cannot change.
+
 use super::cuts::KCut;
 #[cfg(test)]
 use super::cuts::{CutDatabase, CutRange, CutSet};
@@ -120,6 +126,7 @@ pub(crate) enum LogicNode {
 }
 
 #[derive(Debug)]
+/// Canonical AXM graph with a one-way mutable-to-frozen lifecycle.
 pub(crate) struct LogicGraph {
     builder: Option<LogicBuilder>,
     storage: OnceLock<StoredLogicNetwork>,
@@ -202,6 +209,7 @@ impl LogicGraph {
         )
     }
 
+    /// Seals canonical storage exactly once before parallel read-only analysis.
     pub(crate) fn freeze(&mut self) {
         if let Some(builder) = self.builder.take()
             && self.storage.get().is_none()

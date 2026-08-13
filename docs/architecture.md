@@ -1180,3 +1180,10 @@ representation, it must define:
 
 If those cannot be stated, the optimization is not ready for the production
 flow.
+
+These contracts must also be recorded at the code boundary that enforces them.
+That boundary may be a crate API, a restricted interface between internal
+modules, a core type, or a private algorithm. Rust visibility is not a proxy
+for architectural importance: ownership, identity, generation, deterministic
+publication, rollback, invalidation, unit, and bounded-work assumptions remain
+documentation obligations even when their implementation is crate-private.

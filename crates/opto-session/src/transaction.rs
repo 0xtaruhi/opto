@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Atomic reconciliation of design objects and their dependent session state.
+//!
+//! The registry is the identity authority, but timing and power retain reverse
+//! references into it. Every operation therefore prepares and validates all
+//! fallible dependent edits before committing those edits and publishing the
+//! registry change last. Design records remain the caller's responsibility so
+//! a failed reconciliation cannot expose a partial source or mapped artifact.
+
 use crate::objects::locators::{DesignObjectBatch, DesignObjectScope};
 use crate::{DesignView, MappedObjectIndex, Session, SessionError};
 use opto_db::{
@@ -54,6 +62,7 @@ fn apply_reconcile(
     Ok(())
 }
 
+/// Deletes registry objects after preflighting every dependent owner.
 pub(crate) fn delete_objects(
     session: &mut Session,
     removed: &BTreeSet<AnyObjectId>,
@@ -61,6 +70,11 @@ pub(crate) fn delete_objects(
     apply_removals(session, removed)
 }
 
+/// Reconciles the current design against a borrowed mapped artifact.
+///
+/// This function updates only registry-dependent owners. The caller must not
+/// install the mapped artifact or its sidecar until this fallible phase has
+/// succeeded.
 pub(crate) fn reconcile_mapped_objects(
     session: &mut Session,
     mapped: &opto_ir::mapped::MappedNetlist,

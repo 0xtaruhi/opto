@@ -6,6 +6,14 @@
     reason = "this module is the audited adapter between safe shell code and Tcl's C callback ABI"
 )]
 
+//! Audited Tcl callback and object-lifetime adapter.
+//!
+//! Borrowed [`TclArg`] text is valid only for the native callback duration.
+//! Rust command errors are paired with the exact Tcl result text so ordinary
+//! Tcl errors cannot accidentally recover a stale structured diagnostic. Every
+//! FFI access documents the interpreter, object, and byte-lifetime proof at its
+//! call site.
+
 use crate::command::{CommandResult, EvalResult, dispatch};
 use crate::command_catalog::{self, RegisteredCommand};
 use crate::runtime::ShellState;
@@ -20,6 +28,7 @@ use std::ops::Deref;
 use std::path::Path;
 
 #[derive(Clone, Copy)]
+/// Tcl object and UTF-8 view borrowed for one callback invocation.
 pub(super) struct TclArg<'a> {
     pub(super) object: *mut TclObj,
     text: &'a str,
@@ -110,6 +119,7 @@ pub(super) fn register_validation_command_specs<'a>(
     Ok(())
 }
 
+/// Converts Tcl completion into the shell result while preserving typed errors.
 pub(super) fn eval_result(
     state: &ShellState,
     interp: *mut TclInterp,
