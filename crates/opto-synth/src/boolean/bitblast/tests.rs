@@ -29,9 +29,11 @@ mod dynamic;
 mod operations;
 
 #[test]
-fn axm_import_keeps_unknown_constants_symbolic() {
-    let mut module = word::WordModule::new("unknown_axm_constant");
-    let value = module
+fn axm_eliminates_care_free_operands_without_creating_logic() {
+    let mut module = word::WordModule::new("care_free_axm_operand");
+    let input = add_input(&mut module, "input", 1);
+    let input = read_port(&mut module, input);
+    let dont_care = module
         .constant(
             ConstBits::from_bits(vec![BitVal::X]).unwrap(),
             word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap(),
@@ -40,11 +42,22 @@ fn axm_import_keeps_unknown_constants_symbolic() {
         .unwrap();
     let mut backend = AxmBackend::default();
 
-    let bit = backend.import_word(&module, value);
+    let input_bit = backend.import_word(&module, input);
+    let dont_care_bit = backend.import_word(&module, dont_care);
+    let (result, generated) = backend
+        .emit_binary(
+            &mut module,
+            word::BinaryOp::BitXor,
+            input_bit,
+            dont_care_bit,
+            &word::SourceSpan::default(),
+        )
+        .unwrap();
     let (network, inputs) = backend.finish();
 
-    assert!(matches!(bit, ScalarBit::Logic(node) if node.index() != 0));
-    assert_eq!(inputs.as_ref(), &[value]);
+    assert_eq!(result, input_bit);
+    assert_eq!(generated, None);
+    assert_eq!(inputs.as_ref(), &[input]);
     assert_eq!(network.node_count(), 2);
 }
 
@@ -178,7 +191,7 @@ fn frozen_ownership_follows_static_signal_drivers() {
 }
 
 #[test]
-fn resolves_synthesis_x_constants_deterministically() {
+fn preserves_care_free_x_constants_during_bitblast() {
     let mut module = word::WordModule::new("top");
     let ty = word::WordType::bits(1).unwrap();
     let source = word::SourceSpan::located("x_constant.sv", Some(7), Some(11), "constant");
@@ -195,9 +208,9 @@ fn resolves_synthesis_x_constants_deterministically() {
         .find(|connect| connect.target.signal == output)
         .unwrap();
     let word::ValueKind::Constant(bits) = &module.value(connect.value).unwrap().kind else {
-        panic!("resolved X must be a constant");
+        panic!("care-free X must remain a constant");
     };
-    assert_eq!(bits.bit_lsb(0), Some(BitVal::Zero));
+    assert_eq!(bits.bit_lsb(0), Some(BitVal::X));
 }
 
 #[test]

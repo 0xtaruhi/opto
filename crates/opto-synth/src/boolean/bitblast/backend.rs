@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 pub(crate) enum ScalarBit {
     Word(word::ValueId),
     Logic(crate::boolean::logic::network::LogicNodeId),
+    DontCare(word::ValueId),
 }
 
 /// Scalar storage selected by the shared bit-lowering algorithms.
@@ -219,10 +220,11 @@ impl AxmBackend {
     }
 
     pub(crate) fn binding_value(&self, bit: ScalarBit) -> Option<word::ValueId> {
-        let ScalarBit::Logic(literal) = bit else {
-            return None;
-        };
-        self.representatives.get(&literal).copied()
+        match bit {
+            ScalarBit::Logic(literal) => self.representatives.get(&literal).copied(),
+            ScalarBit::DontCare(value) => Some(value),
+            ScalarBit::Word(_) => None,
+        }
     }
 
     fn input(&mut self, value: word::ValueId, signal: Option<word::SignalRef>) -> ScalarBit {
@@ -264,11 +266,16 @@ impl BitBackend for AxmBackend {
         if let word::ValueKind::Constant(bits) = &stored.kind
             && stored.ty.width() == 1
             && let Some(bit) = bits.bit_lsb(0)
-            && matches!(bit, opto_ir::BitVal::Zero | opto_ir::BitVal::One)
         {
-            return ScalarBit::Logic(crate::boolean::logic::network::LogicGraph::constant(
-                matches!(bit, opto_ir::BitVal::One),
-            ));
+            return match bit {
+                opto_ir::BitVal::Zero | opto_ir::BitVal::One => {
+                    ScalarBit::Logic(crate::boolean::logic::network::LogicGraph::constant(
+                        matches!(bit, opto_ir::BitVal::One),
+                    ))
+                }
+                opto_ir::BitVal::X => ScalarBit::DontCare(value),
+                opto_ir::BitVal::Z => self.input(value, None),
+            };
         }
         let signal = match stored.kind {
             word::ValueKind::Signal(reference) if reference.width() == 1 => Some(reference),
@@ -316,6 +323,9 @@ impl BitBackend for AxmBackend {
         arg: ScalarBit,
         _source: &word::SourceSpan,
     ) -> Result<(ScalarBit, Option<word::ValueId>), crate::SynthError> {
+        if matches!(arg, ScalarBit::DontCare(_)) {
+            return Ok((arg, None));
+        }
         let arg = Self::literal(arg)?;
         let value = match op {
             word::UnaryOp::BitNot | word::UnaryOp::LogicalNot => {
@@ -336,6 +346,12 @@ impl BitBackend for AxmBackend {
         right: ScalarBit,
         _source: &word::SourceSpan,
     ) -> Result<(ScalarBit, Option<word::ValueId>), crate::SynthError> {
+        match (left, right) {
+            (ScalarBit::DontCare(_), ScalarBit::DontCare(_)) => return Ok((left, None)),
+            (ScalarBit::DontCare(_), _) => return Ok((right, None)),
+            (_, ScalarBit::DontCare(_)) => return Ok((left, None)),
+            _ => {}
+        }
         let left = Self::literal(left)?;
         let right = Self::literal(right)?;
         let value = match op {
@@ -360,6 +376,17 @@ impl BitBackend for AxmBackend {
         else_value: ScalarBit,
         _source: &word::SourceSpan,
     ) -> Result<(ScalarBit, Option<word::ValueId>), crate::SynthError> {
+        if matches!(cond, ScalarBit::DontCare(_)) {
+            return Ok((else_value, None));
+        }
+        match (then_value, else_value) {
+            (ScalarBit::DontCare(_), ScalarBit::DontCare(_)) => {
+                return Ok((then_value, None));
+            }
+            (ScalarBit::DontCare(_), _) => return Ok((else_value, None)),
+            (_, ScalarBit::DontCare(_)) => return Ok((then_value, None)),
+            _ => {}
+        }
         let value = self.graph.mux(
             Self::literal(cond)?,
             Self::literal(then_value)?,

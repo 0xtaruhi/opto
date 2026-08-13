@@ -19,6 +19,7 @@ pub(crate) fn lower_to_validated_word(
 ) -> Result<word::WordModule, crate::SynthError> {
     let mut module = super::lower_procedures(rtl, runtime, observer)?;
     super::lower_resolved_nets(&mut module, reference_ports)?;
+    super::seal_observable_dont_cares(&mut module, reference_ports)?;
     crate::word::cycle::validate_combinational_acyclic(&module)?;
     crate::api::check::check_design_with_references(&module, reference_ports)
         .map_err(|error| crate::SynthError::invalid(error.to_string()))?;

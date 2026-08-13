@@ -372,7 +372,6 @@ impl RegionArchitectureMaterializer<'_> {
                 mut module,
                 source_to_local,
                 boundary_bindings,
-                observations,
                 operation_sources,
                 memory_values,
                 root_bindings,
@@ -431,6 +430,8 @@ impl RegionArchitectureMaterializer<'_> {
             )
         }?;
         let ownership = lowering.ownership;
+        root_pairs =
+            expand_mapping_root_pairs(self.source, self.semantics, &ownership, root_pairs)?;
         let local_semantics = super::roots::FullDomainRootSemantics::new(&module)?;
         let substrate_outputs = target_output_artifact_keys(
             &module,
@@ -521,7 +522,6 @@ impl RegionArchitectureMaterializer<'_> {
                         local_module: &module,
                         source_to_local: &source_to_local,
                         boundary_bindings: &boundary_bindings,
-                        observations: &observations,
                         memory_values: &memory_values,
                         operation_sources: &operation_sources,
                         root_bindings: &root_bindings,
@@ -633,7 +633,6 @@ impl RegionArchitectureMaterializer<'_> {
             mut module,
             mut source_to_local,
             mut boundary_bindings,
-            observations,
             operation_sources,
             mut memory_values,
             root_bindings,
@@ -696,7 +695,6 @@ impl RegionArchitectureMaterializer<'_> {
                 module,
                 source_to_local,
                 boundary_bindings,
-                observations,
                 operation_sources: operation_sources.into_boxed_slice(),
                 memory_values,
                 root_bindings,
@@ -779,6 +777,47 @@ fn merge_mapping_root_pairs(
         }
     }
     Ok(merged.into_iter().map(|(_, pair)| pair).collect())
+}
+
+fn expand_mapping_root_pairs(
+    source: &word::WordModule,
+    semantics: &super::roots::FullDomainRootSemantics<'_>,
+    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+    roots: Vec<(MappingRoot, word::ValueId)>,
+) -> Result<Vec<(MappingRoot, word::ValueId)>, crate::SynthError> {
+    let mut expanded = Vec::new();
+    for (root, local) in roots {
+        let source_width = source
+            .value(root.value)
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "regional publication root is absent from its source module",
+                )
+            })?
+            .ty
+            .width();
+        let local_bits = ownership
+            .lowered_bits(local)
+            .map_or_else(|| vec![local], <[word::ValueId]>::to_vec);
+        if local_bits.len() != source_width as usize {
+            return Err(crate::SynthError::invariant(
+                "regional publication root width differs after bit lowering",
+            ));
+        }
+        for (bit, local) in local_bits.into_iter().enumerate() {
+            let bit = u32::try_from(bit)
+                .map_err(|_| crate::SynthError::capacity("regional publication bit index"))?;
+            expanded.push((
+                MappingRoot {
+                    requires_combinational_cover: semantics
+                        .bit_requires_artifact(root.value, bit)?,
+                    ..root
+                },
+                local,
+            ));
+        }
+    }
+    Ok(expanded)
 }
 
 fn target_output_artifact_keys(

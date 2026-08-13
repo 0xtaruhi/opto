@@ -55,8 +55,7 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
             source_module: &source,
             local_module: &local,
             source_to_local: &source_to_local,
-            boundary_bindings: &[],
-            observations: &[],
+            boundary_bindings: &[(source_input, local_input)],
             memory_values: &[],
             operation_sources: &[],
             root_bindings: &[(source_root, root_signal)],
@@ -85,7 +84,7 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
 }
 
 #[test]
-fn boundary_observation_never_becomes_a_cover_input_identity() {
+fn only_frozen_boundary_identity_becomes_a_cover_input() {
     let ty = word::WordType::bits(1).unwrap();
     let source_span = word::SourceSpan::default();
     let mut source = word::WordModule::new("source");
@@ -132,6 +131,7 @@ fn boundary_observation_never_becomes_a_cover_input_identity() {
         .connect(word::LValue::signal(root_signal), local_input, source_span)
         .unwrap();
     let source_to_local = std::collections::BTreeMap::from([
+        (port_value, local_input),
         (implementation_input, local_input),
         (observation, local_input),
         (source_root, local_input),
@@ -143,8 +143,7 @@ fn boundary_observation_never_becomes_a_cover_input_identity() {
             source_module: &source,
             local_module: &local,
             source_to_local: &source_to_local,
-            boundary_bindings: &[],
-            observations: &[observation],
+            boundary_bindings: &[(port_value, local_input)],
             memory_values: &[],
             operation_sources: &[],
             root_bindings: &[(source_root, root_signal)],
@@ -159,7 +158,7 @@ fn boundary_observation_never_becomes_a_cover_input_identity() {
     assert_eq!(
         candidate.binding.inputs.as_ref(),
         &[RegionPlanValueBinding::SourceBit {
-            value: implementation_input,
+            value: port_value,
             bit: 0,
         }]
     );

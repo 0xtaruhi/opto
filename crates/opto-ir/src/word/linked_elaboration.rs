@@ -9,7 +9,7 @@ use super::{
     SignalKind, SignalRef, SourceSpan, SynthesisDirectiveKind, Value, ValueId, ValueKind,
     WordError, WordModule, WordType,
 };
-use crate::NameId;
+use crate::{BitVal, ConstBits, NameId};
 use std::collections::BTreeMap;
 
 /// Recursively replaces design instances below `root` with their Word IR.
@@ -727,6 +727,28 @@ impl<'a, F> HierarchyInliner<'a, F> {
         };
 
         let child_remap = self.copy_module(child, &instance_name, false)?;
+        let connected_ports = instance
+            .connections
+            .iter()
+            .map(|connection| parent.name_str(connection.port))
+            .collect::<std::collections::BTreeSet<_>>();
+        for child_port in child.ports().iter().filter(|port| {
+            port.direction == PortDirection::Input
+                && !connected_ports.contains(child.name_str(port.name))
+        }) {
+            let child_signal = child_remap.signal(child_port.signal)?;
+            let bit = if child_port.ty.state() == super::LogicStateKind::FourState {
+                BitVal::X
+            } else {
+                BitVal::Zero
+            };
+            let bits = ConstBits::from_bits(vec![bit; child_port.ty.width() as usize])
+                .map_err(|error| WordError::new(error.to_string()))?;
+            let value = self
+                .target
+                .constant(bits, child_port.ty, instance.source.clone())?;
+            self.connect_child_input(child_signal, value, &instance.source)?;
+        }
         for connection in &instance.connections {
             let port_name = parent.name_str(connection.port);
             let child_port = child

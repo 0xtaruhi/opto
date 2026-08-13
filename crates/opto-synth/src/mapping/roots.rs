@@ -34,6 +34,20 @@ impl<'a> FullDomainRootSemantics<'a> {
         self.prove(value, &mut BTreeSet::new())
     }
 
+    /// Return the frozen publication obligation for one bit of a Word value.
+    ///
+    /// Width-only operations preserve distinct bit identities, so their
+    /// obligations cannot be represented by one aggregate flag before
+    /// bitblasting. This proof follows only exact structural projections;
+    /// ordinary combinational operations remain owned artifacts.
+    pub(crate) fn bit_requires_artifact(
+        &self,
+        value: word::ValueId,
+        bit: u32,
+    ) -> Result<bool, crate::SynthError> {
+        self.prove_bit(value, bit, &mut BTreeSet::new())
+    }
+
     pub(crate) fn canonical_root(
         &self,
         value: word::ValueId,
@@ -133,6 +147,122 @@ impl<'a> FullDomainRootSemantics<'a> {
             }
         };
         active.remove(&value);
+        Ok(result)
+    }
+
+    fn prove_bit(
+        &self,
+        value: word::ValueId,
+        bit: u32,
+        active: &mut BTreeSet<(word::ValueId, u32)>,
+    ) -> Result<bool, crate::SynthError> {
+        let stored = self.module.value(value).ok_or_else(|| {
+            crate::SynthError::invariant(format!("unknown publication bit {value:?}[{bit}]"))
+        })?;
+        if bit >= stored.ty.width() {
+            return Err(crate::SynthError::invariant(
+                "publication bit exceeds its Word value",
+            ));
+        }
+        if !active.insert((value, bit)) {
+            return Err(crate::SynthError::invariant(
+                "publication bit connectivity contains a cycle",
+            ));
+        }
+        let result = match &stored.kind {
+            word::ValueKind::Constant(_) => false,
+            word::ValueKind::Signal(reference) => {
+                match self.drivers.resolve_reference(*reference) {
+                    Some(drivers) if !drivers.is_empty() => {
+                        let (driver, driver_bit) =
+                            drivers.get(bit as usize).copied().ok_or_else(|| {
+                                crate::SynthError::invariant(
+                                    "publication signal bit has no resolved driver",
+                                )
+                            })?;
+                        self.prove_bit(driver, driver_bit, active)?
+                    }
+                    _ => {
+                        let imported_port =
+                            self.module.signal(reference.signal).is_some_and(|signal| {
+                                let word::SignalKind::Port(port) = signal.kind else {
+                                    return false;
+                                };
+                                self.module.port(port).is_some_and(|port| {
+                                    matches!(
+                                        port.direction,
+                                        word::PortDirection::Input | word::PortDirection::Inout
+                                    )
+                                })
+                            });
+                        !imported_port
+                    }
+                }
+            }
+            word::ValueKind::Operation(operation) => {
+                let operation = self.module.operation(*operation).ok_or_else(|| {
+                    crate::SynthError::invariant("publication bit operation is unknown")
+                })?;
+                match &operation.kind {
+                    word::OpKind::Register(_) | word::OpKind::Latch(_) => false,
+                    word::OpKind::Concat { parts } => {
+                        let mut remaining = bit;
+                        let mut requirement = None;
+                        for &part in parts.iter().rev() {
+                            let width = self
+                                .module
+                                .value(part)
+                                .ok_or_else(|| {
+                                    crate::SynthError::invariant(
+                                        "publication concatenation part is unknown",
+                                    )
+                                })?
+                                .ty
+                                .width();
+                            if remaining < width {
+                                requirement = Some(self.prove_bit(part, remaining, active)?);
+                                break;
+                            }
+                            remaining -= width;
+                        }
+                        requirement.ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "publication bit exceeds its concatenation parts",
+                            )
+                        })?
+                    }
+                    word::OpKind::Extract { value, lsb, .. } => {
+                        let source_bit = lsb.checked_add(bit).ok_or_else(|| {
+                            crate::SynthError::invariant("publication extract bit overflows")
+                        })?;
+                        self.prove_bit(*value, source_bit, active)?
+                    }
+                    word::OpKind::Cast { kind, value, .. } => {
+                        let width = self
+                            .module
+                            .value(*value)
+                            .ok_or_else(|| {
+                                crate::SynthError::invariant("publication cast input is unknown")
+                            })?
+                            .ty
+                            .width();
+                        if bit < width {
+                            self.prove_bit(*value, bit, active)?
+                        } else if *kind == word::CastKind::SignExtend {
+                            self.prove_bit(*value, width - 1, active)?
+                        } else {
+                            false
+                        }
+                    }
+                    word::OpKind::Unary { .. }
+                    | word::OpKind::Binary { .. }
+                    | word::OpKind::Mux { .. }
+                    | word::OpKind::DynamicExtract { .. }
+                    | word::OpKind::DynamicInsert { .. } => true,
+                }
+            }
+        };
+        active.remove(&(value, bit));
         Ok(result)
     }
 }
@@ -487,6 +617,28 @@ mod tests {
         let undriven = module.read_signal(undriven, SourceSpan::default()).unwrap();
         let full_domain = FullDomainRootSemantics::new(&module).unwrap();
         assert!(full_domain.requires_artifact(undriven).unwrap());
+    }
+
+    #[test]
+    fn vector_projection_preserves_per_bit_publication_obligations() {
+        let mut module = WordModule::new("mixed_projection");
+        let bit = WordType::bits(1).unwrap();
+        let input = module
+            .add_port("input", PortDirection::Input, bit, SourceSpan::default())
+            .unwrap();
+        let input = module
+            .read_signal(module.port(input).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let inverted = module
+            .unary(word::UnaryOp::BitNot, input, SourceSpan::default())
+            .unwrap();
+        let packed = module
+            .concat(vec![inverted, input], SourceSpan::default())
+            .unwrap();
+
+        let full_domain = FullDomainRootSemantics::new(&module).unwrap();
+        assert!(!full_domain.bit_requires_artifact(packed, 0).unwrap());
+        assert!(full_domain.bit_requires_artifact(packed, 1).unwrap());
     }
 
     #[test]

@@ -262,6 +262,27 @@ effect that changes another signal cannot manufacture a mux or guard for the
 target being lowered. Sensitivity events remain typed controls instead of being
 rediscovered from an arbitrary Boolean expression.
 
+Linked elaboration completes the SSA value domain before regional ownership is
+established. An omitted input of an expanded definition receives a type-correct
+completion value (`X` for a four-state input and zero for a two-state input), and
+that value propagates through the ordinary Word graph. Four-state `X` remains
+care-free; two-state zero is the language-domain value. An instance retained by
+`dont_touch`, `keep_hierarchy`, or black-box status instead preserves the absent
+binding as part of its structural interface. After procedures and resolved nets
+are lowered, otherwise-undefined bits of source-observable output ports are
+sealed with the same type-correct completion rule. This step does not add
+drivers to missing internal or generated logic.
+
+Four-state `X` is the Word representation of a care-free SSA bit, not an early
+choice of Boolean zero. Fixed combinational dataflow supplies value facts in
+topological order; regional observability and cover propagate care from frozen
+roots over the reverse dependencies. Rewrites use sparse dependency worklists
+when a changed fact can affect another result. Registers, latches, and memories
+are explicit boundaries, and source combinational cycles are diagnosed instead
+of being treated as a fixed-point optimization problem. Deterministic zero is
+chosen for a remaining care-free bit only when the final physical netlist is
+published.
+
 Failures carry a diagnostic code, a source location, related locations, notes,
 help, and the Tcl invocation that triggered the work when available. A raw
 `synth` failure string without an actionable RTL or library location is not
