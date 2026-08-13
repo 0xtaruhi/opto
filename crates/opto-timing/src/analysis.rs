@@ -722,6 +722,7 @@ impl ActiveClosure {
     }
 }
 
+/// Restores required rows before arrival rows, then rewinds path and identity arenas.
 pub(super) fn restore_propagation(state: &mut PropagationState, edit: PropagationEdit) {
     for (net, slots) in edit.requireds.into_iter().rev() {
         state
@@ -778,6 +779,10 @@ pub(super) fn remove_last_propagation_net(propagation: &mut PropagationState) {
     propagation.requireds.pop();
 }
 
+/// Bounds retained predecessor storage relative to the dense arrival arena.
+///
+/// The factor is a deterministic structural threshold rather than an RSS- or
+/// allocator-dependent admission policy.
 pub(super) fn compact_paths_if_needed(
     propagation: &mut PropagationState,
 ) -> Result<(), crate::TimingError> {

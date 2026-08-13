@@ -527,6 +527,7 @@ impl ClosureIndex {
         }))
     }
 
+    /// Restores endpoint values and sparse indexes in reverse mutation order.
     pub(crate) fn rollback(&mut self, edit: ClosureEdit) {
         match edit.0 {
             ClosureEditKind::Values {
@@ -603,6 +604,7 @@ impl ClosureIndex {
         }
     }
 
+    /// Releases removed endpoint slots only after the edit is accepted.
     pub(crate) fn commit(&mut self, edit: ClosureEdit) {
         let ClosureEditKind::Spliced { removed, .. } = edit.0 else {
             return;
@@ -615,6 +617,7 @@ impl ClosureIndex {
         }
     }
 
+    /// Seals adjacency overlays before an infallible closure commit.
     pub(crate) fn compact_rows(&mut self) -> Result<(), crate::TimingError> {
         self.endpoints_by_net
             .compact()

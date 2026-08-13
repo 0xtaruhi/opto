@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Native compiler lifecycle for path-backed and in-memory source units.
+//!
+//! Include paths and defines are attached separately to every source unit, and
+//! the requested top and worker bound are fixed before compilation begins.
+//! Lazy compilation retains native module materialization ownership behind the
+//! same Rust snapshot lifetime as eager compilation.
+
 use crate::bridge::read;
 use crate::ffi;
 use crate::{

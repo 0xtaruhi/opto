@@ -107,6 +107,11 @@ the more specific repository document or maintainer direction takes priority.
   old decoder unless maintainers explicitly approve a compatibility contract.
 - Use structured errors with enough context to diagnose the input and failing
   stage. Do not convert a recoverable user error into a panic.
+- Document non-obvious contracts wherever they live, including restricted
+  cross-module interfaces and private algorithms. Record ownership, identity,
+  phase, ordering, determinism, transaction, invalidation, unit, and bounded-
+  work assumptions at the narrowest site that owns them. Do not add comments
+  that merely restate a name, signature, or following statement.
 - The workspace denies warnings, missing documentation, unsafe Rust, and
   undocumented unsafe blocks. Do not weaken repository lint policy to make a
   patch pass.

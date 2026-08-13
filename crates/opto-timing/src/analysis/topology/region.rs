@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Transactional replacement of instance-owned timing graph topology.
+
 use super::{GraphArcId, InstancePinRow, SequentialGraphArc, TimingGraph};
 use crate::{LibraryCellId, TargetPinDirection, TimingEdge, TimingInstance, TimingLibrary};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
+/// Complete rollback journal for one applied graph-region replacement.
+///
+/// Removed arcs remain live until commit, while newly allocated arcs and rows
+/// remain reversible until rollback. The journal also records the topological
+/// generation because another order rebuild may occur while the edit is live.
 pub(crate) struct InstanceRegionGraphEdit {
     old_net_len: usize,
     old_nets: BTreeMap<usize, NetGraphState>,
@@ -46,6 +53,11 @@ impl TimingGraph {
         reason = "region replacement is a preflighted graph transaction whose journal must cover \
                   net growth, adjacency rows, arc arenas, and cycle validation together"
     )]
+    /// Applies a region replacement after preflighting all graph capacities.
+    ///
+    /// The returned dirty nets seed incremental propagation. On error the graph
+    /// is restored internally; on success the caller must eventually commit or
+    /// roll back the returned journal.
     pub(crate) fn replace_instance_region(
         &mut self,
         library: &TimingLibrary,
@@ -373,6 +385,7 @@ impl TimingGraph {
         false
     }
 
+    /// Restores adjacency, arc allocations, appended nets, and ordering state.
     pub(crate) fn rollback_instance_region(
         &mut self,
         edit: InstanceRegionGraphEdit,
@@ -455,6 +468,7 @@ impl TimingGraph {
         clippy::needless_pass_by_value,
         reason = "commit consumes the rollback journal after releasing its deferred removals"
     )]
+    /// Releases deferred old arcs after every fallible owner has prepared.
     pub(crate) fn commit_instance_region(&mut self, edit: InstanceRegionGraphEdit) {
         self.arcs.commit_removals(&edit.removed_arcs);
     }

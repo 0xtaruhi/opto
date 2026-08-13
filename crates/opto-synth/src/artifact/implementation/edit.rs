@@ -12,6 +12,11 @@ use opto_ir::mapped::{AppliedRegionDelta, CellId, MappedGenerationId, MappedNetl
 use std::collections::{BTreeMap, BTreeSet};
 
 impl ImplementationDb {
+    /// Correlates an applied mapped delta with explicit semantic lineage.
+    ///
+    /// Preparation is read-only: it validates generation identity, proves that
+    /// every temporary addition has exactly one lineage, and computes owner
+    /// invalidation without mutating the durable implementation database.
     pub(crate) fn prepare_region_edit(
         &self,
         mapped: &MappedNetlist,
@@ -110,6 +115,11 @@ impl ImplementationDb {
         })
     }
 
+    /// Publishes a prepared provenance and ownership edit.
+    ///
+    /// All arena and tagged-owner capacity checks precede mutation. Cell-origin
+    /// rows, reverse boundary footprints, per-operator footprints, and pending
+    /// owner impact are then updated as one generation-bound operation.
     pub(crate) fn commit_region_edit(
         &mut self,
         edit: PreparedImplementationEdit,

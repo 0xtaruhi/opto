@@ -1,8 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Geometrically tiered immutable parasitic update runs.
+//!
+//! Newer runs shadow older nets by exact name. Runs merge only with a
+//! comparable-weight tail, preventing a stream of small updates from repeatedly
+//! rebuilding the cumulative database. Logical traversal remains deterministic
+//! and name ordered across any number of physical runs.
+
 use super::*;
 
+/// Inserts one update and merges only comparable tail weights.
 pub(super) fn insert_run(
     runs: &mut Vec<ParasiticRun>,
     store: Arc<ParasiticStore>,
@@ -29,6 +37,7 @@ pub(super) fn insert_run(
     Ok(())
 }
 
+/// Streams the newest-wins logical view into one compact immutable store.
 pub(super) fn compact_logical_store(
     nets: LogicalNetIter<'_>,
 ) -> Result<ParasiticStore, crate::TimingError> {
@@ -68,6 +77,10 @@ pub(super) fn logical_nets_cover(
 }
 
 impl ParasiticStore {
+    /// Computes the deterministic structural weight used for tiering.
+    ///
+    /// This is deliberately derived from encoded owners rather than allocator
+    /// telemetry, so merge decisions are reproducible across hosts and runs.
     pub(super) fn work_weight(&self) -> Result<u64, crate::TimingError> {
         let mut bytes = weighted_bytes::<u8>(self.names.stored_bytes())?
             .checked_add(weighted_bytes::<[u32; 4]>(self.names.entry_count())?)

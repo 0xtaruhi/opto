@@ -33,6 +33,11 @@ impl RawSlot {
 }
 
 #[derive(Debug, Clone)]
+/// Stable insertion-order arena with reusable physical slots.
+///
+/// The intrusive live list defines public order independently of slot reuse.
+/// Tracked insertions and removals carry enough information to restore both
+/// that order and the free list during a failed constraint transaction.
 pub(super) struct OrderedArena<T> {
     slots: Vec<OrderedSlot<T>>,
     head: Option<RawSlot>,
@@ -123,6 +128,7 @@ impl<T> OrderedArena<T> {
         Ok(self.insert_tracked(value)?.slot)
     }
 
+    /// Inserts at the logical tail and records whether physical storage grew.
     pub(super) fn insert_tracked(
         &mut self,
         value: T,
@@ -175,6 +181,7 @@ impl<T> OrderedArena<T> {
         self.remove_tracked(slot).value
     }
 
+    /// Unlinks a live row while retaining its exact rollback position.
     pub(super) fn remove_tracked(&mut self, slot: RawSlot) -> ArenaRemoval<T> {
         let stored = &self.slots[slot.index()];
         let previous = stored.previous;
@@ -207,6 +214,7 @@ impl<T> OrderedArena<T> {
         }
     }
 
+    /// Reverses an insertion without perturbing earlier free-list state.
     pub(super) fn undo_insertion(&mut self, insertion: ArenaInsertion) -> T {
         let value = self.remove(insertion.slot);
         if insertion.appended {
@@ -221,6 +229,7 @@ impl<T> OrderedArena<T> {
         value
     }
 
+    /// Restores a removed row at its original logical position.
     pub(super) fn restore_removal(&mut self, removal: ArenaRemoval<T>) {
         assert_eq!(self.free, Some(removal.slot));
         let stored = &mut self.slots[removal.slot.index()];

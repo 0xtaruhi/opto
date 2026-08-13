@@ -37,6 +37,10 @@ pub struct ShellArgs {
 #[derive(Debug)]
 pub struct Shell;
 
+/// Sole mutable state borrowed by callbacks for one live interpreter.
+///
+/// `RefCell` enforces the Tcl callback's single-threaded dynamic borrowing. The
+/// boxed address remains stable for every native command registration.
 pub(super) struct ShellState {
     pub(super) session: RefCell<Session>,
     pub(super) exit_code: RefCell<Option<i32>>,
@@ -106,6 +110,7 @@ pub fn validate_sdc_syntax(script: &str) -> Result<(), crate::ShellError> {
     }
 }
 
+/// Owns one interpreter and the stable callback state registered into it.
 pub(super) struct Runtime {
     interpreter: Interpreter,
     pub(super) state: Box<ShellState>,

@@ -300,6 +300,10 @@ impl RegionCoverPlan {
         &self.payload
     }
 
+    /// Projects a live plan into a portable, canonically ordered record.
+    ///
+    /// Boundary contracts are reduced to semantic keys and sorted so neither
+    /// revision-local port rows nor construction order enter checkpoint identity.
     pub(crate) fn checkpoint_record(&self) -> RegionCoverPlanRecord {
         let mut boundaries = self
             .boundary_response
@@ -332,6 +336,7 @@ impl RegionCoverPlanRecord {
         self.context_key
     }
 
+    /// Validates a portable record independently of a live region graph.
     pub(crate) fn validate(&self, context: RegionContextKey) -> Result<(), crate::SynthError> {
         if self.context_key != context {
             return Err(crate::SynthError::invariant(
@@ -413,6 +418,11 @@ impl RegionCoverPlanRecord {
         Ok(())
     }
 
+    /// Reconstructs a plan only after exact semantic contract matching.
+    ///
+    /// Stable region identity, revision, context, boundary semantic keys, and
+    /// sparse `(scenario, timing_tag)` rows must all match. Cached topology is
+    /// never accepted as connectivity or ownership proof.
     pub(crate) fn restore(
         &self,
         region: crate::SynthesisRegion,

@@ -32,12 +32,14 @@ impl SwitchingActivityUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Session-owned switching activity keyed by durable object identity.
 pub(crate) struct PowerContext {
     pub(crate) revision: RevisionId,
     pub(crate) activities: BTreeMap<AnyObjectId, SwitchingActivity>,
 }
 
 #[derive(Debug)]
+/// Sparse, revision-preflighted removal from [`PowerContext`].
 pub(crate) struct PreparedPowerObjectRemoval {
     revision: Option<RevisionId>,
     objects: Vec<AnyObjectId>,
@@ -53,6 +55,10 @@ impl Default for PowerContext {
 }
 
 impl PowerContext {
+    /// Hashes activity in stable object order for synthesis cache identity.
+    ///
+    /// IEEE bit patterns are hashed directly; construction has already rejected
+    /// invalid values, so equivalent resident contexts produce identical keys.
     pub(crate) fn synthesis_fingerprint(&self) -> Option<[u8; 32]> {
         if self.activities.is_empty() {
             return None;
@@ -77,6 +83,7 @@ impl PowerContext {
         Some(*digest.finalize().as_bytes())
     }
 
+    /// Computes the smaller-side intersection and preflights its revision.
     pub(crate) fn prepare_object_removal(
         &self,
         removed: &impl ObjectIdSet,
@@ -100,6 +107,7 @@ impl PowerContext {
         Ok(PreparedPowerObjectRemoval { revision, objects })
     }
 
+    /// Commits a prepared removal without a remaining failure path.
     pub(crate) fn apply_object_removal(&mut self, prepared: PreparedPowerObjectRemoval) {
         for id in prepared.objects {
             self.activities.remove(&id);

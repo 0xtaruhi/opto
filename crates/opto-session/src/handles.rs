@@ -62,6 +62,11 @@ impl ObjectHandleCodec {
         (generation == self.generation).then_some(object)
     }
 
+    /// Advances the process-local generation before replacing registry slots.
+    ///
+    /// Handles encode durable UIDs but are intentionally invalid across a full
+    /// registry replacement because restored slot ownership belongs to a new
+    /// resident generation.
     pub(crate) fn invalidate_for_registry_replacement(
         &mut self,
     ) -> Result<(), crate::SessionError> {
@@ -70,6 +75,7 @@ impl ObjectHandleCodec {
         Ok(())
     }
 
+    /// Preflights generation capacity so replacement commit cannot fail.
     pub(crate) fn validate_registry_replacement(&self) -> Result<(), crate::SessionError> {
         self.generation
             .checked_add(1)

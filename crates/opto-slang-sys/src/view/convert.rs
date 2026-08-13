@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Total conversion of native tags, flags, and borrowed strings.
+//!
+//! Unknown enum values are bridge invariant failures rather than defaults; a
+//! frontend upgrade therefore cannot silently acquire different HDL semantics.
+
 use crate::ffi;
 use crate::{
     SlangBinaryOp, SlangCastKind, SlangEdge, SlangError, SlangNetResolution, SlangPortDirection,
@@ -101,6 +106,12 @@ pub(super) fn nonzero(value: u32) -> Option<u32> {
     (value != 0).then_some(value)
 }
 
+/// Borrows a required native UTF-8 string.
+///
+/// # Safety
+///
+/// A non-null `ptr` must reference a live NUL-terminated byte sequence for the
+/// returned lifetime. Null is reported as a bridge invariant failure.
 pub(super) unsafe fn required_str<'a>(
     ptr: *const c_char,
     context: &str,
@@ -111,6 +122,12 @@ pub(super) unsafe fn required_str<'a>(
     })
 }
 
+/// Borrows an optional native UTF-8 string.
+///
+/// # Safety
+///
+/// A non-null `ptr` must reference a live NUL-terminated byte sequence for the
+/// returned lifetime.
 pub(super) unsafe fn optional_str<'a>(
     ptr: *const c_char,
     context: &str,

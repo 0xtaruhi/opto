@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Columnar arrival and required-time state for dense timing nets.
+//!
+//! Each `(net, edge)` slot keeps its common first state in structure-of-arrays
+//! columns and allocates ordered overflow only for additional tags. Logical row
+//! materialization exists at worker, publication, and rollback boundaries; the
+//! resident model never becomes an object-per-net container.
+
 use super::*;
 
 const EMPTY_STATE_ID: u32 = u32::MAX;
@@ -142,6 +149,7 @@ struct ArrivalPathSlots {
 }
 
 #[derive(Debug)]
+/// Dense arrival columns with optional path tracking and sparse multi-tag overflow.
 pub(in crate::analysis) struct ArrivalSlotStore {
     net_count: usize,
     tags: Vec<u32>,
@@ -201,6 +209,7 @@ impl ArrivalSlotStore {
         reason = "row replacement consumes the logical row to match DependencyRowStore semantics, \
                   then scatters it into compact columnar storage"
     )]
+    /// Atomically scatters one logical row and returns its rollback value.
     pub(in crate::analysis) fn replace_row(
         &mut self,
         net: usize,
@@ -469,6 +478,7 @@ impl Iterator for ArrivalStateIter<'_> {
 }
 
 #[derive(Debug)]
+/// Dense required-time columns with sparse multi-tag overflow.
 pub(in crate::analysis) struct RequiredSlotStore {
     net_count: usize,
     tags: Vec<u32>,
@@ -506,6 +516,7 @@ impl RequiredSlotStore {
         reason = "row replacement consumes the logical row to match DependencyRowStore semantics, \
                   then scatters it into compact columnar storage"
     )]
+    /// Atomically scatters one logical row and returns its rollback value.
     pub(in crate::analysis) fn replace_row(
         &mut self,
         net: usize,

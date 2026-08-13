@@ -9,6 +9,10 @@ use opto_db::RevisionId;
 use opto_library::LibrarySelection;
 use opto_synth::SynthesisReport;
 
+/// Revisions and library selections captured before synthesis starts.
+///
+/// Publication rejects the result if any member no longer matches the live
+/// session, preventing a long-running synthesis from overwriting newer intent.
 pub(super) struct SynthesisInputSnapshot {
     pub(super) revision: RevisionId,
     pub(super) timing_revision: RevisionId,
@@ -17,6 +21,12 @@ pub(super) struct SynthesisInputSnapshot {
     pub(super) resolution_libraries: LibrarySelection,
 }
 
+/// Fully preflighted synthesis output awaiting atomic session publication.
+///
+/// The mapped object sidecar is constructed during preparation. Commit first
+/// performs the remaining fallible registry reconciliation, then installs
+/// artifact owners and advances the session generation through infallible
+/// moves.
 pub(super) struct CompilationPublication {
     current_name: String,
     revision: Option<RevisionId>,
@@ -26,6 +36,7 @@ pub(super) struct CompilationPublication {
 }
 
 impl CompilationPublication {
+    /// Validates captured inputs, output identities, and the current report.
     pub(super) fn prepare(
         session: &Session,
         inputs: &SynthesisInputSnapshot,
@@ -98,6 +109,11 @@ impl CompilationPublication {
         })
     }
 
+    /// Publishes the prepared outputs without exposing a partial generation.
+    ///
+    /// Registry reconciliation remains fallible and therefore precedes every
+    /// artifact move. Once it succeeds, preparation guarantees that all design
+    /// lookups and ownership transfers below are infallible.
     pub(super) fn commit(mut self, session: &mut Session) -> Result<(), SessionError> {
         if let Some(index) = self.current_object_index.as_ref() {
             let mapped = self

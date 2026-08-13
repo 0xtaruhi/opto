@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Compact topology owners shared by sibling timing views.
+//!
+//! Immutable base allocations are shared by `Arc`; a live region edit writes
+//! only append layers or page-local overlays. Commit may release tombstones and
+//! seal overlays, while rollback must remain able to restore every ID recorded
+//! before the edit. Compaction is therefore forbidden across a live edit unless
+//! its owner explicitly prepares every affected journal.
+
 use super::*;
 use std::borrow::Cow;
 use std::ops::Index;
@@ -100,6 +108,7 @@ impl GraphArcArena {
         self.base.len() + self.overlay.len()
     }
 
+    /// Seals the initial append arena as the immutable shareable base.
     pub(super) fn seal_base(&mut self) {
         assert!(self.base.is_empty() && self.free_overlay.is_empty());
         self.base = std::mem::take(&mut self.overlay).into();
@@ -109,6 +118,10 @@ impl GraphArcArena {
         opto_core::resident::slice_bytes::<GraphArcTopology>(self.base.len())
     }
 
+    /// Forks topology while rebuilding view-specific arc values.
+    ///
+    /// A fork is available only from a hole-free sealed base; sharing an
+    /// overlay or tombstones would couple sibling rollback state.
     pub(super) fn fork_base_with(
         &self,
         mut values: impl FnMut(&GraphArcTopology) -> GraphArcValues,
@@ -126,6 +139,7 @@ impl GraphArcArena {
         })
     }
 
+    /// Converts deferred removals into reusable overlay tombstones at commit.
     pub(super) fn commit_removals(&mut self, removed: &[GraphArcId]) {
         for &id in removed {
             let live = self
@@ -142,6 +156,7 @@ impl GraphArcArena {
         self.normalize_free_list();
     }
 
+    /// Discards arcs allocated by an edit without releasing its old records.
     pub(super) fn rollback_allocations(&mut self, old_len: usize, allocated: &[GraphArcId]) {
         for &id in allocated {
             let live = self

@@ -283,6 +283,10 @@ impl DependencyPublicationPlan {
         }
     }
 
+    /// Checks both the row set and its sealed per-item order.
+    ///
+    /// Publication order is part of the plan contract: accepting a permutation
+    /// here would make column-wise stores observe callback-local ordering.
     pub(crate) fn owns_publication<R>(
         &self,
         item: usize,
@@ -438,11 +442,17 @@ impl<R> DependencyEffects<R> {
         });
     }
 
+    /// Orders the journal independently of worker completion order.
     pub(crate) fn stabilize(&mut self) {
         self.entries
             .sort_unstable_by_key(|entry| (entry.item, entry.row));
     }
 
+    /// Restores all replaced rows and consumes the journal.
+    ///
+    /// Entries are replayed in reverse stabilized order so repeated writes, if
+    /// introduced by a future publication mode, still recover the pre-run
+    /// value rather than an intermediate value.
     pub(crate) fn rollback<S>(&mut self, rows: &mut S)
     where
         R: PartialEq,
@@ -474,6 +484,7 @@ impl DependencyExecution {
         &self.changed_rows
     }
 
+    /// Seals execution summaries into deterministic item and row order.
     pub(crate) fn new(
         mut published_items: Vec<usize>,
         mut changed_items: Vec<usize>,
@@ -692,6 +703,11 @@ impl DependencyWorklist<'_> {
             .sum()
     }
 
+    /// Activates the exact enabled dependents of a changed item.
+    ///
+    /// Disabled runtime boundaries must be respected here as well as during
+    /// dependency counting; otherwise an incremental traversal can escape its
+    /// caller-declared boundary.
     pub(crate) fn activate_dependents(&self, item: usize, activation: &mut DependencyActivation) {
         let dependents = match self.direction {
             DependencyDirection::Forward => self.plan.successors.row(item),
@@ -704,6 +720,11 @@ impl DependencyWorklist<'_> {
         }
     }
 
+    /// Adds an item and its unresolved closure without crossing completed work.
+    ///
+    /// Scheduling across the running/completed frontier would require
+    /// reopening already published consumers, so it is rejected instead of
+    /// producing a traversal whose result depends on insertion timing.
     pub(crate) fn schedule(&mut self, item: usize) -> Result<bool, RuntimeError> {
         if item >= self.state.len() {
             return Err(invalid("scheduled item is outside the dependency plan"));

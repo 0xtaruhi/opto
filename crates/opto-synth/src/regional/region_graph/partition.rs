@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! Deterministic root-closure partitioning and final owner-atom coarsening.
+//!
+//! Initial partitioning may claim operation cones under bounded structural work
+//! policy. Final partitioning instead consumes already frozen structural owner
+//! atoms and may merge but never split them. Stable anchors derive from source
+//! identity and semantic connectivity, never worker count or arena position.
+
 use super::graph::{
     BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBoundaryPort,
     RegionBoundaryPortId, RegionGraphOwnerId, RegionPortDirection, RegionRevision, RegionRowId,
@@ -30,6 +37,7 @@ const COARSENING_ROUNDS: usize = 12;
 const DEFAULT_TARGET_WORK: u64 = 32_768;
 
 #[derive(Debug, Clone, Copy)]
+/// Deterministic structural-work limits for partition activation and coarsening.
 pub(crate) struct RegionPartitionPolicy {
     partition_start: u64,
     minimum: u64,
@@ -181,6 +189,7 @@ fn operation_anchors(
         .map(Vec::into_boxed_slice)
 }
 
+/// Builds the initial operation/memory partition from the synthesis root closure.
 pub(crate) fn build(
     module: &word::WordModule,
     policy: RegionPartitionPolicy,
@@ -188,6 +197,7 @@ pub(crate) fn build(
     build_inner(module, policy, None)
 }
 
+/// Builds the final graph while preserving every structural owner atom whole.
 pub(crate) fn build_with_ownership(
     module: &word::WordModule,
     policy: RegionPartitionPolicy,
