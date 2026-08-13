@@ -4,7 +4,13 @@
 use super::*;
 
 #[derive(TclCommand)]
-#[command(name = "report_power", handler = report_power)]
+#[command(
+    name = "report_power",
+    handler = report_power,
+    summary = "Analyze and report power for the current mapped timing generation.",
+    requires = "The current design must be synthesized with characterized power libraries.",
+    example = "report_power -cell -analysis_effort low"
+)]
 pub(crate) struct ReportPowerArgs {
     #[arg(long = "-cell", conflicts_with = "net")]
     cell: bool,
@@ -49,7 +55,13 @@ pub(crate) struct ReportPowerArgs {
 }
 
 #[derive(TclCommand)]
-#[command(name = "set_switching_activity", handler = set_switching_activity)]
+#[command(
+    name = "set_switching_activity",
+    handler = set_switching_activity,
+    summary = "Atomically set explicit switching activity on ports or nets.",
+    requires = "Objects must belong to the current design and each supplied activity parameter must satisfy its validation rules.",
+    example = "set_switching_activity -static_probability 0.5 -toggle_rate 0.2 [get_ports data_in]"
+)]
 pub(crate) struct SetSwitchingActivityArgs<'a> {
     #[arg(long = "-static_probability")]
     static_probability: Option<f64>,
@@ -76,7 +88,13 @@ pub(crate) struct SetSwitchingActivityArgs<'a> {
 }
 
 #[derive(TclCommand)]
-#[command(name = "reset_switching_activity", handler = reset_switching_activity)]
+#[command(
+    name = "reset_switching_activity",
+    handler = reset_switching_activity,
+    summary = "Remove explicit switching activity from selected or all current-design objects.",
+    requires = "Supplied object handles must be live ports or nets.",
+    example = "reset_switching_activity [get_ports data_in]"
+)]
 pub(crate) struct ResetSwitchingActivityArgs<'a> {
     #[arg(positional)]
     objects: Vec<TclArg<'a>>,

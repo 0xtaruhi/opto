@@ -189,6 +189,42 @@ fn database_settings_are_typed_and_round_trip() {
 }
 
 #[test]
+fn set_db_reports_unknown_root_properties_precisely() {
+    let mut runtime = Runtime::new(Session::new()).unwrap();
+    runtime.register_commands().unwrap();
+
+    let unknown = runtime
+        .eval("set_db not_a_property value")
+        .expect_err("unknown property must be rejected");
+    assert!(
+        unknown
+            .to_string()
+            .contains("unknown root property 'not_a_property'")
+    );
+    assert!(!unknown.to_string().contains("read-only"));
+}
+
+#[test]
+fn numeric_command_arguments_reject_non_finite_values() {
+    let mut runtime = Runtime::new(Session::new()).unwrap();
+    runtime.register_commands().unwrap();
+
+    for script in [
+        "create_clock -period NaN -name clk",
+        "create_clock -period -Infinity -name clk",
+        "set_input_delay -NaN ports",
+    ] {
+        let error = runtime
+            .eval(script)
+            .expect_err("non-finite command value must be rejected");
+        assert!(
+            error.to_string().contains("non-finite value"),
+            "{script}: {error}"
+        );
+    }
+}
+
+#[test]
 fn shell_exit_stops_sourced_script() {
     let script = temp_script_path("opto-source-exit.tcl");
     std::fs::write(&script, "exit 5\necho should_not_run\n").unwrap();

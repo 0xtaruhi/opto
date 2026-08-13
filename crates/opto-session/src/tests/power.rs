@@ -71,6 +71,85 @@ fn activity_update_recomputes_only_the_affected_power_cone() {
 }
 
 #[test]
+fn persistent_net_activity_reaches_synthesis_and_report_power_and_conflicts() {
+    let directory = temp_dir("typed-net-power");
+    let library = directory.join("power.lib");
+    let verilog = directory.join("top.v");
+    std::fs::write(&library, power_library()).unwrap();
+    std::fs::write(
+        &verilog,
+        "module top(input a, output y); BUF U0(.A(a), .Y(y)); endmodule\n",
+    )
+    .unwrap();
+    let mut session = Session::new();
+    session.set_synth_effort(SynthesisEffort::Low);
+    session.read_libs(std::slice::from_ref(&library)).unwrap();
+    session
+        .import_verilog(std::slice::from_ref(&verilog), &FrontendOptions::default())
+        .unwrap();
+    let net = session
+        .get_nets("a")
+        .unwrap()
+        .into_objects()
+        .into_iter()
+        .next()
+        .expect("the input port has a persistent logical net")
+        .erase();
+    session
+        .set_switching_activity(
+            SwitchingActivityUpdate {
+                static_probability: Some(0.4),
+                toggle_rate: Some(0.2),
+                rise_ratio: Some(0.5),
+            },
+            &[net],
+        )
+        .unwrap();
+
+    session.synthesize().unwrap();
+    session
+        .report_power(&ReportPowerOptions::default())
+        .unwrap();
+
+    let port = session
+        .resolve_port_ids("set_switching_activity", &["a".to_string()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .erase();
+    session
+        .set_switching_activity(
+            SwitchingActivityUpdate {
+                static_probability: Some(0.6),
+                toggle_rate: Some(0.3),
+                rise_ratio: Some(0.5),
+            },
+            &[port],
+        )
+        .unwrap();
+
+    let synthesis_error = session
+        .synthesize()
+        .expect_err("synthesis must reject conflicting live port and net activity");
+    assert!(
+        synthesis_error
+            .to_string()
+            .contains("conflicting switching-activity annotations")
+    );
+    let report_error = session
+        .report_power(&ReportPowerOptions::default())
+        .expect_err("report_power must reject the same conflict");
+    assert!(
+        report_error
+            .to_string()
+            .contains("conflicting switching-activity annotations")
+    );
+
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn library_change_releases_the_complete_analysis_generation() {
     let directory = temp_dir("power-cache-invalidation");
     let library = directory.join("power.lib");

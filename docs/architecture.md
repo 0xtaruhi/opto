@@ -1045,6 +1045,11 @@ defect.
   / `set_db`, `read_hdl`, and `elaborate`, and exposes one `synth` operation.
   Reports remain flat. Database writes are schema-declared,
   transactional mutations rather than unrestricted path-based assignment.
+  One sorted root-property catalog declares each canonical name, value type,
+  readability, writability, and help text. One sorted object-query catalog
+  declares each class and whether related-object and filter queries are
+  supported; `get_db` and the flat `get_*` commands dispatch through the same
+  typed query kind.
   RFC 0010 is the normative command-design policy.
 - **One HDL frontend lifecycle.** Rust and Tcl callers ingest source units and
   then elaborate a named top. Test fixtures use that same two-stage path; no
@@ -1058,6 +1063,27 @@ defect.
   catalog is generated. Command handlers do not infer their operation from a
   command-name string. Scalar options are rejected on their second occurrence;
   only fields declared as repeated accept multiple occurrences.
+- **One complete command schema.** The generated catalog owns ordered and
+  independently named positional fields, their numeric or textual lexeme,
+  option identity and repetition, conditional positional arity, validation
+  behavior, and user-facing help. Generic parsing and SDC validation execute
+  those typed policies and contain no command-name exceptions. Public commands
+  must declare an explicit summary and lifecycle requirements; every argument
+  has nonempty field help. Commands with positional arguments or more than one
+  option must declare an executable example, and variants override summary,
+  requirements, and example independently where their public wording differs.
+- **Unambiguous option termination.** Before `--`, an unknown hyphen-prefixed
+  word remains an unsupported option and receives spelling help. A negative
+  numeric word is accepted only where the next declared positional field is
+  numeric. `--` terminates option parsing so textual object names and paths
+  beginning with a hyphen remain representable.
+- **One activity-target resolver.** Stored switching activity uses persistent
+  typed port or net identities. Every report and synthesis-scenario path binds
+  those identities through the timing generation's compact object index;
+  ports expand through the model's port-net relation. A target removed by
+  optimization contributes no timing net in every caller, while conflicting
+  live annotations are rejected after expansion. No caller scans all mapped
+  nets or interprets generated net-name spellings.
 
 ## Rejected Architectures
 
@@ -1112,7 +1138,7 @@ defect.
 | Transactional mapped optimization and exact STA | Implemented |
 | Structured source diagnostics and successful frontend warnings | Implemented across CLI/session, HDL, Liberty, formats, timing, power, and synthesis domains |
 | Opto `report_timing` core path report | Implemented; unsupported advanced report modes are explicit errors |
-| Flat Opto command policy | Defined by RFC 0010; command cutover, scenarios, and structured reports remain pending |
+| Flat Opto command policy | Registered parsing, help, validation behavior, and current root/object database catalogs use generated typed schemas; scenario and structured-report completion remains pending |
 | Same-host real medium-scale regression guard | Implemented for 14 executable 353–10,225-cell cases selected from a pinned 30-case public pool |
 | Multi-million-gate runtime/RSS/QoR qualification | Not yet demonstrated |
 | Versioned public scale-suite performance targets | Target; not yet demonstrated |

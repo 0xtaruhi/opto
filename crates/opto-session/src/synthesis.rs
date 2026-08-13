@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{Session, SynthesisKey};
+use crate::activity::{ActivityTarget, resolve_activity_annotations};
 use opto_db::AnyObjectId;
 use opto_ir::rtl::RtlModule;
 use opto_runtime::ExecutionContext;
@@ -13,7 +14,7 @@ use opto_timing::{
     TimingContext, TimingLibrary,
 };
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub(super) struct ArtifactSynthesisRequest<'a> {
@@ -121,7 +122,7 @@ fn power_annotations(
     scenario: &Scenario,
     model: &opto_timing::TimingModel,
 ) -> Result<Option<opto_power::ActivityAnnotations>, String> {
-    let mut entries = BTreeMap::new();
+    let mut targets = Vec::new();
     for (target, activity) in scenario.power().activities() {
         let activity = opto_power::SwitchingActivity::new(
             activity.static_probability(),
@@ -131,43 +132,22 @@ fn power_annotations(
         .map_err(|error| error.to_string())?;
         match target {
             ScenarioActivityTarget::Port(port) => {
-                for &net in model.port_nets(*port) {
-                    insert_power_activity(&mut entries, net, activity)?;
-                }
+                targets.push((ActivityTarget::Port(*port), activity));
             }
-            ScenarioActivityTarget::Net(name) => {
-                if let Some(net) = model.net_id(name) {
-                    insert_power_activity(&mut entries, net, activity)?;
-                }
+            ScenarioActivityTarget::Net(net) => {
+                targets.push((ActivityTarget::Net(*net), activity));
             }
         }
     }
+    let annotations = resolve_activity_annotations(model, targets)?;
     if model
         .net_ids()
         .filter(|&net| model.net_is_input_port(net))
-        .any(|net| !entries.contains_key(&net))
+        .any(|net| !annotations.contains(net))
     {
         return Ok(None);
     }
-    opto_power::ActivityAnnotations::new(model.generation(), entries)
-        .map(Some)
-        .map_err(|error| error.to_string())
-}
-
-fn insert_power_activity(
-    entries: &mut BTreeMap<opto_timing::TimingNetId, opto_power::SwitchingActivity>,
-    net: opto_timing::TimingNetId,
-    activity: opto_power::SwitchingActivity,
-) -> Result<(), String> {
-    if entries
-        .insert(net, activity)
-        .is_some_and(|previous| previous != activity)
-    {
-        return Err(format!(
-            "conflicting switching activities resolve to timing net {net:?}"
-        ));
-    }
-    Ok(())
+    Ok(Some(annotations))
 }
 
 fn scenario_activities(
@@ -186,7 +166,7 @@ fn scenario_activities(
         }
         let target = match object {
             AnyObjectId::Port(port) => ScenarioActivityTarget::Port(port),
-            AnyObjectId::Net(_) => ScenarioActivityTarget::Net(Arc::from(locator.object_name())),
+            AnyObjectId::Net(net) => ScenarioActivityTarget::Net(net),
             _ => {
                 return Err(crate::SessionError::state(format!(
                     "synthesis: switching activity references unsupported object {object:?}"

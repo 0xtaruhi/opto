@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{CommandSyntax, OptionId, PositionalArity, RegisteredCommand, ValueHint};
+use super::{CommandSyntax, OptionId, PositionalLexeme, RegisteredCommand, ValueHint};
 use crate::tcl::TclArg;
 
 #[derive(Clone, Copy)]
@@ -114,9 +114,9 @@ fn parse_layout<T: AsRef<str>>(
     let mut index = 0usize;
     let mut options = Vec::new();
     let mut positional_indices = Vec::new();
-    let mut explicit_redirect_target = false;
     let mut seen_options = Vec::new();
-    for _ in 0..syntax.leading_positionals {
+    let mut seen_option_ids = Vec::new();
+    for _ in 0..syntax.leading_positionals() {
         let Some(argument) = args.get(index) else {
             break;
         };
@@ -148,15 +148,27 @@ fn parse_layout<T: AsRef<str>>(
         index += 1;
     }
     let mut saw_trailing_positional = false;
+    let mut options_terminated = false;
     while index < args.len() {
         let raw = args[index].as_ref();
-        if !raw.starts_with('-') {
+        if !options_terminated && raw == "--" {
+            options_terminated = true;
+            index += 1;
+            continue;
+        }
+        let negative_numeric = raw.starts_with('-')
+            && syntax
+                .positional_at(positional_indices.len())
+                .is_some_and(|positional| {
+                    positional.lexeme == PositionalLexeme::Numeric && raw.parse::<f64>().is_ok()
+                });
+        if options_terminated || !raw.starts_with('-') || negative_numeric {
             positional_indices.push(index);
             saw_trailing_positional = true;
             index += 1;
             continue;
         }
-        if syntax.leading_positionals != 0 && saw_trailing_positional {
+        if syntax.leading_positionals() != 0 && saw_trailing_positional {
             return Err(invocation_error(
                 command,
                 format!("{command}: unexpected option '{raw}' after object list"),
@@ -178,7 +190,7 @@ fn parse_layout<T: AsRef<str>>(
                 ));
             }
             if syntax.options.is_empty() && syntax.unsupported_options.is_empty() {
-                if syntax.leading_positionals != 0 {
+                if syntax.leading_positionals() != 0 {
                     return Err(invocation_error(
                         command,
                         format!("{command}: unsupported option '{raw}'"),
@@ -214,9 +226,8 @@ fn parse_layout<T: AsRef<str>>(
             ));
         }
         seen_options.push(option.name);
+        seen_option_ids.push(option.id);
         let value_index = if let Some(value_hint) = option.value {
-            explicit_redirect_target |=
-                command == "redirect" && matches!(option.name, "-file" | "-variable");
             index = index.checked_add(1).ok_or_else(|| {
                 invocation_error(
                     command,
@@ -260,46 +271,14 @@ fn parse_layout<T: AsRef<str>>(
         index += 1;
     }
 
-    let positional_arity = if command == "redirect" {
-        Some(PositionalArity::exactly(if explicit_redirect_target {
-            1
-        } else {
-            2
-        }))
-    } else if sdc {
-        syntax.sdc_positional_arity.or(syntax.positional_arity)
-    } else {
-        syntax.positional_arity
-    };
-    if let Some(arity) = positional_arity
-        && !arity.accepts(positional_indices.len())
-    {
-        if let Some(&extra) = positional_indices.get(arity.max) {
-            return Err(invocation_error(
-                command,
-                format!(
-                    "{command}: wrong number of arguments: extra positional option '{}'",
-                    args[extra].as_ref()
-                ),
-                syntax,
-                None,
-            ));
-        }
-        if let Some(label) = syntax.positional_label {
-            return Err(invocation_error(
-                command,
-                format!("{command}: missing {label}"),
-                syntax,
-                None,
-            ));
-        }
-        return Err(invocation_error(
-            command,
-            format!("{command}: wrong number of arguments"),
-            syntax,
-            None,
-        ));
-    }
+    validate_positional_count(
+        command,
+        args,
+        syntax,
+        sdc,
+        &seen_option_ids,
+        &positional_indices,
+    )?;
     for required in syntax.required_options {
         let required_hint = syntax
             .options
@@ -363,6 +342,50 @@ fn parse_layout<T: AsRef<str>>(
         options,
         positional_indices,
     })
+}
+
+fn validate_positional_count<T: AsRef<str>>(
+    command: &str,
+    args: &[T],
+    syntax: &CommandSyntax,
+    sdc: bool,
+    seen_options: &[OptionId],
+    positionals: &[usize],
+) -> Result<(), crate::ShellError> {
+    let Some(arity) = syntax.positional_arity(seen_options, sdc) else {
+        return Ok(());
+    };
+    if arity.accepts(positionals.len()) {
+        return Ok(());
+    }
+    if let Some(&extra) = positionals.get(arity.max) {
+        return Err(invocation_error(
+            command,
+            format!(
+                "{command}: wrong number of arguments: extra positional option '{}'",
+                args[extra].as_ref()
+            ),
+            syntax,
+            None,
+        ));
+    }
+    if let Some(label) = syntax
+        .positional_at(positionals.len())
+        .map(|positional| positional.name)
+    {
+        return Err(invocation_error(
+            command,
+            format!("{command}: wrong number of arguments: missing {label}"),
+            syntax,
+            None,
+        ));
+    }
+    Err(invocation_error(
+        command,
+        format!("{command}: wrong number of arguments"),
+        syntax,
+        None,
+    ))
 }
 
 fn invocation_error(

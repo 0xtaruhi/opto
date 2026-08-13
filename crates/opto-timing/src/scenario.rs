@@ -158,8 +158,8 @@ pub struct ScenarioPowerView {
 pub enum ScenarioActivityTarget {
     /// Persistent design-port target.
     Port(crate::PortId),
-    /// Named design-net target.
-    Net(Arc<str>),
+    /// Persistent design-net target.
+    Net(crate::NetId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -254,10 +254,9 @@ impl ScenarioPowerView {
                         digest.update(&[0]);
                         digest.update(&port.uid().get().get().to_le_bytes());
                     }
-                    ScenarioActivityTarget::Net(name) => {
+                    ScenarioActivityTarget::Net(net) => {
                         digest.update(&[1]);
-                        digest.update(&(name.len() as u64).to_le_bytes());
-                        digest.update(name.as_bytes());
+                        digest.update(&net.uid().get().get().to_le_bytes());
                     }
                 }
                 digest.update(&activity.static_probability.to_le_bytes());
@@ -743,7 +742,9 @@ mod tests {
                         ..opto_library::PowerLibrary::default()
                     }),
                     vec![(
-                        ScenarioActivityTarget::Net(Arc::from("n")),
+                        ScenarioActivityTarget::Net(crate::NetId::from_uid(
+                            opto_core::ObjectUid::from_raw(1).unwrap(),
+                        )),
                         ScenarioSwitchingActivity::new(0.5, 0.2, 0.5).unwrap(),
                     )],
                 )

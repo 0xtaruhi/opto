@@ -194,6 +194,86 @@ fn help_uses_metadata_bound_to_the_command_spec() {
     let synth = registry.command_help_text("synth").unwrap();
     assert!(synth.contains("single mapping pipeline"));
     assert!(synth.contains("non-empty target library"));
+
+    let set_load = registry.command_help_text("set_load").unwrap();
+    assert!(set_load.contains("external capacitive load"));
+    assert!(set_load.contains("set_load -max 0.05 [get_ports data_out]"));
+    assert!(set_load.contains("maximum constraint slot"));
+    assert!(!set_load.contains("maximum-delay analysis"));
+
+    let redirect = registry.command_help_text("redirect").unwrap();
+    assert!(redirect.contains("1 positional with -file or -variable; 2 positionals otherwise"));
+    assert!(redirect.contains("Without -file or -variable, precede it with the output target"));
+}
+
+#[test]
+fn public_help_contains_no_placeholder_metadata() {
+    let registry = registry();
+    let mut missing_examples = Vec::new();
+    for command in registry.iter() {
+        let spec = command.spec();
+        assert!(
+            !spec.summary.trim().is_empty(),
+            "empty summary for '{}'",
+            spec.name
+        );
+        assert!(
+            !spec.requires.trim().is_empty(),
+            "empty requirements for '{}'",
+            spec.name
+        );
+        assert!(!spec.summary.starts_with("Execute the public `"));
+        assert_ne!(
+            spec.requires,
+            "The declared arguments and referenced session objects must be valid."
+        );
+        for option in &command.syntax().options {
+            assert!(
+                !option.help.trim().is_empty(),
+                "empty help for '{} {}'",
+                spec.name,
+                option.name
+            );
+            assert_ne!(option.help, "Enable this command behavior.");
+        }
+        for positional in &command.syntax().positionals {
+            assert!(
+                !positional.name.trim().is_empty() && !positional.help.trim().is_empty(),
+                "empty positional metadata for '{}'",
+                spec.name
+            );
+        }
+        if (!command.syntax().positionals.is_empty() || command.syntax().options.len() > 1)
+            && spec.example.is_none()
+        {
+            missing_examples.push(spec.name);
+        }
+    }
+    assert!(
+        missing_examples.is_empty(),
+        "commands with positional arguments or multiple options need explicit examples: {missing_examples:?}"
+    );
+}
+
+#[test]
+fn infrastructure_behavior_is_declared_by_command_schema() {
+    let registry = registry();
+    assert_eq!(
+        registry.find("source").unwrap().spec().validation,
+        ValidationBehavior::SourceFile
+    );
+    assert_eq!(
+        registry.find("exit").unwrap().spec().validation,
+        ValidationBehavior::ReturnFromScript
+    );
+    assert!(matches!(
+        registry
+            .find("redirect")
+            .unwrap()
+            .syntax()
+            .positional_policy,
+        PositionalPolicy::ConditionalOnAnyOption { .. }
+    ));
 }
 
 #[test]
@@ -267,7 +347,7 @@ fn invocation_preflight_matches_audited_command_contracts() {
         Case {
             command: "redirect",
             args: &["-variable", "captured"],
-            expected_error: Some("wrong number of arguments"),
+            expected_error: Some("missing script"),
         },
         Case {
             command: "redirect",
@@ -287,12 +367,32 @@ fn invocation_preflight_matches_audited_command_contracts() {
         Case {
             command: "set_load",
             args: &["1.0"],
-            expected_error: Some("wrong number of arguments"),
+            expected_error: Some("missing objects"),
         },
         Case {
             command: "set_load",
             args: &["-max", "1.0", "ports"],
             expected_error: None,
+        },
+        Case {
+            command: "set_input_delay",
+            args: &["-0.25", "ports"],
+            expected_error: None,
+        },
+        Case {
+            command: "set_clock_latency",
+            args: &["-source", "-early", "-0.1", "clocks"],
+            expected_error: None,
+        },
+        Case {
+            command: "set_input_delay",
+            args: &["-0.25", "--", "-data"],
+            expected_error: None,
+        },
+        Case {
+            command: "set_input_delay",
+            args: &["-0.25", "-clok", "clk", "ports"],
+            expected_error: Some("unsupported option '-clok'"),
         },
         Case {
             command: "set_max_transition",
@@ -391,13 +491,13 @@ fn invocation_preflight_matches_audited_command_contracts() {
             .to_string()
             .contains("value must precede options")
     );
-    assert_eq!(set_max_transition.syntax().leading_positionals, 1);
+    assert_eq!(set_max_transition.syntax().leading_positionals(), 1);
     assert_eq!(
         registry
             .find("set_max_fanout")
             .unwrap()
             .syntax()
-            .leading_positionals,
+            .leading_positionals(),
         1
     );
     assert_eq!(
@@ -405,7 +505,14 @@ fn invocation_preflight_matches_audited_command_contracts() {
             .find("set_max_delay")
             .unwrap()
             .syntax()
-            .leading_positionals,
+            .leading_positionals(),
         1
     );
+
+    let clock_transition = registry.command_help_text("set_clock_transition").unwrap();
+    assert!(clock_transition.contains("set_clock_transition [options] <transition> <clocks>..."));
+    assert!(clock_transition.contains("<transition> —"));
+    assert!(clock_transition.contains("<clocks> —"));
+    assert!(clock_transition.contains("active timing-library time unit"));
+    assert!(clock_transition.contains("set_clock_transition 0.10 [get_clocks sys_clk]"));
 }

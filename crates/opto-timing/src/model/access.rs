@@ -467,6 +467,14 @@ impl TimingModel {
             .and_then(|index| TimingNetId::from_index(index).ok())
     }
 
+    #[must_use]
+    /// Resolves a persistent logical-net identity in this timing generation.
+    pub fn net_id_for_object(&self, object: crate::NetId) -> Option<TimingNetId> {
+        self.object_bindings
+            .net_name(object)
+            .and_then(|name| self.net_id(name))
+    }
+
     pub(super) fn instance_connection_count(&self, instance: TimingInstanceId) -> usize {
         self.flat_instance(instance)
             .map_or(0, super::design::TimingInstanceView::connection_count)

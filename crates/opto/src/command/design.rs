@@ -17,13 +17,19 @@ pub(crate) struct ElaborateArgs {
 }
 
 #[derive(TclCommand)]
-#[command(name = "check_design", handler = check_design)]
+#[command(
+    name = "check_design",
+    handler = check_design,
+    summary = "Validate the current design without changing it.",
+    requires = "A current elaborated or synthesized design is required."
+)]
 pub(crate) struct CheckDesignArgs {}
 
 #[derive(TclCommand)]
 #[command(
     name = "write_hdl",
     handler = write_hdl,
+    summary = "Write the current design as deterministic mapped Verilog.",
     requires = "A current elaborated or synthesized design is required.",
     example = "write_hdl mapped.v"
 )]

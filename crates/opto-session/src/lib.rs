@@ -52,6 +52,7 @@ use opto_runtime::ExecutionContext;
 #[cfg(test)]
 use std::path::PathBuf;
 
+mod activity;
 mod database;
 mod design_graph;
 mod design_view;

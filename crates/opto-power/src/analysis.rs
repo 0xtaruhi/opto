@@ -177,6 +177,14 @@ impl ActivityAnnotations {
         self.generation
     }
 
+    #[must_use]
+    /// Returns whether this annotation set contains an explicit value for `net`.
+    pub fn contains(&self, net: TimingNetId) -> bool {
+        self.values
+            .binary_search_by_key(&net, |&(candidate, _)| candidate)
+            .is_ok()
+    }
+
     pub(crate) fn get(&self, net: TimingNetId) -> Option<SwitchingActivity> {
         self.values
             .binary_search_by_key(&net, |&(net, _)| net)

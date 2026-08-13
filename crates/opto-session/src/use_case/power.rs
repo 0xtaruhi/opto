@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::timing_model;
+use crate::activity::{ActivityTarget, resolve_activity_annotations};
 use crate::{
     DelayType, PowerEngineMetrics, ReportPowerOptions, Session, SessionError,
     SwitchingActivityUpdate,
 };
 use opto_db::{AnyObjectId, ResolvedObject};
-use opto_ir::mapped::{MappedNetlist, NetId as MappedNetId};
 use opto_power::{ActivityAnnotations, SwitchingActivity};
-use opto_timing::{TimingModel, TimingNetId};
+use opto_timing::TimingModel;
 use std::sync::Arc;
 
 fn power_analysis(
@@ -19,18 +19,18 @@ fn power_analysis(
     let record = session.state.designs.get(&design).ok_or_else(|| {
         SessionError::state(format!("current design '{design}' is missing from store"))
     })?;
-    let mapped = record
-        .synthesized
-        .as_ref()
-        .ok_or_else(|| SessionError::state("report_power: current design is not synthesized"))?
-        .mapped();
+    if record.synthesized.is_none() {
+        return Err(SessionError::state(
+            "report_power: current design is not synthesized",
+        ));
+    }
     let model = timing_model::current_timing_model(session)?;
     let timing_nets = session.process.timing_engine.electrical_snapshot(
         &session.state.timing,
         Arc::clone(&model),
         DelayType::Max,
     )?;
-    let annotations = power_annotations(session, &design, mapped, &model)?;
+    let annotations = power_annotations(session, &design, &model)?;
     let analysis = session
         .process
         .power_engine
@@ -59,10 +59,9 @@ fn power_analysis(
 fn power_annotations(
     session: &Session,
     design: &str,
-    mapped: &MappedNetlist,
     model: &TimingModel,
 ) -> Result<ActivityAnnotations, SessionError> {
-    let mut entries = Vec::new();
+    let mut targets = Vec::new();
     for (&object, &activity) in &session.state.power.activities {
         let locator = session.state.objects.resolve(object).ok_or_else(|| {
             SessionError::state(format!(
@@ -73,20 +72,8 @@ fn power_annotations(
             continue;
         }
         match object {
-            AnyObjectId::Port(port) => {
-                let nets = model.port_nets(port);
-                if nets.is_empty() {
-                    return Err(SessionError::state(format!(
-                        "report_power: port '{}' has no net in the sealed timing generation",
-                        locator.object_name()
-                    )));
-                }
-                entries.extend(nets.iter().map(|&net| (net, activity)));
-            }
-            AnyObjectId::Net(_) => entries.push((
-                root_timing_net(mapped, model, locator.object_name())?,
-                activity,
-            )),
+            AnyObjectId::Port(port) => targets.push((ActivityTarget::Port(port), activity)),
+            AnyObjectId::Net(net) => targets.push((ActivityTarget::Net(net), activity)),
             _ => {
                 return Err(SessionError::state(format!(
                     "report_power: switching activity references unsupported object {object:?}"
@@ -94,39 +81,7 @@ fn power_annotations(
             }
         }
     }
-    ActivityAnnotations::new(model.generation(), entries).map_err(Into::into)
-}
-
-fn root_timing_net(
-    mapped: &MappedNetlist,
-    model: &TimingModel,
-    external_name: &str,
-) -> Result<TimingNetId, SessionError> {
-    let local = mapped
-        .net_ids()
-        .find(|&net| mapped_net_matches(mapped, net, external_name))
-        .ok_or_else(|| {
-            SessionError::state(format!(
-                "report_power: net '{external_name}' has no mapped root-net identity"
-            ))
-        })?;
-    model.mapped_timing_net(local).ok_or_else(|| {
-        SessionError::state(format!(
-            "report_power: net '{external_name}' is absent from the sealed timing generation"
-        ))
-    })
-}
-
-fn mapped_net_matches(mapped: &MappedNetlist, net: MappedNetId, external_name: &str) -> bool {
-    mapped.net_name(net).map_or_else(
-        || {
-            external_name
-                .strip_prefix("_n")
-                .and_then(|index| index.parse::<usize>().ok())
-                == Some(net.index())
-        },
-        |name| name == external_name,
-    )
+    resolve_activity_annotations(model, targets).map_err(SessionError::state)
 }
 impl Session {
     /// Apply explicit switching activity to resolved power objects.
