@@ -227,9 +227,15 @@ pub(crate) struct PortConstraintCommandArgs<'a> {
     rise: bool,
     #[arg(long = "-fall")]
     fall: bool,
-    #[arg(long = "-min")]
+    #[arg(
+        long = "-min",
+        help = "Select the minimum constraint slot for the chosen transition, load, or drive kind."
+    )]
     min: bool,
-    #[arg(long = "-max")]
+    #[arg(
+        long = "-max",
+        help = "Select the maximum constraint slot for the chosen transition, load, or drive kind."
+    )]
     max: bool,
     #[arg(positional)]
     value: f64,

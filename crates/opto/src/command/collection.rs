@@ -11,7 +11,7 @@ macro_rules! collection_query_args {
             handler = $handler,
             sdc,
             summary = $summary,
-            requires = "A current design is required; filters and related objects must use live typed handles.",
+            requires = "A current design is required; related-object selectors must resolve to live objects, and filter expressions must use supported properties and operators.",
             example = $example
         )]
         pub(crate) struct $name<'a> {

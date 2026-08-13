@@ -59,7 +59,7 @@ pub(crate) struct ReportPowerArgs {
     name = "set_switching_activity",
     handler = set_switching_activity,
     summary = "Atomically set explicit switching activity on ports or nets.",
-    requires = "Objects must belong to the current design and activity values must be valid probabilities or rates.",
+    requires = "Objects must belong to the current design and each supplied activity parameter must satisfy its validation rules.",
     example = "set_switching_activity -static_probability 0.5 -toggle_rate 0.2 [get_ports data_in]"
 )]
 pub(crate) struct SetSwitchingActivityArgs<'a> {

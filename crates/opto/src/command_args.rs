@@ -100,7 +100,24 @@ macro_rules! numeric_value {
     };
 }
 
-numeric_value!(f64);
+impl FromTclValue<'_> for f64 {
+    fn from_tcl_value(
+        command: &str,
+        argument: &str,
+        value: TclArg<'_>,
+    ) -> Result<Self, crate::ShellError> {
+        let parsed = value.parse::<Self>().map_err(|_| {
+            crate::ShellError::parse(format!("{command}: invalid value '{value}' for {argument}"))
+        })?;
+        if !parsed.is_finite() {
+            return Err(crate::ShellError::parse(format!(
+                "{command}: non-finite value '{value}' is not valid for {argument}"
+            )));
+        }
+        Ok(parsed)
+    }
+}
+
 numeric_value!(i32);
 numeric_value!(u32);
 numeric_value!(usize);

@@ -57,7 +57,13 @@ pub(crate) struct RedirectArgs<'a> {
     _bg: (),
     #[arg(long = "-max_cores", unsupported)]
     _max_cores: (),
-    #[arg(positional, min = 1, max = 2)]
+    #[arg(
+        positional,
+        min = 1,
+        max = 2,
+        label = "script",
+        help = "The nested Tcl script. Without -file or -variable, precede it with the output target."
+    )]
     positionals: Vec<TclArg<'a>>,
 }
 

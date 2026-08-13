@@ -624,7 +624,13 @@ impl Completer for OptoCompleter {
             .as_deref()
             .and_then(|previous| spec.options.iter().find(|option| option.name == previous))
             .and_then(|option| option.value)
-            .or_else(|| spec.positionals.first().map(|positional| positional.value));
+            .or_else(|| {
+                spec.positional_at(completed_positional_count(
+                    &context.completed_arguments,
+                    spec,
+                ))
+                .map(|positional| positional.value)
+            });
         let Some(hint) = hint else {
             return Vec::new();
         };
@@ -720,6 +726,7 @@ struct CursorContext {
     command: String,
     at_command: bool,
     previous: Option<String>,
+    completed_arguments: Vec<String>,
     prefix: String,
     span: Span,
     grouped: bool,
@@ -761,15 +768,57 @@ fn cursor_context(line: &str, pos: usize) -> CursorContext {
     };
     let previous =
         previous_index.map(|index| clean_token(token_text(segment, tokens[index].clone())));
+    let completed_end = if current.is_some() {
+        tokens.len().saturating_sub(1)
+    } else {
+        tokens.len()
+    };
+    let completed_arguments = tokens
+        .get(1..completed_end)
+        .unwrap_or_default()
+        .iter()
+        .map(|range| clean_token(token_text(segment, range.clone())))
+        .collect();
     let at_command = tokens.is_empty() || (tokens.len() == 1 && current.is_some());
     CursorContext {
         command,
         at_command,
         previous,
+        completed_arguments,
         prefix: clean_prefix.to_string(),
         span: Span::new(span_start, pos),
         grouped,
     }
+}
+
+fn completed_positional_count(
+    arguments: &[String],
+    syntax: &crate::command_catalog::CommandSyntax,
+) -> usize {
+    let mut count = 0usize;
+    let mut index = 0usize;
+    let mut options_terminated = false;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if !options_terminated && argument == "--" {
+            options_terminated = true;
+            index += 1;
+            continue;
+        }
+        if !options_terminated
+            && let Some(option) = syntax
+                .options
+                .iter()
+                .chain(&syntax.unsupported_options)
+                .find(|option| option.name == argument)
+        {
+            index += 1 + usize::from(option.value.is_some());
+            continue;
+        }
+        count += 1;
+        index += 1;
+    }
+    count
 }
 
 fn command_segment_start(line: &str) -> usize {
@@ -949,6 +998,7 @@ mod tests {
         let context = cursor_context("set x [report_timing -from cl", 36);
         assert_eq!(context.command, "report_timing");
         assert_eq!(context.previous.as_deref(), Some("-from"));
+        assert_eq!(context.completed_arguments, ["-from"]);
         assert_eq!(context.prefix, "cl");
     }
 
@@ -984,6 +1034,7 @@ mod tests {
             command: "read_hdl".to_string(),
             at_command: false,
             previous: Some("read_hdl".to_string()),
+            completed_arguments: Vec::new(),
             prefix: prefix.clone(),
             span: Span::new(0, prefix.len()),
             grouped: true,
@@ -996,6 +1047,27 @@ mod tests {
 
         assert!(values.contains(&format!("{prefix}architecture.md")));
         assert!(!values.contains(&prefix));
+    }
+
+    #[test]
+    fn positional_completion_uses_the_current_positional_hint() {
+        let mut commands = CommandRegistry::new();
+        commands
+            .register(crate::commands::SET_CLOCK_TRANSITION)
+            .unwrap();
+        let syntax = commands.find("set_clock_transition").unwrap().syntax();
+        let context = cursor_context("set_clock_transition 0.10 sys", 31);
+
+        assert_eq!(context.completed_arguments, ["0.10"]);
+        assert_eq!(
+            syntax
+                .positional_at(completed_positional_count(
+                    &context.completed_arguments,
+                    syntax,
+                ))
+                .map(|hint| hint.value),
+            Some(ValueHint::Clock)
+        );
     }
 
     #[test]

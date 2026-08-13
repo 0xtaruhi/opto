@@ -903,6 +903,7 @@ fn enabled_checks(checks: ScenarioCheckSet) -> impl Iterator<Item = BoundaryChec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn internal_word_values_bind_stable_net_cell_and_pin_endpoints() {
@@ -945,5 +946,50 @@ mod tests {
             &opto_timing::ExceptionFilter::new([opto_timing::TimingEndpoint::Pin(pin)]),
             &endpoints,
         ));
+    }
+
+    #[test]
+    fn boundary_activity_resolves_persistent_nets_and_prefers_ports() {
+        let mut module = word::WordModule::new("top");
+        let source = word::SourceSpan::default();
+        let signal = module
+            .add_wire("mid", word::WordType::bits(1).unwrap(), source.clone())
+            .unwrap();
+        let value = module.read_signal(signal, source).unwrap();
+        let uid = |raw| opto_core::ObjectUid::from_raw(raw).unwrap();
+        let net = opto_timing::NetId::from_uid(uid(1));
+        let port = opto_timing::PortId::from_uid(uid(2));
+        let net_activity = opto_timing::ScenarioSwitchingActivity::new(0.25, 0.1, 0.5).unwrap();
+        let port_activity = opto_timing::ScenarioSwitchingActivity::new(0.75, 0.3, 0.5).unwrap();
+        let power = opto_timing::ScenarioPowerView::new(
+            Arc::new(opto_library::PowerLibrary::default()),
+            vec![
+                (opto_timing::ScenarioActivityTarget::Net(net), net_activity),
+                (
+                    opto_timing::ScenarioActivityTarget::Port(port),
+                    port_activity,
+                ),
+            ],
+        )
+        .unwrap();
+        let scenario = opto_timing::Scenario::single(
+            Arc::new(opto_timing::TimingContext::default()),
+            Arc::new(opto_timing::TimingLibrary::default()),
+            opto_timing::Parasitics::default(),
+        )
+        .with_power(power);
+        let mut bindings = opto_timing::TimingObjectBindings::builder();
+        bindings.bind_net("mid", net).unwrap();
+        let bindings = bindings.finish().unwrap();
+
+        assert_eq!(
+            boundary_activity(&module, value, None, &scenario, &bindings),
+            Some(net_activity)
+        );
+        assert_eq!(
+            boundary_activity(&module, value, Some(port), &scenario, &bindings),
+            Some(port_activity),
+            "a bound port is the boundary's authoritative activity source"
+        );
     }
 }

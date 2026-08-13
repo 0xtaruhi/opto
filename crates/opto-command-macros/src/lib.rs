@@ -227,7 +227,7 @@ fn expand_tcl_command(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
             "commands with positional arguments or multiple options require an explicit example",
         ));
     }
-    if requires_example && command.names.len() > 1 && command.variant_examples.is_empty() {
+    if command.names.len() > 1 && command.variant_examples.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.ident,
             "commands with variants require an explicit example for every variant",
@@ -844,8 +844,8 @@ impl<'a> FieldConfig<'a> {
             let text = match identifier.trim_start_matches('_') {
                 "rise" => "Apply the command to rising transitions.".to_string(),
                 "fall" => "Apply the command to falling transitions.".to_string(),
-                "min" => "Apply the command to minimum-delay analysis.".to_string(),
-                "max" => "Apply the command to maximum-delay analysis.".to_string(),
+                "min" => "Apply the command to the minimum analysis corner.".to_string(),
+                "max" => "Apply the command to the maximum analysis corner.".to_string(),
                 "early" => "Apply the command to the early analysis side.".to_string(),
                 "late" => "Apply the command to the late analysis side.".to_string(),
                 "setup" => "Apply the command to setup analysis.".to_string(),

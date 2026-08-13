@@ -78,3 +78,35 @@ fn related_object_queries_use_handle_lists() {
         "{result:?}"
     );
 }
+
+#[test]
+fn database_query_schema_rejects_unsupported_forms_precisely() {
+    let mut runtime = Runtime::new(Session::new()).unwrap();
+    runtime.register_commands().unwrap();
+
+    for (script, expected) in [
+        (
+            "get_db not_a_class",
+            "unknown root property or object class",
+        ),
+        (
+            "get_db -of bogus libraries",
+            "libraries does not support -of",
+        ),
+        (
+            "get_db -if {.name == BUF} lib_cells",
+            "lib_cells currently supports name patterns only",
+        ),
+        (
+            "get_db -if {.name == high} synth_effort",
+            "'synth_effort' is a root property",
+        ),
+        (
+            "get_db synth_effort high",
+            "root property 'synth_effort' does not accept name pattern 'high'",
+        ),
+    ] {
+        let error = runtime.eval(script).expect_err("query must be rejected");
+        assert!(error.to_string().contains(expected), "{script}: {error}");
+    }
+}

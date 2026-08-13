@@ -198,6 +198,12 @@ fn help_uses_metadata_bound_to_the_command_spec() {
     let set_load = registry.command_help_text("set_load").unwrap();
     assert!(set_load.contains("external capacitive load"));
     assert!(set_load.contains("set_load -max 0.05 [get_ports data_out]"));
+    assert!(set_load.contains("maximum constraint slot"));
+    assert!(!set_load.contains("maximum-delay analysis"));
+
+    let redirect = registry.command_help_text("redirect").unwrap();
+    assert!(redirect.contains("1 positional with -file or -variable; 2 positionals otherwise"));
+    assert!(redirect.contains("Without -file or -variable, precede it with the output target"));
 }
 
 #[test]
@@ -341,7 +347,7 @@ fn invocation_preflight_matches_audited_command_contracts() {
         Case {
             command: "redirect",
             args: &["-variable", "captured"],
-            expected_error: Some("missing positionals"),
+            expected_error: Some("missing script"),
         },
         Case {
             command: "redirect",

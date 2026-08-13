@@ -462,7 +462,9 @@ fn validation_command_trampoline_impl(
     match spec.validation {
         command_catalog::ValidationBehavior::Noop => {}
         command_catalog::ValidationBehavior::SourceFile => {
-            let path = &command_args[0];
+            let Some(path) = command_args.first() else {
+                return set_error(interp, "source: missing file name");
+            };
             let Ok(path) = CString::new(path.as_str()) else {
                 return set_error(interp, "source: file name contains NUL");
             };

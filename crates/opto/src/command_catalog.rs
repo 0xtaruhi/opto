@@ -285,7 +285,7 @@ impl CommandSyntax {
             .count()
     }
 
-    fn positional_at(&self, index: usize) -> Option<&PositionalHint> {
+    pub(crate) fn positional_at(&self, index: usize) -> Option<&PositionalHint> {
         let mut start = 0usize;
         for positional in &self.positionals {
             let end = start.saturating_add(positional.max);
@@ -453,6 +453,31 @@ fn command_usage(name: &str, syntax: &CommandSyntax) -> String {
             usage.push_str("...");
         }
     }
+    if let PositionalPolicy::ConditionalOnAnyOption {
+        options,
+        present,
+        absent,
+    } = syntax.positional_policy
+    {
+        let option_names = options
+            .iter()
+            .filter_map(|id| {
+                syntax
+                    .options
+                    .iter()
+                    .find(|option| option.id == *id)
+                    .map(|option| option.name)
+            })
+            .collect::<Vec<_>>()
+            .join(" or ");
+        write!(
+            usage,
+            " ({} with {option_names}; {} otherwise)",
+            positional_arity_label(present),
+            positional_arity_label(absent),
+        )
+        .expect("writing to a String cannot fail");
+    }
     usage
 }
 
@@ -471,13 +496,29 @@ fn command_example(name: &str, syntax: &CommandSyntax) -> String {
             }
         }
     }
-    for positional in &syntax.positionals {
-        for _ in 0..positional.min {
-            write!(example, " {}", example_value(positional.value))
-                .expect("writing to a String cannot fail");
-        }
+    let minimum = match syntax.positional_policy {
+        PositionalPolicy::Declared => syntax.positionals.iter().map(|hint| hint.min).sum(),
+        PositionalPolicy::ConditionalOnAnyOption { absent, .. } => absent.min,
+    };
+    for index in 0..minimum {
+        let hint = syntax
+            .positional_at(index)
+            .or_else(|| syntax.positionals.last())
+            .expect("a positive positional arity has a positional hint");
+        write!(example, " {}", example_value(hint.value)).expect("writing to a String cannot fail");
     }
     example
+}
+
+fn positional_arity_label(arity: PositionalArity) -> String {
+    if arity.min == arity.max {
+        let suffix = if arity.min == 1 { "" } else { "s" };
+        return format!("{} positional{suffix}", arity.min);
+    }
+    if arity.max == usize::MAX {
+        return format!("at least {} positionals", arity.min);
+    }
+    format!("{} to {} positionals", arity.min, arity.max)
 }
 
 fn example_value(hint: ValueHint) -> &'static str {

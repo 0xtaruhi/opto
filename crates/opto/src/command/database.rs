@@ -44,104 +44,64 @@ enum RootPropertyKind {
     SynthEffort,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootPropertyType {
-    Boolean,
-    DesignHandle,
-    PathList,
-    PositiveInteger,
-    SynthesisEffort,
-}
-
-impl RootPropertyKind {
-    const fn value_type(self) -> RootPropertyType {
-        match self {
-            Self::ClockGating | Self::ClockGatingLatchBased => RootPropertyType::Boolean,
-            Self::ClockGatingMinimumBitwidth => RootPropertyType::PositiveInteger,
-            Self::CurrentDesign => RootPropertyType::DesignHandle,
-            Self::HdlSearchPath | Self::LibSearchPath => RootPropertyType::PathList,
-            Self::SynthEffort => RootPropertyType::SynthesisEffort,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct RootPropertySpec {
     name: &'static str,
     kind: RootPropertyKind,
-    value_type: RootPropertyType,
     readable: bool,
     writable: bool,
-    help: &'static str,
 }
 
 const ROOT_PROPERTIES: &[RootPropertySpec] = &[
     RootPropertySpec {
         name: "clock_gating",
         kind: RootPropertyKind::ClockGating,
-        value_type: RootPropertyType::Boolean,
         readable: true,
         writable: true,
-        help: "Enable or disable synthesis clock gating.",
     },
     RootPropertySpec {
         name: "clock_gating_latch_based",
         kind: RootPropertyKind::ClockGatingLatchBased,
-        value_type: RootPropertyType::Boolean,
         readable: true,
         writable: true,
-        help: "Select latch-based rather than combinational clock gating.",
     },
     RootPropertySpec {
         name: "clock_gating_minimum_bitwidth",
         kind: RootPropertyKind::ClockGatingMinimumBitwidth,
-        value_type: RootPropertyType::PositiveInteger,
         readable: true,
         writable: true,
-        help: "Minimum register width eligible for clock gating.",
     },
     RootPropertySpec {
         name: "current_design",
         kind: RootPropertyKind::CurrentDesign,
-        value_type: RootPropertyType::DesignHandle,
         readable: true,
         writable: true,
-        help: "The design selected for subsequent commands.",
     },
     RootPropertySpec {
         name: "hdl_search_path",
         kind: RootPropertyKind::HdlSearchPath,
-        value_type: RootPropertyType::PathList,
         readable: true,
         writable: true,
-        help: "Ordered directories searched for HDL inputs.",
     },
     RootPropertySpec {
         name: "lib_search_path",
         kind: RootPropertyKind::LibSearchPath,
-        value_type: RootPropertyType::PathList,
         readable: true,
         writable: true,
-        help: "Ordered directories searched for Liberty inputs.",
     },
     RootPropertySpec {
         name: "synth_effort",
         kind: RootPropertyKind::SynthEffort,
-        value_type: RootPropertyType::SynthesisEffort,
         readable: true,
         writable: true,
-        help: "Deterministic synthesis search effort: low, medium, or high.",
     },
 ];
 
 fn root_property(name: &str) -> Option<&'static RootPropertySpec> {
-    let property = ROOT_PROPERTIES
+    ROOT_PROPERTIES
         .binary_search_by_key(&name, |property| property.name)
         .ok()
-        .map(|index| &ROOT_PROPERTIES[index])?;
-    debug_assert_eq!(property.value_type, property.kind.value_type());
-    debug_assert!(!property.help.is_empty());
-    Some(property)
+        .map(|index| &ROOT_PROPERTIES[index])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,11 +217,19 @@ fn get_root_or_objects(
     pattern: &str,
     args: &GetDbArgs<'_>,
 ) -> Result<CommandResult, crate::ShellError> {
-    if pattern == "*"
-        && args.filter.is_none()
-        && args.of_objects.is_none()
-        && let Some(property) = root_property(term.as_str()).filter(|property| property.readable)
-    {
+    if let Some(property) = root_property(term.as_str()).filter(|property| property.readable) {
+        if args.filter.is_some() || args.of_objects.is_some() {
+            return Err(crate::ShellError::command(format!(
+                "get_db: -if and -of are valid only for object-class queries; '{}' is a root property",
+                term.as_str()
+            )));
+        }
+        if pattern != "*" {
+            return Err(crate::ShellError::command(format!(
+                "get_db: root property '{}' does not accept name pattern '{pattern}'",
+                term.as_str()
+            )));
+        }
         return get_root_property(state, property.kind);
     }
 
@@ -469,7 +437,7 @@ fn set_root(
 ) -> Result<usize, crate::ShellError> {
     let Some(spec) = root_property(property) else {
         return Err(crate::ShellError::command(format!(
-            "set_db: unknown or read-only root property '{property}'"
+            "set_db: unknown root property '{property}'"
         )));
     };
     if !spec.writable {
@@ -565,7 +533,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn root_property_schema_is_sorted_unique_and_type_complete() {
+    fn root_property_schema_is_sorted_unique_and_capability_complete() {
         let mut names = BTreeSet::new();
         for pair in ROOT_PROPERTIES.windows(2) {
             assert!(
@@ -575,9 +543,7 @@ mod tests {
         }
         for property in ROOT_PROPERTIES {
             assert!(names.insert(property.name));
-            assert_eq!(property.value_type, property.kind.value_type());
             assert!(property.readable || property.writable);
-            assert!(!property.help.trim().is_empty());
             assert!(root_property(property.name).is_some());
         }
     }
@@ -601,5 +567,11 @@ mod tests {
         assert!(object_query("ports").unwrap().related);
         assert!(!object_query("libraries").unwrap().related);
         assert!(!object_query("lib_cells").unwrap().filter);
+    }
+
+    #[test]
+    fn unknown_catalog_names_do_not_resolve() {
+        assert!(root_property("not_a_property").is_none());
+        assert!(object_query("not_a_class").is_none());
     }
 }
