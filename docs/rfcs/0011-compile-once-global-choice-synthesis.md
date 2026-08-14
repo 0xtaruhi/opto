@@ -125,8 +125,8 @@ milestone and are not required by this RFC.
 
 ## Goals
 
-1. Reduce the reference Ibex SKY130 end-to-end median below 5.0 seconds in the
-   default release flow on its recorded reference host.
+1. Reduce the reference Ibex SKY130 end-to-end median to at most 5.0 seconds in
+   the default release flow on its recorded reference host.
 2. Improve the accepted public-suite geometric-mean runtime by at least 3x,
    rather than tuning only Ibex.
 3. Preserve or improve exact mapped area, setup/hold timing, electrical
@@ -519,11 +519,15 @@ memory budgets.
 
 ### Characterization catalog
 
-Architecture candidates use a target-characterization catalog keyed by provider
-identity, recipe ABI, implementation shape, timing view, operating grid, and
-characterization ABI. This is the information source for the analytical
-microarchitecture selector. It is separate from Boolean rewrite recipes and
-cell matches because their identities, invalidation, and consumers differ.
+Architecture candidates use a target-characterization catalog keyed by the
+exact `TargetFingerprint`, provider identity, recipe ABI, implementation shape,
+timing view, operating grid, and characterization ABI. The target fingerprint
+covers the canonical Liberty content and every target option that changes
+matching, area, power, or timing. A response from another target namespace is
+never a cache hit even if every remaining key field agrees. This catalog is the
+information source for the analytical microarchitecture selector. It is
+separate from Boolean rewrite recipes and cell matches because their identities,
+invalidation, and consumers differ.
 
 An arbitrary valid Liberty target cannot depend on a pre-warmed proprietary
 database. Providers publish parameterized structural response templates. For a
@@ -677,6 +681,29 @@ The round does not rediscover candidates, change a decision-group footprint,
 repartition, recompile a clean group, or restart full-design Word/Boolean work.
 It is part of the one synthesis architecture, not a fallback mapper.
 
+Structural repair is a pre-publication transaction over immutable accepted
+generations. Newly lowered choices and compiled rows are appended to
+transaction-owned provisional arenas; accepted `ChoiceGraph` and
+`CompiledMapping` generations are never edited in place. Provisional IDs carry
+the transaction generation and cannot be dereferenced through the accepted
+generation. Before commit, validation proves that every new ID, cut leaf, match,
+arc range, ownership range, and shard range belongs to the provisional or
+accepted generation declared by the transaction; the candidate retains its
+sealed interface and exact decision-group footprint; and its
+`CandidateCompilationKey` contains the current group revision, candidate,
+rewrite-atlas ABI, exact target fingerprint, and mapping ABI.
+
+A successful commit first derives a new `CandidateCompilationSetId` from the
+stable ordered set of accepted compilation keys, then derives the corresponding
+`SelectionContextKey`, and finally performs one atomic root replacement that
+publishes the new arena generations, selected topology, compilation set, and
+exact timing generation together. Until that root replacement, no checkpoint,
+report, closure pass, or session object can observe a provisional ID. Failure
+at lowering, compilation, validation, exact timing, or objective comparison
+discards the provisional arenas and timing overlay as one unit; the accepted
+generation, selected topology, cache identities, and publication state remain
+byte-identical.
+
 If a violation remains, ordinary mapped closure receives the best structurally
 legal topology and the exact violation state. Synthesis reports any final
 unmet timing constraint; an unresolved electrical legality requirement is an
@@ -719,6 +746,7 @@ pub(crate) struct CandidateCompilationKey {
     group_revision: ArchitectureDecisionGroupRevision,
     candidate: ArchitectureCandidateId,
     rewrite_atlas_abi: u32,
+    target_fingerprint: TargetFingerprint,
     target_match_fingerprint: TargetMatchFingerprint,
     mapping_abi: u32,
 }
@@ -815,14 +843,49 @@ architecture. If a stage exceeds its budget, optimization targets its dominant
 algorithm or data movement. The budget is never enforced by skipping valid
 work at runtime.
 
-The product-level gate additionally requires:
+Phase 0 freezes the comparison contract in a checked benchmark manifest. It
+records the baseline Opto commit and release-binary SHA-256, the exact
+`cargo build --release --locked --bin opto` build, synthesis command, Rust
+toolchain, worker count, host image, RTL and Liberty SHA-256 values, constraints,
+case membership, timeout, and every threshold below. Phase 6 compares the RFC
+implementation against that artifact, not against a moving branch or a
+developer build. Baseline and candidate runs are interleaved on the same idle
+host image and use identical inputs and worker limits.
 
-- at least 3x geometric-mean runtime improvement on the pinned public suite;
-- no per-tier catastrophic runtime or RSS tail;
-- no aggregate area or critical-delay regression;
-- no new setup, hold, transition, capacitance, or fanout violation;
-- identical equivalence results and deterministic fingerprints; and
-- separately reported warm-catalog, resident-session, and incremental timing.
+The product-level gate requires all of the following:
+
+- the reference Ibex median from at least five serial fresh-process,
+  cold-catalog runs is `<= 5.0 s`;
+- every suite case has at least five successful interleaved baseline/candidate
+  pairs, and each case is represented by its median paired runtime ratio;
+- the geometric mean runtime ratio is `<= 1/3` for the complete suite and
+  separately for each declared size tier, while no individual case ratio may
+  exceed `1.05`;
+- peak `peak_rss_kib` is no worse in geometric mean and no individual case may
+  exceed `1.05` times baseline; the million- and ten-million-gate tier maxima
+  may not increase at all;
+- area ratios are `<= 1.00` in geometric mean and `<= 1.05` for every
+  individual case; `critical_delay` uses the same aggregate and per-case bounds
+  over timing-constrained cases with complete schema timing tuples;
+- `worst_slack` may not cross from non-negative to negative,
+  `total_negative_slack` may not decrease, and `violating_paths` may not
+  increase; setup, hold, transition, capacitance, or fanout diagnostics newly
+  introduced by the candidate fail the case;
+- every requested combinational or sequential equivalence result is exactly
+  `pass`; equivalence has no numeric tolerance; and
+- mapped-netlist, report, and checkpoint SHA-256 values are byte-identical
+  across supported worker counts after normalizing only manifest-declared
+  absolute output paths. No names, IDs, numeric fields, diagnostics, or record
+  ordering are normalized.
+
+A timeout, crash, missing result, missing timing tuple, unavailable requested
+equivalence result, or non-finite metric fails the gate before aggregation; it
+is never dropped or replaced with the last successful run. No statistical
+outlier is discarded. If the median absolute deviation of paired runtime ratios
+for any case exceeds five percent of its median, the host run is unstable and
+the complete baseline/candidate set is repeated; two unstable attempts fail
+qualification rather than relaxing the bound. Warm-catalog, resident-session,
+and incremental results are reported separately and never enter the cold gate.
 
 Ibex alone cannot accept the RFC. The suite includes control-heavy, arithmetic,
 reconvergent, high-fanout, memory, and larger production-shaped open designs.
@@ -868,17 +931,34 @@ reconvergent, high-fanout, memory, and larger production-shaped open designs.
 
 Every benchmark records:
 
-- source, library, constraints, binary, host, profile, and worker fingerprints;
-- wall/CPU time and peak RSS by the stages in this RFC;
+- source, library, constraints, binary, host, profile, and worker identities;
+- schema-defined `wall_seconds`, `user_seconds`, `system_seconds`,
+  `cpu_seconds`, and `peak_rss_kib`, plus separately named stage durations in
+  seconds whose sum is checked against `wall_seconds` within the trace overhead
+  declared by the manifest;
 - node, choice, cut, match, frontier, and selected-cell counts;
 - lookup hit counts without using them as a QoR decision;
 - analytical versus exact timing error distributions;
 - decision-group sizes, candidate counts, rejected overlap work, lost candidate
   classes, partition cut metrics, compilation-reuse counts, structural-repair
   activation, and repair runtime tails;
-- WNS, TNS, violating endpoints, electrical violations, area, power, cell count,
-  and cell composition; and
-- netlist, report, and checkpoint fingerprints across worker counts.
+- schema-defined `area`, `cells`, `cell_histogram`, `clock_period`,
+  `critical_delay`, `worst_slack`, `total_negative_slack`, and
+  `violating_paths`; and
+- a versioned qualification sidecar containing mapped-netlist, report, and
+  checkpoint SHA-256 values per worker count, plus named setup, hold,
+  transition, capacitance, and fanout violation counts.
+
+The current result schema has no power or artifact-fingerprint fields. Before
+power becomes an acceptance metric, the rollout must version that schema with
+total, leakage, internal, and switching power in watts, their scenario and
+activity fingerprint, and explicit missing-data semantics. For a power-aware
+objective, total-power and leakage-power ratios must then be `<= 1.00` in
+geometric mean and `<= 1.05` per case; missing requested activity or power data
+fails the case. Until that schema revision, power is reported outside the
+normalized gate and is never fabricated as zero. The qualification sidecar is
+likewise versioned before Phase 6; it is not inserted into the current
+`additionalProperties: false` result object.
 
 Primary median runtime uses at least five serial fresh-process runs, each with a
 cold target catalog. A separately reported resident process measures warm target
@@ -968,7 +1048,7 @@ incremental suites. Delete displaced plan portfolios, duplicate lowering/cover
 paths, obsolete cache fields, old objectives, old tests, and conflicting
 architecture text.
 
-Accept only when the reference Ibex median is below 5.0 seconds, the suite-level
+Accept only when the reference Ibex median is at most 5.0 seconds, the suite-level
 3x and QoR gates pass, and no fallback or hidden selector remains.
 
 ## Alternatives

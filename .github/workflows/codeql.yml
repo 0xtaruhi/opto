@@ -27,6 +27,7 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -64,6 +65,7 @@ jobs:
   analyze-native:
     name: Analyze (c-cpp)
     needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

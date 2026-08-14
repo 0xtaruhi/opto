@@ -23,6 +23,7 @@ jobs:
   repository-policy:
     name: Public repository policy
     needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -47,19 +48,19 @@ jobs:
           python3 tools/check_real_benchmarks.py benchmarks/real/gate.toml
 
       - name: Install mdBook
-        if: needs.changes.outputs.docs-changed == 'true'
+        if: needs.changes.result != 'success' || needs.changes.outputs.docs-changed == 'true'
         uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
           tool: mdbook
 
       - name: Build architecture guide
-        if: needs.changes.outputs.docs-changed == 'true'
+        if: needs.changes.result != 'success' || needs.changes.outputs.docs-changed == 'true'
         run: mdbook build
 
   dependency-policy:
     name: Dependency policy
     needs: changes
-    if: github.event_name != 'push'
+    if: ${{ !cancelled() && github.event_name != 'push' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -80,7 +81,7 @@ jobs:
   rust:
     name: Rust quality gates (${{ matrix.name }})
     needs: changes
-    if: github.event_name != 'push'
+    if: ${{ !cancelled() && github.event_name != 'push' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -176,7 +177,7 @@ jobs:
   coverage:
     name: Rust coverage
     needs: changes
-    if: github.event_name != 'pull_request' && needs.changes.outputs.docs-only != 'true'
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs-only != 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
