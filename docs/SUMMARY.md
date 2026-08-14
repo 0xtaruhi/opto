@@ -16,3 +16,4 @@
   - [RFC 0006: Region-parallel synthesis and deterministic mapping](rfcs/0006-region-parallel-synthesis.md)
   - [RFC 0007: Timing-driven partitioning and region-private optimization](rfcs/0007-timing-driven-partitioning.md)
   - [RFC 0009: Operator-local timing and region-local architecture selection](rfcs/0009-operator-local-timing.md)
+  - [RFC 0011: Compile-once global choice synthesis](rfcs/0011-compile-once-global-choice-synthesis.md)
