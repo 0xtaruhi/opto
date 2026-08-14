@@ -148,7 +148,7 @@ fn simulation_stimulus_is_independent_of_node_identity() {
         (network, root)
     };
     let signature = |network: &LogicGraph, root: LogicNodeId, origin: u32| {
-        let live = live_nodes(network, &[root]);
+        let live = network.live_nodes(&[root]);
         let stimulus = Stimulus::random();
         let mut signatures = Signatures::new(network.node_count());
         simulate(network, &live, &stimulus, &mut signatures, 0);
@@ -175,7 +175,7 @@ fn simulation_stimulus_is_independent_of_node_identity() {
 #[test]
 fn nominated_classes_are_ordered_by_their_lowest_member() {
     let (network, roots) = majority_pair();
-    let live = live_nodes(&network, &roots);
+    let live = network.live_nodes(&roots);
     let stimulus = Stimulus::random();
     let mut signatures = Signatures::new(network.node_count());
     simulate(&network, &live, &stimulus, &mut signatures, 0);

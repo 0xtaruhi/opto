@@ -211,7 +211,11 @@ struct ConeGate {
     output: NetId,
     library_index: usize,
     output_pin: usize,
-    inputs: Vec<(usize, ConnectionSignal)>,
+    /// Connections indexed by library pin, so evaluating the output function
+    /// resolves a pin name with one scan rather than one scan per pin per
+    /// assignment. A gate is evaluated once per enumerated assignment, so this
+    /// is the inner loop of the proof.
+    inputs: Vec<Option<ConnectionSignal>>,
 }
 
 /// A bounded combinational cone behind one register's input pins.
@@ -242,6 +246,7 @@ impl DriverCone {
         let mut unknowns = Vec::new();
         let mut emitted = HashSet::new();
         let mut visiting = HashSet::new();
+        let mut pending_gates = hashbrown::HashMap::new();
         let mut pending = roots.map(|net| (net, false)).collect::<Vec<_>>();
         while let Some((net, expanded)) = pending.pop() {
             if emitted.contains(&net) || known.iter().any(|&(resolved, _)| resolved == net) {
@@ -250,34 +255,33 @@ impl DriverCone {
             // Only a net the register can still affect is worth folding. Every
             // other net is an unconstrained input, so it becomes one enumerated
             // leaf instead of dragging its own cone into the proof.
+            if expanded {
+                // Every input of this gate has been resolved, so the gate can be
+                // appended in evaluation order. `expanded` entries are only
+                // pushed once the driver has been found.
+                let gate = pending_gates.remove(&net)?;
+                if gates.len() == MAX_CONSTANT_REGISTER_CONE_GATES {
+                    return None;
+                }
+                gates.push(gate);
+                emitted.insert(net);
+                continue;
+            }
             let driver = influenced
                 .contains(&net)
                 .then(|| combinational_driver(mapped, library, net))
                 .flatten();
-            if !expanded {
-                if !visiting.insert(net) || driver.is_none() {
-                    if unknowns.len() == MAX_CONSTANT_REGISTER_UNKNOWNS {
-                        return None;
-                    }
-                    unknowns.push(net);
-                    emitted.insert(net);
-                    continue;
+            let Some(gate) = driver.filter(|_| visiting.insert(net)) else {
+                if unknowns.len() == MAX_CONSTANT_REGISTER_UNKNOWNS {
+                    return None;
                 }
-                let gate = driver.as_ref().expect("driver was checked above");
-                pending.push((net, true));
-                for &(_, signal) in &gate.inputs {
-                    if let ConnectionSignal::Net(input) = signal {
-                        pending.push((input, false));
-                    }
-                }
+                unknowns.push(net);
+                emitted.insert(net);
                 continue;
-            }
-            let gate = driver?;
-            if gates.len() == MAX_CONSTANT_REGISTER_CONE_GATES {
-                return None;
-            }
-            gates.push(gate);
-            emitted.insert(net);
+            };
+            pending.push((net, true));
+            pending.extend(gate.input_nets().map(|input| (input, false)));
+            pending_gates.insert(net, gate);
         }
         Some(Self {
             gates,
@@ -318,14 +322,21 @@ impl ConeGate {
         let function = target.pins().nth(self.output_pin)?.function()?;
         function.eval(&mut |name| {
             let pin = target.pins().position(|pin| pin.name() == name)?;
-            let &(_, signal) = self.inputs.iter().find(|&&(index, _)| index == pin)?;
-            match signal {
+            match self.inputs.get(pin).copied().flatten()? {
                 ConnectionSignal::Constant(value) => Some(value),
                 ConnectionSignal::Net(net) => values
                     .iter()
                     .find(|&&(resolved, _)| resolved == net)
                     .map(|&(_, value)| value),
             }
+        })
+    }
+
+    /// Iterates the nets this gate reads.
+    fn input_nets(&self) -> impl Iterator<Item = NetId> + '_ {
+        self.inputs.iter().filter_map(|signal| match signal {
+            Some(ConnectionSignal::Net(net)) => Some(*net),
+            _ => None,
         })
     }
 }
@@ -361,7 +372,7 @@ fn combinational_driver(
             continue;
         };
         let mut output_pin = None;
-        let mut inputs = Vec::new();
+        let mut inputs = vec![None; target.pins().count()];
         let mut complete = true;
         for connection in connections {
             let Some(library_pin) = connection.library_pin else {
@@ -377,8 +388,8 @@ fn combinational_driver(
                 if connection.signal == ConnectionSignal::Net(net) {
                     output_pin = Some(library_pin);
                 }
-            } else {
-                inputs.push((library_pin, connection.signal));
+            } else if let Some(slot) = inputs.get_mut(library_pin) {
+                *slot = Some(connection.signal);
             }
         }
         if !complete {

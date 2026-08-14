@@ -103,46 +103,44 @@ pub(super) fn optimize(
     if !enabled {
         return finish(identity(source), roots, Vec::new());
     }
-    // Functional reduction runs before the portfolio so every implementation is
-    // built from one duplicate-free subject instead of rediscovering the same
-    // equal cones independently.
-    let reduced = reduce_functionally(source, roots, diagnostics, runtime)?;
-    let source = reduced.network;
-    let roots: &[LogicNodeId] = reduced.roots.as_deref().unwrap_or(roots);
-    let functional = small_support_choice(&source, roots, requirements, diagnostics, runtime)?;
+    // One destructive state owns the whole path, so every node map composes
+    // through the same mechanism and callers only ever see their own node
+    // space. Functional reduction runs first, so the canonical optimization and
+    // every retained alternative are built from one duplicate-free subject
+    // rather than rediscovering the same equal cones.
+    let mut state = TransformState::start(roots, identity(source))?;
+    if let Some(reduction) = reduce_functionally(&state.network, &state.roots, diagnostics, runtime)?
+    {
+        state.apply(reduction)?;
+    }
+    let functional =
+        small_support_choice(&state.network, &state.roots, requirements, diagnostics, runtime)?;
     let canonical = optimize_canonical(
-        &source,
-        roots,
+        &state.network,
+        &state.roots,
         requirements,
         diagnostics,
         runtime,
         incremental,
     )?;
-    let alternatives = functional.into_iter().collect::<Vec<_>>();
-    let mut outcome = finish(canonical, roots, alternatives)?;
-    if let Some(reduction) = &reduced.remap {
-        outcome.remap = compose_remaps(reduction, &outcome.remap);
-    }
-    Ok(outcome)
+    state.apply(canonical)?;
+    finish(state.finish(), roots, functional.into_iter().collect())
 }
 
 /// Runs one SAT sweep over the freshly lowered subject.
 ///
-/// Returns the reduced graph, its roots, and the remap from the caller's node
-/// space into the reduced space. The remap is composed back into the pipeline
-/// outcome so callers never observe the intermediate node space. When the sweep
-/// finds nothing, the original graph and roots are returned unchanged and no
-/// composition is required.
+/// Returns `None` when the sweep proved nothing, which lets the caller skip a
+/// composition rather than compose an identity.
 fn reduce_functionally(
-    source: LogicGraph,
+    source: &LogicGraph,
     roots: &[LogicNodeId],
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
-) -> Result<ReducedSubject, crate::SynthError> {
+) -> Result<Option<TransformProduct>, crate::SynthError> {
     let started = std::time::Instant::now();
     let mut metrics = super::sweep::SweepMetrics::default();
     let before = source.node_count();
-    let reduced = super::sweep::reduce(&source, roots, runtime, &mut metrics)?;
+    let reduced = super::sweep::reduce(source, roots, runtime, &mut metrics)?;
     crate::api::diagnostics::trace!(
         crate::api::diagnostics::SynthTrace::timing(diagnostics),
         "logic.sweep",
@@ -159,30 +157,7 @@ fn reduce_functionally(
         metrics.budget_exhausted,
         started.elapsed()
     );
-    let Some(reduced) = reduced else {
-        return Ok(ReducedSubject {
-            network: source,
-            roots: None,
-            remap: None,
-        });
-    };
-    let reduced_roots = map_roots(&reduced.remap, roots)?;
-    Ok(ReducedSubject {
-        network: reduced.network,
-        roots: Some(reduced_roots),
-        remap: Some(reduced.remap),
-    })
-}
-
-/// The subject after functional reduction.
-///
-/// `roots` and `remap` are absent exactly when the sweep changed nothing, which
-/// lets the caller keep borrowing its original roots and skip one remap
-/// composition.
-struct ReducedSubject {
-    network: LogicGraph,
-    roots: Option<Box<[LogicNodeId]>>,
-    remap: Option<Box<[Option<LogicNodeId>]>>,
+    Ok(reduced)
 }
 
 /// Optimizes the one canonical AXM implementation.
@@ -428,35 +403,40 @@ fn optimize_with(
     Ok(state.finish())
 }
 
+/// Installs the canonical implementation and every retained alternative into one
+/// hash-consed subject.
+///
+/// Alternatives share that subject's nodes and inputs, so cut, truth, and match
+/// analysis is computed once over the union rather than once per structure.
 fn finish(
-    baseline: TransformProduct,
+    canonical: TransformProduct,
     source_roots: &[LogicNodeId],
     alternatives: Vec<ChoiceProposal>,
 ) -> Result<LogicPipelineOutcome, crate::SynthError> {
     if alternatives.is_empty() {
-        map_roots(&baseline.remap, source_roots)?;
+        map_roots(&canonical.remap, source_roots)?;
         return Ok(LogicPipelineOutcome {
-            network: baseline.network,
-            remap: baseline.remap,
+            network: canonical.network,
+            remap: canonical.remap,
             alternatives: Box::new([]),
         });
     }
 
     let mut network = LogicGraph::new();
     let mut variables = HashMap::new();
-    let baseline_remap = copy_graph(
-        &baseline.network,
+    let canonical_remap = copy_graph(
+        &canonical.network,
         None,
         &mut network,
         &mut variables,
         CopyStyle::Preserve,
     )?;
-    let remap = compose_remaps(&baseline.remap, &baseline_remap);
+    let remap = compose_remaps(&canonical.remap, &canonical_remap);
     map_roots(&remap, source_roots)?;
 
     let mut installed = Vec::with_capacity(alternatives.len());
     for alternative in alternatives {
-        let live = live_nodes(&alternative.network, &alternative.roots);
+        let live = alternative.network.live_nodes(&alternative.roots);
         let alternative_remap = copy_graph(
             &alternative.network,
             Some(&live),
@@ -492,7 +472,7 @@ fn copy_active(
     network: &LogicGraph,
     roots: &[LogicNodeId],
 ) -> Result<TransformProduct, crate::SynthError> {
-    let live = live_nodes(network, roots);
+    let live = network.live_nodes(roots);
     let mut copied = LogicGraph::new();
     let mut variables = HashMap::new();
     let remap = copy_graph(
@@ -531,18 +511,6 @@ pub(super) fn compose_remaps(
         .iter()
         .map(|&literal| literal.and_then(|literal| remap_literal(second, literal)))
         .collect()
-}
-
-fn live_nodes(network: &LogicGraph, roots: &[LogicNodeId]) -> Box<[bool]> {
-    let mut live = vec![false; network.node_count()];
-    let mut pending = roots.iter().map(|root| root.positive()).collect::<Vec<_>>();
-    while let Some(node) = pending.pop() {
-        if std::mem::replace(&mut live[node.index()], true) {
-            continue;
-        }
-        pending.extend(network.node(node).fanins().map(LogicNodeId::positive));
-    }
-    live.into_boxed_slice()
 }
 
 fn copy_graph(

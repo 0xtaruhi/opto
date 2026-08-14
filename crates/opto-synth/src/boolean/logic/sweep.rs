@@ -97,7 +97,10 @@ pub(super) fn reduce(
     runtime: &ExecutionContext,
     metrics: &mut SweepMetrics,
 ) -> Result<Option<TransformProduct>, crate::SynthError> {
-    let live = live_nodes(network, roots);
+    let mut live = network.live_nodes(roots);
+    // The constant is a class representative even when no root reaches it, so a
+    // cone proved constant can collapse onto it.
+    live[0] = true;
     let mut stimulus = Stimulus::random();
     let mut substitutions = vec![None; network.node_count()].into_boxed_slice();
     let mut budget = MAX_PROOF_PAIRS;
@@ -115,24 +118,20 @@ pub(super) fn reduce(
         if classes.is_empty() {
             break;
         }
-        let round_pairs = MAX_ROUND_PAIRS.min(budget);
-        let mut refutations = Vec::new();
-        let proved = prove(
+        let round = prove(
             network,
             &classes,
-            round_pairs,
+            MAX_ROUND_PAIRS.min(budget),
             runtime,
-            &mut refutations,
             &mut substitutions,
         )?;
-        let attempted = proved + refutations.len();
-        budget -= attempted.min(budget);
-        metrics.proved += proved;
-        metrics.refuted += refutations.len();
-        if refutations.is_empty() {
+        budget -= round.attempted().min(budget);
+        metrics.proved += round.proved;
+        metrics.refuted += round.refutations.len();
+        if round.refutations.is_empty() {
             break;
         }
-        let Some(changed) = stimulus.learn(&refutations) else {
+        let Some(changed) = stimulus.learn(&round.refutations) else {
             // No room left for learned patterns; another round would nominate
             // exactly the same classes and repeat the same refutations.
             break;
@@ -144,19 +143,6 @@ pub(super) fn reduce(
         return Ok(None);
     }
     Ok(Some(rebuild(network, &live, &substitutions)))
-}
-
-fn live_nodes(network: &LogicGraph, roots: &[LogicNodeId]) -> Box<[bool]> {
-    let mut live = vec![false; network.node_count()];
-    let mut pending = roots.iter().map(|root| root.positive()).collect::<Vec<_>>();
-    while let Some(node) = pending.pop() {
-        if std::mem::replace(&mut live[node.index()], true) {
-            continue;
-        }
-        pending.extend(network.node(node).fanins().map(LogicNodeId::positive));
-    }
-    live[0] = true;
-    live.into_boxed_slice()
 }
 
 /// The stimulus applied to boundary inputs.
@@ -398,14 +384,25 @@ fn nominate(
         .collect()
 }
 
+/// What one proof round established.
+struct Round {
+    proved: usize,
+    refutations: Vec<opto_formal::BoundaryRefutation>,
+}
+
+impl Round {
+    fn attempted(&self) -> usize {
+        self.proved + self.refutations.len()
+    }
+}
+
 fn prove(
     network: &LogicGraph,
     classes: &[Class],
     max_pairs: usize,
     runtime: &ExecutionContext,
-    refutations: &mut Vec<opto_formal::BoundaryRefutation>,
     substitutions: &mut [Option<Substitution>],
-) -> Result<usize, crate::SynthError> {
+) -> Result<Round, crate::SynthError> {
     let literals = classes
         .iter()
         .map(|class| {
@@ -449,6 +446,7 @@ fn prove(
         },
     )?;
     let mut partitions = Vec::with_capacity(classes.len());
+    let mut refutations = Vec::new();
     for (shard_partitions, shard_refutations) in shards {
         partitions.extend(shard_partitions);
         refutations.extend(shard_refutations);
@@ -476,7 +474,10 @@ fn prove(
             proved += 1;
         }
     }
-    Ok(proved)
+    Ok(Round {
+        proved,
+        refutations,
+    })
 }
 
 /// Follows an existing substitution chain to the surviving node, accumulating
