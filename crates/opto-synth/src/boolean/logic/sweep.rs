@@ -101,6 +101,8 @@ pub(super) fn reduce(
     let mut stimulus = Stimulus::random();
     let mut substitutions = vec![None; network.node_count()].into_boxed_slice();
     let mut budget = MAX_PROOF_PAIRS;
+    let mut signatures = Signatures::new(network.node_count());
+    let mut resume = 0usize;
 
     for _ in 0..MAX_REFINEMENT_ROUNDS {
         if budget == 0 {
@@ -108,8 +110,8 @@ pub(super) fn reduce(
             break;
         }
         metrics.rounds += 1;
-        let signatures = simulate(network, &live, &stimulus);
-        let classes = nominate(network, &live, &substitutions, &signatures, &stimulus, metrics);
+        simulate(network, &live, &stimulus, &mut signatures, resume);
+        let classes = nominate(network, &live, &substitutions, &signatures, metrics);
         if classes.is_empty() {
             break;
         }
@@ -130,11 +132,12 @@ pub(super) fn reduce(
         if refutations.is_empty() {
             break;
         }
-        if !stimulus.learn(&refutations) {
+        let Some(changed) = stimulus.learn(&refutations) else {
             // No room left for learned patterns; another round would nominate
             // exactly the same classes and repeat the same refutations.
             break;
-        }
+        };
+        resume = changed;
     }
 
     if metrics.proved == 0 {
@@ -180,9 +183,13 @@ impl Stimulus {
         RANDOM_WORDS + self.learned.len().div_ceil(u64::BITS as usize)
     }
 
-    /// Appends the boundary assignments of `refutations`, and reports whether
-    /// any of them fit in the learned budget.
-    fn learn(&mut self, refutations: &[opto_formal::BoundaryRefutation]) -> bool {
+    /// Appends the boundary assignments of `refutations`.
+    ///
+    /// Returns the index of the first stimulus word whose content changed, or
+    /// `None` when the learned budget is full and nothing was appended. Every
+    /// earlier word is immutable once written, which is what lets simulation
+    /// resume instead of restarting.
+    fn learn(&mut self, refutations: &[opto_formal::BoundaryRefutation]) -> Option<usize> {
         let capacity = LEARNED_WORDS * u64::BITS as usize;
         let before = self.learned.len();
         for refutation in refutations {
@@ -191,7 +198,7 @@ impl Stimulus {
             }
             self.learned.push(refutation.assignment().to_vec());
         }
-        self.learned.len() > before
+        (self.learned.len() > before).then(|| RANDOM_WORDS + before / u64::BITS as usize)
     }
 
     /// Builds the complete stimulus word for one boundary origin.
@@ -234,36 +241,75 @@ fn random_word(origin: u32, word: usize) -> u64 {
     value ^ (value >> 31)
 }
 
-fn simulate(network: &LogicGraph, live: &[bool], stimulus: &Stimulus) -> Vec<u64> {
+/// Simulation signatures, one fixed-stride row per node.
+///
+/// The stride is the maximum stimulus width rather than the current one, so a
+/// later round appends words without moving any earlier value. That is what
+/// makes refinement incremental: learning only ever appends patterns, so
+/// resuming at the first changed word reproduces exactly the signatures a full
+/// re-simulation would produce.
+struct Signatures {
+    values: Vec<u64>,
+    active: usize,
+}
+
+const SIGNATURE_STRIDE: usize = RANDOM_WORDS + LEARNED_WORDS;
+
+impl Signatures {
+    fn new(node_count: usize) -> Self {
+        Self {
+            values: vec![0u64; node_count * SIGNATURE_STRIDE],
+            active: 0,
+        }
+    }
+
+    fn row(&self, node: usize) -> &[u64] {
+        let base = node * SIGNATURE_STRIDE;
+        &self.values[base..base + self.active]
+    }
+}
+
+/// Fills stimulus words `from..` for every live node, leaving earlier words as
+/// the previous round computed them.
+fn simulate(
+    network: &LogicGraph,
+    live: &[bool],
+    stimulus: &Stimulus,
+    signatures: &mut Signatures,
+    from: usize,
+) {
     let node_count = network.node_count();
     let words = stimulus.words();
-    let mut signatures = vec![0u64; node_count * words];
+    debug_assert!(words <= SIGNATURE_STRIDE);
+    signatures.active = words;
+    if from >= words {
+        return;
+    }
+    let values = &mut signatures.values;
     for (index, &live) in live.iter().enumerate().take(node_count) {
         if !live {
             continue;
         }
         let node = LogicNodeId::from_index(index);
-        let base = index * words;
+        let base = index * SIGNATURE_STRIDE;
         match network.node(node) {
-            LogicNode::Const(false) => {}
-            LogicNode::Const(true) => {
-                signatures[base..base + words].fill(u64::MAX);
-            }
+            LogicNode::Const(false) => values[base + from..base + words].fill(0),
+            LogicNode::Const(true) => values[base + from..base + words].fill(u64::MAX),
             LogicNode::Var(origin) => {
-                for word in 0..words {
-                    signatures[base + word] = stimulus.input_word(origin, word);
+                for word in from..words {
+                    values[base + word] = stimulus.input_word(origin, word);
                 }
             }
             LogicNode::And(left, right) => {
-                for word in 0..words {
-                    signatures[base + word] = operand(&signatures, words, left, word)
-                        & operand(&signatures, words, right, word);
+                for word in from..words {
+                    values[base + word] =
+                        operand(values, left, word) & operand(values, right, word);
                 }
             }
             LogicNode::Xor(left, right) => {
-                for word in 0..words {
-                    signatures[base + word] = operand(&signatures, words, left, word)
-                        ^ operand(&signatures, words, right, word);
+                for word in from..words {
+                    values[base + word] =
+                        operand(values, left, word) ^ operand(values, right, word);
                 }
             }
             LogicNode::Mux {
@@ -271,20 +317,18 @@ fn simulate(network: &LogicGraph, live: &[bool], stimulus: &Stimulus) -> Vec<u64
                 then_value,
                 else_value,
             } => {
-                for word in 0..words {
-                    let select = operand(&signatures, words, cond, word);
-                    signatures[base + word] = (select
-                        & operand(&signatures, words, then_value, word))
-                        | (!select & operand(&signatures, words, else_value, word));
+                for word in from..words {
+                    let select = operand(values, cond, word);
+                    values[base + word] = (select & operand(values, then_value, word))
+                        | (!select & operand(values, else_value, word));
                 }
             }
         }
     }
-    signatures
 }
 
-fn operand(signatures: &[u64], words: usize, literal: LogicNodeId, word: usize) -> u64 {
-    let bits = signatures[literal.index() * words + word];
+fn operand(signatures: &[u64], literal: LogicNodeId, word: usize) -> u64 {
+    let bits = signatures[literal.index() * SIGNATURE_STRIDE + word];
     if literal.is_inverted() { !bits } else { bits }
 }
 
@@ -297,11 +341,9 @@ fn nominate(
     network: &LogicGraph,
     live: &[bool],
     substitutions: &[Option<Substitution>],
-    signatures: &[u64],
-    stimulus: &Stimulus,
+    signatures: &Signatures,
     metrics: &mut SweepMetrics,
 ) -> Vec<Class> {
-    let words = stimulus.words();
     let mut buckets: HashMap<Box<[u64]>, Vec<(LogicNodeId, bool)>> = HashMap::new();
     for (index, (&live, substitution)) in live.iter().zip(substitutions).enumerate() {
         if !live || substitution.is_some() {
@@ -318,8 +360,7 @@ fn nominate(
         if matches!(network.node(node), LogicNode::Const(true)) {
             continue;
         }
-        let base = index * words;
-        let mut key = signatures[base..base + words].to_vec();
+        let mut key = signatures.row(index).to_vec();
         // Normalize by the phase of the first simulated pattern so a node and its
         // complement nominate one class instead of two.
         let inverted = key[0] & 1 == 1;

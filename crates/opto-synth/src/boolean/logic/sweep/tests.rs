@@ -150,7 +150,8 @@ fn simulation_stimulus_is_independent_of_node_identity() {
     let signature = |network: &LogicGraph, root: LogicNodeId, origin: u32| {
         let live = live_nodes(network, &[root]);
         let stimulus = Stimulus::random();
-        let signatures = simulate(network, &live, &stimulus);
+        let mut signatures = Signatures::new(network.node_count());
+        simulate(network, &live, &stimulus, &mut signatures, 0);
         (0..network.node_count())
             .find(|&index| {
                 matches!(
@@ -158,7 +159,7 @@ fn simulation_stimulus_is_independent_of_node_identity() {
                     LogicNode::Var(found) if found == origin
                 )
             })
-            .map(|index| signatures[index * stimulus.words()])
+            .map(|index| signatures.row(index)[0])
             .unwrap()
     };
     let (first, first_root) = build(false);
@@ -176,14 +177,14 @@ fn nominated_classes_are_ordered_by_their_lowest_member() {
     let (network, roots) = majority_pair();
     let live = live_nodes(&network, &roots);
     let stimulus = Stimulus::random();
-    let signatures = simulate(&network, &live, &stimulus);
+    let mut signatures = Signatures::new(network.node_count());
+    simulate(&network, &live, &stimulus, &mut signatures, 0);
     let substitutions = vec![None; network.node_count()];
     let classes = nominate(
         &network,
         &live,
         &substitutions,
         &signatures,
-        &stimulus,
         &mut SweepMetrics::default(),
     );
 

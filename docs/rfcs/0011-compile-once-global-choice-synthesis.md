@@ -9,8 +9,10 @@
 - Revised: 2026-08-14, after the measured QoR decomposition recorded under
   Motivation
 - Implementation: Phase 1a (functional reduction) and Phase 1b (sequential
-  excess) are implemented and measured, and the unconditional post-map area MFS
-  sweep is removed. Every other phase is unimplemented.
+  excess) are implemented and measured, the unconditional post-map area MFS
+  sweep is removed, and the independently optimized AXM implementation named in
+  Phase 3 is deleted. The choice graph and compiled mapping arena are
+  unimplemented, as is every later phase.
 
 ## Summary
 
@@ -1348,7 +1350,39 @@ This phase is a runtime and infrastructure phase. The measurements in this RFC
 show Opto's existing rewriting already at `dc2` quality, so no area improvement
 is claimed for the atlas and none is required to accept the phase.
 
-### Phase 3: decision groups, partition scopes, and choice graph
+### Phase 3a: one optimized implementation — implemented
+
+Before the choice graph can replace independently optimized AXM
+implementations, the second implementation has to stop being independently
+optimized. The portfolio ran a MUX-expanded implementation beside an
+un-expanded one, each through its own rewrite convergence and its own cut,
+truth, candidate, and cover passes, and the retained subject arena carried
+both. On the reference case the expanded implementation won every time and the
+un-expanded one was discarded.
+
+MUX expansion is now part of the one canonical optimization path. Cover still
+selects MUX cells, because it matches cut truth tables against the target
+library rather than AXM node kinds, so nothing about the target's MUX cells
+depended on retaining an un-expanded subject.
+
+Measured on the reference case, on top of Phase 1a, Phase 1b, and the hot-path
+work below:
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| subject arena nodes | 18,240 | 10,514 |
+| rewrite passes | 24 | 12 |
+| Boolean stage | 14.2 s | 9.8 s |
+| total area | 76,862.5 | 77,000.1 |
+| end to end | 17.3 s | 12.9 s |
+
+The 0.18% area difference is the cost of a smaller node arena changing cut
+enumeration and its tie orders, not a lost optimization: the discarded
+implementation never won a cover. Recovering it is the job of the choice graph
+in Phase 3b, which keeps both structures as per-node alternatives inside one
+compilation instead of as two compilations.
+
+### Phase 3b: decision groups, partition scopes, and choice graph
 
 Introduce complete disjoint decision-group footprints and sealed interfaces.
 Give decision groups, analytical regions, and compilation shards distinct index

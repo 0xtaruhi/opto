@@ -55,6 +55,10 @@ All notable changes to Opto are documented here. The format follows
 
 ### Changed
 
+- Sweep refinement simulates incrementally. A learned pattern only appends
+  stimulus words, so a round resumes at the first changed word instead of
+  re-simulating the whole subject; the nominated classes are identical.
+
 - Divisor collection skips the support-index probe for a leaf subset that no
   node's support matches. Rewriting probed every subset of every cut of every
   node and nine in ten of those probes missed; an exact negative filter over the
@@ -113,6 +117,13 @@ All notable changes to Opto are documented here. The format follows
   restore invalidate stale handles.
 
 ### Removed
+
+- The un-expanded AXM implementation that ran beside the MUX-expanded one. It
+  doubled every rewrite, cut, truth, and cover pass to produce an alternative
+  that mapping discarded on the reference case, and it doubled the retained
+  subject arena. MUX expansion is now part of the one canonical path. On the
+  public Ibex SKY130 case this cuts the Boolean stage from 14.2 s to 9.8 s and
+  the subject arena from 18,240 to 10,514 nodes, for 0.18% area.
 
 - RFC 0004 and its hierarchy-derived regional execution claims. Still-valid
   canonical-root and source-provenance rules are retained by the main

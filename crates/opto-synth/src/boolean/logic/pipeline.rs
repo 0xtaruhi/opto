@@ -6,7 +6,7 @@
 use super::network::{LogicGraph, LogicNode, LogicNodeId};
 use super::rewrite::{RewriteIncremental, remap_literal};
 use hashbrown::HashMap;
-use opto_runtime::{ExecutionContext, Task, TaskKey};
+use opto_runtime::ExecutionContext;
 
 pub(super) struct LogicPipelineOutcome {
     pub(super) network: LogicGraph,
@@ -25,30 +25,15 @@ struct ChoiceProposal {
     roots: Box<[LogicNodeId]>,
 }
 
-type LogicRoots = (LogicGraph, Box<[LogicNodeId]>);
-type ProposalTransform =
-    fn(&LogicGraph, &[LogicNodeId]) -> Result<Option<LogicRoots>, crate::SynthError>;
-
-#[derive(Clone, Copy)]
-struct ProposalSpec {
-    pass: &'static str,
-    transform: ProposalTransform,
-    round_budget: u8,
-    optimization: OptimizationPolicy,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CopyStyle {
     Preserve,
     DecomposeMux,
 }
 
-const MUX_DECOMPOSITION: ProposalSpec = ProposalSpec {
-    pass: "mux_decomposition",
-    transform: decompose_muxes,
-    round_budget: 2,
-    optimization: OptimizationPolicy::Factored,
-};
+/// Expansion rounds in the canonical path. Normalization can synthesize a fresh
+/// MUX from expanded structure, so one retry is allowed and no more.
+const MUX_DECOMPOSITION_ROUNDS: usize = 2;
 
 pub(super) struct TransformProduct {
     pub(super) network: LogicGraph,
@@ -125,45 +110,16 @@ pub(super) fn optimize(
     let source = reduced.network;
     let roots: &[LogicNodeId] = reduced.roots.as_deref().unwrap_or(roots);
     let functional = small_support_choice(&source, roots, requirements, diagnostics, runtime)?;
-    let mut products = runtime.map_ordered_composite(
-        vec![
-            Task::new(TaskKey::new(7, 0), OptimizationTask::Baseline)
-                .with_estimated_work(source.node_count() as u64),
-            Task::new(
-                TaskKey::new(7, 1),
-                OptimizationTask::Proposal(MUX_DECOMPOSITION),
-            )
-            .with_estimated_work(source.node_count() as u64),
-        ],
-        |task, nested| match task {
-            OptimizationTask::Baseline => optimize_baseline(
-                &source,
-                roots,
-                requirements,
-                diagnostics,
-                nested,
-                incremental,
-            )
-            .map(OptimizationProduct::Baseline),
-            OptimizationTask::Proposal(spec) => {
-                build_proposal(spec, &source, roots, requirements, diagnostics, nested)
-                    .map(OptimizationProduct::Proposal)
-            }
-        },
+    let canonical = optimize_canonical(
+        &source,
+        roots,
+        requirements,
+        diagnostics,
+        runtime,
+        incremental,
     )?;
-    let OptimizationProduct::Baseline(baseline) = products.remove(0) else {
-        return Err(crate::SynthError::invariant(
-            "AXM optimization portfolio returned products out of order",
-        ));
-    };
-    let OptimizationProduct::Proposal(proposal) = products.remove(0) else {
-        return Err(crate::SynthError::invariant(
-            "AXM optimization portfolio returned products out of order",
-        ));
-    };
-    let mut alternatives = functional.into_iter().collect::<Vec<_>>();
-    alternatives.extend(proposal);
-    let mut outcome = finish(baseline, roots, alternatives)?;
+    let alternatives = functional.into_iter().collect::<Vec<_>>();
+    let mut outcome = finish(canonical, roots, alternatives)?;
     if let Some(reduction) = &reduced.remap {
         outcome.remap = compose_remaps(reduction, &outcome.remap);
     }
@@ -229,62 +185,67 @@ struct ReducedSubject {
     remap: Option<Box<[Option<LogicNodeId>]>>,
 }
 
-#[derive(Clone, Copy)]
-enum OptimizationTask {
-    Baseline,
-    Proposal(ProposalSpec),
-}
-
-enum OptimizationProduct {
-    Baseline(TransformProduct),
-    Proposal(Option<ChoiceProposal>),
-}
-
-fn build_proposal(
-    spec: ProposalSpec,
+/// Optimizes the one canonical AXM implementation.
+///
+/// MUX decomposition is part of this path rather than a competing branch. A
+/// genuine MUX node is expanded into AND/inverter structure so cover can share
+/// NAND/NOR across what was one atom, and the ordinary normalizer runs after
+/// each expansion. Normalization can synthesize a fresh MUX, so the expansion is
+/// retried once; the bound is a fixed round budget, not a fixpoint.
+///
+/// Optimizing an un-expanded implementation alongside this one doubled every
+/// rewrite, cut, truth, and cover pass to produce an alternative that mapping
+/// then discarded. Cover still selects MUX cells, because it matches cut truth
+/// tables against the target library rather than AXM node kinds.
+fn optimize_canonical(
     source: &LogicGraph,
     roots: &[LogicNodeId],
     requirements: &[Option<f64>],
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
-) -> Result<Option<ChoiceProposal>, crate::SynthError> {
-    let mut transformed = (spec.transform)(source, roots)?;
-    let mut proposal = None;
-    for round in 0..spec.round_budget {
-        let Some((network, roots)) = transformed else {
+    incremental: Option<RewriteIncremental<'_>>,
+) -> Result<TransformProduct, crate::SynthError> {
+    let mut state = TransformState::start(roots, copy_active(source, roots)?)?;
+    let mut expanded = false;
+    for _ in 0..MUX_DECOMPOSITION_ROUNDS {
+        let Some(decomposition) = decompose_muxes(&state.network, &state.roots)? else {
             break;
         };
-        let cache = super::rewrite::RewriteRecipeCache::default();
-        let metrics = crate::incremental::IncrementalRunMetrics::default();
-        let optimized = optimize_with(
-            &network,
-            &roots,
+        state.apply(decomposition)?;
+        expanded = true;
+        let optimized = optimize_factored(
+            &state.network,
+            &state.roots,
             requirements,
             diagnostics,
             runtime,
-            RewriteIncremental::new(&cache, &metrics),
-            spec.optimization,
         )?;
-        let roots = map_roots(&optimized.remap, &roots)?;
-        let candidate = ChoiceProposal {
-            pass: spec.pass,
-            network: optimized.network,
-            roots,
-        };
-        transformed = if round + 1 < spec.round_budget {
-            (spec.transform)(&candidate.network, &candidate.roots)?
-        } else {
-            None
-        };
-        proposal = Some(candidate);
+        state.apply(optimized)?;
     }
-    Ok(proposal)
+    if expanded {
+        return Ok(state.finish());
+    }
+    // A subject with no MUX node never entered the loop, so it has not been
+    // optimized yet. The baseline policy owns that case because it also runs the
+    // global sharing census.
+    optimize_baseline(
+        source,
+        roots,
+        requirements,
+        diagnostics,
+        runtime,
+        incremental,
+    )
 }
 
+/// Expands every genuine MUX node into AND/inverter structure.
+///
+/// Returns `None` when the subject has no MUX node, which is the signal that
+/// the canonical path has nothing left to expand.
 fn decompose_muxes(
     source: &LogicGraph,
     roots: &[LogicNodeId],
-) -> Result<Option<LogicRoots>, crate::SynthError> {
+) -> Result<Option<TransformProduct>, crate::SynthError> {
     if !(0..source.node_count()).any(|index| {
         matches!(
             source.node(LogicNodeId::from_index(index)),
@@ -302,9 +263,13 @@ fn decompose_muxes(
         &mut variables,
         CopyStyle::DecomposeMux,
     )?;
-    let roots = map_roots(&remap, roots)?;
+    map_roots(&remap, roots)?;
     network.freeze();
-    Ok(Some((network, roots)))
+    Ok(Some(TransformProduct {
+        network,
+        remap,
+        analyses: TransformAnalyses::default(),
+    }))
 }
 
 fn small_support_choice(
@@ -729,13 +694,14 @@ mod tests {
             source.mux(inputs[8], right, left),
         ];
         source.freeze();
-        let (decomposed, decomposed_roots) = decompose_muxes(&source, &roots)
+        let decomposed = decompose_muxes(&source, &roots)
             .unwrap()
             .expect("test graph contains genuine MUX nodes");
+        let decomposed_roots = map_roots(&decomposed.remap, &roots).unwrap();
         let proof = prove_logic_network_equivalence(
             source.storage_network(),
             &roots.map(LogicNodeId::lit),
-            decomposed.storage_network(),
+            decomposed.network.storage_network(),
             &decomposed_roots
                 .iter()
                 .copied()
@@ -748,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn optimization_portfolio_is_deterministic_across_worker_counts() {
+    fn canonical_optimization_is_deterministic_across_worker_counts() {
         let build = || {
             let mut source = LogicGraph::new();
             let inputs = (0..6)

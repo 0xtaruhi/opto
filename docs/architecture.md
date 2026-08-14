@@ -478,13 +478,20 @@ nominated alongside gates because a cone proved constant or proved equal to one
 input removes its whole support. Reduction precedes the optimization portfolio
 so every retained implementation is built from one duplicate-free subject.
 
-Large AXM subjects also publish one bounded representation proposal. Genuine
-MUX nodes are expanded into equivalent AND/inverter structure, while XOR
-remains first-class, and the ordinary local normalizer and structural balancer
-run after each of at most two expansion rounds. A second round is attempted
-only when normalization creates another MUX. This exposes NAND/NOR sharing to
-Liberty cover without changing the canonical baseline, recognizing an RTL
-pattern, or creating another synthesis pipeline.
+MUX expansion is part of the one canonical optimization path, not a competing
+implementation. Genuine MUX nodes are expanded into equivalent AND/inverter
+structure, while XOR remains first-class, and the ordinary local normalizer and
+structural balancer run after each of at most two expansion rounds. A second
+round is attempted only when normalization creates another MUX. This exposes
+NAND/NOR sharing to Liberty cover without recognizing an RTL pattern or
+creating another synthesis pipeline. Cover still selects MUX cells, because it
+matches cut truth tables against the target library rather than AXM node kinds.
+
+Optimizing an un-expanded implementation beside the expanded one is not part of
+the flow. It doubled every rewrite, cut, truth, and cover pass to produce an
+alternative that mapping then discarded, and the retained subject arena carried
+both. One path is the architecture: alternatives are justified by what mapping
+selects, not by what the optimizer could have produced.
 
 Small-support multi-output logic adds one bounded functional normalization:
 complete truth evaluation, shared-cube factoring, root-to-root resubstitution,
@@ -527,10 +534,9 @@ passes return equivalent proposals. Iterative representation proposals use a
 static specification that names the transform, its fixed round budget, and its
 optimization policy; proposal-specific booleans and open-coded retry chains are
 not part of the scheduler. The pipeline installs retained proposals once into
-the shared graph. Independent baseline/proposal transforms and independent
-implementation-cover recoveries run as keyed composite tasks on limited views
-of the same worker pool; results return in implementation order before the
-ordinary deterministic ranking step. The mapper covers the generic
+the shared graph. Independent implementation-cover recoveries
+run as keyed composite tasks on limited views of the same worker pool; results
+return in implementation order before the ordinary deterministic ranking step. The mapper covers the generic
 implementation list with real Liberty cells. Timing-driven portfolios use
 bounded flow ranking before exact recovery of the selected implementation;
 unconstrained portfolios compare exact mapped area because that is their stated
