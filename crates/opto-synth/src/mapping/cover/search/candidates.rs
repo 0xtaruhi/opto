@@ -79,6 +79,14 @@ pub(crate) fn node_candidates(
             let Some(cares) = cares else {
                 continue;
             };
+            // Input inversion permutes the assignments of a truth table, so the
+            // number of don't-care assignments is the same for every inversion
+            // mask. Deciding once whether this cut has a fillable don't-care set
+            // skips the whole permutation loop for the common cut that has none.
+            let dont_care_count = (full & !(cares[cut_index] & full)).count_ones();
+            if dont_care_count == 0 || dont_care_count > DONT_CARE_FILL_CAP {
+                continue;
+            }
             for inversions in 0..1u32 << cut.len() {
                 let inversions =
                     u8::try_from(inversions).expect("cover cuts have at most eight inputs");
@@ -90,9 +98,7 @@ pub(crate) fn node_candidates(
                 .with_input_inversions(inversions)
                 .bits;
                 let dont_care = full & !care;
-                if dont_care == 0 || dont_care.count_ones() > DONT_CARE_FILL_CAP {
-                    continue;
-                }
+                debug_assert_eq!(dont_care.count_ones(), dont_care_count);
                 let base = cell_truth.bits & care;
                 let mut filling = 0u64;
                 loop {

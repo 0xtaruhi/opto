@@ -96,7 +96,8 @@ opto-tcl-sys         opaque vendored Tcl boundary
 opto-synth           synthesis policy and transformations
 opto-timing          constraints, timing graph, full/incremental STA
 opto-power           activity propagation and power evaluation
-opto-formal          independent proof and qualification problems
+opto-formal          independent proof and qualification problems, plus the
+                     equivalence engine that AXM functional reduction calls
 opto-formats         Verilog and report rendering
 ```
 
@@ -460,6 +461,23 @@ independent design representations. Liberty cover evaluates the actual target
 cells and may choose NAND/NOR, AOI/OAI, XOR/XNOR, MUX, or another exact cut; an
 AXM node is never assumed to correspond one-for-one with a physical cell.
 
+The freshly lowered subject is first reduced by one bounded functional-
+reduction pass. Structural hash consing merges only syntactically identical
+nodes, so bit lowering, operator recipes, and separately rewritten cones leave
+behind nodes that compute the same function through different structure. The
+pass nominates candidates by bit-parallel simulation, proves or refutes each
+candidate against a class representative with `opto-formal`, folds every
+refutation's boundary assignment back into the stimulus, and repeats for a fixed
+round budget. A node is replaced only by a literal whose miter was proved
+unsatisfiable; equal simulation signatures nominate, they never authorize. The
+stimulus depends on boundary origin and word index alone, classes are emitted in
+ascending node order, each class elects its lowest-ID member, and independent
+class shards are proved in parallel and reassembled in shard order, so the
+substitution set is identical across worker counts. Constants and inputs are
+nominated alongside gates because a cone proved constant or proved equal to one
+input removes its whole support. Reduction precedes the optimization portfolio
+so every retained implementation is built from one duplicate-free subject.
+
 Large AXM subjects also publish one bounded representation proposal. Genuine
 MUX nodes are expanded into equivalent AND/inverter structure, while XOR
 remains first-class, and the ordinary local normalizer and structural balancer
@@ -494,6 +512,13 @@ time, each bounded proposal receives exact reference recovery and the portfolio
 minimizes mapped area before delay and cell count. Post-map MFS remains local
 cell/MFFC cleanup and incrementally refines care-set partitions while visiting
 larger input sets; it does not reconstruct a second global factoring engine.
+
+Divisor collection enumerates the leaf subsets of a cut and asks the support
+index which nodes realize each subset. Almost all of those subsets are the
+support of no node, so the index carries an exact negative filter keyed by an
+order-independent fingerprint of the subset: a clear bit is a proof of absence
+and skips building and hashing the full key, while a set bit still requires the
+probe. The filter changes cost only; the divisors found are identical.
 
 AXM optimization is scheduled statically by a typed pass pipeline. Destructive
 passes return a `TransformProduct`; `TransformState` alone composes node maps,
@@ -604,6 +629,17 @@ re-cover feature must retain the complete frozen private IR and consume the
 same explicit ownership and binding provenance; reconstructing it from the
 global shell is forbidden.
 
+One incremental region edit reuses the retained topological order and its
+dependency plan whenever the edit adds no dependency edge and no net. Removing
+an arc cannot move a net earlier than a live predecessor, and a plan that still
+lists a removed edge is conservative rather than wrong: the traversal counts
+only dependencies it actually scheduled, so an extra edge recomputes a sink from
+its live predecessors instead of deadlocking on a dead one. Appending a net does
+force a rebuild, because the plan's position arena no longer covers the graph.
+Rebuilding is `O(nets + arcs)` per edit per timing view, so making it conditional
+is what keeps post-map candidate evaluation proportional to the edit rather than
+to the design. Cell resizing and constant-register removal both reuse the plan.
+
 There is one MMMC fact source, but acceptance authority is deliberately scoped
 to its decision domain. Initial mapping has one total `MappedObjective` used
 only to retain or restore an epoch checkpoint. Its timing order comes from the
@@ -695,9 +731,28 @@ This topology order runs whenever an MMMC timing owner exists, whether or not
 the scenario has explicit optimization constraints. Constraints add
 feasibility measurements to the shared transaction objective; they do not
 select a second post-map flow. Physical recovery follows legalization and
-timing preparation, seeds MFS from the full clean netlist when no earlier edit
-provides an incremental frontier, and preserves any measured closure through
-the same commit gate.
+timing preparation and preserves any measured closure through the same commit
+gate.
+
+Mapped resynthesis seeds only from a measured dirty cone: the cells this
+closure has already edited, and the retained non-region instances cover never
+costed. A region-owned cell was selected by cover under the same care set and
+the same library, with exact-area recovery already applied, so re-deriving it
+after mapping repeats a decision that has not changed. Sweeping the whole clean
+netlist is not the default; it spends the largest post-map budget on cells whose
+context never moved.
+
+A register whose reachable value is one constant is removed before that
+resynthesis. The proof substitutes the register's own outputs with their reset
+value, folds the bounded combinational cone behind its input pins, and requires
+the next state to stay at that value for every assignment of the nets the fold
+could not resolve. The fold follows only nets the register's own value can
+still reach, which is what bounds it and what makes the answer meaningful;
+every other net is one enumerated leaf. This is constant folding over structure, not
+inferred state equivalence, so it stays inside the rule that keeps full-domain
+state sharing out of the tree. Independent removals commit as one transaction
+because each transaction pays one incremental-STA update; a round repeats only
+over the cells the previous round reached.
 
 Cloning or sizing before whole-net HFNS is forbidden: removing a few sinks from
 a thousand-sink net merely moves the worst path to another sink. Forest
@@ -1129,6 +1184,9 @@ defect.
 | Private muxed arithmetic, CSA, Wallace/Dadda, and fused MAC; owner-confined FSM and sequential sharing | Implemented |
 | No memory admission mechanism | Implemented |
 | Parallel private technology-independent optimization and Liberty lowering/cover | Implemented |
+| Proof-backed AXM functional reduction before the optimization portfolio | Implemented; shard-parallel, deterministic across worker counts |
+| Mapped resynthesis scoped to a measured dirty cone instead of the whole netlist | Implemented |
+| Constant-register removal proved through a bounded influence cone | Implemented; one batched transaction per round |
 | Weighted outer/inner worker allocation | Implemented |
 | Direct transactional region artifact commit | Implemented |
 | Single-atom mapped ownership and edge-owned boundary repair | Implemented |

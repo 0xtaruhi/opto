@@ -11,6 +11,19 @@ All notable changes to Opto are documented here. The format follows
 
 ### Added
 
+- Proof-backed functional reduction of the canonical AXM subject. Bit-parallel
+  simulation nominates candidate equivalences, `opto-formal` proves or refutes
+  each one, and every refutation's boundary assignment refines the stimulus for
+  the next round. Only a proved pair is merged. On the public Ibex SKY130 case
+  the pass removes 25% of the lowered subject and 3.8% of mapped area while
+  reducing end-to-end time, and its result is byte-identical across worker
+  counts.
+
+- Constant-register removal proved through a bounded influence cone. A register
+  whose reachable value is one constant is folded away with its dead driver
+  logic; independent removals commit as one transaction. On the public Ibex
+  SKY130 case this removes 39 registers and 1,220 area units.
+
 - The production region-parallel synthesis engine: stable Word-region
   identity, hard typed boundaries, region-local Liberty mapping,
   bounded non-dominated plans, deterministic local-ID stitch, immutable
@@ -41,6 +54,32 @@ All notable changes to Opto are documented here. The format follows
   entry point and machine-readable public QoR result schemas.
 
 ### Changed
+
+- Divisor collection skips the support-index probe for a leaf subset that no
+  node's support matches. Rewriting probed every subset of every cut of every
+  node and nine in ten of those probes missed; an exact negative filter over the
+  index keys removes them. Duplicate divisor functions are now rejected by
+  scanning the sixteen-entry result instead of by a hash set allocated per call.
+  On the public Ibex SKY130 case divisor collection drops from 29.6 s to 4.4 s
+  of worker time with a byte-identical mapped netlist.
+
+- Technology-mapping candidate enumeration decides once per cut whether a
+  don't-care set is fillable, instead of recomputing that invariant inside the
+  input-inversion loop. The count of don't-care assignments cannot change under
+  input inversion, so this removes the whole loop for a cut with no don't cares.
+
+- Incremental timing reuses its topological order and dependency plan for a
+  region edit that adds no dependency edge and no net, instead of rebuilding
+  both on every edit and in every timing view. On the public Ibex SKY130 case
+  this drops plan rebuilds from 80 to 2. Dependency-plan construction itself
+  now buckets edges by row instead of comparison-sorting every edge, which is
+  a further 1.8x on the rebuilds that remain.
+
+- Mapped area resynthesis seeds from a measured dirty cone instead of the whole
+  clean netlist. Cover already selected every region-owned cell under the same
+  care set with exact-area recovery, so the unconditional full-netlist sweep
+  repeated that decision; it cost 3.0 s on the public Ibex SKY130 case for
+  0.37% of area, which the mapper now keeps by construction.
 
 - Public and extended QoR area, timing, cell-count, and cell-composition
   baselines now record the accepted generic priority-rebalance trade-offs from

@@ -62,10 +62,34 @@ pub fn prove_logic_network_equivalence(
     }))
 }
 
+/// One boundary assignment that separates a refuted pair.
+///
+/// The caller owns the meaning of the origins: they are the `origin` values of
+/// the encoded network's input nodes. Only inputs the solver actually assigned
+/// appear, so a caller folding these into simulation vectors must supply its own
+/// value for an absent origin rather than assuming a default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryRefutation {
+    assignment: Vec<(u32, bool)>,
+}
+
+impl BoundaryRefutation {
+    #[must_use]
+    /// Returns the assigned boundary origins in ascending order.
+    pub fn assignment(&self) -> &[(u32, bool)] {
+        &self.assignment
+    }
+}
+
 /// Partition simulation-equivalent literal classes using one incremental SAT
 /// instance. Each returned member names an earlier, formally equivalent
 /// representative in its input class. The explicit budgets bound both solver
 /// work and the amount of equivalence information retained by callers.
+///
+/// Every refuted pair appends one [`BoundaryRefutation`] to `refutations`. A
+/// caller that refines its own candidate nomination from those assignments
+/// converges in far fewer solver calls than one that re-nominates the same
+/// separable pair every round.
 ///
 /// # Errors
 ///
@@ -76,6 +100,7 @@ pub fn prove_logic_literal_partitions(
     classes: &[Vec<opto_ir::logic::Lit>],
     max_representatives: usize,
     max_pairs: usize,
+    refutations: &mut Vec<BoundaryRefutation>,
 ) -> Result<Vec<Vec<Option<usize>>>, FormalError> {
     let outputs = classes.iter().flatten().copied().collect::<Vec<_>>();
     if outputs.is_empty() || max_representatives == 0 || max_pairs == 0 {
@@ -125,6 +150,7 @@ pub fn prove_logic_literal_partitions(
                     &mut encoder,
                     encoded_literals[base + representative],
                     encoded_literals[base + alternative],
+                    refutations,
                 )? {
                     representatives[class_index][alternative] = Some(representative);
                 } else {
@@ -145,27 +171,23 @@ fn prove_encoded_literal_equivalence(
     encoder: &mut LogicMiter,
     left: Lit,
     right: Lit,
+    refutations: &mut Vec<BoundaryRefutation>,
 ) -> Result<bool, FormalError> {
-    encoder.solver.assume(&[left, !right]);
-    let left_only = encoder
-        .solver
-        .solve()
-        .map_err(|source| FormalError::Solver {
-            context: "logic equivalence sweep",
-            source,
-        })?;
-    if left_only {
-        return Ok(false);
+    for assumption in [[left, !right], [!left, right]] {
+        encoder.solver.assume(&assumption);
+        let separable = encoder
+            .solver
+            .solve()
+            .map_err(|source| FormalError::Solver {
+                context: "logic equivalence sweep",
+                source,
+            })?;
+        if separable {
+            refutations.push(encoder.boundary_assignment());
+            return Ok(false);
+        }
     }
-    encoder.solver.assume(&[!left, right]);
-    let right_only = encoder
-        .solver
-        .solve()
-        .map_err(|source| FormalError::Solver {
-            context: "logic equivalence sweep",
-            source,
-        })?;
-    Ok(!right_only)
+    Ok(true)
 }
 
 struct LogicMiter {
@@ -287,6 +309,29 @@ impl LogicMiter {
             inputs: BTreeMap::new(),
             clauses: 1,
             encoded_nodes: 0,
+        }
+    }
+
+    /// Reads the boundary half of the current satisfying assignment.
+    ///
+    /// Only encoded inputs are reported, in ascending origin order, so the
+    /// result is stable across solver runs that assign unrelated internal
+    /// variables differently.
+    fn boundary_assignment(&self) -> BoundaryRefutation {
+        let model = self.solver.model().unwrap_or_default();
+        let mut values = vec![None; model.iter().map(|lit| lit.index() + 1).max().unwrap_or(0)];
+        for literal in model {
+            values[literal.index()] = Some(literal.is_positive());
+        }
+        BoundaryRefutation {
+            assignment: self
+                .inputs
+                .iter()
+                .filter_map(|(&origin, literal)| {
+                    let value = values.get(literal.index()).copied().flatten()?;
+                    Some((origin, value != literal.is_negative()))
+                })
+                .collect(),
         }
     }
 

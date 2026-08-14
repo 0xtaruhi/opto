@@ -383,8 +383,14 @@ fn partitions_simulation_candidates_with_incremental_sat() {
     let network = builder.freeze();
 
     assert_eq!(
-        prove_logic_literal_partitions(&network, &[vec![xor, and, sop, demorgan_and]], 4, 64)
-            .unwrap(),
+        prove_logic_literal_partitions(
+            &network,
+            &[vec![xor, and, sop, demorgan_and]],
+            4,
+            64,
+            &mut Vec::new()
+        )
+        .unwrap(),
         vec![vec![None, None, Some(0), Some(1)]]
     );
 }

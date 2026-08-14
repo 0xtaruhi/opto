@@ -220,7 +220,9 @@ impl LogicGraph {
         }
     }
 
-    #[cfg(test)]
+    /// Borrows the frozen canonical storage for a reader that needs the
+    /// portable `opto-ir` network, such as SAT encoding. The borrow does not
+    /// expose mutation and cannot be taken before the graph is frozen.
     pub(crate) fn storage_network(&self) -> &StoredLogicNetwork {
         self.storage()
     }
@@ -488,7 +490,7 @@ impl LogicNodeId {
         self.0.node().index()
     }
 
-    #[cfg(test)]
+    /// Exposes the portable literal for SAT encoding and equivalence proofs.
     pub(crate) const fn lit(self) -> Lit {
         self.0
     }

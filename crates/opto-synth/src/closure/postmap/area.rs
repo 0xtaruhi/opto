@@ -61,23 +61,7 @@ pub(super) fn optimize(
 
     let optimization_boundary =
         super::mfs::optimization_boundary_nets(session.mapped, session.implementations)?;
-    let mut merged = true;
-    while merged {
-        merged = false;
-        let candidates = super::registers::constant_register_candidates(
-            session.mapped,
-            &options.target_cells,
-            &optimization_boundary,
-        )?;
-        for candidate in candidates {
-            if let CandidateDisposition::Accepted(edit) =
-                session.evaluate(candidate, OptimizationPhase::RegisterOptimization)?
-            {
-                extend_cleanup_frontier(session.mapped, &edit, &mut cleanup_dirty);
-                merged = true;
-            }
-        }
-    }
+    remove_constant_registers(&mut session, options, runtime, &optimization_boundary, &mut cleanup_dirty)?;
 
     crate::api::diagnostics::trace!(
         trace,
@@ -133,20 +117,32 @@ pub(super) fn optimize(
     let evaluation_budget = super::session::default_evaluation_budget(session.mapped.cell_count());
     let mut drivers = super::mfs::DriverIndex::build(session.mapped, functions);
     let mut evaluations = 0usize;
-    let mut dirty = if cleanup_dirty.is_empty() {
-        session.mapped.cell_ids().collect()
-    } else {
-        let mut dirty = std::collections::HashSet::new();
+    // Mapped resynthesis seeds from a measured dirty cone, never from the whole
+    // netlist. A region-owned cell was selected by cover under the same care set
+    // and the same library, with exact-area recovery already applied, so
+    // re-deriving it here repeats a decision that has not changed. The seeds are
+    // the cells whose context did move: the ones this closure has already edited
+    // above, and the retained non-region instances that cover never costed.
+    let mut seeds = cleanup_dirty;
+    for cell in session.mapped.cell_ids() {
+        if !matches!(
+            session.implementations.cell_ownership(cell)?,
+            crate::MappedCellOwnership::Region(_)
+        ) {
+            seeds.insert(cell);
+        }
+    }
+    let mut dirty = std::collections::HashSet::new();
+    if !seeds.is_empty() {
         super::mfs::extend_candidate_invalidation(
             session.mapped,
             functions,
             &drivers,
             &optimization_boundary,
-            cleanup_dirty,
+            seeds,
             &mut dirty,
         );
-        dirty
-    };
+    }
     // Candidate generation is read-only and parallel within a sweep. Selection
     // and commit are ordered afterward, so every task observes one mapped
     // generation and no accepted edit depends on worker completion order.
@@ -264,6 +260,45 @@ pub(super) fn optimize(
         phase_started.elapsed()
     );
     Ok(session.finish())
+}
+
+/// Removes every register whose reachable value is one constant, and records the
+/// cells the removals reached so later phases can rescope from them.
+///
+/// One round proves and commits the whole independent batch. A committed round
+/// can expose the next register, so rounds repeat until a scan of the reached
+/// cells proves nothing.
+fn remove_constant_registers(
+    session: &mut AreaOptimizationSession<'_>,
+    options: &crate::SynthesisOptions,
+    runtime: &opto_runtime::ExecutionContext,
+    optimization_boundary: &hashbrown::HashSet<opto_ir::mapped::NetId>,
+    cleanup_dirty: &mut std::collections::HashSet<opto_ir::mapped::CellId>,
+) -> Result<(), crate::SynthError> {
+    let mut scope = None;
+    loop {
+        let registers = super::registers::constant_register_candidates(
+            session.mapped,
+            &options.target_cells,
+            optimization_boundary,
+            scope.as_ref(),
+            runtime,
+        )?;
+        let Some(candidate) =
+            super::registers::constant_register_removal(session.mapped, &registers)?
+        else {
+            return Ok(());
+        };
+        let CandidateDisposition::Accepted(edit) =
+            session.evaluate(candidate, OptimizationPhase::RegisterOptimization)?
+        else {
+            return Ok(());
+        };
+        let mut reached = std::collections::HashSet::new();
+        extend_cleanup_frontier(session.mapped, &edit, &mut reached);
+        cleanup_dirty.extend(reached.iter().copied());
+        scope = Some(reached);
+    }
 }
 
 fn extend_cleanup_frontier(

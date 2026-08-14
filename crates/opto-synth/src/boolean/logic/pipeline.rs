@@ -118,6 +118,12 @@ pub(super) fn optimize(
     if !enabled {
         return finish(identity(source), roots, Vec::new());
     }
+    // Functional reduction runs before the portfolio so every implementation is
+    // built from one duplicate-free subject instead of rediscovering the same
+    // equal cones independently.
+    let reduced = reduce_functionally(source, roots, diagnostics, runtime)?;
+    let source = reduced.network;
+    let roots: &[LogicNodeId] = reduced.roots.as_deref().unwrap_or(roots);
     let functional = small_support_choice(&source, roots, requirements, diagnostics, runtime)?;
     let mut products = runtime.map_ordered_composite(
         vec![
@@ -157,7 +163,70 @@ pub(super) fn optimize(
     };
     let mut alternatives = functional.into_iter().collect::<Vec<_>>();
     alternatives.extend(proposal);
-    finish(baseline, roots, alternatives)
+    let mut outcome = finish(baseline, roots, alternatives)?;
+    if let Some(reduction) = &reduced.remap {
+        outcome.remap = compose_remaps(reduction, &outcome.remap);
+    }
+    Ok(outcome)
+}
+
+/// Runs one SAT sweep over the freshly lowered subject.
+///
+/// Returns the reduced graph, its roots, and the remap from the caller's node
+/// space into the reduced space. The remap is composed back into the pipeline
+/// outcome so callers never observe the intermediate node space. When the sweep
+/// finds nothing, the original graph and roots are returned unchanged and no
+/// composition is required.
+fn reduce_functionally(
+    source: LogicGraph,
+    roots: &[LogicNodeId],
+    diagnostics: crate::SynthesisDiagnostics,
+    runtime: &ExecutionContext,
+) -> Result<ReducedSubject, crate::SynthError> {
+    let started = std::time::Instant::now();
+    let mut metrics = super::sweep::SweepMetrics::default();
+    let before = source.node_count();
+    let reduced = super::sweep::reduce(&source, roots, runtime, &mut metrics)?;
+    crate::api::diagnostics::trace!(
+        crate::api::diagnostics::SynthTrace::timing(diagnostics),
+        "logic.sweep",
+        "nodes={before}->{} rounds={} classes={} candidates={} proved={} refuted={} \
+         exhausted={} wall={:?}",
+        reduced
+            .as_ref()
+            .map_or(before, |product| product.network.node_count()),
+        metrics.rounds,
+        metrics.classes,
+        metrics.candidates,
+        metrics.proved,
+        metrics.refuted,
+        metrics.budget_exhausted,
+        started.elapsed()
+    );
+    let Some(reduced) = reduced else {
+        return Ok(ReducedSubject {
+            network: source,
+            roots: None,
+            remap: None,
+        });
+    };
+    let reduced_roots = map_roots(&reduced.remap, roots)?;
+    Ok(ReducedSubject {
+        network: reduced.network,
+        roots: Some(reduced_roots),
+        remap: Some(reduced.remap),
+    })
+}
+
+/// The subject after functional reduction.
+///
+/// `roots` and `remap` are absent exactly when the sweep changed nothing, which
+/// lets the caller keep borrowing its original roots and skip one remap
+/// composition.
+struct ReducedSubject {
+    network: LogicGraph,
+    roots: Option<Box<[LogicNodeId]>>,
+    remap: Option<Box<[Option<LogicNodeId>]>>,
 }
 
 #[derive(Clone, Copy)]

@@ -4,6 +4,7 @@
 use super::{
     CutDatabase, ExecutionContext, HashMap, KCut, LogicGraph, LogicNode, LogicNodeId, TruthTable,
 };
+use crate::boolean::logic::MAX_MATCH_INPUTS as MAX_CUT_LEAVES;
 
 const COVERAGE_NODE_BUDGET: usize = 256;
 
@@ -45,10 +46,17 @@ pub(crate) fn window_cares(
     Some(cares)
 }
 
+/// Decides whether a node's cone is contained in a seed set.
+///
+/// The seed set is one cut, so it has at most [`MAX_CUT_LEAVES`] members and a
+/// linear scan beats hashing. The traversal stack is owned by the checker rather
+/// than allocated per query, because one checker answers a query for every cut
+/// of its node and this runs for every node of every rewrite pass.
 pub(crate) struct CoverageCheck<'a> {
     network: &'a LogicGraph,
-    seeds: hashbrown::HashSet<usize>,
+    seeds: smallvec::SmallVec<[usize; MAX_CUT_LEAVES]>,
     memo: HashMap<usize, bool>,
+    stack: Vec<(LogicNodeId, bool)>,
     budget: usize,
 }
 
@@ -58,18 +66,35 @@ impl<'a> CoverageCheck<'a> {
             network,
             seeds: seeds.iter().map(|seed| seed.index()).collect(),
             memo: HashMap::new(),
+            stack: Vec::new(),
             budget: COVERAGE_NODE_BUDGET,
         }
     }
 
+    fn is_seed(&self, node: usize) -> bool {
+        self.seeds.contains(&node)
+    }
+
     pub(crate) fn covered(&mut self, start: LogicNodeId) -> Option<bool> {
-        let mut stack = vec![(start.positive(), false)];
+        let mut stack = std::mem::take(&mut self.stack);
+        stack.clear();
+        stack.push((start.positive(), false));
+        let answer = self.walk(&mut stack, start);
+        self.stack = stack;
+        answer
+    }
+
+    fn walk(
+        &mut self,
+        stack: &mut Vec<(LogicNodeId, bool)>,
+        start: LogicNodeId,
+    ) -> Option<bool> {
         while let Some((node, expanded)) = stack.pop() {
             let key = node.index();
             if self.memo.contains_key(&key) {
                 continue;
             }
-            if self.seeds.contains(&key) {
+            if self.is_seed(key) {
                 self.memo.insert(key, true);
                 continue;
             }
@@ -93,6 +118,7 @@ impl<'a> CoverageCheck<'a> {
                         self.seeds.contains(&fanin.index())
                             || self.memo.get(&fanin.index()).copied().unwrap_or(false)
                     });
+
                     self.memo.insert(key, all);
                 }
             }
@@ -110,9 +136,41 @@ struct SupportEntry {
 pub(super) struct SupportIndex {
     entries: Box<[SupportEntry]>,
     entry_ranges: HashMap<KCut, SupportRange>,
+    /// Exact negative filter over the keys present in `entry_ranges`.
+    ///
+    /// Divisor collection probes every subset of a cut's leaves, and on real
+    /// designs almost nine in ten of those subsets are not the support of any
+    /// node. Hashing a full key and probing the map to learn that is the
+    /// dominant cost of rewriting. A set bit only means "probe the map"; a
+    /// clear bit is a proof of absence, so the filter changes cost and never
+    /// changes which divisors are found.
+    key_filter: Box<[u64]>,
     truths: Box<[TruthTable]>,
     truth_ranges: Box<[TruthRange]>,
 }
+
+/// Mixes one leaf node index into the value combined by [`subset_fingerprint`].
+///
+/// The combination is XOR, so this must destroy the low-order structure of a
+/// dense node index or subsets that differ by a swap would collide constantly.
+pub(super) const fn leaf_fingerprint(leaf: u32) -> u64 {
+    let mut value = (leaf as u64).wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    value ^= value >> 29;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^ (value >> 32)
+}
+
+/// Combines per-leaf fingerprints for one subset. Order-independent, because a
+/// support key is a set.
+pub(super) fn subset_fingerprint(leaves: impl IntoIterator<Item = u32>) -> u64 {
+    leaves.into_iter().fold(0, |value, leaf| value ^ leaf_fingerprint(leaf))
+}
+
+/// Filter bits allocated per distinct key. One bit per key would saturate; this
+/// keeps the false-probe rate low while staying a fixed function of the key
+/// count, so the filter is identical across runs and worker counts.
+const KEY_FILTER_BITS_PER_KEY: usize = 32;
+const MINIMUM_KEY_FILTER_WORDS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 struct SupportRange {
@@ -127,6 +185,20 @@ struct TruthRange {
 }
 
 impl SupportIndex {
+    /// Reports whether any key with this fingerprint exists.
+    ///
+    /// A `false` answer is exact: the caller may skip building the key and
+    /// probing the map. A `true` answer still requires the probe.
+    pub(super) fn may_contain(&self, fingerprint: u64) -> bool {
+        // The filter length is a power of two, so reducing the fingerprint is a
+        // mask rather than a division. Masking first keeps the value inside the
+        // filter on every pointer width.
+        let bits = self.key_filter.len() * u64::BITS as usize;
+        let index = usize::try_from(fingerprint & (bits as u64 - 1))
+            .expect("filter length is a usize, so the masked index fits one");
+        self.key_filter[index / u64::BITS as usize] & (1 << (index % u64::BITS as usize)) != 0
+    }
+
     pub(super) fn entries<'index>(
         &'index self,
         key: &[u32],
@@ -223,6 +295,12 @@ pub(super) fn build_support_index(
             .filter(|pair| pair[0].key != pair[1].key)
             .count();
     let mut entry_ranges = HashMap::with_capacity(range_count);
+    let filter_words = (range_count * KEY_FILTER_BITS_PER_KEY)
+        .div_ceil(u64::BITS as usize)
+        .next_power_of_two()
+        .max(MINIMUM_KEY_FILTER_WORDS);
+    let mut key_filter = vec![0u64; filter_words];
+    let filter_bits = filter_words * u64::BITS as usize;
     let mut start = 0usize;
     while start < entries.len() {
         let key = entries[start].key;
@@ -238,6 +316,12 @@ pub(super) fn build_support_index(
                 .try_into()
                 .map_err(|_| crate::SynthError::capacity("support range length"))?,
         };
+        let fingerprint = subset_fingerprint(key.leaves().iter().map(|leaf| {
+            u32::try_from(leaf.index()).expect("logic node index is bounded by compact storage")
+        }));
+        let bit = usize::try_from(fingerprint & (filter_bits as u64 - 1))
+            .expect("filter length is a usize, so the masked index fits one");
+        key_filter[bit / u64::BITS as usize] |= 1 << (bit % u64::BITS as usize);
         if entry_ranges.insert(key, range).is_some() {
             return Err(crate::SynthError::invariant(
                 "support index contains a duplicate key range",
@@ -248,6 +332,7 @@ pub(super) fn build_support_index(
     Ok(SupportIndex {
         entries: entries.into_boxed_slice(),
         entry_ranges,
+        key_filter: key_filter.into_boxed_slice(),
         truths: truths.into_boxed_slice(),
         truth_ranges: truth_ranges.into_boxed_slice(),
     })

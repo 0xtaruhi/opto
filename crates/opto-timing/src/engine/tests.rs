@@ -352,6 +352,42 @@ fn committed_endpoint_shape_changes_reuse_closure_slots() {
 }
 
 #[test]
+fn a_region_edit_that_adds_no_dependency_edge_reuses_the_dependency_plan() {
+    let mut incremental = IncrementalTiming::new_for_optimization(
+        TimingContext::new(),
+        chain_model(),
+        ReportTimingOptions::default(),
+        opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let baseline = incremental.quality_summary().unwrap();
+    let generation = incremental.topological_generation();
+
+    // Same nets, faster cell. The edge set is unchanged, so the retained
+    // topological order and dependency plan stay valid and are not rebuilt.
+    // Propagation must still run: reuse orders the work, it does not skip it.
+    let mut delta = TimingRegionDelta::new();
+    delta
+        .set_instance(buf_instance(1, "U1", "FAST_BUF", "n1", "n2"))
+        .unwrap();
+    let edit = incremental.apply_optimization_region_delta(delta).unwrap();
+    assert_eq!(incremental.topological_generation(), generation);
+    incremental.commit(edit).unwrap();
+    assert_ne!(incremental.quality_summary().unwrap(), baseline);
+
+    // A new instance across existing nets adds a dependency edge the retained
+    // plan does not contain, so the plan must be rebuilt.
+    let mut delta = TimingRegionDelta::new();
+    delta
+        .set_instance(buf_instance(3, "U_added", "BUF", "n1", "y"))
+        .unwrap();
+    let edit = incremental.apply_optimization_region_delta(delta).unwrap();
+    assert_ne!(incremental.topological_generation(), generation);
+    incremental.commit(edit).unwrap();
+    assert_summary_matches_quality(&incremental);
+}
+
+#[test]
 fn cyclic_optimization_delta_is_rejected_instead_of_diverging() {
     let mut incremental = IncrementalTiming::new_for_optimization(
         TimingContext::new(),

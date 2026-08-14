@@ -560,6 +560,14 @@ impl TimingGraph {
         Ok(())
     }
 
+    /// Counts how many times the topological order and its dependency plan have
+    /// been rebuilt. Tests use it to assert that an edit which adds no
+    /// dependency edge reuses the retained plan instead of rebuilding it.
+    #[cfg(test)]
+    pub(crate) fn topological_generation(&self) -> u64 {
+        self.topological_generation
+    }
+
     pub(crate) fn topological_position(&self, net: usize) -> usize {
         self.topological_positions
             .get(net)

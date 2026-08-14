@@ -970,4 +970,9 @@ impl IncrementalTiming {
     pub(crate) fn closure_slot_counts(&self) -> (usize, usize) {
         self.closure.slot_counts()
     }
+
+    #[cfg(test)]
+    pub(crate) fn topological_generation(&self) -> u64 {
+        self.model.graph.topological_generation()
+    }
 }

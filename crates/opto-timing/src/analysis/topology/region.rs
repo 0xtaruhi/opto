@@ -295,7 +295,18 @@ impl TimingGraph {
                     }),
                 };
             }
-            self.topological_order_stale = true;
+            // The retained order and dependency plan stay usable when the edit
+            // added no dependency edge and no net. Removing an arc cannot move a
+            // net earlier than a predecessor, and a plan that still lists the
+            // removed edge is conservative: propagation recomputes the sink from
+            // its live predecessors. Appending a net does invalidate the plan,
+            // because its position arena no longer covers the arena.
+            //
+            // This matters because a rebuild is `O(nets + arcs)` per edit per
+            // timing view, and post-map optimization applies many small edits.
+            // Cell resizing and constant-register removal both land here.
+            self.topological_order_stale |=
+                !added_edges.is_empty() || self.net_count != edit.old_net_len;
         }
         Ok((edit, dirty.into_iter().collect()))
     }

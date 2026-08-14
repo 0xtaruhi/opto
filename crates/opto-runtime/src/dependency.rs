@@ -257,7 +257,7 @@ impl DependencyPublicationPlan {
         Ok(Self {
             item_count,
             row_count,
-            rows: PublicationRows::Sparse(CsrEdges::seal(item_count, rows)?),
+            rows: PublicationRows::Sparse(CsrEdges::seal(item_count, &rows)?),
         })
     }
 
@@ -502,14 +502,54 @@ impl DependencyExecution {
 }
 
 impl CsrEdges {
-    fn seal(row_count: usize, mut edges: Vec<(usize, usize)>) -> Result<Self, RuntimeError> {
-        edges.sort_unstable();
-        edges.dedup();
+    /// Builds one CSR edge table, removing duplicate edges.
+    ///
+    /// Rows are bucketed with a counting pass rather than a comparison sort over
+    /// every edge. The packed-row builder already groups entries by row, so a
+    /// global sort only ever bought duplicate removal, and duplicates can only
+    /// occur inside one row: a multi-pin instance contributes the same source
+    /// net once per arc. Sorting each row instead keeps the result identical and
+    /// deterministic while turning `O(E log E)` into `O(E + R)` plus tiny
+    /// per-row sorts. Plan construction runs on every incremental region edit,
+    /// so this is a hot path in post-map optimization.
+    fn seal(row_count: usize, edges: &[(usize, usize)]) -> Result<Self, RuntimeError> {
         if edges.len() > u32::MAX as usize {
             return Err(invalid("dependency edge count exceeds 32-bit capacity"));
         }
+        let mut offsets = vec![0u32; row_count + 1];
+        for &(row, _) in edges {
+            let slot = offsets
+                .get_mut(row + 1)
+                .ok_or_else(|| invalid("dependency edge row is outside the item arena"))?;
+            *slot = slot
+                .checked_add(1)
+                .ok_or_else(|| invalid("dependency edge count exceeds 32-bit capacity"))?;
+        }
+        for row in 1..offsets.len() {
+            offsets[row] += offsets[row - 1];
+        }
+        let mut cursors = offsets[..row_count].to_vec();
+        let mut values = vec![0usize; edges.len()];
+        for &(row, value) in edges {
+            let cursor = &mut cursors[row];
+            values[*cursor as usize] = value;
+            *cursor += 1;
+        }
+        let mut deduped = Vec::with_capacity(edges.len());
+        for row in 0..row_count {
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            let slice = &mut values[start..end];
+            slice.sort_unstable();
+            let mut previous = None;
+            for &value in slice.iter() {
+                if previous.replace(value) != Some(value) {
+                    deduped.push((row, value));
+                }
+            }
+        }
         Ok(Self {
-            rows: opto_core::PackedRows::try_from_entries(row_count, edges)
+            rows: opto_core::PackedRows::try_from_entries(row_count, deduped)
                 .map_err(|_| invalid("dependency edge row is outside the item arena"))?,
         })
     }
@@ -601,10 +641,10 @@ impl DependencyPlan {
         let successors = predecessors
             .iter()
             .map(|&(item, dependency)| (dependency, item))
-            .collect();
+            .collect::<Vec<_>>();
         Ok(Self {
-            predecessors: Arc::new(CsrEdges::seal(item_count, predecessors)?),
-            successors: Arc::new(CsrEdges::seal(item_count, successors)?),
+            predecessors: Arc::new(CsrEdges::seal(item_count, &predecessors)?),
+            successors: Arc::new(CsrEdges::seal(item_count, &successors)?),
             positions: positions.into(),
         })
     }

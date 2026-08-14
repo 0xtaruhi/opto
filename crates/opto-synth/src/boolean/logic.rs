@@ -12,6 +12,7 @@ mod pipeline;
 mod pla;
 mod rewrite;
 mod subject;
+mod sweep;
 
 #[cfg(test)]
 mod proptests;
