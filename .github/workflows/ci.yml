@@ -17,8 +17,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/classify-changes.yml
+
   repository-policy:
     name: Public repository policy
+    needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -42,22 +46,40 @@ jobs:
           python3 tools/check_real_benchmarks.py benchmarks/real/medium.toml
           python3 tools/check_real_benchmarks.py benchmarks/real/gate.toml
 
+      - name: Install mdBook
+        if: needs.changes.outputs.docs-changed == 'true'
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: mdbook
+
+      - name: Build architecture guide
+        if: needs.changes.outputs.docs-changed == 'true'
+        run: mdbook build
+
   dependency-policy:
     name: Dependency policy
+    needs: changes
     if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - name: Accept documentation-only change
+        if: needs.changes.outputs.docs-only == 'true'
+        run: echo "Dependency policy is unaffected by documentation-only changes."
+
       - name: Check out repository
+        if: needs.changes.outputs.docs-only != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check advisories, licenses and sources; report duplicate crates
+        if: needs.changes.outputs.docs-only != 'true'
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
 
   rust:
     name: Rust quality gates (${{ matrix.name }})
+    needs: changes
     if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -79,72 +101,82 @@ jobs:
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
       RUSTC_WRAPPER: sccache
     steps:
+      - name: Accept documentation-only change
+        if: needs.changes.outputs.docs-only == 'true'
+        run: echo "Rust quality gates are unaffected by documentation-only changes."
+
       - name: Check out repository and pinned dependencies
+        if: needs.changes.outputs.docs-only != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
       - name: Install latest stable Rust
+        if: needs.changes.outputs.docs-only != 'true'
         run: rustup toolchain install stable --profile minimal
 
       - name: Install Linux quality components
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: rustup component add clippy rustfmt
 
       - name: Install compiler cache
+        if: needs.changes.outputs.docs-only != 'true'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - name: Restore Cargo cache
+        if: needs.changes.outputs.docs-only != 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: quality-${{ matrix.name }}
 
       - name: Record toolchain
+        if: needs.changes.outputs.docs-only != 'true'
         run: rustc --version --verbose
 
       - name: Check formatting
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: |
           cargo fmt --all --check
           cargo fmt --manifest-path fuzz/Cargo.toml --all --check
 
       - name: Check workspace architecture
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: python3 tools/check_architecture.py
 
       - name: Check workspace
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: cargo check --workspace --all-targets --all-features --locked
 
       - name: Run Clippy
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run domain and library tests
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: cargo test --workspace --lib --bins --all-features --locked
 
       - name: Run product CLI tests
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: cargo test -p opto --test cli --all-features --locked
 
       - name: Run presubmit qualification
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: cargo test -p opto --test qualification --all-features --locked
 
       - name: Verify portable build, embedded Tcl and CLI
-        if: runner.os != 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os != 'Linux'
         run: |
           cargo test -p opto-tcl-sys --locked
           cargo test -p opto --test cli --locked
 
       - name: Build runtime benchmarks
-        if: runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: cargo bench --workspace --benches --no-run --locked
 
   coverage:
     name: Rust coverage
-    if: github.event_name != 'pull_request'
+    needs: changes
+    if: github.event_name != 'pull_request' && needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
