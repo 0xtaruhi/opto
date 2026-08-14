@@ -1192,7 +1192,8 @@ defect.
 | Parallel private technology-independent optimization and Liberty lowering/cover | Implemented |
 | Proof-backed AXM functional reduction before the optimization portfolio | Implemented; shard-parallel, deterministic across worker counts |
 | Unobservable mapped logic removed before closure evaluates it | Implemented |
-| Proof-backed feedback-enable recovery | Absent; see Known Architectural Gaps |
+| Feedback-enable recovery guarded by a value-level equivalence proof | Implemented; reset registers are declined, see Known Architectural Gaps |
+| Clock gating enabled by default | Implemented |
 | Mapped resynthesis scoped to a measured dirty cone instead of the whole netlist | Implemented |
 | Constant-register removal proved through a bounded influence cone | Implemented; one batched transaction per round |
 | Weighted outer/inner worker allocation | Implemented |
@@ -1211,18 +1212,23 @@ defect.
 
 ## Known Architectural Gaps
 
-Feedback-enable recovery is not proof-backed, and clock gating stays off by
-default because of it. The pass infers an enable and a data path for a register
-the RTL never enabled, by decomposing that register's next-state mux tree
-against its own output. Nothing proves the inferred pair reconstructs the
-original next state. With clock gating enabled the pass converts far more
-registers, and random-stimulus co-simulation of the resulting Ibex SKY130
-netlist diverges from the RTL from cycle 116: the load-store unit's state
-register stops advancing. Disabling only that pass leaves clock gating working
-on RTL-declared enables and the co-simulation clean, which locates the defect
-without excusing it. Clock gating is worth a measured 6.5% of mapped area on
-that case, so the fix is to prove the decomposition rather than to keep the
-transformation off.
+Feedback-enable recovery declines any register that has a reset. Hold detection
+equates two reads of the register's target signal taken at different program
+points, and control lowering has already rewritten reset registers, so on those
+the recovered enable comes out narrower than the design's. That is not a
+theoretical concern: recovering reset registers made the Ibex SKY130 load-store
+unit's transaction-control registers stop updating on cycles where the design's
+own enable was high, and random-stimulus co-simulation against the RTL diverged
+from cycle 116. Lifting the restriction requires hold detection that names the
+register's own output rather than any read of its signal; the recovered enable
+must then be checked against the design's, not only against the next-state
+expression the pass was handed.
+
+The value-level equivalence proof that guards recovery does not close that hole
+by itself. It proves the recovered enable and data reconstruct the next-state
+expression, which it does catch a wrong decomposition of, but the CNF encoder
+gives one variable per signal bit for every read of that signal, so it cannot
+distinguish reads taken at different program points either.
 
 The remaining unproven product targets are multi-million-gate runtime/RSS and
 public-suite QoR/runtime comparison. Those require the benchmark evidence

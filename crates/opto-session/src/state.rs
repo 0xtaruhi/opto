@@ -229,13 +229,11 @@ impl Default for DatabaseSettings {
             hdl_search_path: vec![PathBuf::from(".")],
             lib_search_path: vec![PathBuf::from(".")],
             synth_effort: SynthesisEffort::Medium,
-            // Clock gating stays off by default until feedback-enable recovery
-            // is proof-backed. Enabling it is worth a measured 6.5% of mapped
-            // area on the public Ibex SKY130 case, but the enable that pass
-            // infers for a register the RTL never enabled is not proved
-            // equivalent to that register's next state, and random-stimulus
-            // co-simulation of the resulting netlist diverges.
-            clock_gating: false,
+            // Clock gating is on by default. It is an area, power, and cell
+            // count win wherever the target has an integrated clock gate, and a
+            // target without one produces an empty gate catalog, so the setting
+            // costs nothing there.
+            clock_gating: true,
             clock_gating_style: opto_synth::ClockGatingStyle::default(),
         }
     }

@@ -406,7 +406,7 @@ fn database_settings_have_typed_defaults() {
     assert_eq!(session.hdl_search_path(), [PathBuf::from(".")]);
     assert_eq!(session.lib_search_path(), [PathBuf::from(".")]);
     assert_eq!(session.synth_effort(), SynthesisEffort::Medium);
-    assert!(!session.clock_gating_enabled());
+    assert!(session.clock_gating_enabled());
 }
 
 #[test]

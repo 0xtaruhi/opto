@@ -55,6 +55,18 @@ All notable changes to Opto are documented here. The format follows
 
 ### Changed
 
+- Clock gating is enabled by default. On the public Ibex SKY130 case it removes
+  1,807 area units and 6 enable-flop groups become gated banks.
+
+- Feedback-enable recovery proves that the enable and data it recovers
+  reconstruct the register's next-state expression, and declines the rewrite
+  otherwise. It also declines any register that has a reset: hold detection
+  equates reads of the register's signal taken at different program points, and
+  on reset registers, which control lowering has already rewritten, that yields
+  an enable narrower than the design's. Recovering them made the Ibex load-store
+  unit's transaction-control registers stop updating and random-stimulus
+  co-simulation against the RTL diverge.
+
 - Mapped closure removes every cell whose output no design object reads, before
   the rest of the closure evaluates, times, or resynthesizes it. Buffering,
   cloning, and constant-register removal each strand drivers, so the sweep

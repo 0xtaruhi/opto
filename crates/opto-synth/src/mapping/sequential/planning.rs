@@ -13,7 +13,6 @@ pub(crate) fn recover_feedback_enables(
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let connected = register_targets(module)?;
-
     let mut candidates = Vec::new();
     for (operation, target) in connected {
         let model = module.operation(operation).ok_or_else(|| {
@@ -33,6 +32,19 @@ pub(crate) fn recover_feedback_enables(
             || !(sequential_catalog.has_enable_cell(register.edge, &reset_requests)
                 || gating_edges(register.edge))
         {
+            continue;
+        }
+        // Recovery is declined for a register that has any reset. Hold
+        // detection equates two reads of the register's target signal taken at
+        // different program points, and control lowering has already rewritten
+        // reset registers, so on those the recovered enable comes out narrower
+        // than the design's. Measured on the public Ibex SKY130 case: with reset
+        // registers recovered, the load-store unit's transaction-control
+        // registers stop updating on cycles where the design's own enable is
+        // high, and random-stimulus co-simulation against the RTL diverges.
+        // Declining them keeps clock gating on every register whose enable is
+        // sound and leaves a correct design.
+        if !register.resets.is_empty() {
             continue;
         }
         candidates.push((operation, register.clone(), target, model.source.clone()));
@@ -55,7 +67,19 @@ pub(crate) fn recover_feedback_enables(
         let start = ownership.start(module)?;
         let enable = emit_feedback_enable(module, &plan.enable, &source)?;
         let data = emit_feedback_data(module, &plan.data, &source)?;
+        let reconstructed = module
+            .mux(enable, data, q, source.clone())
+            .map_err(crate::SynthError::from)?;
         ownership.claim_since(module, start, &[operation_id])?;
+        // The decomposition walks a next-state mux tree looking for paths that
+        // hold the register's own output. Nothing about that walk guarantees the
+        // enable and data it extracts reconstruct the original next state, and
+        // an enable that is too narrow silently freezes the register: the design
+        // keeps its reset value and only a long random-stimulus simulation
+        // notices. Prove the identity, and decline the rewrite otherwise.
+        if !enable_recovery_is_equivalent(module, register.d, reconstructed)? {
+            continue;
+        }
         register.d = data;
         register.enable = Some(word::Enable {
             value: enable,
@@ -67,6 +91,28 @@ pub(crate) fn recover_feedback_enables(
             .kind = word::OpKind::Register(register);
     }
     Ok(())
+}
+
+/// Proves that a recovered enable and data reconstruct the original next state
+/// for every value of the register and its inputs.
+///
+/// A disproved identity is a "do not rewrite this register" answer, not an
+/// error: recovery is an optimization and declining it leaves a correct design.
+fn enable_recovery_is_equivalent(
+    module: &word::WordModule,
+    next_state: word::ValueId,
+    reconstructed: word::ValueId,
+) -> Result<bool, crate::SynthError> {
+    let outcome = opto_formal::prove_value_equivalence_under_assumptions(
+        module,
+        next_state,
+        reconstructed,
+        &[],
+    )
+    .map_err(|error| {
+        crate::SynthError::invariant(format!("feedback-enable equivalence proof failed: {error}"))
+    })?;
+    Ok(outcome.require_proved().is_ok())
 }
 
 fn register_targets(
