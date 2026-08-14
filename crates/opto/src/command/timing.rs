@@ -1197,433 +1197,441 @@ pub(super) fn resolve_object_names(
     Ok(names)
 }
 
-macro_rules! timing_handler {
-    ($name:ident, $arguments:ty, $kind_ty:ty, |$state:ident, $interp:ident, $command:ident, $args:ident, $kind:ident| $body:block) => {
-        pub(crate) fn $name(
-            state: &ShellState,
-            interp: *mut TclInterp,
-            command: &'static str,
-            arguments: $arguments,
-            kind: $kind_ty,
-        ) -> Result<CommandResult, crate::ShellError> {
-            let ($state, $interp, $command, $args, $kind) =
-                (state, interp, command, arguments, kind);
-            $body
-        }
-    };
-    ($name:ident, $arguments:ty, |$state:ident, $interp:ident, $command:ident, $args:ident| $body:block) => {
-        pub(crate) fn $name(
-            state: &ShellState,
-            interp: *mut TclInterp,
-            command: &'static str,
-            arguments: $arguments,
-        ) -> Result<CommandResult, crate::ShellError> {
-            let ($state, $interp, $command, $args) = (state, interp, command, arguments);
-            $body
-        }
-    };
-}
-timing_handler!(read_sdc, ReadSdcArgs, |state, interp, command, args| {
-    let _ = command;
+pub(crate) fn read_sdc(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: ReadSdcArgs,
+) -> Result<CommandResult, crate::ShellError> {
     sdc::read_sdc(state, interp, args)
-});
+}
 
-timing_handler!(write_sdc, WriteSdcArgs, |state, _interp, _command, args| {
+pub(crate) fn write_sdc(
+    state: &ShellState,
+    _interp: *mut TclInterp,
+    _command: &'static str,
+    args: WriteSdcArgs,
+) -> Result<CommandResult, crate::ShellError> {
     state
         .session
         .borrow()
         .write_sdc(&args.file)
         .map(CommandResult::Complete)
         .map_err(crate::ShellError::from)
-});
+}
 
-timing_handler!(
-    read_parasitics,
-    ReadParasiticsArgs,
-    |state, interp, command, args| {
-        let _ = (interp, command);
-        read_parasitics_command(state, args).map(CommandResult::Complete)
-    }
-);
+pub(crate) fn read_parasitics(
+    state: &ShellState,
+    _interp: *mut TclInterp,
+    _command: &'static str,
+    args: ReadParasiticsArgs,
+) -> Result<CommandResult, crate::ShellError> {
+    read_parasitics_command(state, args).map(CommandResult::Complete)
+}
 
-timing_handler!(
-    create_clock,
-    CreateClockArgs<'_>,
-    |state, interp, command, args| {
-        let _ = (interp, command);
-        create_clock_command(state, args).map(CommandResult::Complete)
-    }
-);
+pub(crate) fn create_clock(
+    state: &ShellState,
+    _interp: *mut TclInterp,
+    _command: &'static str,
+    args: CreateClockArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    create_clock_command(state, args).map(CommandResult::Complete)
+}
 
-timing_handler!(
-    create_generated_clock,
-    CreateGeneratedClockArgs<'_>,
-    |state, interp, _command, args| {
-        create_generated_clock_command(state, interp, args).map(CommandResult::Complete)
-    }
-);
+pub(crate) fn create_generated_clock(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: CreateGeneratedClockArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    create_generated_clock_command(state, interp, args).map(CommandResult::Complete)
+}
 
-timing_handler!(
-    delete_clock,
-    DeleteClockArgs<'_>,
-    DeleteClockKind,
-    |state, interp, command, args, kind| {
-        delete_clock_command(state, interp, command, args, kind).map(constraint_change_result)
-    }
-);
+pub(crate) fn delete_clock(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: DeleteClockArgs<'_>,
+    kind: DeleteClockKind,
+) -> Result<CommandResult, crate::ShellError> {
+    delete_clock_command(state, interp, command, args, kind).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_port_constraint,
-    PortConstraintCommandArgs<'_>,
-    PortConstraintKind,
-    |state, interp, command, args, kind| {
-        set_port_constraint_command(state, interp, command, args, kind)
-            .map(constraint_change_result)
-    }
-);
+pub(crate) fn set_port_constraint(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: PortConstraintCommandArgs<'_>,
+    kind: PortConstraintKind,
+) -> Result<CommandResult, crate::ShellError> {
+    set_port_constraint_command(state, interp, command, args, kind).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_clock_transition,
-    SetClockTransitionArgs<'_>,
-    |state, interp, command, args| {
-        let _ = command;
-        set_clock_transition_command(state, interp, args).map(constraint_change_result)
-    }
-);
+pub(crate) fn set_clock_transition(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: SetClockTransitionArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    set_clock_transition_command(state, interp, args).map(constraint_change_result)
+}
 
-timing_handler!(
-    unset_clock_transition,
-    UnsetClockTransitionArgs<'_>,
-    |state, interp, _command, args| {
-        unset_clock_transition_command(state, interp, args).map(constraint_change_result)
-    }
-);
+pub(crate) fn unset_clock_transition(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: UnsetClockTransitionArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    unset_clock_transition_command(state, interp, args).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_clock_latency,
-    SetClockLatencyArgs<'_>,
-    |state, interp, _command, args| {
-        set_clock_latency_command(state, interp, args).map(constraint_change_result)
-    }
-);
+pub(crate) fn set_clock_latency(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: SetClockLatencyArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    set_clock_latency_command(state, interp, args).map(constraint_change_result)
+}
 
-timing_handler!(
-    unset_clock_latency,
-    UnsetClockLatencyArgs<'_>,
-    |state, interp, _command, args| {
-        unset_clock_latency_command(state, interp, args).map(constraint_change_result)
-    }
-);
+pub(crate) fn unset_clock_latency(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: UnsetClockLatencyArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    unset_clock_latency_command(state, interp, args).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_clock_uncertainty,
-    SetClockUncertaintyArgs<'_>,
-    |state, interp, command, args| {
-        clock_uncertainty_command(state, interp, command, true, args.into())
-            .map(constraint_change_result)
-    }
-);
+pub(crate) fn set_clock_uncertainty(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: SetClockUncertaintyArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    clock_uncertainty_command(state, interp, command, true, args.into())
+        .map(constraint_change_result)
+}
 
-timing_handler!(
-    unset_clock_uncertainty,
-    UnsetClockUncertaintyArgs<'_>,
-    |state, interp, command, args| {
-        clock_uncertainty_command(state, interp, command, false, args.into())
-            .map(constraint_change_result)
-    }
-);
+pub(crate) fn unset_clock_uncertainty(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: UnsetClockUncertaintyArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    clock_uncertainty_command(state, interp, command, false, args.into())
+        .map(constraint_change_result)
+}
 
-timing_handler!(
-    set_clock_groups,
-    SetClockGroupsArgs<'_>,
-    |state, interp, _command, args| {
-        set_clock_groups_command(state, interp, args).map(constraint_change_result)
-    }
-);
+pub(crate) fn set_clock_groups(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: SetClockGroupsArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    set_clock_groups_command(state, interp, args).map(constraint_change_result)
+}
 
-timing_handler!(
-    unset_clock_groups,
-    UnsetClockGroupsArgs<'_>,
-    |state, interp, _command, args| {
-        unset_clock_groups_command(state, interp, args).map(constraint_change_result)
-    }
-);
+pub(crate) fn unset_clock_groups(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: UnsetClockGroupsArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    unset_clock_groups_command(state, interp, args).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_case_analysis,
-    SetCaseAnalysisArgs<'_>,
-    |state, interp, command, args| {
-        case_analysis_command(state, interp, command, Some(args.value), args.objects)
-            .map(constraint_change_result)
-    }
-);
+pub(crate) fn set_case_analysis(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: SetCaseAnalysisArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    case_analysis_command(state, interp, command, Some(args.value), args.objects)
+        .map(constraint_change_result)
+}
 
-timing_handler!(
-    unset_case_analysis,
-    UnsetCaseAnalysisArgs<'_>,
-    |state, interp, command, args| {
-        case_analysis_command(state, interp, command, None, args.objects)
-            .map(constraint_change_result)
-    }
-);
+pub(crate) fn unset_case_analysis(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: UnsetCaseAnalysisArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    case_analysis_command(state, interp, command, None, args.objects).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_logic,
-    SetLogicArgs<'_>,
-    LogicKind,
-    |state, interp, command, args, kind| {
-        set_logic_command(state, interp, command, args, kind).map(constraint_change_result)
-    }
-);
+pub(crate) fn set_logic(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: SetLogicArgs<'_>,
+    kind: LogicKind,
+) -> Result<CommandResult, crate::ShellError> {
+    set_logic_command(state, interp, command, args, kind).map(constraint_change_result)
+}
 
-timing_handler!(
-    disable_timing,
-    DisableTimingArgs<'_>,
-    MutationKind,
-    |state, interp, command, args, kind| {
-        disable_timing_command(state, interp, command, args, kind).map(constraint_change_result)
-    }
-);
+pub(crate) fn disable_timing(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: DisableTimingArgs<'_>,
+    kind: MutationKind,
+) -> Result<CommandResult, crate::ShellError> {
+    disable_timing_command(state, interp, command, args, kind).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_timing_derate,
-    SetTimingDerateArgs,
-    |state, _interp, _command, args| {
-        set_timing_derate_command(state, args).map(constraint_change_result)
-    }
-);
+pub(crate) fn set_timing_derate(
+    state: &ShellState,
+    _interp: *mut TclInterp,
+    _command: &'static str,
+    args: SetTimingDerateArgs,
+) -> Result<CommandResult, crate::ShellError> {
+    set_timing_derate_command(state, args).map(constraint_change_result)
+}
 
-timing_handler!(
-    unset_timing_derate,
-    UnsetTimingDerateArgs,
-    |state, _interp, _command, _args| {
-        state
-            .session
-            .borrow_mut()
-            .unset_timing_derate()
-            .map(constraint_change_result)
-            .map_err(crate::ShellError::from)
-    }
-);
+pub(crate) fn unset_timing_derate(
+    state: &ShellState,
+    _interp: *mut TclInterp,
+    _command: &'static str,
+    _args: UnsetTimingDerateArgs,
+) -> Result<CommandResult, crate::ShellError> {
+    state
+        .session
+        .borrow_mut()
+        .unset_timing_derate()
+        .map(constraint_change_result)
+        .map_err(crate::ShellError::from)
+}
 
-timing_handler!(
-    propagated_clock,
-    PropagatedClockArgs<'_>,
-    MutationKind,
-    |state, interp, command, args, kind| {
-        set_propagated_clock_command(state, interp, command, args, kind)
-            .map(constraint_change_result)
-    }
-);
+pub(crate) fn propagated_clock(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: PropagatedClockArgs<'_>,
+    kind: MutationKind,
+) -> Result<CommandResult, crate::ShellError> {
+    set_propagated_clock_command(state, interp, command, args, kind).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_resistance,
-    SetResistanceArgs<'_>,
-    |state, interp, _command, args| {
-        set_resistance_command(state, interp, args).map(constraint_change_result)
-    }
-);
+pub(crate) fn set_resistance(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: SetResistanceArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    set_resistance_command(state, interp, args).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_io_delay,
-    SetIoDelayArgs<'_>,
-    opto_session::IoDelayKind,
-    |state, interp, command, args, kind| {
-        set_io_delay_command(state, interp, command, args, kind).map(constraint_change_result)
-    }
-);
+pub(crate) fn set_io_delay(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: SetIoDelayArgs<'_>,
+    kind: opto_session::IoDelayKind,
+) -> Result<CommandResult, crate::ShellError> {
+    set_io_delay_command(state, interp, command, args, kind).map(constraint_change_result)
+}
 
-timing_handler!(
-    unset_io_delay,
-    UnsetIoDelayArgs<'_>,
-    opto_session::IoDelayKind,
-    |state, interp, command, args, kind| {
-        unset_io_delay_command(state, interp, command, args, kind).map(constraint_change_result)
-    }
-);
+pub(crate) fn unset_io_delay(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: UnsetIoDelayArgs<'_>,
+    kind: opto_session::IoDelayKind,
+) -> Result<CommandResult, crate::ShellError> {
+    unset_io_delay_command(state, interp, command, args, kind).map(constraint_change_result)
+}
 
-timing_handler!(
-    set_scoped_design_rule,
-    ScopedDesignRuleArgs<'_>,
-    DesignRuleKind,
-    |state, interp, command, args, kind| {
-        let scope = match (args.data_path, args.clock_path) {
-            (false, false) => DesignRuleScope::All,
-            (true, false) => DesignRuleScope::DataPath,
-            (false, true) => DesignRuleScope::ClockPath,
-            (true, true) => DesignRuleScope::ClockAndData,
-        };
-        set_design_rule_command(
-            state,
-            interp,
-            command,
-            args.limit,
-            &args.objects,
-            scope,
+pub(crate) fn set_scoped_design_rule(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: ScopedDesignRuleArgs<'_>,
+    kind: DesignRuleKind,
+) -> Result<CommandResult, crate::ShellError> {
+    let scope = match (args.data_path, args.clock_path) {
+        (false, false) => DesignRuleScope::All,
+        (true, false) => DesignRuleScope::DataPath,
+        (false, true) => DesignRuleScope::ClockPath,
+        (true, true) => DesignRuleScope::ClockAndData,
+    };
+    set_design_rule_command(
+        state,
+        interp,
+        command,
+        args.limit,
+        &args.objects,
+        scope,
+        kind,
+    )
+    .map(constraint_change_result)
+}
+
+pub(crate) fn set_max_fanout(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: SetMaxFanoutArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    set_design_rule_command(
+        state,
+        interp,
+        command,
+        args.limit,
+        &args.objects,
+        DesignRuleScope::All,
+        DesignRuleKind::Fanout,
+    )
+    .map(constraint_change_result)
+}
+
+pub(crate) fn set_path_delay(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: SetPathDelayArgs<'_>,
+    delay_kind: PathDelayKind,
+) -> Result<CommandResult, crate::ShellError> {
+    let kind = match delay_kind {
+        PathDelayKind::Max => PathExceptionCommand::MaxDelay(args.delay),
+        PathDelayKind::Min => PathExceptionCommand::MinDelay(args.delay),
+    };
+    set_path_exception_command(
+        state,
+        interp,
+        command,
+        PathExceptionArgs {
+            mutation: MutationKind::Set,
             kind,
-        )
-        .map(constraint_change_result)
-    }
-);
+            points: args.points,
+            setup: false,
+            hold: false,
+            rise: args.rise,
+            fall: args.fall,
+            start: false,
+            end: false,
+            reset_path: args.reset_path,
+            ignore_clock_latency: args.ignore_clock_latency,
+            comment: args.comment.unwrap_or_default(),
+        },
+    )
+    .map(constraint_change_result)
+}
 
-timing_handler!(
-    set_max_fanout,
-    SetMaxFanoutArgs<'_>,
-    |state, interp, command, args| {
-        set_design_rule_command(
-            state,
-            interp,
-            command,
-            args.limit,
-            &args.objects,
-            DesignRuleScope::All,
-            DesignRuleKind::Fanout,
-        )
-        .map(constraint_change_result)
-    }
-);
+pub(crate) fn set_false_path(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: SetFalsePathArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    set_path_exception_command(
+        state,
+        interp,
+        command,
+        PathExceptionArgs {
+            mutation: MutationKind::Set,
+            kind: PathExceptionCommand::FalsePath,
+            points: args.points,
+            setup: args.setup,
+            hold: args.hold,
+            rise: args.rise,
+            fall: args.fall,
+            start: false,
+            end: false,
+            reset_path: args.reset_path,
+            ignore_clock_latency: false,
+            comment: args.comment.unwrap_or_default(),
+        },
+    )
+    .map(constraint_change_result)
+}
 
-timing_handler!(
-    set_path_delay,
-    SetPathDelayArgs<'_>,
-    PathDelayKind,
-    |state, interp, command, args, delay_kind| {
-        let kind = match delay_kind {
-            PathDelayKind::Max => PathExceptionCommand::MaxDelay(args.delay),
-            PathDelayKind::Min => PathExceptionCommand::MinDelay(args.delay),
-        };
-        set_path_exception_command(
-            state,
-            interp,
-            command,
-            PathExceptionArgs {
-                mutation: MutationKind::Set,
-                kind,
-                points: args.points,
-                setup: false,
-                hold: false,
-                rise: args.rise,
-                fall: args.fall,
-                start: false,
-                end: false,
-                reset_path: args.reset_path,
-                ignore_clock_latency: args.ignore_clock_latency,
-                comment: args.comment.unwrap_or_default(),
-            },
-        )
-        .map(constraint_change_result)
-    }
-);
+pub(crate) fn unset_path_exceptions(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: UnsetPathExceptionsArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    set_path_exception_command(
+        state,
+        interp,
+        command,
+        PathExceptionArgs {
+            mutation: MutationKind::Unset,
+            kind: PathExceptionCommand::FalsePath,
+            points: args.points,
+            setup: args.setup,
+            hold: args.hold,
+            rise: args.rise,
+            fall: args.fall,
+            start: false,
+            end: false,
+            reset_path: false,
+            ignore_clock_latency: false,
+            comment: String::new(),
+        },
+    )
+    .map(constraint_change_result)
+}
 
-timing_handler!(
-    set_false_path,
-    SetFalsePathArgs<'_>,
-    |state, interp, command, args| {
-        set_path_exception_command(
-            state,
-            interp,
-            command,
-            PathExceptionArgs {
-                mutation: MutationKind::Set,
-                kind: PathExceptionCommand::FalsePath,
-                points: args.points,
-                setup: args.setup,
-                hold: args.hold,
-                rise: args.rise,
-                fall: args.fall,
-                start: false,
-                end: false,
-                reset_path: args.reset_path,
-                ignore_clock_latency: false,
-                comment: args.comment.unwrap_or_default(),
-            },
-        )
-        .map(constraint_change_result)
-    }
-);
+pub(crate) fn set_multicycle_path(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    command: &'static str,
+    args: SetMulticyclePathArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    set_path_exception_command(
+        state,
+        interp,
+        command,
+        PathExceptionArgs {
+            mutation: MutationKind::Set,
+            kind: PathExceptionCommand::MultiCycle(args.cycles),
+            points: args.points,
+            setup: args.setup,
+            hold: args.hold,
+            rise: args.rise,
+            fall: args.fall,
+            start: args.start,
+            end: args.end,
+            reset_path: args.reset_path,
+            ignore_clock_latency: false,
+            comment: args.comment.unwrap_or_default(),
+        },
+    )
+    .map(constraint_change_result)
+}
 
-timing_handler!(
-    unset_path_exceptions,
-    UnsetPathExceptionsArgs<'_>,
-    |state, interp, command, args| {
-        set_path_exception_command(
-            state,
-            interp,
-            command,
-            PathExceptionArgs {
-                mutation: MutationKind::Unset,
-                kind: PathExceptionCommand::FalsePath,
-                points: args.points,
-                setup: args.setup,
-                hold: args.hold,
-                rise: args.rise,
-                fall: args.fall,
-                start: false,
-                end: false,
-                reset_path: false,
-                ignore_clock_latency: false,
-                comment: String::new(),
-            },
-        )
-        .map(constraint_change_result)
-    }
-);
+pub(crate) fn report_clock(
+    state: &ShellState,
+    _interp: *mut TclInterp,
+    _command: &'static str,
+    _args: ReportClockArgs,
+) -> Result<CommandResult, crate::ShellError> {
+    Ok(CommandResult::Complete(
+        state.session.borrow().report_clock(),
+    ))
+}
 
-timing_handler!(
-    set_multicycle_path,
-    SetMulticyclePathArgs<'_>,
-    |state, interp, command, args| {
-        set_path_exception_command(
-            state,
-            interp,
-            command,
-            PathExceptionArgs {
-                mutation: MutationKind::Set,
-                kind: PathExceptionCommand::MultiCycle(args.cycles),
-                points: args.points,
-                setup: args.setup,
-                hold: args.hold,
-                rise: args.rise,
-                fall: args.fall,
-                start: args.start,
-                end: args.end,
-                reset_path: args.reset_path,
-                ignore_clock_latency: false,
-                comment: args.comment.unwrap_or_default(),
-            },
-        )
-        .map(constraint_change_result)
-    }
-);
+pub(crate) fn check_timing(
+    state: &ShellState,
+    _interp: *mut TclInterp,
+    _command: &'static str,
+    _args: CheckTimingArgs,
+) -> Result<CommandResult, crate::ShellError> {
+    state
+        .session
+        .borrow()
+        .check_timing()
+        .map(CommandResult::Complete)
+        .map_err(crate::ShellError::from)
+}
 
-timing_handler!(
-    report_clock,
-    ReportClockArgs,
-    |state, _interp, _command, _args| {
-        Ok(CommandResult::Complete(
-            state.session.borrow().report_clock(),
-        ))
-    }
-);
-
-timing_handler!(
-    check_timing,
-    CheckTimingArgs,
-    |state, _interp, _command, _args| {
-        state
-            .session
-            .borrow()
-            .check_timing()
-            .map(CommandResult::Complete)
-            .map_err(crate::ShellError::from)
-    }
-);
-
-timing_handler!(
-    report_timing,
-    ReportTimingArgs<'_>,
-    |state, interp, command, args| {
-        let _ = command;
-        report_timing_command(state, interp, args).map(CommandResult::Complete)
-    }
-);
+pub(crate) fn report_timing(
+    state: &ShellState,
+    interp: *mut TclInterp,
+    _command: &'static str,
+    args: ReportTimingArgs<'_>,
+) -> Result<CommandResult, crate::ShellError> {
+    report_timing_command(state, interp, args).map(CommandResult::Complete)
+}

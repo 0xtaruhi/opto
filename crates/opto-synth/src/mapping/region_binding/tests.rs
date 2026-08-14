@@ -51,7 +51,7 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
     let ownership = crate::boolean::bitblast::LoweredRegionOwnership::new(local.values().len());
 
     let candidate = build_candidate_binding(
-        CandidateBindingInputs {
+        CandidateBindingDomain {
             source_module: &source,
             local_module: &local,
             source_to_local: &source_to_local,
@@ -139,7 +139,7 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
     let ownership = crate::boolean::bitblast::LoweredRegionOwnership::new(local.values().len());
 
     let candidate = build_candidate_binding(
-        CandidateBindingInputs {
+        CandidateBindingDomain {
             source_module: &source,
             local_module: &local,
             source_to_local: &source_to_local,

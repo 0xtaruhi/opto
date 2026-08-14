@@ -33,7 +33,7 @@ pub use opto_ir::word::SynthesisDirectiveKind;
 pub use opto_power::{PowerEngineMetrics, SwitchingActivity};
 pub use opto_synth::{
     OptimizationPhase, SourceChangeMetrics, StageId, SynthesisEffort, SynthesisMetrics,
-    SynthesisProgressStatus,
+    SynthesisProgress, SynthesisProgressStatus, SynthesisTimingProgress,
 };
 pub use opto_timing::{
     CaseAnalysisValue, ClockGroupKind, ClockSpec, ConstraintChange, CornerSelection, DelayType,

@@ -41,7 +41,8 @@ pub use api::{
     CheckDesignError, CombinationalCycle, CombinationalCycleNode, OptimizationPhase, ReferencePort,
     ReferencePortMap, StageId, SynthError, SynthesisConfig, SynthesisDiagnostics, SynthesisEffort,
     SynthesisMetrics, SynthesisOptions, SynthesisProgress, SynthesisProgressStatus,
-    SynthesisReport, SynthesisResult, TimingSummary, check_design_with_references,
+    SynthesisReport, SynthesisResult, SynthesisTimingProgress, TimingSummary,
+    check_design_with_references,
 };
 pub use artifact::{
     BoundaryEdgeId, ImplementationDb, ImplementationRegion, ImplementationRegionId,
@@ -76,9 +77,9 @@ pub use regional::{
     BoundaryInputContract, BoundaryOutputContract, BoundaryPortId, BoundaryResponse,
     BoundaryResponseRow, BoundaryValueRevision, ContractGeneration, EarlyLate, FiniteValue,
     OperationAnchorId, RegionAnchorId, RegionBoundaryPort, RegionBoundaryPortId, RegionContextKey,
-    RegionCoverPlan, RegionPlanCost, RegionPlanIdentity, RegionPlanSize, RegionPortDirection,
-    RegionRevision, RegionRowId, RiseFall, SynthesisRegion, SynthesisRegionGraph,
-    SynthesisRegionKind, SynthesisRegionRevision, TimingTag, TimingTagId, TimingTagInterner,
+    RegionCoverPlan, RegionPlanCost, RegionPortDirection, RegionRevision, RegionRowId, RiseFall,
+    SynthesisRegion, SynthesisRegionGraph, SynthesisRegionKind, SynthesisRegionRevision,
+    TimingCorners, TimingTag, TimingTagId, TimingTagInterner,
 };
 
 #[cfg(test)]

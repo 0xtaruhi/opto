@@ -358,7 +358,7 @@ pub(super) fn update_propagation_from_nets(
             .as_ref()
             .map_or(0, |paths| paths.nodes.len()),
         origins_len: propagation.origins.values.len(),
-        tags_len: propagation.tags.keys.len(),
+        tags_len: propagation.tags.len(),
         origins: Vec::new(),
         arrivals: Vec::new(),
         requireds: Vec::new(),

@@ -8,9 +8,9 @@
 
 use super::{
     BestMapping, CombinationalCellCatalog, MappedCellSource, MappedObjective, MappedRegionArtifact,
-    MappedRegionFootprint, MeasuredEpoch, RegionalIr, RegionalMappedState, RegionalMapper,
-    RegionalMappingOutcome, RegionalPlans, SynthesisProgress, WordMappedSignals,
-    boundary_observation_values, materialize, resolve_boundary_nets,
+    MappedRegionFootprint, RegionalMappedState, RegionalMapper, RegionalMappingOutcome,
+    RegionalMappingState, SynthesisProgress, WordMappedSignals, boundary_observation_values,
+    materialize, resolve_boundary_nets,
 };
 use crate::mapping::MappedOutput;
 use opto_ir::mapped::{CellId, RegionDelta};
@@ -22,11 +22,6 @@ struct PreparedRegion {
     origins: crate::artifact::implementation::OriginSetId,
 }
 
-struct PreparedArtifact {
-    row: usize,
-    artifact: MappedRegionArtifact,
-}
-
 impl RegionalMapper<'_> {
     fn combinational_catalog(&self) -> &CombinationalCellCatalog {
         &self.config.mapping_context.combinational_catalog
@@ -36,12 +31,11 @@ impl RegionalMapper<'_> {
     /// stops asking for another epoch, then publishes the best candidate.
     pub(super) fn run_epochs(
         &self,
-        ir: &mut RegionalIr<'_>,
-        state: &mut RegionalPlans,
+        state: &mut RegionalMappingState<'_>,
         observer: &mut dyn FnMut(SynthesisProgress),
     ) -> Result<RegionalMappingOutcome, crate::SynthError> {
         let mut coordinator = crate::regional::RegionalEpochCoordinator::new(self.config.effort);
-        let mut mapped = self.build_initial_generation(ir, state)?;
+        let mut mapped = self.build_initial_generation(state)?;
         let mut best = None::<BestMapping>;
         loop {
             let epoch = coordinator.epoch();
@@ -52,25 +46,25 @@ impl RegionalMapper<'_> {
                 state.rows.clone()
             };
             let plans = rows.iter().map(|row| row.plan.clone()).collect::<Vec<_>>();
-            let measured = self.measure_epoch(state, &mut mapped, &plans, epoch)?;
+            let (measured_plans, global_dynamic_power, timing_quality) =
+                self.measure_epoch(state, &mut mapped, &plans, epoch)?;
             let census = mapped.implementation_census.as_ref().ok_or_else(|| {
                 crate::SynthError::invariant("mapped implementation census was not initialized")
             })?;
             let objective = MappedObjective::from_plans(
-                &measured.plans,
-                measured.global_dynamic_power,
+                &measured_plans,
+                global_dynamic_power,
                 census.area(),
                 census.managed_leakage(),
                 census.managed_cell_count,
                 census.static_key,
-                measured.timing_quality,
+                timing_quality,
             )?;
             let current_is_best = best
                 .as_ref()
                 .is_none_or(|best| objective.better_than(&best.objective));
             if current_is_best {
-                let checkpoint_rows = measured
-                    .plans
+                let checkpoint_rows = measured_plans
                     .iter()
                     .cloned()
                     .zip(rows.iter().map(|row| row.binding.clone()))
@@ -81,12 +75,12 @@ impl RegionalMapper<'_> {
                     rows: checkpoint_rows,
                 });
             }
-            let decision = coordinator.evaluate(&measured.plans);
+            let decision = coordinator.evaluate(&measured_plans);
             // A remap that moves no contract would re-measure identical plans
             // and spend an epoch of budget for nothing.
             let decision = match decision {
                 crate::regional::EpochDecision::Remap(dirty) => {
-                    for (row, plan) in state.rows.iter_mut().zip(measured.plans) {
+                    for (row, plan) in state.rows.iter_mut().zip(measured_plans) {
                         row.plan = plan;
                     }
                     let changed = Self::reallocate_contracts(state, &dirty, epoch)?;
@@ -113,7 +107,7 @@ impl RegionalMapper<'_> {
                                     .then_some(index)
                             })
                             .collect::<Vec<_>>();
-                        self.replace_regions(ir, state, &mut mapped, &topology_changed)?;
+                        self.replace_regions(state, &mut mapped, &topology_changed)?;
                         continue;
                     }
                 }
@@ -142,7 +136,7 @@ impl RegionalMapper<'_> {
                             })
                             .collect::<Vec<_>>();
                         state.rows = best_rows.to_vec();
-                        self.replace_regions(ir, state, &mut mapped, &changed)?;
+                        self.replace_regions(state, &mut mapped, &changed)?;
                     }
                     let selected_plans = best_rows
                         .into_iter()
@@ -182,15 +176,14 @@ impl RegionalMapper<'_> {
 
     fn build_initial_generation(
         &self,
-        ir: &mut RegionalIr<'_>,
-        plans: &RegionalPlans,
+        state: &mut RegionalMappingState<'_>,
     ) -> Result<RegionalMappedState, crate::SynthError> {
-        let boundary_values = boundary_observation_values(self.regions, ir.region_ownership)?;
+        let boundary_values = boundary_observation_values(self.regions, state.region_ownership)?;
         let mut observed_values = materialize::region_delta::regional_binding_values(
-            plans.rows.iter().map(|row| &row.binding),
+            state.rows.iter().map(|row| &row.binding),
         )
         .into_vec();
-        observed_values.extend(materialize::sequential_binding_values(ir.module)?);
+        observed_values.extend(materialize::sequential_binding_values(state.module)?);
         observed_values.extend(
             boundary_values
                 .iter()
@@ -205,7 +198,7 @@ impl RegionalMapper<'_> {
             },
             observed_nets,
         ) = materialize::build_mapped_substrate(materialize::MappedSubstrateRequest {
-            module: ir.module,
+            module: state.module,
             options: self.config.options,
             design_references: self.config.design_references,
             reference_ports: self.config.reference_ports,
@@ -214,7 +207,7 @@ impl RegionalMapper<'_> {
             observed_values: &observed_values,
         })?;
         let signals =
-            WordMappedSignals::from_observations(ir.module, &observed_values, &observed_nets)?;
+            WordMappedSignals::from_observations(state.module, &observed_values, &observed_nets)?;
         let boundary_nets = resolve_boundary_nets(&signals, &boundary_values)?;
         let substrate_cell_count = substrate_sources.len();
         let mut cell_sources = vec![None; netlist.cell_slot_count()];
@@ -240,21 +233,21 @@ impl RegionalMapper<'_> {
             signals,
             boundary_nets: boundary_nets.into_boxed_slice(),
             footprints: std::iter::repeat_with(|| None)
-                .take(plans.rows.len())
+                .take(state.rows.len())
                 .collect(),
             timing: None,
         };
         let sequential = materialize::MappedSequentialArtifact::from_module(
-            ir.module,
+            state.module,
             &mapped.signals,
             self.regions,
-            ir.region_ownership,
+            state.region_ownership,
             &self.config,
         )?;
-        let rows = (0..plans.rows.len()).collect::<Vec<_>>();
-        let regions = self.prepare_regions(ir, plans, &mapped, &rows)?;
+        let rows = (0..state.rows.len()).collect::<Vec<_>>();
+        let regions = self.prepare_regions(state, &mapped, &rows)?;
         self.apply_regions(&mut mapped, &regions, Some(&sequential))?;
-        let census = self.full_implementation_census(ir, &mapped)?;
+        let census = self.full_implementation_census(state, &mapped)?;
         mapped.implementation_census = Some(census);
         mapped.timing = crate::closure::mmmc::MmmcTiming::new(
             &mapped.netlist,
@@ -279,13 +272,24 @@ impl RegionalMapper<'_> {
     }
 
     /// Measures a candidate directly on the long-lived mapped generation.
+    #[expect(
+        clippy::type_complexity,
+        reason = "named local destructuring is clearer than a one-use measurement carrier"
+    )]
     fn measure_epoch(
         &self,
-        state: &RegionalPlans,
+        state: &RegionalMappingState<'_>,
         mapped: &mut RegionalMappedState,
         plans: &[crate::RegionCoverPlan],
         epoch: u32,
-    ) -> Result<MeasuredEpoch, crate::SynthError> {
+    ) -> Result<
+        (
+            Vec<crate::RegionCoverPlan>,
+            Option<f64>,
+            Option<opto_timing::TimingQualitySummary>,
+        ),
+        crate::SynthError,
+    > {
         let (plans, global_dynamic_power) = {
             let _profile = self
                 .trace
@@ -310,51 +314,49 @@ impl RegionalMapper<'_> {
             .as_mut()
             .map(|timing| timing.metrics().map(|metrics| metrics.analysis))
             .transpose()?;
-        Ok(MeasuredEpoch {
-            plans,
-            global_dynamic_power,
-            timing_quality,
-        })
+        Ok((plans, global_dynamic_power, timing_quality))
     }
 
     fn replace_regions(
         &self,
-        ir: &mut RegionalIr<'_>,
-        state: &RegionalPlans,
+        state: &mut RegionalMappingState<'_>,
         mapped: &mut RegionalMappedState,
         rows: &[usize],
     ) -> Result<(), crate::SynthError> {
         if rows.is_empty() {
             return Ok(());
         }
-        let regions = self.prepare_regions(ir, state, mapped, rows)?;
+        let regions = self.prepare_regions(state, mapped, rows)?;
         self.apply_regions(mapped, &regions, None)
     }
 
     fn prepare_regions(
         &self,
-        ir: &mut RegionalIr<'_>,
-        state: &RegionalPlans,
+        state: &mut RegionalMappingState<'_>,
         mapped: &RegionalMappedState,
-        rows: &[usize],
+        materialization_rows: &[usize],
     ) -> Result<Vec<PreparedRegion>, crate::SynthError> {
-        if rows.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if materialization_rows
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
             return Err(crate::SynthError::invariant(
                 "regional materialization rows are not strictly ordered",
             ));
         }
-        let module = ir.module;
-        let region_ownership = ir.region_ownership;
-        let provenance = &mut *ir.provenance;
-        let mut prepared_regions = Vec::with_capacity(rows.len());
+        let module = state.module;
+        let region_ownership = state.region_ownership;
+        let plan_rows = &state.rows;
+        let provenance = &mut *state.provenance;
+        let mut prepared_regions = Vec::with_capacity(materialization_rows.len());
         self.runtime.commit_indexed(
-            rows.len(),
+            materialization_rows.len(),
             |slot| {
-                let row = rows[slot];
+                let row = materialization_rows[slot];
                 let _profile = self
                     .trace
                     .span(|| format!("initial_mapping.region[{row}].materialization"));
-                let state_row = state.rows.get(row).ok_or_else(|| {
+                let state_row = plan_rows.get(row).ok_or_else(|| {
                     crate::SynthError::invariant("regional artifact row is out of range")
                 })?;
                 let artifact = MappedRegionArtifact::from_library_plan(
@@ -370,17 +372,17 @@ impl RegionalMapper<'_> {
                         "mapped artifact belongs to another synthesis region",
                     ));
                 }
-                Ok::<_, crate::SynthError>(PreparedArtifact { row, artifact })
+                Ok::<_, crate::SynthError>((row, artifact))
             },
-            |_, prepared| {
+            |_, (row, artifact)| {
                 let origins = provenance.origins_for_operation_cover(
                     module,
-                    prepared.artifact.roots(),
-                    prepared.artifact.leaves(),
+                    artifact.roots(),
+                    artifact.leaves(),
                 )?;
                 prepared_regions.push(PreparedRegion {
-                    row: prepared.row,
-                    artifact: prepared.artifact,
+                    row,
+                    artifact,
                     origins,
                 });
                 Ok(())
@@ -577,7 +579,7 @@ impl RegionalMapper<'_> {
     /// caller can decide whether another epoch is worth committing before it
     /// changes the shared mapped generation.
     fn reallocate_contracts(
-        state: &mut RegionalPlans,
+        state: &mut RegionalMappingState<'_>,
         dirty: &[crate::RegionRowId],
         epoch: u32,
     ) -> Result<Box<[crate::RegionRowId]>, crate::SynthError> {
@@ -589,7 +591,7 @@ impl RegionalMapper<'_> {
     /// Rebinds measured contracts without reopening frozen regional topology.
     fn refresh_contracts(
         &self,
-        state: &mut RegionalPlans,
+        state: &mut RegionalMappingState<'_>,
         dirty: &[crate::RegionRowId],
     ) -> Result<(), crate::SynthError> {
         let contexts = dirty
@@ -614,7 +616,7 @@ impl RegionalMapper<'_> {
 
     fn region_context(
         &self,
-        state: &RegionalPlans,
+        state: &RegionalMappingState<'_>,
         row: crate::RegionRowId,
     ) -> Result<crate::RegionContextKey, crate::SynthError> {
         let region = self

@@ -4,9 +4,10 @@
 //! Streaming, design-local reconciliation of persistent object identities.
 
 use super::{
-    AnyObjectId, Arc, DesignPosition, HashMap, LiveSlot, NameCheckpoint, NameId, ObjectIdSet,
-    ObjectKey, ObjectRegistry, ObjectUid, RegistryError, ResolvedObject,
+    AnyObjectId, DesignPosition, HashMap, LiveSlot, NameCheckpoint, NameId, ObjectIdSet, ObjectKey,
+    ObjectRegistry, ObjectRegistryOwner, ObjectUid, RegistryError, ResolvedObject,
 };
+use opto_core::OwnerToken;
 use std::cmp::Ordering;
 
 /// Whether one design keeps identities for locators present in the new view.
@@ -60,7 +61,7 @@ struct PlannedDesign {
 /// high-water mark, and live length.
 #[derive(Debug)]
 pub struct ObjectRegistryReconcilePlan {
-    owner: Arc<()>,
+    owner: OwnerToken<ObjectRegistryOwner>,
     next_uid: u64,
     live_len: usize,
     designs: Box<[PlannedDesign]>,
@@ -114,7 +115,7 @@ impl ObjectRegistryReconcilePlan {
     }
 
     fn validate_owner(&self, registry: &ObjectRegistry) -> Result<(), RegistryError> {
-        if !Arc::ptr_eq(&self.owner, &registry.owner)
+        if !self.owner.same_owner(&registry.owner)
             || self.next_uid != registry.next_uid
             || self.live_len != registry.len
         {
@@ -299,7 +300,7 @@ impl ObjectRegistry {
         );
 
         Ok(ObjectRegistryReconcilePlan {
-            owner: Arc::clone(&self.owner),
+            owner: self.owner.clone(),
             next_uid: self.next_uid,
             live_len: self.len,
             designs,

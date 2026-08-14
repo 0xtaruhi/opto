@@ -20,6 +20,29 @@ fn first_instance_binding(graph: &DefinitionGraph) -> LinkBinding {
 }
 
 #[test]
+fn structural_equality_does_not_merge_runtime_ownership() {
+    let build = || {
+        DefinitionGraph::build(
+            [
+                definition("top", &[("u0", "leaf")]),
+                definition("leaf", &[]),
+            ],
+            [LinkProviderInput::definitions("*")],
+            "top",
+        )
+        .unwrap()
+    };
+    let first = build();
+    let second = build();
+    assert_eq!(first, second);
+
+    let occurrences = OccurrenceGraph::materialize(&first).unwrap();
+    let child = occurrences.ids().nth(1).unwrap();
+    assert!(occurrences.instance(&second, child).is_none());
+    assert!(occurrences.format_path(&second, child).is_none());
+}
+
+#[test]
 fn repeated_hierarchy_is_counted_without_expanding_definitions() {
     let graph = DefinitionGraph::build(
         [

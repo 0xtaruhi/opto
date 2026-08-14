@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BoundaryContract, EarlyLate, FiniteValue, RegionContextKey, RiseFall};
-use crate::{RegionAnchorId, RegionRevision};
+use super::{BoundaryContract, EarlyLate, FiniteValue, RegionContextKey, TimingCorners};
+use crate::{RegionAnchorId, RegionRevision, SynthesisRegion};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::mem::{size_of, size_of_val};
@@ -16,9 +16,9 @@ pub struct BoundaryResponseRow {
     /// Interned timing-path semantics for the measured lane.
     pub timing_tag: super::TimingTagId,
     /// Measured arrival by corner and transition.
-    pub arrival: EarlyLate<RiseFall<Option<FiniteValue>>>,
+    pub arrival: TimingCorners<Option<FiniteValue>>,
     /// Measured transition by corner and transition.
-    pub transition: EarlyLate<RiseFall<Option<FiniteValue>>>,
+    pub transition: TimingCorners<Option<FiniteValue>>,
     /// Measured input capacitance by corner.
     pub input_capacitance: EarlyLate<Option<FiniteValue>>,
     /// Measured switching activity when power analysis was available.
@@ -99,28 +99,6 @@ pub struct RegionCoverPlan {
     payload: Arc<[u8]>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Stable semantic and context identity carried by one regional plan.
-pub struct RegionPlanIdentity {
-    /// Content-anchored identity of the synthesized region.
-    pub region: RegionAnchorId,
-    /// Region semantics excluding external timing context.
-    pub revision: RegionRevision,
-    /// Complete target, scenario, contract, and predecessor context.
-    pub context_key: RegionContextKey,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Exact artifact-local topology counts encoded by one regional plan.
-pub struct RegionPlanSize {
-    /// Number of nets encoded exclusively inside the region payload.
-    pub local_net_count: u32,
-    /// Number of cells encoded exclusively inside the region payload.
-    pub local_cell_count: u32,
-    /// Number of cell pins encoded exclusively inside the region payload.
-    pub local_pin_count: u32,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Checkpoint-safe compact representation of one selected regional cover.
 ///
@@ -169,24 +147,48 @@ impl RegionCoverPlan {
     /// Seal a compact plan before optional measured responses are attached.
     #[must_use]
     pub fn new(
-        identity: RegionPlanIdentity,
+        region: SynthesisRegion,
+        context_key: RegionContextKey,
         cost: RegionPlanCost,
-        size: RegionPlanSize,
+        local_net_count: u32,
+        local_pin_count: u32,
         boundary_response: Vec<BoundaryContract>,
         payload: Vec<u8>,
     ) -> Self {
         Self {
-            region: identity.region,
-            revision: identity.revision,
-            context_key: identity.context_key,
+            region: region.id(),
+            revision: region.revision(),
+            context_key,
             cost,
-            local_net_count: size.local_net_count,
-            local_cell_count: size.local_cell_count,
-            local_pin_count: size.local_pin_count,
+            local_net_count,
+            local_cell_count: cost.cell_count,
+            local_pin_count,
             boundary_response: boundary_response.into(),
             measured_response: Arc::from([]),
             implementation_cells: Arc::from([]),
             payload: payload.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty_for_test(
+        region: RegionAnchorId,
+        revision: RegionRevision,
+        context_key: RegionContextKey,
+        cost: RegionPlanCost,
+    ) -> Self {
+        Self {
+            region,
+            revision,
+            context_key,
+            cost,
+            local_net_count: 0,
+            local_cell_count: cost.cell_count,
+            local_pin_count: 0,
+            boundary_response: Arc::from([]),
+            measured_response: Arc::from([]),
+            implementation_cells: Arc::from([]),
+            payload: Arc::from([]),
         }
     }
 
@@ -330,10 +332,6 @@ impl RegionCoverPlan {
 impl RegionCoverPlanRecord {
     pub(crate) const fn region(&self) -> RegionAnchorId {
         self.region
-    }
-
-    pub(crate) const fn context_key(&self) -> RegionContextKey {
-        self.context_key
     }
 
     /// Validates a portable record independently of a live region graph.

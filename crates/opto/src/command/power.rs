@@ -165,11 +165,10 @@ pub(crate) fn reset_switching_activity(
 
 pub(crate) fn report_power(
     state: &ShellState,
-    interp: *mut TclInterp,
+    _interp: *mut TclInterp,
     command: &'static str,
     args: ReportPowerArgs,
 ) -> Result<CommandResult, crate::ShellError> {
-    let _ = interp;
     let mut options = ReportPowerOptions::default();
     if args.cell {
         options.kind = PowerReportKind::Cell;

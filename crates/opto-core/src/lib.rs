@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Compact identities, revisions, and interned storage shared by Opto.
+//! Compact identities, typed arenas, and interned storage shared by Opto.
 //!
 //! Persistent Opto structures use these allocation primitives. [`ObjectUid`]
 //! identifies a logical object for its entire lifetime, while typed arena IDs
 //! identify compact slots inside one sealed representation. [`RevisionId`]
-//! orders published state, and [`NameTable`] stores each distinct string once
-//! so large designs do not duplicate names.
+//! orders published state, [`OwnerToken`] distinguishes process-local owners,
+//! and [`DenseInterner`] assigns deterministic typed IDs without duplicating
+//! each domain's forward/reverse indexes. [`NameTable`] stores each distinct
+//! string once so large designs do not duplicate names.
 //!
 //! The central invariant is that compact IDs are meaningful only in the arena
 //! that created them. Persistent references must use a UID or carry the owning
@@ -15,6 +17,9 @@
 //! a checkpoint removes only allocations made after it.
 
 mod diagnostic;
+mod identity;
+mod index;
+mod interner;
 mod names;
 mod paged;
 pub mod resident;
@@ -23,6 +28,9 @@ mod rows;
 pub use diagnostic::{
     Diagnostic, DiagnosticLabel, DiagnosticLocation, DiagnosticSeverity, DiagnosticSource,
 };
+pub use identity::OwnerToken;
+pub use index::{ArenaIndex, IndexVec};
+pub use interner::DenseInterner;
 pub use names::{NameCheckpoint, NameError, NameId, NameTable};
 pub use paged::PagedCowVec;
 pub use rows::{PackedRows, PackedRowsBuilder, PackedRowsError, RowArena, RowArenaBuilder};

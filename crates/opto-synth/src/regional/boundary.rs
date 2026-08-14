@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::{RegionBoundaryPort, RegionPortDirection, RegionRevision, SynthesisEffort};
+use opto_core::{ArenaIndex, DenseInterner};
 use opto_timing::{ClockId, ScenarioGeneration, ScenarioId, TimingEdge};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -103,6 +103,12 @@ impl<T> EarlyLate<T> {
     }
 }
 
+/// Early/late timing corners, each split into rise/fall transition lanes.
+///
+/// This alias names the recurring composition without introducing another
+/// owner or changing its representation.
+pub type TimingCorners<T> = EarlyLate<RiseFall<T>>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
 /// Dense identity of one interned timing-path semantic tag.
@@ -113,6 +119,20 @@ impl TimingTagId {
     /// Return the dense interner index.
     pub const fn raw(self) -> u32 {
         self.0
+    }
+}
+
+impl ArenaIndex for TimingTagId {
+    type Error = BoundaryContractError;
+
+    fn try_from_index(index: usize) -> Result<Self, Self::Error> {
+        u32::try_from(index)
+            .map(Self)
+            .map_err(|_| BoundaryContractError::Capacity("timing tag"))
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
@@ -159,8 +179,7 @@ pub struct TimingTag {
 #[derive(Debug, Clone, Default)]
 /// Canonical interner for sparse timing tags.
 pub struct TimingTagInterner {
-    tags: Vec<TimingTag>,
-    ids: BTreeMap<TimingTag, TimingTagId>,
+    tags: DenseInterner<TimingTagId, TimingTag>,
 }
 
 impl TimingTagInterner {
@@ -177,32 +196,24 @@ impl TimingTagInterner {
     /// Returns [`BoundaryContractError::Capacity`] after the 32-bit ID domain is
     /// exhausted.
     pub fn intern(&mut self, tag: TimingTag) -> Result<TimingTagId, BoundaryContractError> {
-        if let Some(&id) = self.ids.get(&tag) {
-            return Ok(id);
-        }
-        let raw = u32::try_from(self.tags.len())
-            .map_err(|_| BoundaryContractError::Capacity("timing tag"))?;
-        let id = TimingTagId(raw);
-        self.tags.push(tag.clone());
-        self.ids.insert(tag, id);
-        Ok(id)
+        self.tags.intern(tag)
     }
 
     #[must_use]
     /// Resolve an ID allocated by this interner.
     pub fn get(&self, id: TimingTagId) -> Option<&TimingTag> {
-        self.tags.get(id.raw() as usize)
+        self.tags.get(id)
     }
 
     #[must_use]
     /// Return interned tags in dense-ID order.
     pub fn tags(&self) -> &[TimingTag] {
-        &self.tags
+        self.tags.values()
     }
 }
 
 type OptionalLane = RiseFall<Option<FiniteValue>>;
-type OptionalEarlyLateLane = EarlyLate<OptionalLane>;
+type OptionalEarlyLateLane = TimingCorners<Option<FiniteValue>>;
 
 /// One MMMC analysis corner.
 ///

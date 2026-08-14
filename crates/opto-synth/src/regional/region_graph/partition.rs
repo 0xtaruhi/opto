@@ -352,7 +352,7 @@ fn partition_operations(
     let (components, component_of) = dependency_components(module, &dependencies);
     let criticality = estimates.criticality(&dependencies);
     let seeds = initial_seeds(module, anchors, &criticality, &roots, &reachable);
-    let mut regions = claim_cones(ConeClaimInputs {
+    let mut regions = ConeClaimState {
         module,
         anchors,
         dependencies: &dependencies,
@@ -363,7 +363,10 @@ fn partition_operations(
         reachable: &reachable,
         seeds,
         size_limit: policy.target,
-    })?;
+        owners: vec![None; module.operations().len()],
+        regions: Vec::new(),
+    }
+    .claim()?;
     coarsen_regions(module, &dependencies, &criticality, policy, &mut regions)?;
     Ok(regions)
 }
@@ -673,7 +676,8 @@ fn enqueue_seed(
         .insert(operation);
 }
 
-struct ConeClaimInputs<'a> {
+/// Mutable ownership state for one deterministic cone-claim pass.
+struct ConeClaimState<'a> {
     module: &'a word::WordModule,
     anchors: &'a [OperationAnchorId],
     dependencies: &'a [Vec<usize>],
@@ -684,115 +688,121 @@ struct ConeClaimInputs<'a> {
     reachable: &'a [bool],
     seeds: BTreeMap<(std::cmp::Reverse<u64>, OperationAnchorId), BTreeSet<usize>>,
     size_limit: u64,
+    owners: Vec<Option<usize>>,
+    regions: Vec<TempRegion>,
 }
 
-fn claim_cones(request: ConeClaimInputs<'_>) -> Result<Vec<TempRegion>, crate::SynthError> {
-    let ConeClaimInputs {
-        module,
-        anchors,
-        dependencies,
-        components,
-        component_of,
-        criticality,
-        estimates,
-        reachable,
-        mut seeds,
-        size_limit,
-    } = request;
-    let mut owners = vec![None; module.operations().len()];
-    let mut regions = Vec::new();
-    loop {
-        if seeds.is_empty() {
-            let next = owners
-                .iter()
-                .enumerate()
-                .filter(|&(operation, owner)| reachable[operation] && owner.is_none())
-                .max_by_key(|&(operation, _)| {
-                    (
-                        criticality[operation],
-                        std::cmp::Reverse(anchors[operation]),
-                    )
-                })
-                .map(|(operation, _)| operation);
-            let Some(next) = next else { break };
-            enqueue_seed(&mut seeds, next, anchors, criticality);
-        }
-        let (key, roots) = seeds.pop_first().expect("nonempty seed queue was checked");
-        let mut pending = roots.iter().copied().collect::<Vec<_>>();
-        pending.sort_unstable_by_key(|&operation| {
-            (
-                criticality[operation],
-                std::cmp::Reverse(anchors[operation]),
-            )
-        });
-        let mut operations = Vec::new();
-        let mut work = 0u64;
-        let mut delay = 0u64;
-        let mut wiring = 0u64;
-        let region_index = regions.len();
-        while let Some(operation) = pending.pop() {
-            if owners[operation].is_some() {
-                continue;
+impl ConeClaimState<'_> {
+    fn claim(self) -> Result<Vec<TempRegion>, crate::SynthError> {
+        let Self {
+            module,
+            anchors,
+            dependencies,
+            components,
+            component_of,
+            criticality,
+            estimates,
+            reachable,
+            mut seeds,
+            size_limit,
+            mut owners,
+            mut regions,
+        } = self;
+        loop {
+            if seeds.is_empty() {
+                let next = owners
+                    .iter()
+                    .enumerate()
+                    .filter(|&(operation, owner)| reachable[operation] && owner.is_none())
+                    .max_by_key(|&(operation, _)| {
+                        (
+                            criticality[operation],
+                            std::cmp::Reverse(anchors[operation]),
+                        )
+                    })
+                    .map(|(operation, _)| operation);
+                let Some(next) = next else { break };
+                enqueue_seed(&mut seeds, next, anchors, criticality);
             }
-            let component = &components[component_of[operation]];
-            let component_work = component.iter().fold(0u64, |total, &member| {
-                total.saturating_add(operation_work(module, &module.operations()[member]))
+            let (key, roots) = seeds.pop_first().expect("nonempty seed queue was checked");
+            let mut pending = roots.iter().copied().collect::<Vec<_>>();
+            pending.sort_unstable_by_key(|&operation| {
+                (
+                    criticality[operation],
+                    std::cmp::Reverse(anchors[operation]),
+                )
             });
-            if !operations.is_empty() && work.saturating_add(component_work) > size_limit {
-                enqueue_seed(&mut seeds, operation, anchors, criticality);
-                continue;
-            }
-            let mut inputs = Vec::new();
-            for &member in component {
-                if owners[member].replace(region_index).is_some() {
-                    return Err(crate::SynthError::invariant(
-                        "dependency component was split between cone owners",
-                    ));
+            let mut operations = Vec::new();
+            let mut work = 0u64;
+            let mut delay = 0u64;
+            let mut wiring = 0u64;
+            let region_index = regions.len();
+            while let Some(operation) = pending.pop() {
+                if owners[operation].is_some() {
+                    continue;
                 }
-                operations.push(word::OpId::from_index(member).map_err(crate::SynthError::from)?);
-                inputs.extend(dependencies[member].iter().copied().filter(|&input| {
-                    component_of[input] != component_of[member]
-                        && (!is_state(&module.operations()[input].kind) || roots.contains(&input))
-                }));
+                let component = &components[component_of[operation]];
+                let component_work = component.iter().fold(0u64, |total, &member| {
+                    total.saturating_add(operation_work(module, &module.operations()[member]))
+                });
+                if !operations.is_empty() && work.saturating_add(component_work) > size_limit {
+                    enqueue_seed(&mut seeds, operation, anchors, criticality);
+                    continue;
+                }
+                let mut inputs = Vec::new();
+                for &member in component {
+                    if owners[member].replace(region_index).is_some() {
+                        return Err(crate::SynthError::invariant(
+                            "dependency component was split between cone owners",
+                        ));
+                    }
+                    operations
+                        .push(word::OpId::from_index(member).map_err(crate::SynthError::from)?);
+                    inputs.extend(dependencies[member].iter().copied().filter(|&input| {
+                        component_of[input] != component_of[member]
+                            && (!is_state(&module.operations()[input].kind)
+                                || roots.contains(&input))
+                    }));
+                }
+                work = work.saturating_add(component_work);
+                delay = component.iter().fold(delay, |total, &member| {
+                    total.saturating_add(estimates.operations[member].delay)
+                });
+                wiring = component.iter().fold(wiring, |total, &member| {
+                    total.saturating_add(estimates.operations[member].wiring_units)
+                });
+                inputs.sort_unstable_by_key(|&input| {
+                    (criticality[input], std::cmp::Reverse(anchors[input]))
+                });
+                inputs.dedup();
+                pending.extend(inputs);
             }
-            work = work.saturating_add(component_work);
-            delay = component.iter().fold(delay, |total, &member| {
-                total.saturating_add(estimates.operations[member].delay)
+            if operations.is_empty() {
+                continue;
+            }
+            operations.sort_unstable();
+            let kind = if operations
+                .iter()
+                .any(|operation| is_state(&module.operations()[operation.index()].kind))
+            {
+                SynthesisRegionKind::State
+            } else {
+                SynthesisRegionKind::Combinational
+            };
+            regions.push(TempRegion {
+                anchor: key.1.bytes(),
+                kind,
+                operations,
+                memories: Vec::new(),
+                work,
+                delay,
+                wiring,
+                id: RegionAnchorId::from_bytes([0; 32]),
+                revision: RegionRevision::from_bytes([0; 32]),
             });
-            wiring = component.iter().fold(wiring, |total, &member| {
-                total.saturating_add(estimates.operations[member].wiring_units)
-            });
-            inputs.sort_unstable_by_key(|&input| {
-                (criticality[input], std::cmp::Reverse(anchors[input]))
-            });
-            inputs.dedup();
-            pending.extend(inputs);
         }
-        if operations.is_empty() {
-            continue;
-        }
-        operations.sort_unstable();
-        let kind = if operations
-            .iter()
-            .any(|operation| is_state(&module.operations()[operation.index()].kind))
-        {
-            SynthesisRegionKind::State
-        } else {
-            SynthesisRegionKind::Combinational
-        };
-        regions.push(TempRegion {
-            anchor: key.1.bytes(),
-            kind,
-            operations,
-            memories: Vec::new(),
-            work,
-            delay,
-            wiring,
-            id: RegionAnchorId::from_bytes([0; 32]),
-            revision: RegionRevision::from_bytes([0; 32]),
-        });
+        Ok(regions)
     }
-    Ok(regions)
 }
 
 fn dependency_components(

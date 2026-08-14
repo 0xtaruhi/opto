@@ -81,7 +81,7 @@ impl TimingContextCheckpoint {
     /// capacities are invalid.
     pub fn restore(self) -> Result<TimingContext, crate::TimingError> {
         let mut timing = TimingContext {
-            owner: Arc::new(()),
+            owner: opto_core::OwnerToken::fresh(),
             revision: self.revision,
             clocks: OrderedArena::from_values(self.clocks)?,
             input_transitions: self.input_transitions,

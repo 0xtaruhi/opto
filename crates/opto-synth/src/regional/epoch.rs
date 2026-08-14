@@ -245,19 +245,14 @@ fn violates_measured_contract(plan: &RegionCoverPlan) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        FiniteValue, RegionAnchorId, RegionContextKey, RegionPlanCost, RegionPlanIdentity,
-        RegionPlanSize, RegionRevision,
-    };
+    use crate::{FiniteValue, RegionAnchorId, RegionContextKey, RegionPlanCost, RegionRevision};
 
     fn plan(violation: f64) -> RegionCoverPlan {
         let zero = FiniteValue::new(0.0).unwrap();
-        RegionCoverPlan::new(
-            RegionPlanIdentity {
-                region: RegionAnchorId::from_bytes_for_test([1; 32]),
-                revision: RegionRevision::from_bytes_for_test([2; 32]),
-                context_key: RegionContextKey::from_bytes_for_test([3; 32]),
-            },
+        RegionCoverPlan::empty_for_test(
+            RegionAnchorId::from_bytes_for_test([1; 32]),
+            RegionRevision::from_bytes_for_test([2; 32]),
+            RegionContextKey::from_bytes_for_test([3; 32]),
             RegionPlanCost {
                 legal: true,
                 worst_normalized_violation: FiniteValue::new(violation).unwrap(),
@@ -269,13 +264,6 @@ mod tests {
                 cell_count: 0,
                 stable_plan_key: [0; 32],
             },
-            RegionPlanSize {
-                local_net_count: 0,
-                local_cell_count: 0,
-                local_pin_count: 0,
-            },
-            Vec::new(),
-            Vec::new(),
         )
     }
 

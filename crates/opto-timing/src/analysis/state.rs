@@ -59,10 +59,23 @@ impl PropagationState {
                 0
             }
         };
-        let tags = opto_core::resident::slice_bytes::<TagKey>(self.tags.keys.capacity())
-            .saturating_add(btree_memory_bytes::<TagKey, TagId>(self.tags.ids.len()))
-            .saturating_add(self.tags.keys.iter().map(tag_spill).sum::<usize>())
-            .saturating_add(self.tags.ids.keys().map(tag_spill).sum::<usize>());
+        let tags = opto_core::resident::slice_bytes::<TagKey>(self.tags.entries.value_capacity())
+            .saturating_add(btree_memory_bytes::<TagKey, TagId>(self.tags.entries.len()))
+            .saturating_add(
+                self.tags
+                    .entries
+                    .values()
+                    .iter()
+                    .map(tag_spill)
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.tags
+                    .entries
+                    .reverse_keys()
+                    .map(tag_spill)
+                    .sum::<usize>(),
+            );
         arrivals
             .saturating_add(requireds)
             .saturating_add(paths)
@@ -251,6 +264,21 @@ pub(super) enum OriginKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct TagId(u32);
 
+impl opto_core::ArenaIndex for TagId {
+    type Error = crate::TimingError;
+
+    fn try_from_index(index: usize) -> Result<Self, Self::Error> {
+        let raw = u32::try_from(index).map_err(|_| crate::TimingAnalysisError::Capacity {
+            resource: "arrival tag arena",
+        })?;
+        Ok(Self(raw))
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct TagKey {
     pub(super) launch_domain: LaunchDomain,
@@ -265,40 +293,26 @@ pub(super) enum LaunchDomain {
 
 #[derive(Debug, Default)]
 pub(super) struct TagArena {
-    pub(super) ids: BTreeMap<TagKey, TagId>,
-    pub(super) keys: Vec<TagKey>,
+    entries: opto_core::DenseInterner<TagId, TagKey>,
 }
 
 impl TagArena {
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(super) fn intern(&mut self, key: TagKey) -> Result<TagId, crate::TimingError> {
-        if let Some(&id) = self.ids.get(&key) {
-            return Ok(id);
-        }
-        if self.keys.len() >= u32::MAX as usize {
-            return Err(crate::TimingAnalysisError::Capacity {
-                resource: "arrival tag arena",
-            }
-            .into());
-        }
-        let id = TagId(self.keys.len().try_into().map_err(|_| {
-            crate::TimingAnalysisError::Capacity {
-                resource: "arrival tag arena",
-            }
-        })?);
-        self.ids.insert(key.clone(), id);
-        self.keys.push(key);
-        Ok(id)
+        self.entries.intern(key)
     }
 
     pub(super) fn key(&self, id: TagId) -> Result<&TagKey, crate::TimingError> {
-        self.keys
-            .get(id.0 as usize)
+        self.entries
+            .get(id)
             .ok_or_else(|| crate::TimingAnalysisError::UnknownArrivalTag { id: id.0 }.into())
     }
 
     pub(super) fn truncate(&mut self, len: usize) {
-        self.keys.truncate(len);
-        self.ids.retain(|_, id| (id.0 as usize) < len);
+        self.entries.truncate(len);
     }
 
     pub(super) fn intern_family(
@@ -376,9 +390,8 @@ impl TagArena {
             launch_domain: current_key.launch_domain,
             path_exceptions,
         };
-        self.ids
-            .get(&key)
-            .copied()
+        self.entries
+            .find(&key)
             .ok_or_else(|| crate::TimingAnalysisError::UnknownArrivalTagTransition.into())
     }
 }

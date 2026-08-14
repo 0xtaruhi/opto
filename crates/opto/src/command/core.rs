@@ -202,11 +202,10 @@ fn exit_command(command: &str, code: Option<i32>) -> Result<CommandResult, crate
 
 pub(crate) fn help(
     state: &ShellState,
-    interp: *mut TclInterp,
+    _interp: *mut TclInterp,
     _command: &'static str,
     args: HelpArgs,
 ) -> Result<CommandResult, crate::ShellError> {
-    let _ = interp;
     let text = match args.command {
         None => state.commands.help_text(),
         Some(name) => state

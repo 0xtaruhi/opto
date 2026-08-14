@@ -331,8 +331,18 @@ impl RegionPlanBinding {
     }
 }
 
+pub(crate) struct CandidateBinding {
+    pub(crate) binding: RegionPlanBinding,
+    pub(crate) output_widths: Box<[usize]>,
+}
+
+/// Borrowed identity domain used to bind one private cover to the frozen design.
+///
+/// Only sources present in this view may cross the regional publication
+/// boundary; keeping them together centralizes that authority without owning a
+/// second copy of the plan or its topology.
 #[derive(Clone, Copy)]
-pub(crate) struct CandidateBindingInputs<'a> {
+pub(crate) struct CandidateBindingDomain<'a> {
     pub(crate) source_module: &'a word::WordModule,
     pub(crate) local_module: &'a word::WordModule,
     pub(crate) source_to_local: &'a std::collections::BTreeMap<word::ValueId, word::ValueId>,
@@ -341,11 +351,6 @@ pub(crate) struct CandidateBindingInputs<'a> {
     pub(crate) operation_sources: &'a [Option<word::OpId>],
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
     pub(crate) ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
-}
-
-pub(crate) struct CandidateBinding {
-    pub(crate) binding: RegionPlanBinding,
-    pub(crate) output_widths: Box<[usize]>,
 }
 
 type BindingMap = std::collections::BTreeMap<word::ValueId, Vec<RegionPlanValueBinding>>;
@@ -404,11 +409,11 @@ fn bind_root_outputs(
 }
 
 pub(crate) fn build_candidate_binding<'a>(
-    inputs: CandidateBindingInputs<'_>,
+    domain: CandidateBindingDomain<'_>,
     subject_inputs: &[word::ValueId],
     output_values: impl IntoIterator<Item = &'a [word::ValueId]>,
 ) -> Result<CandidateBinding, crate::SynthError> {
-    let CandidateBindingInputs {
+    let CandidateBindingDomain {
         source_module,
         local_module,
         source_to_local,
@@ -417,7 +422,7 @@ pub(crate) fn build_candidate_binding<'a>(
         operation_sources,
         root_bindings,
         ownership,
-    } = inputs;
+    } = domain;
     let output_values = output_values.into_iter().collect::<Vec<_>>();
     let mut local_to_sources = BindingMap::new();
     // Input identities come only from the region graph's frozen boundary

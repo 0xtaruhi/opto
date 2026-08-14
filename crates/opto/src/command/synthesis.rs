@@ -99,15 +99,17 @@ impl OptimizationTrace {
     fn record(&self, event: opto_session::SynthesisTrace) {
         use std::sync::atomic::Ordering;
 
-        let progress = &event.progress;
-        if progress.optimization.is_none() {
-            self.record_stage(event.design, progress.stage, progress.status);
-            return;
-        }
-        let Some(area) = progress.area else {
-            return;
-        };
-        let Some(phase) = progress.optimization else {
+        let opto_session::SynthesisProgress::Candidate {
+            phase,
+            area,
+            cells,
+            timing,
+        } = event.progress
+        else {
+            let opto_session::SynthesisProgress::Stage { stage, status } = event.progress else {
+                unreachable!("synthesis progress variants are exhaustive")
+            };
+            self.record_stage(event.design, stage, status);
             return;
         };
         let elapsed = self.started.elapsed().as_secs();
@@ -119,18 +121,15 @@ impl OptimizationTrace {
         {
             return;
         }
-        let wns = progress
-            .worst_slack
+        let wns = timing
+            .and_then(|timing| timing.worst_slack)
             .map_or_else(|| "--".to_string(), |wns| format!("{wns:.2}"));
-        let tns = progress
-            .total_negative_slack
+        let tns = timing
+            .map(|timing| timing.total_negative_slack)
             .map_or_else(|| "--".to_string(), |tns| format!("{tns:.1}"));
-        let violations = progress
-            .violations
+        let violations = timing
+            .map(|timing| timing.violations)
             .map_or_else(|| "--".to_string(), |count| count.to_string());
-        let cells = progress
-            .cells
-            .map_or_else(|| "--".to_string(), |cells| cells.to_string());
         println!(
             "Optimization: elapsed={:02}:{:02}:{:02} phase=\"{}\" area={area:.1} \
              worst_slack={wns} total_negative_slack={tns} violations={violations} cells={cells}",
@@ -345,21 +344,19 @@ fn report_resources_command(
 
 pub(crate) fn synth(
     state: &ShellState,
-    interp: *mut TclInterp,
-    command: &'static str,
+    _interp: *mut TclInterp,
+    _command: &'static str,
     _args: SynthArgs,
 ) -> Result<CommandResult, crate::ShellError> {
-    let _ = (interp, command);
     synth_command(state).map(CommandResult::Complete)
 }
 
 pub(crate) fn report_area(
     state: &ShellState,
-    interp: *mut TclInterp,
-    command: &'static str,
+    _interp: *mut TclInterp,
+    _command: &'static str,
     _args: ReportAreaArgs,
 ) -> Result<CommandResult, crate::ShellError> {
-    let _ = (interp, command);
     state
         .session
         .borrow()
@@ -370,11 +367,10 @@ pub(crate) fn report_area(
 
 pub(crate) fn report_qor(
     state: &ShellState,
-    interp: *mut TclInterp,
-    command: &'static str,
+    _interp: *mut TclInterp,
+    _command: &'static str,
     _args: ReportQorArgs,
 ) -> Result<CommandResult, crate::ShellError> {
-    let _ = (interp, command);
     state
         .session
         .borrow()
@@ -386,9 +382,8 @@ pub(crate) fn report_qor(
 pub(crate) fn report_resources(
     state: &ShellState,
     interp: *mut TclInterp,
-    command: &'static str,
+    _command: &'static str,
     args: ReportResourcesArgs<'_>,
 ) -> Result<CommandResult, crate::ShellError> {
-    let _ = command;
     report_resources_command(state, interp, args).map(CommandResult::Complete)
 }

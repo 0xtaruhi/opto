@@ -19,5 +19,5 @@ pub use error::{CombinationalCycle, CombinationalCycleNode, SynthError};
 pub use types::{
     OptimizationPhase, StageId, SynthesisConfig, SynthesisDiagnostics, SynthesisEffort,
     SynthesisMetrics, SynthesisOptions, SynthesisProgress, SynthesisProgressStatus,
-    SynthesisReport, SynthesisResult, TimingSummary,
+    SynthesisReport, SynthesisResult, SynthesisTimingProgress, TimingSummary,
 };

@@ -4,8 +4,8 @@
 //! Generation-local implementation metrics maintained from regional deltas.
 
 use super::{
-    ImplementationCensus, MappedCellSource, RegionalIr, RegionalMappedState, RegionalMapper,
-    ScenarioLeakageCensus,
+    ImplementationCensus, MappedCellSource, RegionalMappedState, RegionalMapper,
+    RegionalMappingState, ScenarioLeakageCensus,
 };
 use opto_ir::mapped::CellId;
 
@@ -84,7 +84,7 @@ impl ImplementationCensus {
 impl RegionalMapper<'_> {
     pub(super) fn full_implementation_census(
         &self,
-        ir: &RegionalIr<'_>,
+        state: &RegionalMappingState<'_>,
         mapped: &RegionalMappedState,
     ) -> Result<ImplementationCensus, crate::SynthError> {
         let mut library_area_all = 0.0;
@@ -103,7 +103,7 @@ impl RegionalMapper<'_> {
                 MappedCellSource::Instance(instance) => !self
                     .config
                     .source_instances
-                    .is_source_instance(ir.module, *instance)?,
+                    .is_source_instance(state.module, *instance)?,
                 MappedCellSource::Value { .. } | MappedCellSource::Region { .. } => true,
             };
             if managed {
