@@ -50,7 +50,10 @@ pub(super) fn lower_logic(
             execution.runtime,
         )
     }?;
-    let (prepared_regions, memory_implementations) = preparation;
+    let crate::mapping::RegionalArchitecturePreparation {
+        regions: prepared_regions,
+        memories: memory_implementations,
+    } = preparation;
     let mut prepared_regions = prepared_regions.into_vec();
     for prepared in &mut prepared_regions {
         prepared.binding.resolve_sequential_sources(&source)?;

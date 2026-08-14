@@ -41,11 +41,20 @@ pub(super) enum ResolvedOperation {
     },
 }
 
-type ResolvedDelta = (
-    Vec<ResolvedOperation>,
-    BTreeMap<TempNetId, NetId>,
-    BTreeMap<TempCellId, CellId>,
-);
+struct ResolvedDelta {
+    operations: Vec<ResolvedOperation>,
+    added_nets: BTreeMap<TempNetId, NetId>,
+    added_cells: BTreeMap<TempCellId, CellId>,
+}
+
+#[derive(Default)]
+struct OperationValidation {
+    removed_cells: BTreeSet<CellId>,
+    removed_nets: BTreeSet<NetId>,
+    reconnected: BTreeMap<PinId, ConnectionSignal>,
+    written_cells: BTreeSet<CellId>,
+    written_nets: BTreeSet<NetId>,
+}
 
 impl MappedNetlist {
     /// Captures versions for an explicit regional cell and net read set.
@@ -124,8 +133,11 @@ impl MappedNetlist {
             ));
         }
         self.check_snapshot(&snapshot)?;
-        let (operations, added_nets, added_cells) =
-            self.resolve_operations(&requested_operations)?;
+        let ResolvedDelta {
+            operations,
+            added_nets,
+            added_cells,
+        } = self.resolve_operations(&requested_operations)?;
         self.validate_operations(&snapshot, &operations)?;
         let removed_net_count = operations
             .iter()
@@ -507,23 +519,18 @@ impl MappedNetlist {
                 }),
             })
             .collect::<Result<Vec<_>, RegionConflict>>()?;
-        Ok((operations, added_nets, added_cells))
+        Ok(ResolvedDelta {
+            operations,
+            added_nets,
+            added_cells,
+        })
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "cross-operation conflicts share one set of validation indexes and must be checked together"
-    )]
     fn validate_operations(
         &self,
         snapshot: &RegionSnapshot,
         operations: &[ResolvedOperation],
     ) -> Result<(), RegionConflict> {
-        let mut removed_cells = BTreeSet::new();
-        let mut removed_nets = BTreeSet::new();
-        let mut reconnected = BTreeMap::new();
-        let mut written_cells = BTreeSet::new();
-        let mut written_nets = BTreeSet::new();
         let new_nets = operations
             .iter()
             .filter_map(|operation| match operation {
@@ -531,124 +538,181 @@ impl MappedNetlist {
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-
+        let mut validation = OperationValidation::default();
         for operation in operations {
-            match operation {
-                ResolvedOperation::AddCell {
-                    spec, connections, ..
-                } => {
-                    if spec.name.is_empty() || spec.cell_type.is_empty() {
-                        return Err(RegionConflict::invalid(
-                            "mapped cells require non-empty instance and cell type names"
-                                .to_string(),
-                        ));
-                    }
-                    let mut pins = BTreeSet::new();
-                    for (pin, _, signal) in connections {
-                        if pin.is_empty() || !pins.insert(pin) {
-                            return Err(RegionConflict::invalid(format!(
-                                "mapped cell '{}' has an empty or duplicate pin name",
-                                spec.name
-                            )));
-                        }
-                        validate_signal(self, snapshot, *signal, &new_nets)?;
-                    }
-                }
-                ResolvedOperation::RemoveCell(cell) => {
-                    if !snapshot.contains_cell(*cell) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta removes cell {cell:?} outside its snapshot"
-                        )));
-                    }
-                    for connection in self.connections(*cell).ok_or_else(|| {
-                        RegionConflict::invalid(format!(
-                            "region delta references removed cell {cell:?}"
-                        ))
-                    })? {
-                        validate_signal(self, snapshot, connection.signal, &new_nets)?;
-                    }
-                    if !written_cells.insert(*cell) || !removed_cells.insert(*cell) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta writes cell {cell:?} more than once"
-                        )));
-                    }
-                }
-                ResolvedOperation::RemoveNet(net) => {
-                    if !snapshot.contains_net(*net) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta removes net {net:?} outside its snapshot"
-                        )));
-                    }
-                    if !written_nets.insert(*net) || !removed_nets.insert(*net) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta writes net {net:?} more than once"
-                        )));
-                    }
-                }
-                ResolvedOperation::ReconnectPin { pin, signal } => {
-                    let owner = self.pin_owner(*pin).ok_or_else(|| {
-                        RegionConflict::invalid(format!(
-                            "region delta references unknown pin {pin:?}"
-                        ))
-                    })?;
-                    if !snapshot.contains_cell(owner) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta reconnects pin {pin:?} outside its cell snapshot"
-                        )));
-                    }
-                    if reconnected.insert(*pin, *signal).is_some() {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta reconnects pin {pin:?} more than once"
-                        )));
-                    }
-                    let old_signal = self
-                        .connection(*pin)
-                        .expect("validated pin has a live connection")
-                        .signal;
-                    validate_signal(self, snapshot, old_signal, &new_nets)?;
-                    validate_signal(self, snapshot, *signal, &new_nets)?;
-                }
-                ResolvedOperation::ReplaceCell { cell, .. }
-                | ResolvedOperation::RenameCell { cell, .. } => {
-                    if !snapshot.contains_cell(*cell) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta writes cell {cell:?} outside its snapshot"
-                        )));
-                    }
-                    if !written_cells.insert(*cell) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta writes cell {cell:?} more than once"
-                        )));
-                    }
-                }
-                ResolvedOperation::RenameNet { net, .. } => {
-                    if !snapshot.contains_net(*net) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta writes net {net:?} outside its snapshot"
-                        )));
-                    }
-                    if !written_nets.insert(*net) {
-                        return Err(RegionConflict::invalid(format!(
-                            "region delta writes net {net:?} more than once"
-                        )));
-                    }
-                }
-                ResolvedOperation::AddNet { .. } => {}
-            }
+            validation.validate_operation(self, snapshot, operation, &new_nets)?;
         }
+        validation.validate_cell_names(self, operations)?;
+        validation.validate_removed_nets(self, operations)
+    }
+}
 
+impl OperationValidation {
+    fn validate_operation(
+        &mut self,
+        netlist: &MappedNetlist,
+        snapshot: &RegionSnapshot,
+        operation: &ResolvedOperation,
+        new_nets: &BTreeSet<NetId>,
+    ) -> Result<(), RegionConflict> {
+        match operation {
+            ResolvedOperation::AddCell {
+                spec, connections, ..
+            } => Self::validate_added_cell(netlist, snapshot, spec, connections, new_nets),
+            ResolvedOperation::RemoveCell(cell) => {
+                self.validate_removed_cell(netlist, snapshot, *cell, new_nets)
+            }
+            ResolvedOperation::RemoveNet(net) => {
+                Self::require_snapshot_net(snapshot, *net, "removes")?;
+                Self::record_write(&mut self.written_nets, *net, "net")?;
+                self.removed_nets.insert(*net);
+                Ok(())
+            }
+            ResolvedOperation::ReconnectPin { pin, signal } => {
+                self.validate_reconnection(netlist, snapshot, *pin, *signal, new_nets)
+            }
+            ResolvedOperation::ReplaceCell { cell, .. }
+            | ResolvedOperation::RenameCell { cell, .. } => {
+                Self::require_snapshot_cell(snapshot, *cell, "writes")?;
+                Self::record_write(&mut self.written_cells, *cell, "cell")
+            }
+            ResolvedOperation::RenameNet { net, .. } => {
+                Self::require_snapshot_net(snapshot, *net, "writes")?;
+                Self::record_write(&mut self.written_nets, *net, "net")
+            }
+            ResolvedOperation::AddNet { .. } => Ok(()),
+        }
+    }
+
+    fn validate_added_cell(
+        netlist: &MappedNetlist,
+        snapshot: &RegionSnapshot,
+        spec: &CellSpec,
+        connections: &[(String, Option<u16>, ConnectionSignal)],
+        new_nets: &BTreeSet<NetId>,
+    ) -> Result<(), RegionConflict> {
+        if spec.name.is_empty() || spec.cell_type.is_empty() {
+            return Err(RegionConflict::invalid(
+                "mapped cells require non-empty instance and cell type names".to_string(),
+            ));
+        }
+        let mut pins = BTreeSet::new();
+        for (pin, _, signal) in connections {
+            if pin.is_empty() || !pins.insert(pin) {
+                return Err(RegionConflict::invalid(format!(
+                    "mapped cell '{}' has an empty or duplicate pin name",
+                    spec.name
+                )));
+            }
+            validate_signal(netlist, snapshot, *signal, new_nets)?;
+        }
+        Ok(())
+    }
+
+    fn validate_removed_cell(
+        &mut self,
+        netlist: &MappedNetlist,
+        snapshot: &RegionSnapshot,
+        cell: CellId,
+        new_nets: &BTreeSet<NetId>,
+    ) -> Result<(), RegionConflict> {
+        Self::require_snapshot_cell(snapshot, cell, "removes")?;
+        for connection in netlist.connections(cell).ok_or_else(|| {
+            RegionConflict::invalid(format!("region delta references removed cell {cell:?}"))
+        })? {
+            validate_signal(netlist, snapshot, connection.signal, new_nets)?;
+        }
+        Self::record_write(&mut self.written_cells, cell, "cell")?;
+        self.removed_cells.insert(cell);
+        Ok(())
+    }
+
+    fn validate_reconnection(
+        &mut self,
+        netlist: &MappedNetlist,
+        snapshot: &RegionSnapshot,
+        pin: PinId,
+        signal: ConnectionSignal,
+        new_nets: &BTreeSet<NetId>,
+    ) -> Result<(), RegionConflict> {
+        let owner = netlist.pin_owner(pin).ok_or_else(|| {
+            RegionConflict::invalid(format!("region delta references unknown pin {pin:?}"))
+        })?;
+        if !snapshot.contains_cell(owner) {
+            return Err(RegionConflict::invalid(format!(
+                "region delta reconnects pin {pin:?} outside its cell snapshot"
+            )));
+        }
+        if self.reconnected.insert(pin, signal).is_some() {
+            return Err(RegionConflict::invalid(format!(
+                "region delta reconnects pin {pin:?} more than once"
+            )));
+        }
+        let old_signal = netlist
+            .connection(pin)
+            .expect("validated pin has a live connection")
+            .signal;
+        validate_signal(netlist, snapshot, old_signal, new_nets)?;
+        validate_signal(netlist, snapshot, signal, new_nets)
+    }
+
+    fn require_snapshot_cell(
+        snapshot: &RegionSnapshot,
+        cell: CellId,
+        action: &str,
+    ) -> Result<(), RegionConflict> {
+        if snapshot.contains_cell(cell) {
+            return Ok(());
+        }
+        Err(RegionConflict::invalid(format!(
+            "region delta {action} cell {cell:?} outside its snapshot"
+        )))
+    }
+
+    fn require_snapshot_net(
+        snapshot: &RegionSnapshot,
+        net: NetId,
+        action: &str,
+    ) -> Result<(), RegionConflict> {
+        if snapshot.contains_net(net) {
+            return Ok(());
+        }
+        Err(RegionConflict::invalid(format!(
+            "region delta {action} net {net:?} outside its snapshot"
+        )))
+    }
+
+    fn record_write<T: Copy + Ord + std::fmt::Debug>(
+        written: &mut BTreeSet<T>,
+        object: T,
+        kind: &str,
+    ) -> Result<(), RegionConflict> {
+        if written.insert(object) {
+            return Ok(());
+        }
+        Err(RegionConflict::invalid(format!(
+            "region delta writes {kind} {object:?} more than once"
+        )))
+    }
+
+    fn validate_cell_names(
+        &self,
+        netlist: &MappedNetlist,
+        operations: &[ResolvedOperation],
+    ) -> Result<(), RegionConflict> {
         let mut future_names = BTreeSet::new();
-        let mut released_names = removed_cells
+        let mut released_names = self
+            .removed_cells
             .iter()
-            .map(|cell| self.cells[cell.index()].cell.name)
+            .map(|cell| netlist.cells[cell.index()].cell.name)
             .collect::<BTreeSet<_>>();
         let mut renamed_cells = BTreeSet::new();
         for operation in operations {
             let name = match operation {
                 ResolvedOperation::AddCell { spec, .. } => spec.name.as_str(),
                 ResolvedOperation::RenameCell { cell, name } => {
-                    let old = self.cells[cell.index()].cell.name;
-                    let old_name = self.names.resolve(old).ok_or_else(|| {
+                    let old = netlist.cells[cell.index()].cell.name;
+                    let old_name = netlist.names.resolve(old).ok_or_else(|| {
                         RegionConflict::invalid("mapped cell has an invalid name identifier")
                     })?;
                     if old_name == name.as_str() {
@@ -673,21 +737,21 @@ impl MappedNetlist {
         }
         let interned_future = future_names
             .iter()
-            .filter_map(|&name| self.names.get(name).map(|id| (name, id)))
+            .filter_map(|&name| netlist.names.get(name).map(|id| (name, id)))
             .collect::<Vec<_>>();
         if interned_future
             .iter()
             .any(|(_, id)| !released_names.contains(id))
         {
             let mut used = BTreeSet::new();
-            for cell in self
+            for cell in netlist
                 .cell_ids()
-                .filter(|cell| !removed_cells.contains(cell) && !renamed_cells.contains(cell))
+                .filter(|cell| !self.removed_cells.contains(cell) && !renamed_cells.contains(cell))
             {
-                used.insert(self.cells[cell.index()].cell.name);
+                used.insert(netlist.cells[cell.index()].cell.name);
             }
-            for instance in self.design_instance_ids() {
-                used.insert(self.design_instances[instance.index()].name);
+            for instance in netlist.design_instance_ids() {
+                used.insert(netlist.design_instances[instance.index()].name);
             }
             for (name, id) in interned_future {
                 if used.contains(&id) {
@@ -697,27 +761,35 @@ impl MappedNetlist {
                 }
             }
         }
+        Ok(())
+    }
 
-        for net in &removed_nets {
-            if self.is_external_net(*net) {
+    fn validate_removed_nets(
+        &self,
+        netlist: &MappedNetlist,
+        operations: &[ResolvedOperation],
+    ) -> Result<(), RegionConflict> {
+        for net in &self.removed_nets {
+            if netlist.is_external_net(*net) {
                 return Err(RegionConflict::invalid(format!(
                     "region delta removes externally referenced net {net:?}"
                 )));
             }
-            for pin in self
+            for pin in netlist
                 .pins_on_net(*net)
                 .expect("removed candidate net is live before transaction")
             {
-                let owner = self
+                let owner = netlist
                     .pin_owner(pin)
                     .expect("net adjacency contains only live cell pins");
-                if removed_cells.contains(&owner) {
+                if self.removed_cells.contains(&owner) {
                     continue;
                 }
-                let signal = reconnected
+                let signal = self
+                    .reconnected
                     .get(&pin)
                     .copied()
-                    .unwrap_or(self.connections[pin.index()].signal);
+                    .unwrap_or(netlist.connections[pin.index()].signal);
                 if signal == ConnectionSignal::Net(*net) {
                     return Err(RegionConflict::invalid(format!(
                         "region delta removes net {net:?} while pin {pin:?} still references it"

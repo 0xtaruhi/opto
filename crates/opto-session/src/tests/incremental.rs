@@ -983,8 +983,11 @@ fn synthesize_publication_traces_only_the_root_artifact() {
                 state = changed.wait(state).unwrap();
             }
         }
-        if trace.progress.stage == opto_synth::StageId::FINALIZATION
-            && trace.progress.status == opto_synth::SynthesisProgressStatus::Completed
+        if trace.progress
+            == (opto_synth::SynthesisProgress::Stage {
+                stage: opto_synth::StageId::FINALIZATION,
+                status: opto_synth::SynthesisProgressStatus::Completed,
+            })
         {
             finished_tx.send(trace.design.to_string()).unwrap();
         }

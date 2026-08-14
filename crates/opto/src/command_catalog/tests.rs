@@ -293,6 +293,7 @@ fn misspelled_option_has_structured_help_and_a_nearby_spelling() {
 #[test]
 fn invocation_preflight_matches_audited_command_contracts() {
     struct Case {
+        name: &'static str,
         command: &'static str,
         args: &'static [&'static str],
         expected_error: Option<&'static str>,
@@ -300,146 +301,175 @@ fn invocation_preflight_matches_audited_command_contracts() {
 
     let cases = [
         Case {
+            name: "valid read_sdc options",
             command: "read_sdc",
             args: &["-syntax_only", "-version", "2.2", "constraints.sdc"],
             expected_error: None,
         },
         Case {
+            name: "extra read_sdc file",
             command: "read_sdc",
             args: &["constraints.sdc", "extra.sdc"],
             expected_error: Some("wrong number of arguments"),
         },
         Case {
+            name: "read_sdc option missing value",
             command: "read_sdc",
             args: &["-version"],
             expected_error: Some("missing value for -version"),
         },
         Case {
+            name: "unsupported SDC version",
             command: "read_sdc",
             args: &["-version", "9.9", "constraints.sdc"],
             expected_error: Some("value for -version must be 1.0"),
         },
         Case {
+            name: "unsupported parasitic completion",
             command: "read_parasitics",
             args: &["-complete_with", "invented", "design.spef"],
             expected_error: Some("value for -complete_with must be none"),
         },
         Case {
+            name: "exclusive parasitic modes",
             command: "read_parasitics",
             args: &["-elmore", "-arnoldi", "design.spef"],
             expected_error: Some("-elmore and -arnoldi are mutually exclusive"),
         },
         Case {
+            name: "exclusive power report kinds",
             command: "report_power",
             args: &["-cell", "-net"],
             expected_error: Some("-cell and -net are mutually exclusive"),
         },
         Case {
+            name: "redirect target and script",
             command: "redirect",
             args: &["out.rpt", "report_area"],
             expected_error: None,
         },
         Case {
+            name: "redirect file option",
             command: "redirect",
             args: &["-file", "out.rpt", "report_area"],
             expected_error: None,
         },
         Case {
+            name: "redirect missing script",
             command: "redirect",
             args: &["-variable", "captured"],
             expected_error: Some("missing script"),
         },
         Case {
+            name: "redirect extra argument",
             command: "redirect",
             args: &["out.rpt", "report_area", "extra"],
             expected_error: Some("wrong number of arguments"),
         },
         Case {
+            name: "input transition positionals",
             command: "set_input_transition",
             args: &["0.2", "ports"],
             expected_error: None,
         },
         Case {
+            name: "input transition option before values",
             command: "set_input_transition",
             args: &["-rise", "0.2", "ports"],
             expected_error: None,
         },
         Case {
+            name: "load missing objects",
             command: "set_load",
             args: &["1.0"],
             expected_error: Some("missing objects"),
         },
         Case {
+            name: "load option before values",
             command: "set_load",
             args: &["-max", "1.0", "ports"],
             expected_error: None,
         },
         Case {
+            name: "negative input delay positional",
             command: "set_input_delay",
             args: &["-0.25", "ports"],
             expected_error: None,
         },
         Case {
+            name: "negative clock latency positional",
             command: "set_clock_latency",
             args: &["-source", "-early", "-0.1", "clocks"],
             expected_error: None,
         },
         Case {
+            name: "double dash terminates options",
             command: "set_input_delay",
             args: &["-0.25", "--", "-data"],
             expected_error: None,
         },
         Case {
+            name: "misspelled input delay option",
             command: "set_input_delay",
             args: &["-0.25", "-clok", "clk", "ports"],
             expected_error: Some("unsupported option '-clok'"),
         },
         Case {
+            name: "negative design rule positional",
             command: "set_max_transition",
             args: &["-0.2", "ports"],
             expected_error: None,
         },
         Case {
+            name: "option after object list",
             command: "set_max_transition",
             args: &["0.2", "ports", "-data_path"],
             expected_error: Some("unexpected option '-data_path' after object list"),
         },
         Case {
+            name: "unsupported max fanout option",
             command: "set_max_fanout",
             args: &["2", "-data_path", "clocks"],
             expected_error: Some("unsupported option '-data_path'"),
         },
         Case {
+            name: "report area accepts no arguments",
             command: "report_area",
             args: &[],
             expected_error: None,
         },
         Case {
+            name: "report area rejects positional",
             command: "report_area",
             args: &["unexpected"],
             expected_error: Some("wrong number of arguments"),
         },
         Case {
+            name: "create clock missing period value",
             command: "create_clock",
             args: &["-period"],
             expected_error: Some("missing value for -period"),
         },
         Case {
+            name: "create clock negative period lexeme",
             command: "create_clock",
             args: &["-period", "-1", "-name", "clk"],
             expected_error: None,
         },
         Case {
+            name: "duplicate create clock period",
             command: "create_clock",
             args: &["-period", "1", "-period", "10", "-name", "clk"],
             expected_error: Some("option '-period' may be specified only once"),
         },
         Case {
+            name: "repeatable clock group",
             command: "set_clock_groups",
             args: &["-group", "a", "-group", "b"],
             expected_error: None,
         },
         Case {
+            name: "nonrepeatable power effort",
             command: "report_power",
             args: &["-analysis_effort", "low", "-analysis_effort", "low"],
             expected_error: Some("option '-analysis_effort' may be specified only once"),
@@ -453,7 +483,8 @@ fn invocation_preflight_matches_audited_command_contracts() {
         match case.expected_error {
             None => assert!(
                 result.is_ok(),
-                "{} {:?}: {result:?}",
+                "{}: {} {:?}: {result:?}",
+                case.name,
                 case.command,
                 case.args
             ),
@@ -461,36 +492,55 @@ fn invocation_preflight_matches_audited_command_contracts() {
                 let error = result.expect_err("invalid invocation must fail preflight");
                 assert!(
                     error.to_string().contains(expected),
-                    "{} {:?}: {error}",
+                    "{}: {} {:?}: expected {expected:?}, got {error}",
+                    case.name,
                     case.command,
                     case.args
                 );
             }
         }
     }
+}
 
-    let elaborate = registry.find("elaborate").unwrap();
+#[test]
+fn sdc_preflight_applies_sdc_specific_required_arguments() {
+    let registry = registry();
     let create_clock = registry.find("create_clock").unwrap();
     let set_max_transition = registry.find("set_max_transition").unwrap();
-    assert!(validate_invocation(elaborate, &["top"]).is_ok());
-    assert!(
-        validate_sdc_invocation(create_clock, &["-name", "clk"])
-            .unwrap_err()
-            .to_string()
-            .contains("missing -period")
-    );
-    assert!(
-        validate_sdc_invocation(create_clock, &["-period", "5"])
-            .unwrap_err()
-            .to_string()
-            .contains("missing -name")
-    );
-    assert!(
-        validate_sdc_invocation(set_max_transition, &["-data_path", "0.2", "ports"])
-            .unwrap_err()
-            .to_string()
-            .contains("value must precede options")
-    );
+
+    for (name, command, args, expected) in [
+        (
+            "missing create_clock period",
+            create_clock,
+            &["-name", "clk"][..],
+            "missing -period",
+        ),
+        (
+            "missing create_clock name",
+            create_clock,
+            &["-period", "5"][..],
+            "missing -name",
+        ),
+        (
+            "leading design-rule value",
+            set_max_transition,
+            &["-data_path", "0.2", "ports"][..],
+            "value must precede options",
+        ),
+    ] {
+        let error = validate_sdc_invocation(command, args)
+            .expect_err("invalid SDC invocation must fail preflight");
+        assert!(
+            error.to_string().contains(expected),
+            "{name}: expected {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn design_rule_commands_declare_their_leading_value() {
+    let registry = registry();
+    let set_max_transition = registry.find("set_max_transition").unwrap();
     assert_eq!(set_max_transition.syntax().leading_positionals(), 1);
     assert_eq!(
         registry
@@ -508,11 +558,22 @@ fn invocation_preflight_matches_audited_command_contracts() {
             .leading_positionals(),
         1
     );
+}
 
+#[test]
+fn clock_transition_help_describes_both_positionals_and_units() {
+    let registry = registry();
     let clock_transition = registry.command_help_text("set_clock_transition").unwrap();
-    assert!(clock_transition.contains("set_clock_transition [options] <transition> <clocks>..."));
-    assert!(clock_transition.contains("<transition> —"));
-    assert!(clock_transition.contains("<clocks> —"));
-    assert!(clock_transition.contains("active timing-library time unit"));
-    assert!(clock_transition.contains("set_clock_transition 0.10 [get_clocks sys_clk]"));
+    for expected in [
+        "set_clock_transition [options] <transition> <clocks>...",
+        "<transition> —",
+        "<clocks> —",
+        "active timing-library time unit",
+        "set_clock_transition 0.10 [get_clocks sys_clk]",
+    ] {
+        assert!(
+            clock_transition.contains(expected),
+            "set_clock_transition help omitted {expected:?}:\n{clock_transition}"
+        );
+    }
 }

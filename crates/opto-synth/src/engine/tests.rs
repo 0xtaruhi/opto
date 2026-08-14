@@ -198,7 +198,13 @@ fn technology_mapping_progress_uses_final_register_to_register_timing() {
     let mut mapping_progress = None;
     let result = SynthesisEngine::new()
         .synthesize(request, crate::test_runtime(), &mut |progress| {
-            if progress.optimization == Some(crate::OptimizationPhase::TechnologyMapping) {
+            if matches!(
+                progress,
+                crate::SynthesisProgress::Candidate {
+                    phase: crate::OptimizationPhase::TechnologyMapping,
+                    ..
+                }
+            ) {
                 mapping_progress = Some(progress);
             }
         })
@@ -208,10 +214,20 @@ fn technology_mapping_progress_uses_final_register_to_register_timing() {
         .timing()
         .expect("registered path has no timing summary");
 
-    assert!((progress.worst_slack.unwrap() + 0.1).abs() < 1e-12);
-    assert_eq!(progress.worst_slack, final_timing.slack);
-    assert_eq!(progress.total_negative_slack, Some(final_timing.tns));
-    assert_eq!(progress.violations, Some(final_timing.violating_paths));
+    let crate::SynthesisProgress::Candidate {
+        timing: Some(timing),
+        ..
+    } = progress
+    else {
+        panic!("technology mapping candidate has no timing measurements");
+    };
+    assert!((timing.worst_slack.unwrap() + 0.1).abs() < 1e-12);
+    assert_eq!(timing.worst_slack, final_timing.slack);
+    assert_eq!(
+        timing.total_negative_slack.to_bits(),
+        final_timing.tns.to_bits()
+    );
+    assert_eq!(timing.violations, final_timing.violating_paths);
 }
 
 fn target_options() -> SynthesisOptions {
@@ -498,8 +514,10 @@ fn synthesis_outer_events(
             SynthesisRequest::unconstrained(structural(source), options),
             crate::test_runtime(),
             &mut |progress| {
-                if OUTER_STAGES.contains(&progress.stage) && progress.optimization.is_none() {
-                    events.push((progress.stage, progress.status));
+                if let crate::SynthesisProgress::Stage { stage, status } = progress
+                    && OUTER_STAGES.contains(&stage)
+                {
+                    events.push((stage, status));
                 }
             },
         )
@@ -537,8 +555,10 @@ fn failed_stage_emits_a_terminal_failure_event() {
             ),
             crate::test_runtime(),
             &mut |progress| {
-                if OUTER_STAGES.contains(&progress.stage) && progress.optimization.is_none() {
-                    events.push((progress.stage, progress.status));
+                if let crate::SynthesisProgress::Stage { stage, status } = progress
+                    && OUTER_STAGES.contains(&stage)
+                {
+                    events.push((stage, status));
                 }
             },
         )

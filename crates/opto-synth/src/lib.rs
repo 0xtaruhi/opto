@@ -41,7 +41,8 @@ pub use api::{
     CheckDesignError, CombinationalCycle, CombinationalCycleNode, OptimizationPhase, ReferencePort,
     ReferencePortMap, StageId, SynthError, SynthesisConfig, SynthesisDiagnostics, SynthesisEffort,
     SynthesisMetrics, SynthesisOptions, SynthesisProgress, SynthesisProgressStatus,
-    SynthesisReport, SynthesisResult, TimingSummary, check_design_with_references,
+    SynthesisReport, SynthesisResult, SynthesisTimingProgress, TimingSummary,
+    check_design_with_references,
 };
 pub use artifact::{
     BoundaryEdgeId, ImplementationDb, ImplementationRegion, ImplementationRegionId,

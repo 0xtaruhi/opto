@@ -637,7 +637,7 @@ fn fanout_tree_synthesis_precedes_residual_branch_optimization() {
             scenarios,
         },
         &mut |event| {
-            if let Some(phase) = event.optimization {
+            if let SynthesisProgress::Candidate { phase, .. } = event {
                 phases.push(phase);
             }
         },
@@ -774,7 +774,7 @@ fn violating_fanout_nets_commit_as_one_forest_transaction() {
             scenarios,
         },
         &mut |event| {
-            if let Some(phase) = event.optimization {
+            if let SynthesisProgress::Candidate { phase, .. } = event {
                 phases.push(phase);
             }
         },

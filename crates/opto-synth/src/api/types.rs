@@ -146,28 +146,41 @@ impl StageId {
 #[derive(Debug, Clone, Copy, PartialEq)]
 /// One lifecycle or candidate-observation event from synthesis.
 ///
-/// Stage lifecycle events leave all metric fields as `None`. Optimization
-/// candidate events identify a phase and carry the measurements available when
-/// that candidate was committed.
-pub struct SynthesisProgress {
-    /// Stable stage identifier suitable for logs and machine consumers.
-    pub stage: StageId,
-    /// Optimization phase for a committed candidate observation.
-    pub optimization: Option<OptimizationPhase>,
-    /// Lifecycle state represented by this event.
-    pub status: SynthesisProgressStatus,
-    /// Total mapped cell area in target-library area units after the commit.
-    pub area: Option<f64>,
-    /// Number of mapped cells after the observed commit.
-    pub cells: Option<usize>,
-    /// Worst slack in the timing library's time unit.
+/// The variants make the two event shapes explicit: stage lifecycle events
+/// cannot accidentally carry candidate metrics, and candidate observations
+/// always carry their phase, area, and cell count together.
+pub enum SynthesisProgress {
+    /// A stage entered or left one lifecycle state.
+    Stage {
+        /// Stable stage identifier suitable for logs and machine consumers.
+        stage: StageId,
+        /// Lifecycle state represented by this event.
+        status: SynthesisProgressStatus,
+    },
+    /// An optimization phase committed a candidate artifact.
+    Candidate {
+        /// Optimization phase responsible for the candidate.
+        phase: OptimizationPhase,
+        /// Total mapped cell area in target-library area units.
+        area: f64,
+        /// Number of mapped cells after the commit.
+        cells: usize,
+        /// Timing measurements, when timing was evaluated for this candidate.
+        timing: Option<SynthesisTimingProgress>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+/// Timing measurements attached to a committed synthesis candidate.
+pub struct SynthesisTimingProgress {
+    /// Worst slack in the timing library's time unit, if an endpoint exists.
     pub worst_slack: Option<f64>,
     /// Sum of negative endpoint slack in the timing library's time unit.
-    pub total_negative_slack: Option<f64>,
+    pub total_negative_slack: f64,
     /// Number of endpoints with negative slack.
-    pub violations: Option<usize>,
+    pub violations: usize,
     /// Number of candidates evaluated by the phase so far.
-    pub evaluations: Option<usize>,
+    pub evaluations: usize,
 }
 
 /// The terminal state of one synthesis-stage progress event.
@@ -227,17 +240,7 @@ impl OptimizationPhase {
 
 impl SynthesisProgress {
     fn lifecycle(stage: StageId, status: SynthesisProgressStatus) -> Self {
-        Self {
-            stage,
-            optimization: None,
-            status,
-            area: None,
-            cells: None,
-            worst_slack: None,
-            total_negative_slack: None,
-            violations: None,
-            evaluations: None,
-        }
+        Self::Stage { stage, status }
     }
 
     /// Construct a stage-start lifecycle observation.
@@ -259,16 +262,11 @@ impl SynthesisProgress {
     }
 
     pub(crate) fn candidate(phase: OptimizationPhase, area: f64, cells: usize) -> Self {
-        Self {
-            stage: phase.stage(),
-            optimization: Some(phase),
-            status: SynthesisProgressStatus::Completed,
-            area: Some(area),
-            cells: Some(cells),
-            worst_slack: None,
-            total_negative_slack: None,
-            violations: None,
-            evaluations: None,
+        Self::Candidate {
+            phase,
+            area,
+            cells,
+            timing: None,
         }
     }
 
@@ -279,16 +277,16 @@ impl SynthesisProgress {
         analysis: &opto_timing::TimingQualitySummary,
         evaluations: usize,
     ) -> Self {
-        Self {
-            stage: phase.stage(),
-            optimization: Some(phase),
-            status: SynthesisProgressStatus::Completed,
-            area: Some(area),
-            cells: Some(cells),
-            worst_slack: analysis.wns(),
-            total_negative_slack: Some(analysis.tns()),
-            violations: Some(analysis.violating_paths()),
-            evaluations: Some(evaluations),
+        Self::Candidate {
+            phase,
+            area,
+            cells,
+            timing: Some(SynthesisTimingProgress {
+                worst_slack: analysis.wns(),
+                total_negative_slack: analysis.tns(),
+                violations: analysis.violating_paths(),
+                evaluations,
+            }),
         }
     }
 }
