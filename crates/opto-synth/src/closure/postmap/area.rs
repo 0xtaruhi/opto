@@ -61,6 +61,7 @@ pub(super) fn optimize(
 
     let optimization_boundary =
         super::mfs::optimization_boundary_nets(session.mapped, session.implementations)?;
+    remove_dead_cells(&mut session, catalog, &optimization_boundary, &mut cleanup_dirty)?;
     remove_constant_registers(&mut session, options, runtime, &optimization_boundary, &mut cleanup_dirty)?;
 
     crate::api::diagnostics::trace!(
@@ -260,6 +261,35 @@ pub(super) fn optimize(
         phase_started.elapsed()
     );
     Ok(session.finish())
+}
+
+/// Removes every cell whose output no design object reads, and records the cells
+/// the removals reached.
+///
+/// This runs before the rest of the closure so later phases do not evaluate,
+/// time, or resynthesize logic that is already unobservable. Buffering, cloning,
+/// and constant-register removal can each strand a driver, so the sweep repeats
+/// until a scan finds nothing.
+fn remove_dead_cells(
+    session: &mut AreaOptimizationSession<'_>,
+    catalog: &super::candidates::PostmapCellCatalog,
+    optimization_boundary: &hashbrown::HashSet<opto_ir::mapped::NetId>,
+    cleanup_dirty: &mut std::collections::HashSet<opto_ir::mapped::CellId>,
+) -> Result<(), crate::SynthError> {
+    let functions = catalog.mfs_functions();
+    loop {
+        let Some(candidate) =
+            super::mfs::dead_cell_removal(session.mapped, functions, optimization_boundary)?
+        else {
+            return Ok(());
+        };
+        let CandidateDisposition::Accepted(edit) =
+            session.evaluate(candidate, OptimizationPhase::RegisterOptimization)?
+        else {
+            return Ok(());
+        };
+        extend_cleanup_frontier(session.mapped, &edit, cleanup_dirty);
+    }
 }
 
 /// Removes every register whose reachable value is one constant, and records the

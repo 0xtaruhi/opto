@@ -524,6 +524,122 @@ pub(super) fn dead_cell_candidate(
     Some(PostmapCandidate::new(delta))
 }
 
+/// Proposes one transaction removing every cell whose output no design object
+/// reads, transitively.
+///
+/// This is structural dead-code elimination, not resynthesis: it asks only
+/// whether a net has a reader, so it costs one pass over the pins rather than a
+/// cut and care-set analysis per cell. Buffering, cloning, and register removal
+/// can all leave a driver whose last sink went away, and the cell that then
+/// becomes dead is usually another driver, so removal iterates to a fixpoint
+/// before it builds the delta. Removals commit together because each post-map
+/// transaction pays one incremental-STA update.
+///
+/// Returns `None` when nothing is dead.
+pub(super) fn dead_cell_removal(
+    mapped: &MappedNetlist,
+    functions: &HashMap<String, CellFunction>,
+    boundary: &HashSet<NetId>,
+) -> Result<Option<PostmapCandidate>, crate::SynthError> {
+    // A cell this pass cannot interpret is never removed, and every net it
+    // touches counts as read: an unknown output pin must not look like a dead
+    // net just because nothing else drives it.
+    let mut outputs = HashMap::new();
+    for cell in mapped.cell_ids() {
+        let output = mapped
+            .cell_type(cell)
+            .and_then(|name| functions.get(name))
+            .and_then(|function| cell_output_pin(mapped, cell, function));
+        if let Some((pin, net)) = output {
+            outputs.insert(cell, (pin, net));
+        }
+    }
+    let mut readers: HashMap<NetId, usize> = HashMap::new();
+    let mut drivers: HashMap<NetId, CellId> = HashMap::new();
+    for cell in mapped.cell_ids() {
+        let output_pin = outputs.get(&cell).map(|&(pin, _)| pin);
+        if let Some(&(_, net)) = outputs.get(&cell) {
+            drivers.insert(net, cell);
+        }
+        let Some(pins) = mapped.pin_ids(cell) else {
+            continue;
+        };
+        for pin in pins {
+            if Some(pin) == output_pin {
+                continue;
+            }
+            let Some(connection) = mapped.connection(pin) else {
+                continue;
+            };
+            if let ConnectionSignal::Net(net) = connection.signal {
+                *readers.entry(net).or_default() += 1;
+            }
+        }
+    }
+
+    let removable = |cell: CellId, readers: &HashMap<NetId, usize>| {
+        outputs.get(&cell).is_some_and(|&(_, net)| {
+            !boundary.contains(&net) && readers.get(&net).copied().unwrap_or(0) == 0
+        })
+    };
+    let mut dead = Vec::new();
+    let mut pending = mapped
+        .cell_ids()
+        .filter(|&cell| removable(cell, &readers))
+        .collect::<Vec<_>>();
+    let mut removed = HashSet::new();
+    while let Some(cell) = pending.pop() {
+        if !removed.insert(cell) {
+            continue;
+        }
+        dead.push(cell);
+        let output_pin = outputs.get(&cell).map(|&(pin, _)| pin);
+        let Some(pins) = mapped.pin_ids(cell) else {
+            continue;
+        };
+        for pin in pins {
+            if Some(pin) == output_pin {
+                continue;
+            }
+            let Some(connection) = mapped.connection(pin) else {
+                continue;
+            };
+            let ConnectionSignal::Net(net) = connection.signal else {
+                continue;
+            };
+            let Some(count) = readers.get_mut(&net) else {
+                continue;
+            };
+            *count -= 1;
+            if *count == 0
+                && let Some(&driver) = drivers.get(&net)
+                && !removed.contains(&driver)
+                && removable(driver, &readers)
+            {
+                pending.push(driver);
+            }
+        }
+    }
+    if dead.is_empty() {
+        return Ok(None);
+    }
+    // Cell order is the stable arena order, so the delta is identical across
+    // worker counts even though the worklist pops in discovery order.
+    dead.sort_unstable();
+    let nets = super::mapped_cell_nets(mapped, dead.iter().copied())?;
+    let snapshot = mapped
+        .snapshot_region(dead.clone(), nets)
+        .map_err(crate::SynthError::from)?;
+    let mut delta = RegionDelta::new(snapshot);
+    for cell in dead {
+        delta.remove_cell(cell).map_err(crate::SynthError::from)?;
+        if let Some(&(_, net)) = outputs.get(&cell) {
+            delta.remove_net(net).map_err(crate::SynthError::from)?;
+        }
+    }
+    Ok(Some(PostmapCandidate::new(delta)))
+}
+
 #[derive(Clone, Copy)]
 struct DriverReplacement<'a> {
     cell: CellId,

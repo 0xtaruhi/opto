@@ -55,6 +55,13 @@ All notable changes to Opto are documented here. The format follows
 
 ### Changed
 
+- Mapped closure removes every cell whose output no design object reads, before
+  the rest of the closure evaluates, times, or resynthesizes it. Buffering,
+  cloning, and constant-register removal each strand drivers, so the sweep
+  repeats to a fixpoint and commits as one transaction. On the public Ibex
+  SKY130 case this removes 64 cells and 240 area units that scoping mapped
+  resynthesis to a dirty cone had otherwise left behind.
+
 - Sweep refinement simulates incrementally. A learned pattern only appends
   stimulus words, so a round resumes at the first changed word instead of
   re-simulating the whole subject; the nominated classes are identical.
