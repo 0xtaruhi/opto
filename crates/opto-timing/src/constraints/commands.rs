@@ -25,10 +25,10 @@ impl TimingContext {
         if self.transactions.is_empty() {
             debug_assert!(self.journal.is_empty());
         }
-        let identity = Arc::new(());
-        self.transactions.push(Arc::clone(&identity));
+        let identity = opto_core::OwnerToken::fresh();
+        self.transactions.push(identity.clone());
         TimingCheckpoint {
-            owner: Arc::clone(&self.owner),
+            owner: self.owner.clone(),
             identity,
             journal_len: self.journal.len(),
             revision: self.revision,
@@ -117,13 +117,13 @@ impl TimingContext {
         &self,
         checkpoint: &TimingCheckpoint,
     ) -> Result<usize, crate::TimingError> {
-        if !Arc::ptr_eq(&self.owner, &checkpoint.owner) {
+        if !self.owner.same_owner(&checkpoint.owner) {
             return Err(crate::TimingError::CheckpointOwnerMismatch);
         }
         let position = self
             .transactions
             .iter()
-            .position(|identity| Arc::ptr_eq(identity, &checkpoint.identity))
+            .position(|identity| identity.same_owner(&checkpoint.identity))
             .ok_or(crate::TimingError::StaleCheckpoint)?;
         if checkpoint.journal_len > self.journal.len() {
             return Err(crate::TimingError::StaleCheckpoint);

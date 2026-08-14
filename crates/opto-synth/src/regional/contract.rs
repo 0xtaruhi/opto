@@ -3,8 +3,8 @@
 
 use super::{
     BoundaryCheckKind, BoundaryContract, BoundaryContractRow, BoundaryInputContract,
-    BoundaryOutputContract, EarlyLate, FiniteValue, RiseFall, TimingTag, TimingTagId,
-    TimingTagInterner, check_value_lane, input_transition_lane, path_timing_lane,
+    BoundaryOutputContract, EarlyLate, FiniteValue, TimingTag, TimingTagId, TimingTagInterner,
+    check_value_lane, input_transition_lane, path_timing_lane,
 };
 use opto_ir::word;
 use opto_timing::{Scenario, ScenarioCheckSet, ScenarioSet, TimingEdge};
@@ -829,8 +829,8 @@ fn finite(value: f64) -> Result<FiniteValue, crate::SynthError> {
 }
 
 fn update_present_timing_lanes(
-    target: &mut EarlyLate<RiseFall<Option<FiniteValue>>>,
-    source: EarlyLate<RiseFall<Option<FiniteValue>>>,
+    target: &mut super::TimingCorners<Option<FiniteValue>>,
+    source: super::TimingCorners<Option<FiniteValue>>,
 ) {
     for (target, source) in [
         (&mut target.early.rise, source.early.rise),

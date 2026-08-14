@@ -27,9 +27,8 @@ mod sequential_integration_tests;
 pub use clock_gating::ClockGatingStyle;
 
 pub(crate) use architecture::{
-    ArchitectureMappingConfig, RegionalArchitectureMapping, RegionalArchitecturePreparation,
-    RegionalArchitectureRequest, extend_operation_regions_for_memories,
-    prepare_regional_architectures,
+    RegionalArchitectureMapping, RegionalArchitectureRequest,
+    extend_operation_regions_for_memories, prepare_regional_architectures,
 };
 pub(crate) use cell::{MappedCell, MappedInputConnection, MappedOutputConnection};
 use library::CombinationalCellCatalog;
@@ -37,7 +36,7 @@ pub(crate) use materialize::MappedOutput;
 #[cfg(test)]
 pub(crate) use materialize::build_test_substrate;
 pub(crate) use region_binding::{
-    CandidateBindingInputs, RegionPlanBinding, build_candidate_binding,
+    CandidateBindingDomain, RegionPlanBinding, build_candidate_binding,
 };
 pub(crate) use roots::FullDomainRootSemantics;
 use sequential::SequentialCellCatalog;

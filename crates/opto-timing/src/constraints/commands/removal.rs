@@ -397,7 +397,7 @@ impl TimingContext {
             + max_capacitances.len()
             + max_fanouts.len();
         Ok(PreparedTimingObjectRemoval {
-            owner: Arc::clone(&self.owner),
+            owner: self.owner.clone(),
             base_revision: self.revision,
             revision,
             clocks,
@@ -448,7 +448,7 @@ impl TimingContext {
         &mut self,
         prepared: PreparedTimingObjectRemoval,
     ) -> Result<ValidatedTimingObjectRemoval<'_>, crate::TimingError> {
-        if !Arc::ptr_eq(&self.owner, &prepared.owner) {
+        if !self.owner.same_owner(&prepared.owner) {
             return Err(crate::TimingError::ObjectRemovalOwnerMismatch);
         }
         if self.revision != prepared.base_revision {
@@ -468,7 +468,7 @@ impl TimingContext {
         prepared: PreparedTimingObjectRemoval,
     ) {
         debug_assert!(
-            Arc::ptr_eq(&self.owner, &prepared.owner) && self.revision == prepared.base_revision
+            self.owner.same_owner(&prepared.owner) && self.revision == prepared.base_revision
         );
         for (object, references) in prepared.references {
             self.remove_reference_set(object, &references);

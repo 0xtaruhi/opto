@@ -7,9 +7,11 @@
 //! storage. Path strings are reconstructed only at reporting boundaries.
 
 use super::{
-    Arc, Definition, DefinitionGraph, DefinitionGraphError, DefinitionId, DefinitionInstance,
-    InstanceOrdinal, LinkBinding, NameTable, OccurrenceGraphError, OccurrenceId, append_path,
+    Definition, DefinitionGraph, DefinitionGraphError, DefinitionGraphOwner, DefinitionId,
+    DefinitionInstance, InstanceOrdinal, LinkBinding, NameTable, OccurrenceGraphError,
+    OccurrenceId, append_path,
 };
+use opto_core::OwnerToken;
 
 /// A sealed, explicitly materialized hierarchy occurrence graph.
 ///
@@ -20,7 +22,7 @@ use super::{
 #[derive(Debug)]
 pub struct OccurrenceGraph {
     // Materialization and reporting must use the same graph or one of its clones.
-    definition_graph_identity: Arc<()>,
+    definition_graph_identity: OwnerToken<DefinitionGraphOwner>,
     parents: Box<[Option<OccurrenceId>]>,
     owner_definitions: Box<[DefinitionId]>,
     instance_ordinals: Box<[Option<InstanceOrdinal>]>,
@@ -160,7 +162,7 @@ impl OccurrenceGraph {
 
         debug_assert_eq!(parents.len(), layout.node_count);
         Ok(Self {
-            definition_graph_identity: Arc::clone(&graph.identity),
+            definition_graph_identity: graph.identity.clone(),
             parents: parents.into_boxed_slice(),
             owner_definitions: owner_definitions.into_boxed_slice(),
             instance_ordinals: instance_ordinals.into_boxed_slice(),
@@ -268,7 +270,7 @@ impl OccurrenceGraph {
         graph: &'a DefinitionGraph,
         id: OccurrenceId,
     ) -> Option<DefinitionInstance<'a>> {
-        if !Arc::ptr_eq(&self.definition_graph_identity, &graph.identity) {
+        if !self.definition_graph_identity.same_owner(&graph.identity) {
             return None;
         }
         let ordinal = self.instance_ordinal(id)?;
@@ -282,7 +284,7 @@ impl OccurrenceGraph {
     /// definition graph return `None`.
     #[must_use]
     pub fn format_path(&self, graph: &DefinitionGraph, id: OccurrenceId) -> Option<String> {
-        if !Arc::ptr_eq(&self.definition_graph_identity, &graph.identity) {
+        if !self.definition_graph_identity.same_owner(&graph.identity) {
             return None;
         }
         let mut names = Vec::new();

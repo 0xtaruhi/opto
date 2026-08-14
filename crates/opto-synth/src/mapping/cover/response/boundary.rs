@@ -4,8 +4,8 @@
 //! Boundary value projection and per-port measurement for cover responses.
 
 use super::{
-    ArrivalReduction, BoundaryContract, BoundaryInputMeasurements, BoundaryValueIndex, EarlyLate,
-    LaneEvaluation, Measurement, RiseFall, optional_finite, word,
+    ArrivalReduction, BoundaryContract, BoundaryInputMeasurements, BoundaryValueIndex,
+    LaneEvaluation, Measurement, optional_finite, word,
 };
 use crate::mapping::cover::AnalyzedRegionOutput;
 
@@ -173,7 +173,7 @@ pub(crate) fn boundary_input_measurements(
             (&mut measurements.late_rise, true, false),
             (&mut measurements.late_fall, true, true),
         ] {
-            let lane = |values: EarlyLate<RiseFall<Option<crate::FiniteValue>>>| {
+            let lane = |values: crate::regional::TimingCorners<Option<crate::FiniteValue>>| {
                 let edge = if late { values.late } else { values.early };
                 if fall { edge.fall } else { edge.rise }
             };

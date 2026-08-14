@@ -3,9 +3,7 @@
 
 //! Publication of every explored regional mapping context.
 
-use super::regional_mapping::RegionalPlanJournalRecord;
 use crate::incremental::RegionalCacheRecord;
-use crate::regional::RegionCoverPlanRecord;
 use crate::{RegionContextKey, RegionCoverPlan, SynthError};
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -17,7 +15,7 @@ use std::collections::{BTreeMap, btree_map::Entry};
 pub(super) fn publish(
     base_records: &mut Box<[RegionalCacheRecord]>,
     final_plans: &[RegionCoverPlan],
-    journal: Box<[RegionalPlanJournalRecord]>,
+    journal: Box<[(crate::RegionRowId, RegionCoverPlan)]>,
 ) -> Result<(), SynthError> {
     let bases = std::mem::take(base_records).into_vec();
     if bases.len() != final_plans.len() {
@@ -35,16 +33,16 @@ pub(super) fn publish(
             "regional decision records contain duplicate context keys",
         ));
     }
-    for journaled in journal {
+    for (row, plan) in journal {
         let base = bases
-            .get(journaled.row.index())
+            .get(row.index())
             .ok_or_else(|| SynthError::invariant("regional plan journal row is out of range"))?;
-        merge_plan(&mut records, base, journaled.plan, false)?;
+        merge_plan(&mut records, base, &plan, false)?;
     }
     // The journal retains every explored context. The selected plans remain
     // authoritative for contexts that also contain the best checkpoint.
     for (base, plan) in bases.iter().zip(final_plans) {
-        merge_plan(&mut records, base, plan.checkpoint_record(), true)?;
+        merge_plan(&mut records, base, plan, true)?;
     }
     *base_records = records.into_values().collect();
     RegionalCacheRecord::validate_all(base_records)
@@ -53,7 +51,7 @@ pub(super) fn publish(
 fn merge_plan(
     records: &mut BTreeMap<RegionContextKey, RegionalCacheRecord>,
     base: &RegionalCacheRecord,
-    plan: RegionCoverPlanRecord,
+    plan: &RegionCoverPlan,
     replace: bool,
 ) -> Result<(), SynthError> {
     let mut incoming = if base.context() == plan.context_key() {

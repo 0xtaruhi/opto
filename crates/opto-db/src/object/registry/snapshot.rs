@@ -4,9 +4,10 @@
 //! Canonical object-registry checkpoint wire boundary.
 
 use super::{
-    Arc, Deserialize, HashMap, NameTable, ObjectKey, ObjectRegistry, ObjectUid, RegistryError,
+    Deserialize, HashMap, NameTable, ObjectKey, ObjectRegistry, ObjectUid, RegistryError,
     Serialize, fmt,
 };
+use opto_core::OwnerToken;
 use serde::de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Error as SerError, SerializeSeq};
 
@@ -204,7 +205,7 @@ impl SnapshotRestore {
     fn new(names: NameTable, next_uid: u64) -> Self {
         Self {
             registry: ObjectRegistry {
-                owner: Arc::new(()),
+                owner: OwnerToken::fresh(),
                 next_uid,
                 names,
                 slots: Vec::new(),

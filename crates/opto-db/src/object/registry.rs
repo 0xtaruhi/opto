@@ -11,10 +11,9 @@ use super::{
     AnyObjectId, Deserialize, NameError, NameId, NameTable, ObjectIdSet, ObjectKey, ObjectLocator,
     ObjectUid, ResolvedObject, Serialize, fmt,
 };
-use opto_core::NameCheckpoint;
+use opto_core::{NameCheckpoint, OwnerToken};
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroU32;
-use std::sync::Arc;
 
 mod reconcile;
 mod snapshot;
@@ -26,6 +25,8 @@ pub use reconcile::{
 #[cfg(test)]
 pub(super) use snapshot::SnapshotRecord;
 pub use snapshot::{ObjectRegistrySnapshot, ObjectRegistrySnapshotRef};
+
+pub(super) enum ObjectRegistryOwner {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -113,7 +114,7 @@ pub(super) struct ArenaSlot {
 /// Insertion is idempotent by [`ObjectLocator`]. Iteration and snapshots retain
 /// monotonically increasing UID order, independent of arena-slot reuse.
 pub struct ObjectRegistry {
-    owner: Arc<()>,
+    owner: OwnerToken<ObjectRegistryOwner>,
     pub(super) next_uid: u64,
     pub(super) names: NameTable,
     pub(super) slots: Vec<ArenaSlot>,

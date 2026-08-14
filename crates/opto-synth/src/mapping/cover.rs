@@ -36,12 +36,10 @@ pub(crate) struct AnalyzedRegionOutput {
 
 type SelectedSubjectCover = (Box<[AnalyzedRegionOutput]>, LibraryCover);
 
+/// Borrowed closure domain used to evaluate and seal one regional cover.
 #[derive(Clone, Copy)]
-pub(crate) struct CompactPlanInputs<'a, 'scenario> {
-    pub(crate) region: crate::SynthesisRegion,
-    pub(crate) context: crate::RegionContextKey,
-    pub(crate) boundary_response: &'a [crate::BoundaryContract],
-    pub(crate) decision_key: [u8; 32],
+pub(crate) struct CoverClosureDomain<'a, 'scenario> {
+    pub(crate) contracts: &'a [crate::BoundaryContract],
     pub(crate) catalog: &'a CombinationalCellCatalog,
     pub(crate) response_models: &'a CoverResponseModels<'scenario>,
     pub(crate) timing_tags: &'a crate::TimingTagInterner,
@@ -51,11 +49,11 @@ pub(crate) struct CompactPlanInputs<'a, 'scenario> {
 impl AnalyzedRegionCover {
     pub(crate) fn candidate_binding(
         &mut self,
-        inputs: crate::mapping::CandidateBindingInputs<'_>,
+        domain: crate::mapping::CandidateBindingDomain<'_>,
         catalog: &CombinationalCellCatalog,
     ) -> Result<RegionPlanBinding, crate::SynthError> {
         let candidate = crate::mapping::build_candidate_binding(
-            inputs,
+            domain,
             &self.inputs,
             self.outputs.iter().map(|output| output.values.as_ref()),
         )?;
@@ -90,18 +88,18 @@ impl AnalyzedRegionCover {
 
     pub(crate) fn compact_plan(
         &self,
-        inputs: CompactPlanInputs<'_, '_>,
+        region: crate::SynthesisRegion,
+        context: crate::RegionContextKey,
+        decision_key: [u8; 32],
+        closure: CoverClosureDomain<'_, '_>,
     ) -> Result<crate::RegionCoverPlan, crate::SynthError> {
-        let CompactPlanInputs {
-            region,
-            context,
-            boundary_response,
-            decision_key,
+        let CoverClosureDomain {
+            contracts: boundary_response,
             catalog,
             response_models,
             timing_tags,
             regional_slice,
-        } = inputs;
+        } = closure;
         let mut payload = b"ORCP\x03".to_vec();
         payload.extend_from_slice(&(self.cover.cells.len() as u64).to_le_bytes());
         for (index, cell) in self.cover.cells.iter().enumerate() {
@@ -215,11 +213,8 @@ impl AnalyzedRegionCover {
             timing_tags,
         )?;
         Ok(crate::RegionCoverPlan::new(
-            crate::RegionPlanIdentity {
-                region: region.id(),
-                revision: region.revision(),
-                context_key: context,
-            },
+            region,
+            context,
             crate::RegionPlanCost {
                 legal: true,
                 worst_normalized_violation: finite(boundary_score.worst_normalized_violation)?,
@@ -231,11 +226,8 @@ impl AnalyzedRegionCover {
                 cell_count: local_cell_count,
                 stable_plan_key,
             },
-            crate::RegionPlanSize {
-                local_net_count,
-                local_cell_count,
-                local_pin_count,
-            },
+            local_net_count,
+            local_pin_count,
             boundary_response.to_vec(),
             payload,
         )

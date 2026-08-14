@@ -7,9 +7,8 @@
 //! list without expanding the hierarchy. [`OccurrenceGraph`] performs that
 //! expansion explicitly when a consumer needs occurrence-local state.
 
-use opto_core::{DenseId, NameId, NameTable};
+use opto_core::{DenseId, NameId, NameTable, OwnerToken};
 use std::fmt;
-use std::sync::Arc;
 
 mod occurrence;
 
@@ -20,6 +19,7 @@ enum DefinitionTag {}
 enum ProviderTag {}
 enum OccurrenceTag {}
 enum InstanceOrdinalTag {}
+pub(super) enum DefinitionGraphOwner {}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// A dense definition identity scoped to one [`DefinitionGraph`].
@@ -361,7 +361,7 @@ struct Definition {
     instances: Box<[StoredDefinitionInstance]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 /// A sealed, linked graph of definitions and their instance references.
 ///
 /// The graph retains definitions once and computes occurrence multiplicities
@@ -369,7 +369,7 @@ struct Definition {
 /// graph revision.
 pub struct DefinitionGraph {
     // Clones share this token; independently built graphs never do.
-    identity: Arc<()>,
+    identity: OwnerToken<DefinitionGraphOwner>,
     root: DefinitionId,
     names: NameTable,
     definitions: Box<[Definition]>,
@@ -380,6 +380,22 @@ pub struct DefinitionGraph {
     unresolved_occurrences: u64,
     first_unresolved: Option<FirstUnresolved>,
 }
+
+impl PartialEq for DefinitionGraph {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.names == other.names
+            && self.definitions == other.definitions
+            && self.definition_by_name == other.definition_by_name
+            && self.providers == other.providers
+            && self.postorder == other.postorder
+            && self.occurrence_counts == other.occurrence_counts
+            && self.unresolved_occurrences == other.unresolved_occurrences
+            && self.first_unresolved == other.first_unresolved
+    }
+}
+
+impl Eq for DefinitionGraph {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FirstUnresolved {
@@ -539,7 +555,7 @@ impl DefinitionGraph {
         let first_unresolved = find_first_unresolved(&graph_definitions, root, &postorder);
         debug_assert_eq!(first_unresolved.is_some(), unresolved_occurrences != 0);
         Ok(Self {
-            identity: Arc::new(()),
+            identity: OwnerToken::fresh(),
             root,
             names,
             definitions: graph_definitions.into_boxed_slice(),

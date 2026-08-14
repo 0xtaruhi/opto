@@ -12,7 +12,7 @@ pub(crate) mod region_graph;
 pub use boundary::{
     BoundaryCheckKind, BoundaryContract, BoundaryContractError, BoundaryContractRow,
     BoundaryInputContract, BoundaryOutputContract, ContractGeneration, EarlyLate, FiniteValue,
-    RegionContextKey, RiseFall, TimingTag, TimingTagId, TimingTagInterner,
+    RegionContextKey, RiseFall, TimingCorners, TimingTag, TimingTagId, TimingTagInterner,
 };
 use boundary::{check_value_lane, input_transition_lane, path_timing_lane};
 pub use region_graph::{
@@ -24,8 +24,5 @@ pub use region_graph::{
 pub(crate) use contract::RegionContractSet;
 pub(crate) use epoch::{EpochDecision, RegionalEpochCoordinator};
 pub(crate) use ownership::StructuralOwnershipProvenance;
-pub use plan::{
-    BoundaryResponse, BoundaryResponseRow, RegionCoverPlan, RegionPlanCost, RegionPlanIdentity,
-    RegionPlanSize,
-};
+pub use plan::{BoundaryResponse, BoundaryResponseRow, RegionCoverPlan, RegionPlanCost};
 pub(crate) use plan::{RegionCoverPlanRecord, RegionImplementationCell, RegionalSharedAllocations};

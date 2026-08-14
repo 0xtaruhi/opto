@@ -327,7 +327,7 @@ pub struct SessionConfig {
 /// analysis models are derived process state and may be invalidated when the
 /// session revision or active libraries change.
 pub struct Session {
-    checkpoint_owner: Arc<()>,
+    checkpoint_owner: opto_core::OwnerToken<ConstraintCheckpointOwner>,
     constraint_transactions: ConstraintTransactions,
     pub(crate) state: PersistentState,
     pub(crate) process: ProcessState,
@@ -367,13 +367,15 @@ pub(crate) struct TimingModelCache {
 /// A checkpoint belongs to exactly one session. Committing keeps semantic
 /// changes; restoring rolls back constraints, object registration, and caches.
 pub struct ConstraintCheckpoint {
-    owner: Arc<()>,
+    owner: opto_core::OwnerToken<ConstraintCheckpointOwner>,
     transaction: u64,
     revision: RevisionId,
     current_design: Option<String>,
     objects: ObjectRegistryCheckpoint,
     timing: TimingCheckpoint,
 }
+
+enum ConstraintCheckpointOwner {}
 
 #[derive(Debug, Default)]
 struct ConstraintTransactions {
@@ -410,7 +412,7 @@ impl ConstraintTransactions {
 impl Default for Session {
     fn default() -> Self {
         Self {
-            checkpoint_owner: Arc::new(()),
+            checkpoint_owner: opto_core::OwnerToken::fresh(),
             constraint_transactions: ConstraintTransactions::default(),
             state: PersistentState::default(),
             process: ProcessState::default(),
@@ -450,7 +452,7 @@ impl Session {
         }
         let state = PersistentState::default();
         Ok(Self {
-            checkpoint_owner: Arc::new(()),
+            checkpoint_owner: opto_core::OwnerToken::fresh(),
             constraint_transactions: ConstraintTransactions::default(),
             state,
             process: ProcessState::with_runtime(
@@ -474,7 +476,7 @@ impl Session {
     /// Starts a nested transaction for constraint-owned session state.
     pub fn constraint_checkpoint(&mut self) -> ConstraintCheckpoint {
         ConstraintCheckpoint {
-            owner: Arc::clone(&self.checkpoint_owner),
+            owner: self.checkpoint_owner.clone(),
             transaction: self.constraint_transactions.begin(),
             revision: self.state.revision,
             current_design: self.state.current_design.clone(),
@@ -526,7 +528,7 @@ impl Session {
         &self,
         checkpoint: &ConstraintCheckpoint,
     ) -> Result<(), SessionError> {
-        if Arc::ptr_eq(&self.checkpoint_owner, &checkpoint.owner) {
+        if self.checkpoint_owner.same_owner(&checkpoint.owner) {
             Ok(())
         } else {
             Err(SessionError::state(

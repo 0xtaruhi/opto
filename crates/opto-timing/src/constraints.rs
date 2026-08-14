@@ -11,7 +11,6 @@ use super::*;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 mod arbitration;
 mod checkpoint;
@@ -30,6 +29,9 @@ use storage::{ArenaInsertion, ArenaRemoval, OrderedArena, RawSlot};
 pub use storage::{TimingRowIter, TimingRows};
 
 const TIMING_FINGERPRINT_DOMAIN: &[u8] = b"opto/synthesis-timing/v1\0";
+
+enum TimingContextOwner {}
+enum TimingTransactionOwner {}
 
 /// Typed outcome of a timing-constraint mutation.
 ///
@@ -375,7 +377,7 @@ impl IoDelay {
 /// append-only undo journal, while serialized checkpoints contain only primary
 /// rows and rebuild derived indexes during restore.
 pub struct TimingContext {
-    owner: Arc<()>,
+    owner: opto_core::OwnerToken<TimingContextOwner>,
     pub(crate) revision: RevisionId,
     clocks: OrderedArena<Clock>,
     pub(crate) input_transitions: BTreeMap<PortId, PortValueSlots>,
@@ -393,7 +395,7 @@ pub struct TimingContext {
     max_fanouts: OrderedArena<DesignRuleConstraint>,
     clock_slots: BTreeMap<ClockId, ClockSlot>,
     references: BTreeMap<opto_db::AnyObjectId, BTreeSet<TimingReference>>,
-    transactions: Vec<Arc<()>>,
+    transactions: Vec<opto_core::OwnerToken<TimingTransactionOwner>>,
     journal: Vec<TimingUndo>,
 }
 
@@ -404,7 +406,7 @@ pub struct TimingContext {
 /// updates without allocating a full timing-context rollback snapshot.
 #[derive(Debug)]
 pub struct PreparedTimingObjectRemoval {
-    owner: Arc<()>,
+    owner: opto_core::OwnerToken<TimingContextOwner>,
     base_revision: RevisionId,
     revision: Option<RevisionId>,
     clocks: Vec<RowEdit<ClockSlot, Clock>>,
@@ -448,8 +450,8 @@ impl ValidatedTimingObjectRemoval<'_> {
 #[derive(Debug)]
 #[must_use = "a timing checkpoint must be committed or rolled back"]
 pub struct TimingCheckpoint {
-    owner: Arc<()>,
-    identity: Arc<()>,
+    owner: opto_core::OwnerToken<TimingContextOwner>,
+    identity: opto_core::OwnerToken<TimingTransactionOwner>,
     journal_len: usize,
     revision: RevisionId,
 }
@@ -637,7 +639,7 @@ design_rule_slots!(
 impl Default for TimingContext {
     fn default() -> Self {
         Self {
-            owner: Arc::new(()),
+            owner: opto_core::OwnerToken::fresh(),
             revision: RevisionId::INITIAL,
             clocks: OrderedArena::default(),
             input_transitions: BTreeMap::new(),
@@ -664,7 +666,7 @@ impl Default for TimingContext {
 impl Clone for TimingContext {
     fn clone(&self) -> Self {
         Self {
-            owner: Arc::new(()),
+            owner: opto_core::OwnerToken::fresh(),
             revision: self.revision,
             clocks: self.clocks.clone(),
             input_transitions: self.input_transitions.clone(),
@@ -765,9 +767,9 @@ impl TimingContext {
                 self.clock_slots.len(),
             ))
             .saturating_add(references)
-            .saturating_add(opto_core::resident::slice_bytes::<Arc<()>>(
-                self.transactions.len(),
-            ))
+            .saturating_add(opto_core::resident::slice_bytes::<
+                opto_core::OwnerToken<TimingTransactionOwner>,
+            >(self.transactions.len()))
             .saturating_add(self.transactions.len().saturating_mul(
                 opto_core::resident::allocation_bytes(std::mem::size_of::<[usize; 2]>()),
             ))

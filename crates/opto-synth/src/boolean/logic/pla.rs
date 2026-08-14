@@ -355,19 +355,20 @@ fn resubstitute_roots(
             budget,
         })
         .collect::<Vec<_>>();
+    let search_space = RelationSearchSpace {
+        variable_bits: &variable_bits,
+        outputs,
+        input_count,
+        full,
+    };
     let analyze = |mut work: RelationWork| {
         let mut local_profile = RelationProfile::default();
         let search = relation_candidates(
             outputs[work.output],
-            RelationInputs {
-                support: &work.support,
-                variable_bits: &variable_bits,
-                outputs,
-                divisors: &order[..work.position],
-                separation: &separations[work.output],
-                input_count,
-                full,
-            },
+            &work.support,
+            &order[..work.position],
+            &separations[work.output],
+            &search_space,
             &mut work.budget,
             &mut local_profile,
         );
@@ -457,22 +458,19 @@ fn relation_gain(
         .map_or(0, |count| support.len().saturating_sub(count))
 }
 
-#[derive(Clone, Copy)]
-struct RelationInputs<'a> {
-    support: &'a [usize],
-    variable_bits: &'a [u128],
-    outputs: &'a [u128],
-    divisors: &'a [usize],
-    separation: &'a SeparationMatrix,
-    input_count: usize,
-    full: u128,
-}
-
 struct RelationWork {
     position: usize,
     output: usize,
     support: Vec<usize>,
     budget: usize,
+}
+
+/// Immutable truth-space shared by every parallel relation search.
+struct RelationSearchSpace<'a> {
+    variable_bits: &'a [u128],
+    outputs: &'a [u128],
+    input_count: usize,
+    full: u128,
 }
 
 fn relation_capacity(divisor_count: usize, support_count: usize) -> usize {
@@ -532,19 +530,21 @@ struct RelationSearch {
 
 fn relation_candidates(
     target: u128,
-    inputs: RelationInputs<'_>,
+    support: &[usize],
+    built: &[usize],
+    separation: &SeparationMatrix,
+    space: &RelationSearchSpace<'_>,
     budget: &mut usize,
     profile: &mut RelationProfile,
 ) -> RelationSearch {
-    let RelationInputs {
-        support,
+    let RelationSearchSpace {
         variable_bits,
         outputs,
-        divisors: built,
-        separation,
         input_count,
         full,
-    } = inputs;
+    } = space;
+    let input_count = *input_count;
+    let full = *full;
     let mut search = RelationSearch::default();
     for count in 1..=super::MAX_MATCH_INPUTS.min(built.len()) {
         visit_combinations(built.len(), count, |divisors| {

@@ -21,15 +21,10 @@ use objective::{BestMapping, MappedObjective};
 
 pub(crate) struct RegionalMappingOutcome {
     pub(crate) plans: Box<[crate::RegionCoverPlan]>,
-    pub(crate) plan_journal: Box<[RegionalPlanJournalRecord]>,
+    pub(crate) plan_journal: Box<[(crate::RegionRowId, crate::RegionCoverPlan)]>,
     pub(crate) epochs: usize,
     pub(crate) mapped: mapping::MappedOutput,
     pub(crate) timing: Option<crate::closure::mmmc::MmmcTiming>,
-}
-
-pub(crate) struct RegionalPlanJournalRecord {
-    pub(crate) row: crate::RegionRowId,
-    pub(crate) plan: crate::regional::RegionCoverPlanRecord,
 }
 
 type BoundaryValueObservation = ([u8; 32], Box<[word::ValueId]>);
@@ -53,42 +48,42 @@ struct RegionalMapper<'a> {
     trace: crate::api::diagnostics::SynthTrace,
 }
 
-/// Frozen Word semantics and ownership plus the mutable provenance ledger.
-struct RegionalIr<'a> {
+/// The single mutable epoch state governed by one regional mapper.
+///
+/// Frozen Word semantics and ownership define the generation in which the
+/// rows are valid. The provenance ledger, contracts, rows, and exploration
+/// journal advance together under the mapper's serialized publication rules.
+struct RegionalMappingState<'a> {
     module: &'a word::WordModule,
     provenance: &'a mut ProvenanceBuilder,
     region_ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
+    contracts: crate::regional::RegionContractSet,
+    rows: Vec<RegionalPlanRow>,
+    plan_journal:
+        std::collections::BTreeMap<(usize, crate::RegionContextKey), crate::RegionCoverPlan>,
 }
 
-/// Regional state that one epoch may replace.
+/// One compact plan and its generation-local source binding.
 #[derive(Clone)]
 pub(super) struct RegionalPlanRow {
     pub(super) plan: crate::RegionCoverPlan,
     pub(super) binding: RegionPlanBinding,
 }
 
-struct RegionalPlans {
-    contracts: crate::regional::RegionContractSet,
-    rows: Vec<RegionalPlanRow>,
-    plan_journal: std::collections::BTreeMap<
-        (usize, crate::RegionContextKey),
-        crate::regional::RegionCoverPlanRecord,
-    >,
-}
-
-impl RegionalPlans {
+impl RegionalMappingState<'_> {
     fn journal_compacted_plan(
         &mut self,
         row: usize,
         plan: &crate::RegionCoverPlan,
     ) -> Result<(), crate::SynthError> {
-        let record = plan.checkpoint_record();
-        let key = (row, record.context_key());
+        let key = (row, plan.context_key());
         match self.plan_journal.entry(key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(record);
+                entry.insert(plan.clone());
             }
-            std::collections::btree_map::Entry::Occupied(entry) if entry.get() != &record => {
+            std::collections::btree_map::Entry::Occupied(entry)
+                if entry.get().checkpoint_record() != plan.checkpoint_record() =>
+            {
                 return Err(crate::SynthError::invariant(
                     "one regional decision context compacted to different portable plans",
                 ));
@@ -98,15 +93,12 @@ impl RegionalPlans {
         Ok(())
     }
 
-    fn take_plan_journal(&mut self) -> Result<Box<[RegionalPlanJournalRecord]>, crate::SynthError> {
+    fn take_plan_journal(
+        &mut self,
+    ) -> Result<Box<[(crate::RegionRowId, crate::RegionCoverPlan)]>, crate::SynthError> {
         std::mem::take(&mut self.plan_journal)
             .into_iter()
-            .map(|((row, _), plan)| {
-                Ok(RegionalPlanJournalRecord {
-                    row: crate::RegionRowId::from_index(row)?,
-                    plan,
-                })
-            })
+            .map(|((row, _), plan)| Ok((crate::RegionRowId::from_index(row)?, plan)))
             .collect()
     }
 }
@@ -140,13 +132,6 @@ struct ScenarioLeakageCensus {
     unknown_cells: u64,
 }
 
-/// What one epoch measured on the shared mapped generation.
-struct MeasuredEpoch {
-    plans: Vec<crate::RegionCoverPlan>,
-    global_dynamic_power: Option<f64>,
-    timing_quality: Option<opto_timing::TimingQualitySummary>,
-}
-
 pub(crate) fn map_mapping_library_cells(
     request: RegionalMappingRequest<'_>,
     runtime: &ExecutionContext,
@@ -171,14 +156,16 @@ pub(crate) fn map_mapping_library_cells(
             "regional mappings do not align with the region graph",
         ));
     }
-    let mut ir = RegionalIr {
+    let mut state = RegionalMappingState {
         module,
         provenance,
         region_ownership,
+        contracts: contracts.clone(),
+        rows: regional_plans.to_vec(),
+        plan_journal: std::collections::BTreeMap::new(),
     };
     let trace =
         crate::api::diagnostics::SynthTrace::timing(config.mapping_context.config.diagnostics);
-    let contracts = contracts.clone();
     let mapper = RegionalMapper {
         regions,
         response_models: cover::CoverResponseModels::new(config.scenarios),
@@ -186,12 +173,7 @@ pub(crate) fn map_mapping_library_cells(
         runtime,
         trace,
     };
-    let mut state = RegionalPlans {
-        contracts,
-        rows: regional_plans.to_vec(),
-        plan_journal: std::collections::BTreeMap::new(),
-    };
-    mapper.run_epochs(&mut ir, &mut state, observer)
+    mapper.run_epochs(&mut state, observer)
 }
 
 /// Resolves frozen regional boundary values against the one mapped substrate.

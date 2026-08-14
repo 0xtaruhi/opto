@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::regional::{RegionContextKey, RegionCoverPlanRecord, RegionalSharedAllocations};
+use crate::regional::{
+    BoundaryContract, RegionContextKey, RegionCoverPlanRecord, RegionalSharedAllocations,
+};
+use crate::{RegionCoverPlan, SynthesisRegion};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -26,8 +29,8 @@ impl RegionalCacheRecord {
         }
     }
 
-    pub(crate) fn set_plan(&mut self, plan: RegionCoverPlanRecord) {
-        self.plan = Some(plan);
+    pub(crate) fn set_plan(&mut self, plan: &RegionCoverPlan) {
+        self.plan = Some(plan.checkpoint_record());
     }
 
     pub(crate) fn clear_plan(&mut self) {
@@ -46,8 +49,20 @@ impl RegionalCacheRecord {
         &self.memory_implementations
     }
 
-    pub(crate) const fn plan(&self) -> Option<&RegionCoverPlanRecord> {
-        self.plan.as_ref()
+    /// Reconstructs the cached plan at the persistence boundary.
+    ///
+    /// The portable record remains private to the cache. Mapping code receives
+    /// only a live plan whose region, revision, context, and contracts have all
+    /// been validated against the current generation.
+    pub(crate) fn restore_plan(
+        &self,
+        region: SynthesisRegion,
+        contracts: &[BoundaryContract],
+    ) -> Result<Option<RegionCoverPlan>, crate::SynthError> {
+        self.plan
+            .as_ref()
+            .map(|plan| plan.restore(region, self.context, contracts))
+            .transpose()
     }
 
     /// Reuses the immutable decision payload for a new measured context.

@@ -28,8 +28,9 @@ struct ContractProjection {
     input_transitions: Box<[(word::ValueId, f64)]>,
 }
 
+/// Borrowed generation in which regional logic identities may be resolved.
 #[derive(Clone, Copy)]
-pub(crate) struct RegionLogicCandidateInputs<'a> {
+pub(crate) struct RegionLogicDomain<'a> {
     pub(crate) module: &'a word::WordModule,
     pub(crate) subject_inputs: &'a [word::ValueId],
     pub(crate) source_to_local: &'a BTreeMap<word::ValueId, word::ValueId>,
@@ -129,16 +130,16 @@ impl RegionLogicSlice {
     pub(crate) fn build_candidate(
         region: crate::RegionAnchorId,
         decision_key: [u8; 32],
-        inputs: RegionLogicCandidateInputs<'_>,
+        domain: RegionLogicDomain<'_>,
     ) -> Result<Self, crate::SynthError> {
-        let RegionLogicCandidateInputs {
+        let RegionLogicDomain {
             module,
             subject_inputs,
             source_to_local,
             ownership,
             contracts,
             roots,
-        } = inputs;
+        } = domain;
         let mut inputs = subject_inputs.iter().copied().collect::<BTreeSet<_>>();
         let mut topology_roots = Vec::new();
         for &(root, local) in roots {

@@ -30,30 +30,25 @@ pub(super) fn lower_logic(
             "logic_lowering.architecture_preparation".to_string()
         });
         crate::mapping::prepare_regional_architectures(
-            crate::mapping::RegionalArchitectureRequest {
+            &crate::mapping::RegionalArchitectureRequest {
                 source: &source,
                 operation_regions,
                 decisions: &ledger.regional_cache_records,
                 regions: &regions,
                 contracts: &contracts,
-                config: crate::mapping::ArchitectureMappingConfig {
-                    options: &environment.options,
-                    timing: environment.primary_scenario().constraints(),
-                    scenarios: &environment.scenarios,
-                    target_model: &target_model,
-                    port_bindings: &environment.port_bindings,
-                    mapping_context: &mapping_context,
-                    rewrite_recipes: &execution.engine.rewrite_recipes,
-                    incremental_metrics: &environment.incremental_metrics,
-                },
+                options: &environment.options,
+                timing: environment.primary_scenario().constraints(),
+                scenarios: &environment.scenarios,
+                target_model: &target_model,
+                port_bindings: &environment.port_bindings,
+                mapping_context: &mapping_context,
+                rewrite_recipes: &execution.engine.rewrite_recipes,
+                incremental_metrics: &environment.incremental_metrics,
             },
             execution.runtime,
         )
     }?;
-    let crate::mapping::RegionalArchitecturePreparation {
-        regions: prepared_regions,
-        memories: memory_implementations,
-    } = preparation;
+    let (prepared_regions, memory_implementations) = preparation;
     let mut prepared_regions = prepared_regions.into_vec();
     for prepared in &mut prepared_regions {
         prepared.binding.resolve_sequential_sources(&source)?;
