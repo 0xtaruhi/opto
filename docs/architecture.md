@@ -1212,23 +1212,50 @@ defect.
 
 ## Known Architectural Gaps
 
-Feedback-enable recovery declines any register that has a reset. Hold detection
-equates two reads of the register's target signal taken at different program
-points, and control lowering has already rewritten reset registers, so on those
-the recovered enable comes out narrower than the design's. That is not a
-theoretical concern: recovering reset registers made the Ibex SKY130 load-store
-unit's transaction-control registers stop updating on cycles where the design's
-own enable was high, and random-stimulus co-simulation against the RTL diverged
-from cycle 116. Lifting the restriction requires hold detection that names the
-register's own output rather than any read of its signal; the recovered enable
-must then be checked against the design's, not only against the next-state
-expression the pass was handed.
+Register enable ownership is the largest open defect, and it is an architecture
+problem rather than a missing check.
 
-The value-level equivalence proof that guards recovery does not close that hole
-by itself. It proves the recovered enable and data reconstruct the next-state
-expression, which it does catch a wrong decomposition of, but the CNF encoder
-gives one variable per signal bit for every read of that signal, so it cannot
-distinguish reads taken at different program points either.
+The frontend already knows each register's enable exactly: `always_ff` lowering
+emits `RegisterOp { d, enable, resets }` with the enable taken straight from the
+branch condition. Control lowering then destroys it, folding the enable into the
+next state whenever the target has no enabled cell for that reset shape, and
+feedback-enable recovery afterwards tries to pattern-match it back out of the
+next state. An exact control is discarded and then guessed. Worse, the same
+expansion is implemented twice: once inside control lowering and once in
+`expand_unsupported_enables`.
+
+Recovery is only as good as its pattern. It decides that a path holds by
+comparing it against a read of the register's target signal, and equates two
+reads of one signal even though a clocked process that assigns the signal on a
+reset branch and an enable branch produces reads that denote different values.
+On the Ibex SKY130 case that yields an enable narrower than the design's: the
+load-store unit's transaction-control registers stop updating on cycles where
+the design's own enable is high, and random-stimulus co-simulation against the
+RTL diverges from cycle 116. Recovery therefore declines any register that has a
+reset.
+
+The value-level equivalence proof that guards recovery does not close that hole.
+It proves the recovered enable and data reconstruct the next-state expression,
+and it does reject a wrong decomposition, but the CNF encoder gives one variable
+per signal bit for every read of that signal, so it cannot distinguish reads
+taken at different program points either.
+
+The intended architecture is one owner per control: control lowering normalizes
+resets and composes a synchronous reset into the enable but never consumes it;
+clock gating and enabled-cell selection consume exact enables; and
+`expand_unsupported_enables` is the single, last site that turns a remaining
+enable into a next-state mux. A register's held value is then read through a
+wire with exactly one driver, so it denotes the register's output and not
+whichever assignment ran last. Recovery survives only for a register whose RTL
+writes its enable as a mux rather than as a branch.
+
+Building that pipeline exposes a second defect that the current order hides:
+with exact enables surviving to clock gating, the Ibex case gates 24 to 29
+register banks instead of 6 and co-simulation still diverges, so gating an exact
+enable is itself wrong somewhere. The current order masks it because control
+lowering has already expanded most enables before gating can see them. Both
+defects have to be fixed together; neither is closed by adding a condition to
+the recovery pass.
 
 The remaining unproven product targets are multi-million-gate runtime/RSS and
 public-suite QoR/runtime comparison. Those require the benchmark evidence
