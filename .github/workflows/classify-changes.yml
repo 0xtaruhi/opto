@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: Classify changes
+
+on:
+  workflow_call:
+    outputs:
+      docs-changed:
+        description: Whether the revision changes files below docs
+        value: ${{ jobs.classify.outputs.docs-changed }}
+      docs-only:
+        description: Whether every changed file is below docs
+        value: ${{ jobs.classify.outputs.docs-only }}
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-24.04
+    outputs:
+      docs-changed: ${{ steps.paths.outputs.docs-changed }}
+      docs-only: ${{ steps.paths.outputs.docs-only }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: paths
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          docs_changed=false
+          docs_only=false
+          if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]] \
+            && git cat-file -e "$BASE_SHA^{commit}" \
+            && git cat-file -e "$HEAD_SHA^{commit}"; then
+            diff_range="$BASE_SHA..$HEAD_SHA"
+            if [[ "$EVENT_NAME" == pull_request ]]; then
+              diff_range="$BASE_SHA...$HEAD_SHA"
+            fi
+            mapfile -d '' changed_paths \
+              < <(git diff --name-only -z "$diff_range")
+            if (( ${#changed_paths[@]} > 0 )); then
+              docs_only=true
+              for path in "${changed_paths[@]}"; do
+                if [[ "$path" == docs/* ]]; then
+                  docs_changed=true
+                else
+                  docs_only=false
+                fi
+              done
+            fi
+          fi
+          echo "docs-changed=$docs_changed" >> "$GITHUB_OUTPUT"
+          echo "docs-only=$docs_only" >> "$GITHUB_OUTPUT"

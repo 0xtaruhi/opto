@@ -21,8 +21,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    uses: ./.github/workflows/classify-changes.yml
+
   analyze:
     name: Analyze (${{ matrix.language }})
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -36,31 +41,46 @@ jobs:
           - language: rust
             build-mode: none
     steps:
+      - name: Accept documentation-only change
+        if: needs.changes.outputs.docs-only == 'true'
+        run: echo "CodeQL inputs are unaffected by documentation-only changes."
+
       - name: Check out repository and pinned dependencies
+        if: needs.changes.outputs.docs-only != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
       - name: Initialize CodeQL
+        if: needs.changes.outputs.docs-only != 'true'
         uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
       - name: Analyze
+        if: needs.changes.outputs.docs-only != 'true'
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
 
   analyze-native:
     name: Analyze (c-cpp)
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - name: Accept documentation-only change
+        if: needs.changes.outputs.docs-only == 'true'
+        run: echo "Native CodeQL inputs are unaffected by documentation-only changes."
+
       - name: Check out repository and pinned dependencies
+        if: needs.changes.outputs.docs-only != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
       - name: Initialize CodeQL
+        if: needs.changes.outputs.docs-only != 'true'
         uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         with:
           languages: c-cpp
@@ -68,4 +88,5 @@ jobs:
           config-file: ./.github/codeql/native.yml
 
       - name: Analyze
+        if: needs.changes.outputs.docs-only != 'true'
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
