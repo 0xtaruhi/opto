@@ -502,8 +502,10 @@ fn synthesize_preserves_reconstructed_state_and_controls() {
     assert_eq!(text.matches("  DFD1 ").count(), 2, "{text}");
     assert_eq!(text.matches("  ANR2 ").count(), 1, "{text}");
     assert_eq!(text.matches("  MUX2 ").count(), 1, "{text}");
+    // The generated instance index is an emission detail; the reconstructed
+    // enable is the property under test, so match the connectivity only.
     assert!(
-        text.contains("MUX2 U2(.I0(q[0]), .I1(d0), .S(enable), .Z(n1));"),
+        text.contains("(.I0(q[0]), .I1(d0), .S(enable), .Z(n1));"),
         "{text}"
     );
     assert!(

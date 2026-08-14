@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 407
+expected_tests = 408
 
 [[owners]]
 path = "src/api"
@@ -32,7 +32,7 @@ contract = "Reusable Word-IR dependency, driver, cycle, use, and instance analys
 [[owners]]
 path = "src/planning"
 owner = "planning"
-tests = 63
+tests = 64
 contract = "Region-owned Word optimization, recognition, resource choice, and architecture recipes."
 
 [[owners]]

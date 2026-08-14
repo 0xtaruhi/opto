@@ -332,31 +332,7 @@ pub(crate) fn optimize_owned_combinational_dataflow(
         })
         .collect::<Result<Vec<_>, crate::SynthError>>()?;
 
-    for index in 0..module.operations().len() {
-        let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
-        let operation = module.operation_mut(operation_id).ok_or_else(|| {
-            crate::SynthError::invariant("owned dataflow operation is outside the arena")
-        })?;
-        let result = operation.result;
-        operation.kind.for_each_input_mut(|value| {
-            let replacement = representatives[value.index()];
-            if replacement.index() < result.index() {
-                *value = replacement;
-            }
-        });
-    }
-    for (mut connect, removable) in module.take_connects().into_iter().zip(removable_connects) {
-        if removable {
-            continue;
-        }
-        connect.value = representatives[connect.value.index()];
-        if let Some(dynamic) = &mut connect.target.dynamic {
-            dynamic.offset = representatives[dynamic.offset.index()];
-        }
-        module
-            .connect(connect.target, connect.value, connect.source)
-            .map_err(crate::SynthError::from)?;
-    }
+    commit_representatives(module, &representatives, &removable_connects)?;
     Ok(DataflowChanges {
         representatives: representatives.into_boxed_slice(),
         changed,
@@ -462,18 +438,7 @@ fn apply_representatives(
         .iter()
         .map(|connect| drivers.is_removable(module, connect, &read_bits))
         .collect::<Result<Vec<_>, crate::SynthError>>()?;
-    module
-        .rewrite_value_uses(&resolved_values)
-        .map_err(crate::SynthError::from)?;
-    let connects = module.take_connects();
-    for (connect, removable) in connects.into_iter().zip(removable_connects) {
-        if removable {
-            continue;
-        }
-        module
-            .connect(connect.target, connect.value, connect.source)
-            .map_err(crate::SynthError::from)?;
-    }
+    commit_representatives(module, &resolved_values, &removable_connects)?;
     let changed = resolved_values.iter().enumerate().any(|(index, &value)| {
         word::ValueId::from_index(index).is_ok_and(|original| original != value)
     });
@@ -481,6 +446,34 @@ fn apply_representatives(
         representatives: resolved_values.into_boxed_slice(),
         changed,
     })
+}
+
+/// Substitutes the canonical representatives into every Word IR read, then
+/// drops the connects the substitution left unreachable.
+///
+/// Both dataflow entry points must commit through this one function.
+/// [`read_signal_bits`] charges a signal read to its representative, so a wire
+/// whose readers were all substituted is judged removable. Rewriting only
+/// operation operands and connects would honour that judgement for those two
+/// readers while leaving instance connections and memory ports still naming the
+/// wire, which is how a clock-gate enable ends up driven by nothing.
+fn commit_representatives(
+    module: &mut word::WordModule,
+    representatives: &[word::ValueId],
+    removable_connects: &[bool],
+) -> Result<(), crate::SynthError> {
+    module
+        .rewrite_value_uses(representatives)
+        .map_err(crate::SynthError::from)?;
+    for (connect, &removable) in module.take_connects().into_iter().zip(removable_connects) {
+        if removable {
+            continue;
+        }
+        module
+            .connect(connect.target, connect.value, connect.source)
+            .map_err(crate::SynthError::from)?;
+    }
+    Ok(())
 }
 
 fn close_representatives(representatives: &mut [word::ValueId]) -> Result<(), crate::SynthError> {

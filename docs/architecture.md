@@ -1210,52 +1210,47 @@ defect.
 | Multi-million-gate runtime/RSS/QoR qualification | Not yet demonstrated |
 | Versioned public scale-suite performance targets | Target; not yet demonstrated |
 
-## Known Architectural Gaps
+## Register Control Ownership
 
-Register enable ownership is the largest open defect, and it is an architecture
-problem rather than a missing check.
+Each register control has exactly one owner. The frontend knows each register's
+enable exactly, because `always_ff` lowering emits
+`RegisterOp { d, enable, resets }` with the enable taken straight from the branch
+condition. Control lowering normalizes resets and composes a synchronous reset
+into that enable but never consumes it. Clock gating and enabled-cell selection
+consume exact enables. `expand_unsupported_enables` is the single, last site that
+turns a remaining enable into a next-state mux, so a register's held value is
+read through a wire with exactly one driver and denotes the register's output
+rather than whichever assignment ran last.
 
-The frontend already knows each register's enable exactly: `always_ff` lowering
-emits `RegisterOp { d, enable, resets }` with the enable taken straight from the
-branch condition. Control lowering then destroys it, folding the enable into the
-next state whenever the target has no enabled cell for that reset shape, and
-feedback-enable recovery afterwards tries to pattern-match it back out of the
-next state. An exact control is discarded and then guessed. Worse, the same
-expansion is implemented twice: once inside control lowering and once in
-`expand_unsupported_enables`.
-
-Recovery is only as good as its pattern. It decides that a path holds by
-comparing it against a read of the register's target signal, and equates two
-reads of one signal even though a clocked process that assigns the signal on a
-reset branch and an enable branch produces reads that denote different values.
-On the Ibex SKY130 case that yields an enable narrower than the design's: the
-load-store unit's transaction-control registers stop updating on cycles where
-the design's own enable is high, and random-stimulus co-simulation against the
-RTL diverges from cycle 116. Recovery therefore declines any register that has a
-reset.
-
-The value-level equivalence proof that guards recovery does not close that hole.
-It proves the recovered enable and data reconstruct the next-state expression,
-and it does reject a wrong decomposition, but the CNF encoder gives one variable
-per signal bit for every read of that signal, so it cannot distinguish reads
-taken at different program points either.
-
-The intended architecture is one owner per control: control lowering normalizes
-resets and composes a synchronous reset into the enable but never consumes it;
-clock gating and enabled-cell selection consume exact enables; and
-`expand_unsupported_enables` is the single, last site that turns a remaining
-enable into a next-state mux. A register's held value is then read through a
-wire with exactly one driver, so it denotes the register's output and not
-whichever assignment ran last. Recovery survives only for a register whose RTL
+The earlier pipeline discarded the exact enable in control lowering and then had
+feedback-enable recovery pattern-match it back out of the next state, with the
+expansion implemented twice. Recovery decided that a path holds by comparing it
+against a read of the register's target signal, and equated two reads of one
+signal even though a clocked process that assigns on a reset branch and on an
+enable branch produces reads that denote different values. On the Ibex SKY130
+case that inferred an enable narrower than the design's and co-simulation
+diverged from cycle 116. The value-level equivalence proof that guards recovery
+does not close that hole either: the CNF encoder gives one variable per signal
+bit for every read of that signal, so it cannot distinguish reads taken at
+different program points. Recovery is now reachable only for a register whose RTL
 writes its enable as a mux rather than as a branch.
 
-Building that pipeline exposes a second defect that the current order hides:
-with exact enables surviving to clock gating, the Ibex case gates 24 to 29
-register banks instead of 6 and co-simulation still diverges, so gating an exact
-enable is itself wrong somewhere. The current order masks it because control
-lowering has already expanded most enables before gating can see them. Both
-defects have to be fixed together; neither is closed by adding a condition to
-the recovery pass.
+Letting exact enables reach clock gating exposed a second defect, in owned
+combinational dataflow rather than in sequential mapping. `read_signal_bits`
+charges a signal read to its canonical representative, so a wire whose readers
+were all substituted is judged removable, but the substitution loop rewrote only
+operation operands and connects. Instance connections and memory ports kept
+naming the wire whose driver had just been dropped. Only an enable read solely by
+an integrated clock gate could expose it: on Ibex three load-store-unit gates
+took `ctrl_update`, `rdata_update`, and `addr_update` from undriven nets, so
+those banks never updated. Both dataflow entry points now commit through one
+`commit_representatives`, which substitutes through `rewrite_value_uses` — the
+single definition of every Word IR value read — before dropping connects.
+
+With both fixed, clock gating is on by default and gates 24 register banks on
+Ibex SKY130 instead of 6.
+
+## Known Architectural Gaps
 
 The remaining unproven product targets are multi-million-gate runtime/RSS and
 public-suite QoR/runtime comparison. Those require the benchmark evidence

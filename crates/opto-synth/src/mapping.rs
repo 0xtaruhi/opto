@@ -94,7 +94,7 @@ impl TargetMappingContext {
         sequential::normalize_sequential_controls(module, ownership)?;
         finish_stage("normalize controls");
         if target_mapping {
-            sequential::lower_controls(module, &self.sequential_catalog, ownership)?;
+            sequential::lower_controls(module, ownership)?;
             finish_stage("lower controls");
         }
         let gating_edges = |edge: word::Edge| {
@@ -120,13 +120,13 @@ impl TargetMappingContext {
                     ownership,
                 )?;
                 finish_stage("gate clocks");
-                sequential::expand_unsupported_enables(
-                    module,
-                    &self.sequential_catalog,
-                    ownership,
-                )?;
-                finish_stage("expand enables");
             }
+            // The single expansion site, and the last pass that may consume an
+            // enable. Everything before it either keeps the enable exact or
+            // turns it into a gated clock; whatever the target cannot realize as
+            // an enabled cell becomes a next-state mux here.
+            sequential::expand_unsupported_enables(module, &self.sequential_catalog, ownership)?;
+            finish_stage("expand enables");
         }
         Ok(())
     }
