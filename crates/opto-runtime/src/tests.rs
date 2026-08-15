@@ -255,6 +255,19 @@ fn dependency_worklist_releases_only_ready_items() {
     assert_eq!(ready.claim_ready().unwrap(), None);
 }
 
+/// A row count the plan cannot represent is a structured error, not an abort.
+///
+/// The edge iterator is empty, so nothing here needs a large allocation; the
+/// point is that the count is rejected before anything is sized from it.
+#[test]
+fn dependency_publication_reports_an_unrepresentable_row_count() {
+    let error = DependencyPublicationPlan::sparse(0, usize::MAX, []).unwrap_err();
+    assert!(
+        matches!(error, RuntimeError::InvalidDependencyPlan { .. }),
+        "unexpected error {error:?}"
+    );
+}
+
 #[test]
 fn dependency_publication_rejects_conflicts_and_rolls_back() {
     assert!(DependencyPublicationPlan::sparse(2, 1, [(0, 0), (1, 0)]).is_err());

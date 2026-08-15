@@ -96,7 +96,8 @@ opto-tcl-sys         opaque vendored Tcl boundary
 opto-synth           synthesis policy and transformations
 opto-timing          constraints, timing graph, full/incremental STA
 opto-power           activity propagation and power evaluation
-opto-formal          independent proof and qualification problems
+opto-formal          independent proof and qualification problems, plus the
+                     equivalence engine that AXM functional reduction calls
 opto-formats         Verilog and report rendering
 ```
 
@@ -460,13 +461,37 @@ independent design representations. Liberty cover evaluates the actual target
 cells and may choose NAND/NOR, AOI/OAI, XOR/XNOR, MUX, or another exact cut; an
 AXM node is never assumed to correspond one-for-one with a physical cell.
 
-Large AXM subjects also publish one bounded representation proposal. Genuine
-MUX nodes are expanded into equivalent AND/inverter structure, while XOR
-remains first-class, and the ordinary local normalizer and structural balancer
-run after each of at most two expansion rounds. A second round is attempted
-only when normalization creates another MUX. This exposes NAND/NOR sharing to
-Liberty cover without changing the canonical baseline, recognizing an RTL
-pattern, or creating another synthesis pipeline.
+The freshly lowered subject is first reduced by one bounded functional-
+reduction pass. Structural hash consing merges only syntactically identical
+nodes, so bit lowering, operator recipes, and separately rewritten cones leave
+behind nodes that compute the same function through different structure. The
+pass nominates candidates by bit-parallel simulation, proves or refutes each
+candidate against a class representative with `opto-formal`, folds every
+refutation's boundary assignment back into the stimulus, and repeats for a fixed
+round budget. A node is replaced only by a literal whose miter was proved
+unsatisfiable; equal simulation signatures nominate, they never authorize. The
+stimulus depends on boundary origin and word index alone, classes are emitted in
+ascending node order, each class elects its lowest-ID member, and independent
+class shards are proved in parallel and reassembled in shard order, so the
+substitution set is identical across worker counts. Constants and inputs are
+nominated alongside gates because a cone proved constant or proved equal to one
+input removes its whole support. Reduction precedes the optimization portfolio
+so every retained implementation is built from one duplicate-free subject.
+
+MUX expansion is part of the one canonical optimization path, not a competing
+implementation. Genuine MUX nodes are expanded into equivalent AND/inverter
+structure, while XOR remains first-class, and the ordinary local normalizer and
+structural balancer run after each of at most two expansion rounds. A second
+round is attempted only when normalization creates another MUX. This exposes
+NAND/NOR sharing to Liberty cover without recognizing an RTL pattern or
+creating another synthesis pipeline. Cover still selects MUX cells, because it
+matches cut truth tables against the target library rather than AXM node kinds.
+
+Optimizing an un-expanded implementation beside the expanded one is not part of
+the flow. It doubled every rewrite, cut, truth, and cover pass to produce an
+alternative that mapping then discarded, and the retained subject arena carried
+both. One path is the architecture: alternatives are justified by what mapping
+selects, not by what the optimizer could have produced.
 
 Small-support multi-output logic adds one bounded functional normalization:
 complete truth evaluation, shared-cube factoring, root-to-root resubstitution,
@@ -495,6 +520,13 @@ minimizes mapped area before delay and cell count. Post-map MFS remains local
 cell/MFFC cleanup and incrementally refines care-set partitions while visiting
 larger input sets; it does not reconstruct a second global factoring engine.
 
+Divisor collection enumerates the leaf subsets of a cut and asks the support
+index which nodes realize each subset. Almost all of those subsets are the
+support of no node, so the index carries an exact negative filter keyed by an
+order-independent fingerprint of the subset: a clear bit is a proof of absence
+and skips building and hashing the full key, while a set bit still requires the
+probe. The filter changes cost only; the divisors found are identical.
+
 AXM optimization is scheduled statically by a typed pass pipeline. Destructive
 passes return a `TransformProduct`; `TransformState` alone composes node maps,
 checks that active roots survive, and carries typed reusable analyses. Optional
@@ -502,10 +534,9 @@ passes return equivalent proposals. Iterative representation proposals use a
 static specification that names the transform, its fixed round budget, and its
 optimization policy; proposal-specific booleans and open-coded retry chains are
 not part of the scheduler. The pipeline installs retained proposals once into
-the shared graph. Independent baseline/proposal transforms and independent
-implementation-cover recoveries run as keyed composite tasks on limited views
-of the same worker pool; results return in implementation order before the
-ordinary deterministic ranking step. The mapper covers the generic
+the shared graph. Independent implementation-cover recoveries
+run as keyed composite tasks on limited views of the same worker pool; results
+return in implementation order before the ordinary deterministic ranking step. The mapper covers the generic
 implementation list with real Liberty cells. Timing-driven portfolios use
 bounded flow ranking before exact recovery of the selected implementation;
 unconstrained portfolios compare exact mapped area because that is their stated
@@ -604,6 +635,17 @@ re-cover feature must retain the complete frozen private IR and consume the
 same explicit ownership and binding provenance; reconstructing it from the
 global shell is forbidden.
 
+One incremental region edit reuses the retained topological order and its
+dependency plan whenever the edit adds no dependency edge and no net. Removing
+an arc cannot move a net earlier than a live predecessor, and a plan that still
+lists a removed edge is conservative rather than wrong: the traversal counts
+only dependencies it actually scheduled, so an extra edge recomputes a sink from
+its live predecessors instead of deadlocking on a dead one. Appending a net does
+force a rebuild, because the plan's position arena no longer covers the graph.
+Rebuilding is `O(nets + arcs)` per edit per timing view, so making it conditional
+is what keeps post-map candidate evaluation proportional to the edit rather than
+to the design. Cell resizing and constant-register removal both reuse the plan.
+
 There is one MMMC fact source, but acceptance authority is deliberately scoped
 to its decision domain. Initial mapping has one total `MappedObjective` used
 only to retain or restore an epoch checkpoint. Its timing order comes from the
@@ -695,9 +737,28 @@ This topology order runs whenever an MMMC timing owner exists, whether or not
 the scenario has explicit optimization constraints. Constraints add
 feasibility measurements to the shared transaction objective; they do not
 select a second post-map flow. Physical recovery follows legalization and
-timing preparation, seeds MFS from the full clean netlist when no earlier edit
-provides an incremental frontier, and preserves any measured closure through
-the same commit gate.
+timing preparation and preserves any measured closure through the same commit
+gate.
+
+Mapped resynthesis seeds only from a measured dirty cone: the cells this
+closure has already edited, and the retained non-region instances cover never
+costed. A region-owned cell was selected by cover under the same care set and
+the same library, with exact-area recovery already applied, so re-deriving it
+after mapping repeats a decision that has not changed. Sweeping the whole clean
+netlist is not the default; it spends the largest post-map budget on cells whose
+context never moved.
+
+A register whose reachable value is one constant is removed before that
+resynthesis. The proof substitutes the register's own outputs with their reset
+value, folds the bounded combinational cone behind its input pins, and requires
+the next state to stay at that value for every assignment of the nets the fold
+could not resolve. The fold follows only nets the register's own value can
+still reach, which is what bounds it and what makes the answer meaningful;
+every other net is one enumerated leaf. This is constant folding over structure, not
+inferred state equivalence, so it stays inside the rule that keeps full-domain
+state sharing out of the tree. Independent removals commit as one transaction
+because each transaction pays one incremental-STA update; a round repeats only
+over the cells the previous round reached.
 
 Cloning or sizing before whole-net HFNS is forbidden: removing a few sinks from
 a thousand-sink net merely moves the worst path to another sink. Forest
@@ -1129,6 +1190,12 @@ defect.
 | Private muxed arithmetic, CSA, Wallace/Dadda, and fused MAC; owner-confined FSM and sequential sharing | Implemented |
 | No memory admission mechanism | Implemented |
 | Parallel private technology-independent optimization and Liberty lowering/cover | Implemented |
+| Proof-backed AXM functional reduction before the optimization portfolio | Implemented; shard-parallel, deterministic across worker counts |
+| Unobservable mapped logic removed before closure evaluates it | Implemented |
+| Feedback-enable recovery guarded by a value-level equivalence proof | Implemented; reset registers are declined, see Known Architectural Gaps |
+| Clock gating enabled by default | Implemented |
+| Mapped resynthesis scoped to a measured dirty cone instead of the whole netlist | Implemented |
+| Constant-register removal proved through a bounded influence cone | Implemented; one batched transaction per round |
 | Weighted outer/inner worker allocation | Implemented |
 | Direct transactional region artifact commit | Implemented |
 | Single-atom mapped ownership and edge-owned boundary repair | Implemented |
@@ -1142,6 +1209,204 @@ defect.
 | Same-host real medium-scale regression guard | Implemented for 14 executable 353–10,225-cell cases selected from a pinned 30-case public pool |
 | Multi-million-gate runtime/RSS/QoR qualification | Not yet demonstrated |
 | Versioned public scale-suite performance targets | Target; not yet demonstrated |
+
+## Register Control Ownership
+
+Each register control has exactly one owner. The frontend knows each register's
+enable exactly, because `always_ff` lowering emits
+`RegisterOp { d, enable, resets }` with the enable taken straight from the branch
+condition. Control lowering normalizes resets and composes a synchronous reset
+into that enable but never consumes it. Clock gating and enabled-cell selection
+consume exact enables. `expand_unsupported_enables` is the single, last site that
+turns a remaining enable into a next-state mux, so a register's held value is
+read through a wire with exactly one driver and denotes the register's output
+rather than whichever assignment ran last.
+
+The earlier pipeline discarded the exact enable in control lowering and then had
+feedback-enable recovery pattern-match it back out of the next state, with the
+expansion implemented twice. Recovery decided that a path holds by comparing it
+against a read of the register's target signal, and equated two reads of one
+signal even though a clocked process that assigns on a reset branch and on an
+enable branch produces reads that denote different values. On the Ibex SKY130
+case that inferred an enable narrower than the design's and co-simulation
+diverged from cycle 116. The value-level equivalence proof that guards recovery
+does not close that hole either: the CNF encoder gives one variable per signal
+bit for every read of that signal, so it cannot distinguish reads taken at
+different program points. Recovery is now reachable only for a register whose RTL
+writes its enable as a mux rather than as a branch.
+
+Letting exact enables reach clock gating exposed a second defect, in owned
+combinational dataflow rather than in sequential mapping. `read_signal_bits`
+charges a signal read to its canonical representative, so a wire whose readers
+were all substituted is judged removable, but the substitution loop rewrote only
+operation operands and connects. Instance connections and memory ports kept
+naming the wire whose driver had just been dropped. Only an enable read solely by
+an integrated clock gate could expose it: on Ibex three load-store-unit gates
+took `ctrl_update`, `rdata_update`, and `addr_update` from undriven nets, so
+those banks never updated. Both dataflow entry points now commit through one
+`commit_representatives`, which substitutes through `rewrite_value_uses` — the
+single definition of every Word IR value read — before dropping connects.
+
+With both fixed, clock gating is on by default and gates 24 register banks on
+Ibex SKY130 instead of 6.
+
+## One Boolean Implementation
+
+Technology mapping covers one AXM implementation. The subject used to carry a
+portfolio: a PLA-based multi-output resynthesis proposed an alternative, the
+pipeline installed every proposal into one hash-consed graph, and the cover
+selector covered each implementation and ranked the results. The alternative
+only ever existed for a region whose whole subject had at most seven primary
+inputs, which no real design reaches, so the portfolio ranked one member and the
+machinery cost more to carry than it could ever return. RFC 11 keeps a choice
+graph on the roadmap; when it lands it will nominate choices inside one subject
+rather than cover whole implementations against each other.
+
+## Speculative Construction Rewinds
+
+Feedback-enable recovery has to build an expression before it can prove whether
+to keep it: the enable and data it extracts are only checkable once they exist
+as Word values. It used to build them in the production module and then walk
+away on a failed proof, leaving the reads, the expressions, the reconstructed
+mux, and their ownership entries resident. They were unreachable, so
+materialization dropped them, but every Word pass, ownership traversal, and
+partition build between then and there still walked them.
+
+The construction now takes a module checkpoint first and rewinds to it on every
+declining path. A rewind rejects any change to another arena and checks every
+retained annotation, directive, memory port, value, operation,
+connection, and instance for references into the suffix, then discards the
+suffix and rewinds interned names. Every rejection happens before mutation, so
+the public rollback operation is atomic without requiring the intermediate
+module to satisfy unrelated publication invariants.
+
+## The Initial-State Contract
+
+Constant-register removal proves a register constant by induction over that one
+register: the base case is that it holds its reset value, and the step is that
+its next state is that same value. Only registers with an asynchronous clear or
+preset are considered and only the reset value is ever folded, so the base case
+is exactly one assumption, stated here rather than derived: every such register
+is reset before the design is observed.
+
+The cone the proof folds carries a second obligation. It rewrites a net into a
+Boolean function of its inputs, so exactly one non-boundary cell must drive that
+net unconditionally. A second output, an explicit constant driver, an external
+design boundary, an `Inout` pin, a three-state output, or an unresolved driver
+makes the net an unknown leaf instead.
+
+Nothing in a mapped netlist can establish the initial-state assumption, so the
+pass enforces what it can. A register whose own reset the netlist holds inactive
+is declined because the assumption cannot reach it. The qualification harness applies
+the assumption rather than relying on it: an asynchronous reset is a falling
+edge, so a reset that is merely low at time zero never fires one and every
+asynchronously reset flop keeps its simulator initial value. The harness now
+drives reset high, low, and back, and releases on a falling clock edge.
+
+The case that makes the contract visible is a register whose next state is its
+own output. It satisfies the induction, and in hardware it holds its power-up
+value forever; folding it to the reset value is correct exactly when the
+contract holds. A test pins that behaviour so the assumption appears in the
+suite instead of being implied by the proof.
+
+## One Definition of a Propagation Dependency
+
+The propagation plan orders a net's arrival after every incoming arc's source
+and after the enable of every latch-data arc. Region editing decides whether the
+retained plan still describes the graph, and it now asks the same question from
+the same definition. Deciding it from `from`/`to` adjacency instead was wrong in
+one specific way: a latch enable reaches the graph inside the data arc rather
+than as an edge, so replacing a latch with the same data and output nets but a
+different enable changed the plan's dependency set without changing adjacency at
+all. The plan was retained, and a later edit confined to the new enable's cone
+never rescheduled the latch output.
+
+A related limit is worth recording: the topological order itself is computed
+from arcs only, so it does not order a latch enable before the latch output.
+The plan then declares a dependency the order does not provide, and building the
+model fails with a dependency-ordering error. A design whose latch enable cone
+is longer than its data cone reaches that today.
+
+## Functional Reduction Merges As It Proves
+
+A refinement round proves a batch of candidate equivalences, learns the
+counterexamples the refuted ones produced, and simulates again. The proved
+equivalences are now merged into the subject before the next round, which is
+what makes the next round cheap: two cones that differ only by an equivalence an
+earlier round proved become one node under structural hashing, so the solver is
+never asked about them. Proving every round against the original subject made
+each round re-derive every earlier proof. Signatures are carried onto the merged
+node space rather than re-simulated, because a merged node computes the function
+of every node that mapped onto it.
+
+A round's proof budget is partitioned across shards exactly, quotient and
+remainder, so the quotas sum to the budget. Handing every shard the rounded-up
+share overshot by up to one proof per shard, and once the remaining budget fell
+below the shard count it gave every shard a quota of one: a round with a single
+proof left could still launch one per shard. The caller's subtraction is exact
+for the same reason, where it used to clamp and absorb the overshoot.
+
+One limit is worth stating plainly. The sweep bounds how many proofs it
+attempts, per round and in total, but nothing bounds how hard a single proof may
+be. On Ibex SKY130 one miter takes about a second, roughly half the pass, and it
+is not distinguishable by cone depth or cone size from instances that finish in
+microseconds. A deterministic per-proof budget, in conflicts rather than in wall
+clock, is what would bound it; the pinned solver exposes neither a conflict
+limit nor an interrupt, and a wall-clock bound would make the netlist depend on
+machine speed.
+
+## Mapped Resynthesis Rounds
+
+A resynthesis round derives candidates for a dirty frontier, commits the
+non-conflicting ones, and re-derives whatever the commits invalidated. Two facts
+about that loop were being thrown away between rounds.
+
+A candidate that conflicts with a selected one is still derived from a mapped
+generation no commit has reached, so it is carried to the next round and
+scheduled in its frontier position rather than derived again. And a search that
+found nothing depends only on the cells it read, which the invalidation walk
+over-approximates by design; recording that read set keeps a handful of cells
+with an expensive exhaustive search from being asked the same question every
+round. On Ibex SKY130 one cell answered "nothing" in 70 ms, 23 times.
+
+Both are exact: a carried candidate whose cells a commit reached is dropped, and
+a recorded search is repeated as soon as any cell it read is touched. The
+recorded set has to be the whole set, which is more than the window: the cost
+model grows a fanout-free cone backward from the replaced cell, and a driver it
+rejected or a consumer it counted took part in the answer without appearing in
+the window. That growth reports every cell it inspected rather than only the
+cells it kept.
+
+## The Support Index Is Its Own Key Index
+
+Rewriting looks up which nodes have a given cut as their support. The entries
+are sorted by that key, so equal keys are already contiguous and a range lookup
+is a binary search over them. Carrying a second map from key to range meant
+hashing a whole cut once per distinct key on every rewrite pass, which cost more
+than every other part of building the index put together. The negative filter
+stays: it answers "no such key" without touching the entries at all.
+
+## Window Care Sets and Exact Recovery
+
+Two analyses decide what they need before they compute it, because doing so
+bounds the work rather than trimming it.
+
+A window care set projects each of a node's cuts onto the largest cut that is
+not the node itself. A cut the window does not contain is projected as fully
+cared, so its leaves are never read back. Building the truth tables first meant
+observing those leaves anyway, and observing a leaf the window does not reach
+expands its whole cone, past the window's inputs and on toward the primary
+inputs. Coverage is therefore decided first, in cut order and short circuiting,
+so the traversal budget is spent on the same leaves either way; only the cones
+outside the window go unevaluated.
+
+Exact area recovery scores every viable candidate of a slot. It used to score
+one by installing the choice and immediately removing it again, which walked the
+newly activated cone twice and wrote every reference count on the way. A slot is
+charged exactly when it is unreferenced and the trial has not reached it yet,
+which visited marks decide without touching the cover. The trial walks and sorts
+its frontier exactly as the committing update does, so the two sum areas in the
+same order and agree bit for bit.
 
 ## Known Architectural Gaps
 

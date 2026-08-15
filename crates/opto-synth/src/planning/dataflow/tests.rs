@@ -813,3 +813,59 @@ fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
             .all(|owner| *owner == Some(chain_owner))
     );
 }
+
+#[test]
+fn keeps_a_driver_for_a_wire_read_only_by_an_instance() {
+    let source = word::SourceSpan::default();
+    let mut module = word::WordModule::new("top");
+    let bit = word::WordType::new(1, false, LogicStateKind::FourState).unwrap();
+    let input = module
+        .add_port("a", word::PortDirection::Input, bit, source.clone())
+        .unwrap();
+    let read = module
+        .read_signal(module.port(input).unwrap().signal, source.clone())
+        .unwrap();
+    let driver = module
+        .unary(word::UnaryOp::BitNot, read, source.clone())
+        .unwrap();
+    let wire = module.add_wire("enable", bit, source.clone()).unwrap();
+    module
+        .connect(word::LValue::signal(wire), driver, source.clone())
+        .unwrap();
+    let enable = module.read_signal(wire, source.clone()).unwrap();
+    module
+        .add_instance(
+            "gate",
+            "ICG",
+            vec![("GATE".to_string(), enable, source.clone())],
+            source,
+        )
+        .unwrap();
+
+    let word::ValueKind::Operation(operation) = module.value(driver).unwrap().kind else {
+        panic!("test driver must be operation-backed");
+    };
+    let mut owners = vec![None; module.operations().len()];
+    owners[operation.index()] = Some(crate::RegionRowId::from_index(0).unwrap());
+    optimize_owned_combinational_dataflow(&mut module, &owners).unwrap();
+
+    // The wire's only reader was the instance, so dropping its connect is
+    // legitimate only if the instance was substituted onto the driver too.
+    for connection in module
+        .instances()
+        .iter()
+        .flat_map(|instance| &instance.connections)
+    {
+        let word::ValueKind::Signal(reference) = module.value(connection.value).unwrap().kind
+        else {
+            continue;
+        };
+        assert!(
+            module
+                .connects()
+                .iter()
+                .any(|connect| connect.target.signal == reference.signal),
+            "instance connection reads a wire with no driver"
+        );
+    }
+}

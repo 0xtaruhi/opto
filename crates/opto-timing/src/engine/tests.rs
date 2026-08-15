@@ -352,6 +352,42 @@ fn committed_endpoint_shape_changes_reuse_closure_slots() {
 }
 
 #[test]
+fn a_region_edit_that_adds_no_dependency_edge_reuses_the_dependency_plan() {
+    let mut incremental = IncrementalTiming::new_for_optimization(
+        TimingContext::new(),
+        chain_model(),
+        ReportTimingOptions::default(),
+        opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let baseline = incremental.quality_summary().unwrap();
+    let generation = incremental.topological_generation();
+
+    // Same nets, faster cell. The edge set is unchanged, so the retained
+    // topological order and dependency plan stay valid and are not rebuilt.
+    // Propagation must still run: reuse orders the work, it does not skip it.
+    let mut delta = TimingRegionDelta::new();
+    delta
+        .set_instance(buf_instance(1, "U1", "FAST_BUF", "n1", "n2"))
+        .unwrap();
+    let edit = incremental.apply_optimization_region_delta(delta).unwrap();
+    assert_eq!(incremental.topological_generation(), generation);
+    incremental.commit(edit).unwrap();
+    assert_ne!(incremental.quality_summary().unwrap(), baseline);
+
+    // A new instance across existing nets adds a dependency edge the retained
+    // plan does not contain, so the plan must be rebuilt.
+    let mut delta = TimingRegionDelta::new();
+    delta
+        .set_instance(buf_instance(3, "U_added", "BUF", "n1", "y"))
+        .unwrap();
+    let edit = incremental.apply_optimization_region_delta(delta).unwrap();
+    assert_ne!(incremental.topological_generation(), generation);
+    incremental.commit(edit).unwrap();
+    assert_summary_matches_quality(&incremental);
+}
+
+#[test]
 fn cyclic_optimization_delta_is_rejected_instead_of_diverging() {
     let mut incremental = IncrementalTiming::new_for_optimization(
         TimingContext::new(),
@@ -2015,6 +2051,126 @@ fn pin_swap_model() -> TimingModel {
         )],
     };
     TimingModel::new(design, library).unwrap()
+}
+
+/// A latch whose enable net is carried inside its data arc rather than as an
+/// ordinary graph edge, which is what makes plan reuse observable.
+fn latch_enable_model(enable_net: &str) -> TimingModel {
+    let mut latch = crate::test_library::test_target_cells(vec![TimingCell {
+        name: "LATCH".to_string(),
+        arcs: vec![TimingArc::scalar("D", "Q", 0.04)],
+        clock_to_q: vec![ClockToQArc {
+            clock_edge: TimingEdge::Rise,
+            arc: TimingArc::scalar("E", "Q", 0.04),
+        }],
+        constraints: Vec::new(),
+        pin_capacitance: BTreeMap::new(),
+    }])
+    .pop()
+    .unwrap();
+    latch
+        .pins
+        .iter_mut()
+        .find(|pin| pin.name == "Q")
+        .unwrap()
+        .function = Some(BooleanFunction::Pin("IQ".to_string()));
+    latch.sequential = vec![crate::TargetSequential {
+        kind: crate::TargetSequentialKind::Latch,
+        state_variables: vec!["IQ".to_string(), "IQN".to_string()],
+        clocked_on: None,
+        next_state: Some(BooleanFunction::Pin("D".to_string())),
+        enable: Some(BooleanFunction::Pin("E".to_string())),
+        clear: None,
+        preset: None,
+    }];
+    let mut cells = crate::test_library::test_target_cells(vec![
+        TimingCell {
+            name: "BUF".to_string(),
+            arcs: vec![TimingArc::scalar("A", "Y", 0.10)],
+            ..TimingCell::default()
+        },
+        TimingCell {
+            name: "FAST_BUF".to_string(),
+            arcs: vec![TimingArc::scalar("A", "Y", 0.05)],
+            ..TimingCell::default()
+        },
+    ]);
+    cells.push(latch);
+    let design = TimingDesign {
+        id: test_design_id(),
+        name: "top".to_string(),
+        ports: vec![
+            test_port("d", TimingPortDirection::Input),
+            test_port("sel_a", TimingPortDirection::Input),
+            test_port("sel_b", TimingPortDirection::Input),
+            test_port("q", TimingPortDirection::Output),
+        ],
+        instances: vec![
+            buf_instance(0, "U_EN_A", "BUF", "sel_a", "en_a"),
+            buf_instance(1, "U_EN_B", "BUF", "sel_b", "en_b"),
+            buf_instance(2, "U_D", "BUF", "d", "d1"),
+            test_instance(
+                3,
+                "U_L",
+                "LATCH",
+                [("D", "d1"), ("E", enable_net), ("Q", "qi")],
+            ),
+            buf_instance(4, "U_OUT", "BUF", "qi", "q"),
+        ],
+    };
+    TimingModel::new(
+        design,
+        TimingLibrary {
+            cells: cells.into(),
+            ..TimingLibrary::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn latch_enable_replacement_invalidates_the_retained_propagation_plan() {
+    // The latch keeps its data and output nets, so `from`/`to` adjacency is
+    // identical before and after; only the enable its data arc carries moves,
+    // and a latch enable reaches the graph inside the arc rather than as an
+    // edge. The propagation plan lists that enable as a dependency of the latch
+    // output, so retaining the plan would leave the output scheduled against a
+    // net that no longer controls it, and a later edit confined to the new
+    // enable's cone would never recompute it.
+    let mut incremental = IncrementalTiming::new(
+        TimingContext::new(),
+        latch_enable_model("en_a"),
+        ReportTimingOptions::default(),
+    )
+    .unwrap();
+    let retained = incremental.topological_generation();
+
+    let mut moved = TimingRegionDelta::new();
+    moved
+        .set_instance(test_instance(
+            3,
+            "U_L",
+            "LATCH",
+            [("D", "d1"), ("E", "en_b"), ("Q", "qi")],
+        ))
+        .unwrap();
+    let moved = incremental.apply_region_delta(moved).unwrap();
+    incremental.commit(moved).unwrap();
+
+    assert!(
+        incremental.topological_generation() > retained,
+        "moving a latch enable must rebuild the propagation plan"
+    );
+    assert_eq!(
+        incremental.net_states(),
+        IncrementalTiming::new(
+            TimingContext::new(),
+            latch_enable_model("en_b"),
+            ReportTimingOptions::default(),
+        )
+        .unwrap()
+        .net_states()
+    );
 }
 
 fn chain_model() -> TimingModel {

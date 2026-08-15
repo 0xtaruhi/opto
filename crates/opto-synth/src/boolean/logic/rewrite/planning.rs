@@ -339,40 +339,46 @@ pub(super) fn collect_divisors(
 ) -> Divisors {
     let leaves = cut.leaves();
     let mut divisors = Divisors::new();
-    let mut seen = hashbrown::HashSet::<u64>::with_capacity(DIVISOR_CAP);
+    // Per-leaf fingerprints are computed once and combined per subset, so the
+    // negative filter costs one XOR chain and one bit test instead of building
+    // and hashing a full support key.
+    let mut leaf_indices = [0u32; WINDOW_CUT_LEAVES];
+    let mut leaf_fingerprints = [0u64; WINDOW_CUT_LEAVES];
+    for (slot, leaf) in leaves.iter().enumerate() {
+        let index = u32::try_from(leaf.index())
+            .expect("logic node index is bounded by compact graph storage");
+        leaf_indices[slot] = index;
+        leaf_fingerprints[slot] = super::support::leaf_fingerprint(index);
+    }
+    let pairs_wanted = !virtuals.is_empty();
     for subset in 1u32..1 << leaves.len() {
         if subset.count_ones() < 2 {
             continue;
         }
-        let mut positions = [0usize; WINDOW_CUT_LEAVES];
+        let mut fingerprint = 0u64;
         let mut key = [0u32; WINDOW_CUT_LEAVES];
         let mut position_count = 0;
-        for (position, leaf) in leaves.iter().enumerate() {
-            if subset & (1 << position) == 0 {
-                continue;
-            }
-            positions[position_count] = position;
-            key[position_count] = u32::try_from(leaf.index())
-                .expect("logic node index is bounded by compact graph storage");
+        let mut remaining = subset;
+        while remaining != 0 {
+            let position = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            key[position_count] = leaf_indices[position];
+            fingerprint ^= leaf_fingerprints[position];
             position_count += 1;
         }
-        let positions = &positions[..position_count];
-        if positions.len() == 2 && !virtuals.is_empty() {
-            let pair = (
-                u32::try_from(leaves[positions[0]].index())
-                    .expect("logic node index is bounded by compact graph storage"),
-                u32::try_from(leaves[positions[1]].index())
-                    .expect("logic node index is bounded by compact graph storage"),
-            );
+        if pairs_wanted && position_count == 2 {
+            let pair = (key[0], key[1]);
             if let Some(entries) = virtuals.by_pair.get(&pair) {
                 for &(id, truth) in entries {
                     let expanded = expand_truth_for_subset(u64::from(truth), subset, leaves.len());
-                    if !insert_divisor(&mut divisors, &mut seen, DivisorRef::Virtual(id), expanded)
-                    {
+                    if !insert_divisor(&mut divisors, DivisorRef::Virtual(id), expanded) {
                         return divisors;
                     }
                 }
             }
+        }
+        if !support_index.may_contain(fingerprint) {
+            continue;
         }
         for &(divisor, function) in support_index.entries(&key[..position_count]) {
             if divisor as usize >= target || dying.contains(&divisor) {
@@ -381,7 +387,6 @@ pub(super) fn collect_divisors(
             let expanded = expand_truth_for_subset(function, subset, leaves.len());
             if !insert_divisor(
                 &mut divisors,
-                &mut seen,
                 DivisorRef::Node(LogicNodeId::from_index(divisor as usize)),
                 expanded,
             ) {
@@ -392,16 +397,17 @@ pub(super) fn collect_divisors(
     divisors
 }
 
-pub(super) fn insert_divisor(
-    divisors: &mut Divisors,
-    seen: &mut hashbrown::HashSet<u64>,
-    divisor: DivisorRef,
-    function: u64,
-) -> bool {
+/// Adds one distinct divisor function, reporting whether collection may continue.
+///
+/// Duplicate functions are rejected by scanning the retained divisors instead of
+/// by a hash set: the cap is sixteen, so the scan is a handful of register
+/// comparisons, while a set costs one allocation per call and this runs once per
+/// cut of every node of every pass.
+pub(super) fn insert_divisor(divisors: &mut Divisors, divisor: DivisorRef, function: u64) -> bool {
     if divisors.len() == DIVISOR_CAP {
         return false;
     }
-    if seen.insert(function) {
+    if !divisors.iter().any(|&(_, seen)| seen == function) {
         divisors.push((divisor, function));
     }
     divisors.len() < DIVISOR_CAP

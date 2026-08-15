@@ -61,23 +61,19 @@ pub(super) fn optimize(
 
     let optimization_boundary =
         super::mfs::optimization_boundary_nets(session.mapped, session.implementations)?;
-    let mut merged = true;
-    while merged {
-        merged = false;
-        let candidates = super::registers::constant_register_candidates(
-            session.mapped,
-            &options.target_cells,
-            &optimization_boundary,
-        )?;
-        for candidate in candidates {
-            if let CandidateDisposition::Accepted(edit) =
-                session.evaluate(candidate, OptimizationPhase::RegisterOptimization)?
-            {
-                extend_cleanup_frontier(session.mapped, &edit, &mut cleanup_dirty);
-                merged = true;
-            }
-        }
-    }
+    remove_dead_cells(
+        &mut session,
+        catalog,
+        &optimization_boundary,
+        &mut cleanup_dirty,
+    )?;
+    remove_constant_registers(
+        &mut session,
+        options,
+        runtime,
+        &optimization_boundary,
+        &mut cleanup_dirty,
+    )?;
 
     crate::api::diagnostics::trace!(
         trace,
@@ -128,36 +124,90 @@ pub(super) fn optimize(
     if !policy.area_resynthesis {
         return Ok(session.finish());
     }
+    resynthesize_dirty_cells(
+        &mut session,
+        ResynthesisScope {
+            catalog,
+            runtime,
+            trace,
+            diagnostics,
+            optimization_boundary: &optimization_boundary,
+        },
+        cleanup_dirty,
+        phase_started,
+    )?;
+    Ok(session.finish())
+}
+
+/// Everything one resynthesis sweep reads but never edits.
+#[derive(Clone, Copy)]
+struct ResynthesisScope<'a> {
+    catalog: &'a super::candidates::PostmapCellCatalog,
+    runtime: &'a opto_runtime::ExecutionContext,
+    trace: crate::api::diagnostics::SynthTrace,
+    diagnostics: crate::SynthesisDiagnostics,
+    optimization_boundary: &'a hashbrown::HashSet<opto_ir::mapped::NetId>,
+}
+
+/// Rewrites mapped cells whose context moved, until nothing is left to rewrite.
+fn resynthesize_dirty_cells(
+    session: &mut AreaOptimizationSession<'_>,
+    scope: ResynthesisScope<'_>,
+    cleanup_dirty: std::collections::HashSet<opto_ir::mapped::CellId>,
+    phase_started: std::time::Instant,
+) -> Result<(), crate::SynthError> {
+    let ResynthesisScope {
+        catalog,
+        runtime,
+        trace,
+        diagnostics,
+        optimization_boundary,
+    } = scope;
     let functions = catalog.mfs_functions();
     let resynthesis = catalog.mfs_resynthesis(super::mfs::ResynthesisObjective::Area);
     let evaluation_budget = super::session::default_evaluation_budget(session.mapped.cell_count());
     let mut drivers = super::mfs::DriverIndex::build(session.mapped, functions);
     let mut evaluations = 0usize;
-    let mut dirty = if cleanup_dirty.is_empty() {
-        session.mapped.cell_ids().collect()
-    } else {
-        let mut dirty = std::collections::HashSet::new();
+    // Region-owned cells are already exact-area covered; seed only changed or
+    // otherwise uncosted cells.
+    let mut seeds = cleanup_dirty;
+    for cell in session.mapped.cell_ids() {
+        if !matches!(
+            session.implementations.cell_ownership(cell)?,
+            crate::MappedCellOwnership::Region(_)
+        ) {
+            seeds.insert(cell);
+        }
+    }
+    let mut dirty = std::collections::HashSet::new();
+    if !seeds.is_empty() {
         super::mfs::extend_candidate_invalidation(
             session.mapped,
             functions,
             &drivers,
-            &optimization_boundary,
-            cleanup_dirty,
+            optimization_boundary,
+            seeds,
             &mut dirty,
         );
-        dirty
-    };
-    // Candidate generation is read-only and parallel within a sweep. Selection
-    // and commit are ordered afterward, so every task observes one mapped
-    // generation and no accepted edit depends on worker completion order.
+    }
+    // Retained candidates share the current generation; stable frontier order
+    // keeps selection independent of derivation scheduling.
+    let mut retained = std::collections::HashMap::<opto_ir::mapped::CellId, _>::new();
+    // Cache barren searches until one of their recorded reads changes.
+    let mut barren = std::collections::HashMap::<opto_ir::mapped::CellId, Vec<_>>::new();
     loop {
         if evaluations >= evaluation_budget {
             break;
         }
+        let frontier = dirty
+            .iter()
+            .copied()
+            .chain(retained.keys().copied())
+            .collect::<std::collections::HashSet<_>>();
         let work = super::region::scoped_work(
             session.mapped,
-            &dirty,
-            super::region::scheduling_cell_budget(dirty.len(), runtime.parallelism()),
+            &frontier,
+            super::region::scheduling_cell_budget(frontier.len(), runtime.parallelism()),
         )?;
         let cell_count = work.iter().map(|work| work.cells.len()).sum::<usize>();
         if work.is_empty() {
@@ -174,7 +224,6 @@ pub(super) fn optimize(
             let mapped = &*session.mapped;
             let implementations = &*session.implementations;
             let drivers = &drivers;
-            let optimization_boundary = &optimization_boundary;
             let context = super::mfs::OptimizationContext {
                 mapped,
                 implementations,
@@ -184,11 +233,18 @@ pub(super) fn optimize(
                 boundary: optimization_boundary,
                 diagnostics: diagnostics.mfs,
             };
+            let dirty = &dirty;
             runtime.map_ordered(tasks, move |work| {
                 Ok::<_, crate::SynthError>(
                     work.cells
                         .into_iter()
-                        .map(|cell| (cell, super::mfs::optimization_candidate(context, cell)))
+                        .map(|cell| {
+                            let mut read = Vec::new();
+                            let candidate = dirty.contains(&cell).then(|| {
+                                super::mfs::optimization_candidate_reading(context, cell, &mut read)
+                            });
+                            (cell, candidate.flatten(), read)
+                        })
                         .collect::<Vec<_>>(),
                 )
             })?
@@ -196,16 +252,27 @@ pub(super) fn optimize(
         crate::api::diagnostics::trace!(
             trace,
             "postmap.area.mfs_generate",
-            "scoped_cells={cell_count} cells={} wall={:?} par={}",
-            session.mapped.cell_count(),
-            sweep_started.elapsed(),
-            runtime.parallelism()
+            "scoped_cells={cell_count} derived={} wall={:?}",
+            dirty.len(),
+            sweep_started.elapsed()
         );
         let apply_started = std::time::Instant::now();
         let mut touched = std::collections::HashSet::new();
         let mut next_dirty = std::collections::HashSet::new();
-        let batch = select_non_conflicting(candidates.into_iter().flatten());
-        next_dirty.extend(batch.deferred);
+        let pool = candidates
+            .into_iter()
+            .flatten()
+            .map(|(cell, candidate, read)| {
+                if candidate.is_none() && !read.is_empty() {
+                    barren.insert(cell, read);
+                }
+                let candidate = candidate.or_else(|| retained.remove(&cell));
+                (cell, candidate)
+            })
+            .collect::<Vec<_>>();
+        let batch = select_non_conflicting(pool);
+        retained.clear();
+        retained.extend(batch.deferred);
         for (cell, candidate) in batch.selected {
             if evaluations >= evaluation_budget {
                 break;
@@ -231,6 +298,7 @@ pub(super) fn optimize(
                 }
             }
         }
+        let touched_cells = touched.clone();
         crate::api::diagnostics::trace!(
             trace,
             "postmap.area.mfs_apply",
@@ -242,17 +310,21 @@ pub(super) fn optimize(
         if evaluations >= evaluation_budget {
             break;
         }
-        if touched.is_empty() && next_dirty.is_empty() {
+        if touched.is_empty() && next_dirty.is_empty() && retained.is_empty() {
             break;
         }
         super::mfs::extend_candidate_invalidation(
             session.mapped,
             functions,
             &drivers,
-            &optimization_boundary,
+            optimization_boundary,
             touched,
             &mut next_dirty,
         );
+        // Discard retained candidates invalidated by the committed edit.
+        retained.retain(|cell, _| !next_dirty.contains(cell));
+        barren.retain(|_, read| !read.iter().any(|cell| touched_cells.contains(cell)));
+        next_dirty.retain(|cell| !barren.contains_key(cell));
         dirty = next_dirty;
     }
 
@@ -263,7 +335,64 @@ pub(super) fn optimize(
         session.mapped.cell_count(),
         phase_started.elapsed()
     );
-    Ok(session.finish())
+    Ok(())
+}
+
+/// Removes unobserved cells to a fixpoint and records the affected frontier.
+fn remove_dead_cells(
+    session: &mut AreaOptimizationSession<'_>,
+    catalog: &super::candidates::PostmapCellCatalog,
+    optimization_boundary: &hashbrown::HashSet<opto_ir::mapped::NetId>,
+    cleanup_dirty: &mut std::collections::HashSet<opto_ir::mapped::CellId>,
+) -> Result<(), crate::SynthError> {
+    let functions = catalog.mfs_functions();
+    loop {
+        let Some(candidate) =
+            super::mfs::dead_cell_removal(session.mapped, functions, optimization_boundary)?
+        else {
+            return Ok(());
+        };
+        let CandidateDisposition::Accepted(edit) =
+            session.evaluate(candidate, OptimizationPhase::RegisterOptimization)?
+        else {
+            return Ok(());
+        };
+        extend_cleanup_frontier(session.mapped, &edit, cleanup_dirty);
+    }
+}
+
+/// Removes proved-constant register batches to a scoped fixpoint.
+fn remove_constant_registers(
+    session: &mut AreaOptimizationSession<'_>,
+    options: &crate::SynthesisOptions,
+    runtime: &opto_runtime::ExecutionContext,
+    optimization_boundary: &hashbrown::HashSet<opto_ir::mapped::NetId>,
+    cleanup_dirty: &mut std::collections::HashSet<opto_ir::mapped::CellId>,
+) -> Result<(), crate::SynthError> {
+    let mut scope = None;
+    loop {
+        let registers = super::registers::constant_register_candidates(
+            session.mapped,
+            &options.target_cells,
+            optimization_boundary,
+            scope.as_ref(),
+            runtime,
+        )?;
+        let Some(candidate) =
+            super::registers::constant_register_removal(session.mapped, &registers)?
+        else {
+            return Ok(());
+        };
+        let CandidateDisposition::Accepted(edit) =
+            session.evaluate(candidate, OptimizationPhase::RegisterOptimization)?
+        else {
+            return Ok(());
+        };
+        let mut reached = std::collections::HashSet::new();
+        extend_cleanup_frontier(session.mapped, &edit, &mut reached);
+        cleanup_dirty.extend(reached.iter().copied());
+        scope = Some(reached);
+    }
 }
 
 fn extend_cleanup_frontier(
@@ -279,13 +408,7 @@ fn extend_cleanup_frontier(
     }
 }
 
-/// Owns the mapped netlist and the running objective for common post-map
-/// cleanup. When timing exists, the same candidate path also preserves or
-/// improves constraint closure.
-///
-/// This mirrors [`super::session::TimingOptimizationSession`]: passes ask the
-/// session to evaluate a candidate and never assemble the transaction inputs or
-/// publish progress themselves.
+/// Owns post-map state and the running area/timing acceptance objective.
 struct AreaOptimizationSession<'a> {
     mapped: &'a mut MappedNetlist,
     implementations: &'a mut ImplementationDb,
@@ -311,8 +434,7 @@ impl AreaOptimizationSession<'_> {
         }
     }
 
-    /// Evaluates one candidate and, when it is accepted, publishes progress and
-    /// returns the nets and cells its edit touched.
+    /// Evaluates a candidate and returns the accepted edit frontier.
     fn evaluate(
         &mut self,
         candidate: PostmapCandidate,

@@ -50,6 +50,47 @@ pub(crate) struct CoverPlanner<'a> {
     reference_estimates: Vec<f64>,
     demand: CoverDemand,
     live_nodes: Box<[bool]>,
+    /// Reused frontier buffers for [`CoverPlanner::change_choices_references`].
+    ///
+    /// Exact recovery calls it twice per candidate per slot, so allocating its
+    /// two frontiers per call dominated the pass.
+    reference_scratch: ReferenceScratch,
+    trial_scratch: TrialScratch,
+}
+
+/// Frontier buffers owned across reference-count updates.
+#[derive(Default)]
+struct ReferenceScratch {
+    seeded_roots: Vec<usize>,
+    next: Vec<usize>,
+}
+
+/// Visited marks owned across trial evaluations, stamped by an epoch so that
+/// starting a trial costs nothing.
+#[derive(Default)]
+struct TrialScratch {
+    epoch: u32,
+    marks: Vec<u32>,
+    frontier: Vec<usize>,
+    next: Vec<usize>,
+}
+
+impl TrialScratch {
+    fn begin(&mut self, slots: usize) {
+        self.marks.resize(slots, 0);
+        self.frontier.clear();
+        self.next.clear();
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.marks.fill(0);
+            self.epoch = 1;
+        }
+    }
+
+    /// Marks a slot, reporting whether this trial had not reached it yet.
+    fn mark(&mut self, slot: usize) -> bool {
+        std::mem::replace(&mut self.marks[slot], self.epoch) != self.epoch
+    }
 }
 
 const MAX_OBSERVABILITY_CONSUMERS: usize = 8;

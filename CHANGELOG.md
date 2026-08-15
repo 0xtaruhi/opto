@@ -9,7 +9,44 @@ All notable changes to Opto are documented here. The format follows
 
 ## [Unreleased]
 
+### Measured
+
+The entries below record what each change did when it landed. This is the state
+of the branch as a whole, measured once at its head so that the two are not
+confused:
+
+| Metric | Base `9dc2f6d` | Head |
+| --- | ---: | ---: |
+| total cell area | 80,846.3 | 72,540.8 |
+| combinational area | — | 48,795.5 |
+| mapped cells | 8,956 | 8,071 |
+| gated register banks | 0 | 24 |
+| end to end | 26.9 s | 13.3 s |
+
+Command `opto -f run.tcl` on the pinned public Ibex SKY130 case, manifest
+`qualification/upstream/ibex-core/manifest.tsv` (md5
+`e95d15b2cd016546843a90ed8f62a9d0`),
+library `sky130_fd_sc_hd__tt_025C_1v80`, 80 workers, Intel Xeon Gold 6148 at
+2.40 GHz. Netlist md5 `2e02688e1a5d8b56778e5f78f5f9ec6b`, byte-identical at 1
+and 80 workers, and 20,000-cycle random-stimulus co-simulation against the RTL
+is clean across 30 output ports.
+
 ### Added
+
+- Proof-backed functional reduction of the canonical AXM subject. Bit-parallel
+  simulation nominates candidate equivalences, `opto-formal` proves or refutes
+  each one, and every refutation's boundary assignment refines the stimulus for
+  the next round. Only a proved pair is merged. On the public Ibex SKY130 case
+  the pass removes 25% of the lowered subject and 3.8% of mapped area while
+  reducing end-to-end time, and its result is byte-identical across worker
+  counts.
+
+- Constant-register removal proved through a bounded influence cone. A register
+  whose reachable value is one constant is folded away with its dead driver
+  logic under the documented assumption that its asynchronous reset is asserted
+  before observation; an inactive reset or unresolved/multiple driver keeps the
+  register. Independent removals commit as one transaction. On the public Ibex
+  SKY130 case this removes 39 registers and 1,220 area units.
 
 - The production region-parallel synthesis engine: stable Word-region
   identity, hard typed boundaries, region-local Liberty mapping,
@@ -41,6 +78,57 @@ All notable changes to Opto are documented here. The format follows
   entry point and machine-readable public QoR result schemas.
 
 ### Changed
+
+- Clock gating is enabled by default, and register controls have one owner
+  each: the frontend's exact enable survives control lowering, so gating and
+  enabled-cell selection consume it and a single site expands whatever is left.
+  On the public Ibex SKY130 case 24 register banks are gated.
+
+- Feedback-enable recovery proves that the enable and data it recovers
+  reconstruct the register's next-state expression, and declines the rewrite
+  otherwise. It also declines any register that has a reset: hold detection
+  equates reads of the register's signal taken at different program points, and
+  on reset registers, which control lowering has already rewritten, that yields
+  an enable narrower than the design's. Recovering them made the Ibex load-store
+  unit's transaction-control registers stop updating and random-stimulus
+  co-simulation against the RTL diverge.
+
+- Mapped closure removes every cell whose output no design object reads, before
+  the rest of the closure evaluates, times, or resynthesizes it. Buffering,
+  cloning, and constant-register removal each strand drivers, so the sweep
+  repeats to a fixpoint and commits as one transaction. On the public Ibex
+  SKY130 case this removes 64 cells and 240 area units that scoping mapped
+  resynthesis to a dirty cone had otherwise left behind.
+
+- Sweep refinement simulates incrementally. A learned pattern only appends
+  stimulus words, so a round resumes at the first changed word instead of
+  re-simulating the whole subject; the nominated classes are identical.
+
+- Divisor collection skips the support-index probe for a leaf subset that no
+  node's support matches. Rewriting probed every subset of every cut of every
+  node and nine in ten of those probes missed; an exact negative filter over the
+  index keys removes them. Duplicate divisor functions are now rejected by
+  scanning the sixteen-entry result instead of by a hash set allocated per call.
+  On the public Ibex SKY130 case divisor collection drops from 29.6 s to 4.4 s
+  of worker time with a byte-identical mapped netlist.
+
+- Technology-mapping candidate enumeration decides once per cut whether a
+  don't-care set is fillable, instead of recomputing that invariant inside the
+  input-inversion loop. The count of don't-care assignments cannot change under
+  input inversion, so this removes the whole loop for a cut with no don't cares.
+
+- Incremental timing reuses its topological order and dependency plan for a
+  region edit that adds no dependency edge and no net, instead of rebuilding
+  both on every edit and in every timing view. On the public Ibex SKY130 case
+  this drops plan rebuilds from 80 to 2. Dependency-plan construction itself
+  now buckets edges by row instead of comparison-sorting every edge, which is
+  a further 1.8x on the rebuilds that remain.
+
+- Mapped area resynthesis seeds from a measured dirty cone instead of the whole
+  clean netlist. Cover already selected every region-owned cell under the same
+  care set with exact-area recovery, so the unconditional full-netlist sweep
+  repeated that decision; it cost 3.0 s on the public Ibex SKY130 case for
+  0.37% of area, which the mapper now keeps by construction.
 
 - Public and extended QoR area, timing, cell-count, and cell-composition
   baselines now record the accepted generic priority-rebalance trade-offs from
@@ -74,6 +162,13 @@ All notable changes to Opto are documented here. The format follows
   restore invalidate stale handles.
 
 ### Removed
+
+- The un-expanded AXM implementation that ran beside the MUX-expanded one. It
+  doubled every rewrite, cut, truth, and cover pass to produce an alternative
+  that mapping discarded on the reference case, and it doubled the retained
+  subject arena. MUX expansion is now part of the one canonical path. On the
+  public Ibex SKY130 case this cuts the Boolean stage from 14.2 s to 9.8 s and
+  the subject arena from 18,240 to 10,514 nodes, for 0.18% area.
 
 - RFC 0004 and its hierarchy-derived regional execution claims. Still-valid
   canonical-root and source-provenance rules are retained by the main

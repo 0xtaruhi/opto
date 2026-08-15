@@ -18,7 +18,9 @@ mod outcome;
 mod word_miter;
 
 pub use error::FormalError;
-pub use logic::{prove_logic_literal_partitions, prove_logic_network_equivalence};
+pub use logic::{
+    BoundaryRefutation, prove_logic_literal_partitions, prove_logic_network_equivalence,
+};
 pub use outcome::{Counterexample, ProofOutcome};
 pub use word_miter::{
     FiniteTransitionRelation, enumerate_finite_signal_register_transitions,

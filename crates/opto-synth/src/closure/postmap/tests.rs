@@ -448,8 +448,12 @@ fn timing_preparation_and_area_recovery_share_one_postmap_flow() {
     );
 }
 
+/// Mapped resynthesis no longer sweeps the whole netlist. `U0` is a retained
+/// Word instance rather than a cover selection, so it is a seed even when no
+/// earlier closure phase changed anything; a region-owned cell in the same
+/// netlist would not be.
 #[test]
-fn area_resynthesis_seeds_a_clean_netlist() {
+fn area_resynthesis_seeds_retained_instances_in_a_clean_netlist() {
     let cells = fanout_cells();
     let options = SynthesisOptions {
         target_cells: cells.clone().into(),
@@ -1251,7 +1255,14 @@ fn candidate_batch_selects_stable_disjoint_cell_and_net_regions() {
             .collect::<Vec<_>>(),
         [driver, second_sink]
     );
-    assert_eq!(batch.deferred, [first_sink]);
+    assert_eq!(
+        batch
+            .deferred
+            .iter()
+            .map(|(cell, _)| *cell)
+            .collect::<Vec<_>>(),
+        [first_sink]
+    );
 }
 
 #[test]

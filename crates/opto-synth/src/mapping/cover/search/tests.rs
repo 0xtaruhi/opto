@@ -778,7 +778,7 @@ fn covers_sum_and_carry_with_one_full_adder() {
 }
 
 #[test]
-fn exact_recovery_preserves_references_across_a_full_adder_chain() {
+fn exact_recovery_scores_shared_full_adder_outputs_without_reference_drift() {
     let mut network = LogicGraph::new();
     let mut carry = network.variable(0).unwrap();
     let mut outputs = Vec::new();
@@ -852,6 +852,14 @@ fn exact_recovery_preserves_references_across_a_full_adder_chain() {
     .unwrap();
 
     assert_eq!(cover.outputs.len(), outputs.len());
+    assert_eq!(cover.cells.len(), 32);
+    assert!(
+        cover
+            .cells
+            .iter()
+            .all(|cell| matches!(cell.binding, LibraryCoverBinding::Joint(_)))
+    );
+    assert!((cover_area(&cover, &matcher) - 128.0).abs() < 1e-9);
 }
 
 #[test]

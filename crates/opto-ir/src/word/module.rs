@@ -22,11 +22,52 @@ mod builders;
 use crate::value::{BitVal, ConstBits};
 use crate::{NameId, NameTable};
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod instance;
 mod rewrite;
 mod validation;
+
+static NEXT_SPECULATION_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+/// Runtime-only owner identity for speculation checkpoints.
+///
+/// Clones receive a fresh identity, while equality ignores it so structural
+/// module comparisons and deterministic serialization remain unchanged.
+#[derive(Debug)]
+struct SpeculationIdentity(NonZeroU64);
+
+impl SpeculationIdentity {
+    fn fresh() -> Self {
+        let raw = NEXT_SPECULATION_IDENTITY
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .expect("Word module speculation identity space is exhausted");
+        Self(NonZeroU64::new(raw).expect("speculation identities start at one"))
+    }
+}
+
+impl Default for SpeculationIdentity {
+    fn default() -> Self {
+        Self::fresh()
+    }
+}
+
+impl Clone for SpeculationIdentity {
+    fn clone(&self) -> Self {
+        Self::fresh()
+    }
+}
+
+impl PartialEq for SpeculationIdentity {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for SpeculationIdentity {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Validated word-level definition with dense, owner-local arenas.
@@ -53,6 +94,27 @@ pub struct WordModule {
     pub(super) named_signals: Vec<Option<SignalId>>,
     pub(super) named_memories: Vec<Option<MemoryId>>,
     pub(super) named_instances: Vec<Option<InstId>>,
+    #[serde(skip, default)]
+    speculation_identity: SpeculationIdentity,
+}
+
+/// One module's arena boundary, taken before a speculative construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeculationCheckpoint {
+    identity: NonZeroU64,
+    names: crate::NameCheckpoint,
+    annotations: usize,
+    synthesis_directives: usize,
+    ports: usize,
+    values: usize,
+    operations: usize,
+    signals: usize,
+    memories: usize,
+    memory_read_ports: usize,
+    memory_write_ports: usize,
+    type_layouts: usize,
+    connects: usize,
+    instances: usize,
 }
 
 fn dense_id<T: Copy>(index: &[Option<T>], name: NameId) -> Option<T> {
@@ -114,6 +176,7 @@ impl WordModule {
             named_signals: Vec::new(),
             named_memories: Vec::new(),
             named_instances: Vec::new(),
+            speculation_identity: SpeculationIdentity::fresh(),
         }
     }
 
@@ -882,6 +945,162 @@ impl WordModule {
             source,
         });
         Ok(())
+    }
+
+    /// Records the arena boundary a speculative construction starts from.
+    ///
+    /// A pass that has to build an expression before it can decide whether to
+    /// keep it takes one of these first and rolls back on every path that
+    /// declines. See [`WordModule::rollback_speculation`].
+    #[must_use]
+    pub fn speculation_checkpoint(&self) -> SpeculationCheckpoint {
+        SpeculationCheckpoint {
+            identity: self.speculation_identity.0,
+            names: self.names.checkpoint(),
+            annotations: self.annotations.len(),
+            synthesis_directives: self.synthesis_directives.len(),
+            ports: self.ports.len(),
+            values: self.values.len(),
+            operations: self.operations.len(),
+            signals: self.signals.len(),
+            memories: self.memories.len(),
+            memory_read_ports: self.memory_read_ports.len(),
+            memory_write_ports: self.memory_write_ports.len(),
+            type_layouts: self.type_layouts.len(),
+            connects: self.connects.len(),
+            instances: self.instances.len(),
+        }
+    }
+
+    /// Discards the values and operations appended since `checkpoint`.
+    ///
+    /// The rollback is atomic: it rejects changes to any other arena, then
+    /// validates the prospective prefix before discarding the suffix. Existing
+    /// objects therefore cannot retain a speculative value or operation ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WordError`] without mutation when another arena changed, the
+    /// name-table revision is incompatible, or the retained module would refer
+    /// to an ID in the discarded suffix.
+    pub fn rollback_speculation(
+        &mut self,
+        checkpoint: SpeculationCheckpoint,
+    ) -> Result<(), WordError> {
+        if checkpoint.identity != self.speculation_identity.0 {
+            return Err(WordError::new(
+                "speculation checkpoint belongs to a different module",
+            ));
+        }
+        self.names
+            .validate_checkpoint(checkpoint.names)
+            .map_err(WordError::from)?;
+        if checkpoint.values > self.values.len() || checkpoint.operations > self.operations.len() {
+            return Err(WordError::new(
+                "speculation checkpoint is ahead of the module arenas",
+            ));
+        }
+        if checkpoint.annotations != self.annotations.len()
+            || checkpoint.synthesis_directives != self.synthesis_directives.len()
+            || checkpoint.ports != self.ports.len()
+            || checkpoint.signals != self.signals.len()
+            || checkpoint.memories != self.memories.len()
+            || checkpoint.memory_read_ports != self.memory_read_ports.len()
+            || checkpoint.memory_write_ports != self.memory_write_ports.len()
+            || checkpoint.type_layouts != self.type_layouts.len()
+            || checkpoint.connects != self.connects.len()
+            || checkpoint.instances != self.instances.len()
+        {
+            return Err(WordError::new(
+                "speculation changed a non-value arena that rollback cannot undo",
+            ));
+        }
+        if self.speculation_prefix_retains_suffix(checkpoint) {
+            return Err(WordError::new(
+                "speculation rollback would strand a value or operation ID",
+            ));
+        }
+
+        self.values.truncate(checkpoint.values);
+        self.operations.truncate(checkpoint.operations);
+        self.names
+            .rollback(checkpoint.names)
+            .map_err(WordError::from)?;
+        Ok(())
+    }
+
+    fn speculation_prefix_retains_suffix(&self, checkpoint: SpeculationCheckpoint) -> bool {
+        let target_retains_suffix = |target: AnnotationTarget| match target {
+            AnnotationTarget::Value(value) => value.index() >= checkpoint.values,
+            AnnotationTarget::Operation(operation) => operation.index() >= checkpoint.operations,
+            _ => false,
+        };
+        if self
+            .annotations
+            .iter()
+            .any(|annotation| target_retains_suffix(annotation.target))
+            || self
+                .synthesis_directives
+                .iter()
+                .any(|directive| target_retains_suffix(directive.target))
+        {
+            return true;
+        }
+
+        let value_retains_suffix = |value: ValueId| value.index() >= checkpoint.values;
+        if self.memory_read_ports.iter().any(|port| {
+            value_retains_suffix(port.address)
+                || match port.timing {
+                    MemoryReadTiming::Asynchronous => false,
+                    MemoryReadTiming::Synchronous { clock, enable, .. } => {
+                        value_retains_suffix(clock.value)
+                            || enable.is_some_and(|enable| value_retains_suffix(enable.value))
+                    }
+                }
+        }) || self.memory_write_ports.iter().any(|port| {
+            value_retains_suffix(port.address)
+                || value_retains_suffix(port.data)
+                || value_retains_suffix(port.clock.value)
+                || port
+                    .enable
+                    .is_some_and(|enable| value_retains_suffix(enable.value))
+                || port
+                    .mask
+                    .is_some_and(|mask| value_retains_suffix(mask.value))
+        }) {
+            return true;
+        }
+
+        if self.values[..checkpoint.values].iter().any(|value| {
+            matches!(value.kind, ValueKind::Operation(operation) if operation.index() >= checkpoint.operations)
+        }) || self.operations[..checkpoint.operations]
+            .iter()
+            .any(|operation| {
+                if value_retains_suffix(operation.result) {
+                    return true;
+                }
+                let mut retains_suffix = false;
+                operation.kind.for_each_input(|value| {
+                    retains_suffix |= value_retains_suffix(value);
+                });
+                retains_suffix
+            })
+        {
+            return true;
+        }
+
+        self.connects.iter().any(|connect| {
+            value_retains_suffix(connect.value)
+                || connect
+                    .target
+                    .dynamic
+                    .is_some_and(|range| value_retains_suffix(range.offset))
+        }) || self.instances.iter().any(|instance| {
+            instance
+                .connections
+                .iter()
+                .any(|connection| value_retains_suffix(connection.value))
+        })
     }
 
     /// Removes and returns all continuous assignments in insertion order.

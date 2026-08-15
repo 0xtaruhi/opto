@@ -15,6 +15,39 @@ use crate::boolean::logic::TruthTable;
 
 const CUT_ANALYSIS_CHUNK_ITEMS: usize = 4096;
 
+/// Checks whether translated predecessor leaves preserve their sorted rank.
+fn translation_preserves_predecessor_rank(
+    leaves: &opto_core::PackedRows<u32>,
+    old_predecessors: &[Option<u32>; 3],
+    old_to_new: &[Option<LogicNodeId>],
+) -> bool {
+    let mut rows = [[].as_slice(); 3];
+    let mut row_count = 0;
+    for old in old_predecessors.iter().flatten() {
+        rows[row_count] = leaves.row(*old as usize);
+        row_count += 1;
+    }
+    let rows = &mut rows[..row_count];
+    let mut previous_new = None;
+    loop {
+        let Some(next) = rows.iter().filter_map(|row| row.first().copied()).min() else {
+            return true;
+        };
+        for row in rows.iter_mut() {
+            while row.first() == Some(&next) {
+                *row = &row[1..];
+            }
+        }
+        let Some(mapped) = old_to_new.get(next as usize).copied().flatten() else {
+            return false;
+        };
+        if previous_new.is_some_and(|previous| previous >= mapped.index()) {
+            return false;
+        }
+        previous_new = Some(mapped.index());
+    }
+}
+
 fn cut_segment_count(levels: &[Vec<usize>]) -> Result<usize, crate::SynthError> {
     levels.iter().try_fold(0usize, |count, level| {
         count
@@ -292,6 +325,8 @@ impl CutDatabase {
         for index in 0..node_count {
             levels[network.level(LogicNodeId::from_index(index)) as usize].push(index);
         }
+        // Precompute each predecessor's leaf union once for rank checks.
+        let predecessor_leaves = previous.sorted_leaves(runtime)?;
         let segment_count = cut_segment_count(&levels)?;
         let mut arena = Vec::<Box<[KCut]>>::with_capacity(segment_count);
         let mut ranges = vec![CutRange::UNINITIALIZED; node_count];
@@ -314,7 +349,8 @@ impl CutDatabase {
                         .all(|(new, old)| new_to_old[new.index()] == Some(*old));
                     let rank_preserved = fanins_unchanged
                         && predecessors_correspond
-                        && previous.translation_preserves_predecessor_rank(
+                        && translation_preserves_predecessor_rank(
+                            &predecessor_leaves,
                             &old_predecessors[index],
                             old_to_new,
                         );
@@ -406,33 +442,41 @@ impl CutDatabase {
         Some(translated)
     }
 
-    fn translation_preserves_predecessor_rank(
+    /// Packs each node's sorted distinct cut leaves in bounded chunks.
+    fn sorted_leaves(
         &self,
-        old_predecessors: &[Option<u32>; 3],
-        old_to_new: &[Option<LogicNodeId>],
-    ) -> bool {
-        let mut leaves = old_predecessors
-            .iter()
-            .flatten()
-            .map(|old| LogicNodeId::from_index(*old as usize))
-            .flat_map(|old_fanin| self.cuts(old_fanin))
-            .flat_map(KCut::leaves)
-            .map(|leaf| leaf.index())
-            .collect::<Vec<_>>();
-        leaves.sort_unstable();
-        leaves.dedup();
-        let mut previous = None;
-        for leaf in leaves {
-            let Some(mapped) = old_to_new.get(leaf).copied().flatten() else {
-                return false;
-            };
-            let mapped = mapped.index();
-            if previous.is_some_and(|previous| previous >= mapped) {
-                return false;
-            }
-            previous = Some(mapped);
-        }
-        true
+        runtime: &ExecutionContext,
+    ) -> Result<opto_core::PackedRows<u32>, crate::SynthError> {
+        let row_count = self.rows.row_count();
+        let mut rows = opto_core::PackedRowsBuilder::try_with_capacity(row_count, 0)
+            .map_err(|_| crate::SynthError::capacity("logic cut leaf index exceeds capacity"))?;
+        runtime.analyze_indexed_chunks(
+            row_count,
+            CUT_ANALYSIS_CHUNK_ITEMS,
+            |index| {
+                let mut leaves = self
+                    .cuts(LogicNodeId::from_index(index))
+                    .iter()
+                    .flat_map(KCut::leaves)
+                    .map(|leaf| {
+                        u32::try_from(leaf.index())
+                            .expect("logic node index is bounded by compact graph storage")
+                    })
+                    .collect::<Vec<_>>();
+                leaves.sort_unstable();
+                leaves.dedup();
+                Ok::<_, crate::SynthError>(leaves)
+            },
+            |_, chunk| {
+                for leaves in chunk {
+                    rows.try_push_row(leaves).map_err(|_| {
+                        crate::SynthError::capacity("logic cut leaf index exceeds capacity")
+                    })?;
+                }
+                Ok::<_, crate::SynthError>(())
+            },
+        )?;
+        Ok(rows.finish())
     }
 
     pub(crate) fn assert_same(&self, other: &Self) {

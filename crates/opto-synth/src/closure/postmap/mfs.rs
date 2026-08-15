@@ -294,8 +294,18 @@ pub(super) fn optimization_candidate(
     context: OptimizationContext<'_>,
     cell: CellId,
 ) -> Option<PostmapCandidate> {
+    optimization_candidate_reading(context, cell, &mut Vec::new())
+}
+
+/// Derives one candidate and records the reads needed to invalidate a miss.
+pub(super) fn optimization_candidate_reading(
+    context: OptimizationContext<'_>,
+    cell: CellId,
+    read: &mut Vec<CellId>,
+) -> Option<PostmapCandidate> {
+    read.clear();
     dead_cell_candidate(context.mapped, context.functions, context.boundary, cell)
-        .or_else(|| wire_replacement_for(context, cell))
+        .or_else(|| wire_replacement_for(context, cell, read))
 }
 
 const ODC_DEPTH: usize = 5;
@@ -436,12 +446,32 @@ fn driver_mffc(
     root: CellId,
     keep_nets: &[NetId],
 ) -> Vec<(CellId, NetId, f64)> {
+    driver_mffc_reading(
+        mapped,
+        implementations,
+        functions,
+        boundary,
+        root,
+        keep_nets,
+        &mut Vec::new(),
+    )
+}
+
+/// Grows the cone and records every cell that influenced the decision.
+fn driver_mffc_reading(
+    mapped: &MappedNetlist,
+    implementations: &ImplementationDb,
+    functions: &HashMap<String, CellFunction>,
+    boundary: &HashSet<NetId>,
+    root: CellId,
+    keep_nets: &[NetId],
+    inspected: &mut Vec<CellId>,
+) -> Vec<(CellId, NetId, f64)> {
+    inspected.push(root);
     let mut dying_cells = vec![root];
     let mut dying = Vec::new();
     let mut changed = true;
-    // Grow the maximum fanout-free cone backward from the replaced root. A net
-    // may die only when every consumer is already in the cone; the hard cap
-    // bounds both snapshot size and formal proof cost.
+    // Bound both the transaction snapshot and the formal proof cone.
     while changed && dying.len() < 8 {
         changed = false;
         let mut inputs = Vec::new();
@@ -460,6 +490,9 @@ fn driver_mffc(
                 || dying.iter().any(|&(_, dead, _)| dead == net)
             {
                 continue;
+            }
+            if let Some(pins) = mapped.pins_on_net(net) {
+                inspected.extend(pins.filter_map(|pin| mapped.pin_owner(pin)));
             }
             let Some(driver) = mapped.pins_on_net(net).and_then(|mut pins| {
                 pins.find_map(|pin| {
@@ -522,6 +555,111 @@ pub(super) fn dead_cell_candidate(
     delta.remove_cell(cell).ok()?;
     delta.remove_net(out_net).ok()?;
     Some(PostmapCandidate::new(delta))
+}
+
+/// Builds one transaction that removes structurally dead cells to a fixpoint.
+pub(super) fn dead_cell_removal(
+    mapped: &MappedNetlist,
+    functions: &HashMap<String, CellFunction>,
+    boundary: &HashSet<NetId>,
+) -> Result<Option<PostmapCandidate>, crate::SynthError> {
+    // A cell this pass cannot interpret is never removed, and every net it
+    // touches counts as read: an unknown output pin must not look like a dead
+    // net just because nothing else drives it.
+    let mut outputs = HashMap::new();
+    for cell in mapped.cell_ids() {
+        let output = mapped
+            .cell_type(cell)
+            .and_then(|name| functions.get(name))
+            .and_then(|function| cell_output_pin(mapped, cell, function));
+        if let Some((pin, net)) = output {
+            outputs.insert(cell, (pin, net));
+        }
+    }
+    let mut readers: HashMap<NetId, usize> = HashMap::new();
+    let mut drivers: HashMap<NetId, CellId> = HashMap::new();
+    for cell in mapped.cell_ids() {
+        let output_pin = outputs.get(&cell).map(|&(pin, _)| pin);
+        if let Some(&(_, net)) = outputs.get(&cell) {
+            drivers.insert(net, cell);
+        }
+        let Some(pins) = mapped.pin_ids(cell) else {
+            continue;
+        };
+        for pin in pins {
+            if Some(pin) == output_pin {
+                continue;
+            }
+            let Some(connection) = mapped.connection(pin) else {
+                continue;
+            };
+            if let ConnectionSignal::Net(net) = connection.signal {
+                *readers.entry(net).or_default() += 1;
+            }
+        }
+    }
+
+    let removable = |cell: CellId, readers: &HashMap<NetId, usize>| {
+        outputs.get(&cell).is_some_and(|&(_, net)| {
+            !boundary.contains(&net) && readers.get(&net).copied().unwrap_or(0) == 0
+        })
+    };
+    let mut dead = Vec::new();
+    let mut pending = mapped
+        .cell_ids()
+        .filter(|&cell| removable(cell, &readers))
+        .collect::<Vec<_>>();
+    let mut removed = HashSet::new();
+    while let Some(cell) = pending.pop() {
+        if !removed.insert(cell) {
+            continue;
+        }
+        dead.push(cell);
+        let output_pin = outputs.get(&cell).map(|&(pin, _)| pin);
+        let Some(pins) = mapped.pin_ids(cell) else {
+            continue;
+        };
+        for pin in pins {
+            if Some(pin) == output_pin {
+                continue;
+            }
+            let Some(connection) = mapped.connection(pin) else {
+                continue;
+            };
+            let ConnectionSignal::Net(net) = connection.signal else {
+                continue;
+            };
+            let Some(count) = readers.get_mut(&net) else {
+                continue;
+            };
+            *count -= 1;
+            if *count == 0
+                && let Some(&driver) = drivers.get(&net)
+                && !removed.contains(&driver)
+                && removable(driver, &readers)
+            {
+                pending.push(driver);
+            }
+        }
+    }
+    if dead.is_empty() {
+        return Ok(None);
+    }
+    // Cell order is the stable arena order, so the delta is identical across
+    // worker counts even though the worklist pops in discovery order.
+    dead.sort_unstable();
+    let nets = super::mapped_cell_nets(mapped, dead.iter().copied())?;
+    let snapshot = mapped
+        .snapshot_region(dead.clone(), nets)
+        .map_err(crate::SynthError::from)?;
+    let mut delta = RegionDelta::new(snapshot);
+    for cell in dead {
+        delta.remove_cell(cell).map_err(crate::SynthError::from)?;
+        if let Some(&(_, net)) = outputs.get(&cell) {
+            delta.remove_net(net).map_err(crate::SynthError::from)?;
+        }
+    }
+    Ok(Some(PostmapCandidate::new(delta)))
 }
 
 #[derive(Clone, Copy)]

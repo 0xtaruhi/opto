@@ -5,7 +5,6 @@ use super::{
     AND_WEIGHT, Arc, CENSUS_DIVISOR_STORAGE, DIVISOR_DEPTH, HashMap, MUX_WEIGHT, TruthTable,
     VecDeque, WINDOW_CUT_LEAVES, XOR_WEIGHT, plan_level,
 };
-use crate::boolean::logic::network::{LogicGraph, LogicNodeId};
 
 #[derive(Debug)]
 pub(in crate::boolean::logic) enum Plan {
@@ -25,44 +24,6 @@ pub(in crate::boolean::logic) enum Plan {
 }
 
 impl Plan {
-    pub(in crate::boolean::logic) fn materialize(
-        &self,
-        network: &mut LogicGraph,
-        leaves: &[LogicNodeId],
-    ) -> LogicNodeId {
-        match self {
-            Self::Constant(value) => LogicGraph::constant(*value),
-            Self::Literal { var, inverted } => {
-                let leaf = leaves[usize::from(*var)];
-                if *inverted { leaf.inverted() } else { leaf }
-            }
-            Self::And(left, right) => {
-                let left = left.materialize(network, leaves);
-                let right = right.materialize(network, leaves);
-                network.and(left, right)
-            }
-            Self::Or(left, right) => {
-                let left = left.materialize(network, leaves);
-                let right = right.materialize(network, leaves);
-                network.and(left.inverted(), right.inverted()).inverted()
-            }
-            Self::Xor(left, right) => {
-                let left = left.materialize(network, leaves);
-                let right = right.materialize(network, leaves);
-                network.xor(left, right)
-            }
-            Self::Mux {
-                select,
-                then_plan,
-                else_plan,
-            } => {
-                let then_value = then_plan.materialize(network, leaves);
-                let else_value = else_plan.materialize(network, leaves);
-                network.mux(leaves[usize::from(*select)], then_value, else_value)
-            }
-        }
-    }
-
     #[cfg(test)]
     pub(super) fn truth(&self, input_count: usize, divisors: &[u64]) -> u64 {
         let assignments = 1usize << input_count;
@@ -281,13 +242,6 @@ impl Default for Synthesizer {
 impl Synthesizer {
     pub(in crate::boolean::logic) fn fresh() -> Self {
         Self::default()
-    }
-
-    pub(in crate::boolean::logic) fn with_plan_capacity(capacity: usize) -> Self {
-        Self {
-            plans: BoundedCache::new(capacity),
-            ..Self::default()
-        }
     }
 
     pub(in crate::boolean::logic) fn plan(&mut self, truth: TruthTable) -> (u32, Arc<Plan>) {

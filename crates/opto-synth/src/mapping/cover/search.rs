@@ -83,41 +83,15 @@ pub(crate) fn cover_logic_network_with_truths(
     timing_constraints: CoverTiming<'_>,
     runtime: &ExecutionContext,
 ) -> Result<Option<LibraryCover>, crate::SynthError> {
-    cover_logic_network_with_recovery(
-        CoverProblem {
-            network,
-            cuts,
-            truths,
-            outputs,
-            catalog,
-            timing: timing_constraints,
-            runtime,
-        },
-        CoverRecovery::Exact,
-    )
-}
-
-pub(crate) fn estimate_logic_network_with_truths(
-    network: &LogicGraph,
-    cuts: &CutDatabase,
-    truths: &CutTruthDatabase,
-    outputs: &[LogicNodeId],
-    catalog: &CombinationalCellCatalog,
-    timing_constraints: CoverTiming<'_>,
-    runtime: &ExecutionContext,
-) -> Result<Option<LibraryCover>, crate::SynthError> {
-    cover_logic_network_with_recovery(
-        CoverProblem {
-            network,
-            cuts,
-            truths,
-            outputs,
-            catalog,
-            timing: timing_constraints,
-            runtime,
-        },
-        CoverRecovery::Flow,
-    )
+    cover_logic_network_with_recovery(CoverProblem {
+        network,
+        cuts,
+        truths,
+        outputs,
+        catalog,
+        timing: timing_constraints,
+        runtime,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -131,15 +105,8 @@ struct CoverProblem<'a> {
     runtime: &'a ExecutionContext,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CoverRecovery {
-    Flow,
-    Exact,
-}
-
 fn cover_logic_network_with_recovery(
     problem: CoverProblem<'_>,
-    recovery: CoverRecovery,
 ) -> Result<Option<LibraryCover>, crate::SynthError> {
     let CoverProblem {
         network,
@@ -211,7 +178,7 @@ fn cover_logic_network_with_recovery(
             "joint recovery produced an incomplete cover",
         ));
     }
-    if recovery == CoverRecovery::Exact {
+    {
         let mut recovery_iteration = 0usize;
         loop {
             recovery_iteration += 1;

@@ -532,20 +532,28 @@ impl TimingGraph {
         Ok(graph)
     }
 
+    /// Appends incoming arc sources and latch enables used by the propagation plan.
+    pub(super) fn plan_dependencies<'graph>(
+        &'graph self,
+        arcs: &'graph [GraphArcId],
+    ) -> impl Iterator<Item = usize> + 'graph {
+        arcs.iter().flat_map(move |&arc| {
+            let arc = self.arc(arc);
+            let enable = match arc.kind {
+                GraphArcKind::Combinational => None,
+                GraphArcKind::LatchData { enable_net, .. } => Some(enable_net.index()),
+            };
+            [Some(arc.from.index()), enable].into_iter().flatten()
+        })
+    }
+
     pub(super) fn assign_topological_order(
         &mut self,
         order: Vec<usize>,
     ) -> Result<(), crate::TimingError> {
         let propagation_plan =
             opto_runtime::DependencyPlan::from_topological_order(self.net_count, &order, |net| {
-                self.incoming[net].iter().flat_map(|&arc| {
-                    let arc = self.arc(arc);
-                    let enable = match arc.kind {
-                        GraphArcKind::Combinational => None,
-                        GraphArcKind::LatchData { enable_net, .. } => Some(enable_net.index()),
-                    };
-                    [Some(arc.from.index()), enable].into_iter().flatten()
-                })
+                self.plan_dependencies(&self.incoming[net])
             })?;
         let mut positions = vec![u32::MAX; self.net_count];
         for (position, &net) in order.iter().enumerate() {
@@ -558,6 +566,12 @@ impl TimingGraph {
         self.topological_order_stale = false;
         self.topological_generation += 1;
         Ok(())
+    }
+
+    /// Counts topological-order and dependency-plan rebuilds.
+    #[cfg(test)]
+    pub(crate) fn topological_generation(&self) -> u64 {
+        self.topological_generation
     }
 
     pub(crate) fn topological_position(&self, net: usize) -> usize {

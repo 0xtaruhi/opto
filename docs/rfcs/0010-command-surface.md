@@ -169,7 +169,9 @@ deterministic search budgets within one pipeline. They do not select different
 engines, representations, mappers, or fallback paths.
 
 `clock_gating` enables the owned clock-gating transformation and its reporting.
-It is not encoded in another synthesis command name. Properties that do not
+It is enabled by default, and `set_db clock_gating false` declines it. A target
+without an integrated clock gate produces an empty gate catalog, so the setting
+costs nothing there. It is not encoded in another synthesis command name. Properties that do not
 affect the implemented pipeline are not exposed.
 
 A successful `synth` publishes one mapped design revision, provenance, QoR

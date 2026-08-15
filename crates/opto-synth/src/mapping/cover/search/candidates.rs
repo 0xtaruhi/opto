@@ -79,6 +79,14 @@ pub(crate) fn node_candidates(
             let Some(cares) = cares else {
                 continue;
             };
+            // Input inversion permutes the assignments of a truth table, so the
+            // number of don't-care assignments is the same for every inversion
+            // mask. Deciding once whether this cut has a fillable don't-care set
+            // skips the whole permutation loop for the common cut that has none.
+            let dont_care_count = (full & !(cares[cut_index] & full)).count_ones();
+            if dont_care_count == 0 || dont_care_count > DONT_CARE_FILL_CAP {
+                continue;
+            }
             for inversions in 0..1u32 << cut.len() {
                 let inversions =
                     u8::try_from(inversions).expect("cover cuts have at most eight inputs");
@@ -90,9 +98,7 @@ pub(crate) fn node_candidates(
                 .with_input_inversions(inversions)
                 .bits;
                 let dont_care = full & !care;
-                if dont_care == 0 || dont_care.count_ones() > DONT_CARE_FILL_CAP {
-                    continue;
-                }
+                debug_assert_eq!(dont_care.count_ones(), dont_care_count);
                 let base = cell_truth.bits & care;
                 let mut filling = 0u64;
                 loop {
@@ -184,13 +190,13 @@ pub(crate) fn observability_cares(
         .max_by_key(|cut| cut.len())?;
     let mut inputs = base.leaves().to_vec();
     inputs.push(node);
-    let observed = cuts
-        .cuts(node)
-        .iter()
-        .flat_map(|cut| cut.leaves().iter().copied())
-        .collect::<Vec<_>>();
-    let tables = network.truth_tables_for_inputs(consumer, &inputs, &observed);
     let mut coverage = crate::boolean::logic::CoverageCheck::new(network, base.leaves());
+    let cut_list = cuts.cuts(node);
+    let projected =
+        crate::boolean::logic::projected_cuts(&mut coverage, cut_list, |cut| cut.contains(node));
+    let observed =
+        crate::boolean::logic::projected_leaves(cut_list, &projected).collect::<Vec<_>>();
+    let tables = network.truth_tables_for_inputs(consumer, &inputs, &observed);
     let (function, _) = tables.care_projection(consumer, &inputs)?;
     let window = base.len();
     let mut sensitive = 0u64;
@@ -203,18 +209,15 @@ pub(crate) fn observability_cares(
     if sensitive == full_window {
         return None;
     }
-    let cares = cuts
-        .cuts(node)
+    let cares = cut_list
         .iter()
-        .map(|cut| {
-            if cut.contains(node) {
+        .zip(projected.iter())
+        .map(|(cut, &projected)| {
+            if !projected {
                 return u64::MAX;
             }
             let mut leaf_functions = Vec::with_capacity(cut.len());
             for leaf in cut.leaves() {
-                if coverage.covered(*leaf) != Some(true) {
-                    return u64::MAX;
-                }
                 match tables.care_projection(*leaf, &inputs) {
                     Some((truth, _)) => leaf_functions.push(truth),
                     None => return u64::MAX,

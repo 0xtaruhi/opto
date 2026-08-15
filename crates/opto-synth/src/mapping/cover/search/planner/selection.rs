@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+use super::ReferenceScratch;
 use super::{
     Candidate, CellBinding, CoverDemand, CoverPlanner, ExactChoice, ExactViability,
     ExecutionContext, KCut, LibraryCover, LibraryCoverBinding, LibraryCoverCell,
@@ -151,9 +152,7 @@ impl CoverPlanner<'_> {
         &mut self,
         runtime: &ExecutionContext,
     ) -> Result<usize, crate::SynthError> {
-        // Exact recovery chooses implementations only for real logic phases.
-        // Joint cells live in virtual slots after `base_slots` and have no
-        // direct candidate arena of their own.
+        // Joint cells occupy virtual slots and have no direct candidate arena.
         let viability = runtime.analyze_indexed(self.base_slots, |slot_id| {
             Ok::<_, crate::SynthError>(self.exact_slot_viability(slot_id))
         })?;
@@ -167,11 +166,7 @@ impl CoverPlanner<'_> {
             queued[slot] = true;
         }
         let mut changes = 0usize;
-        // Logic node IDs are topological, so visit consumers before their
-        // dependencies. A consumer choice can change the exact reference
-        // count and sharing cost of its leaves; reverse order propagates that
-        // information through the full cone in one pass instead of advancing
-        // only one level per outer recovery iteration.
+        // Reverse topology propagates changed sharing costs through one pass.
         while let Some(slot_id) = pending.pop() {
             queued[slot_id] = false;
             if self.demand.reference_count(slot_id) == 0 {
@@ -213,8 +208,7 @@ impl CoverPlanner<'_> {
                 let choice = SlotChoice::Cell(u32::try_from(candidate_index).map_err(|_| {
                     crate::SynthError::capacity("cover candidate count exceeds compact capacity")
                 })?);
-                let added = self.change_choice_references(slot_id, choice, 1, &mut stack)?;
-                self.change_choice_references(slot_id, choice, -1, &mut stack)?;
+                let added = self.trial_choice_area(slot_id, choice)?;
                 let exact = ExactChoice {
                     choice,
                     area: added + candidate.nominal_cost(self.catalog).area,
@@ -230,13 +224,7 @@ impl CoverPlanner<'_> {
                 if self.choices[other].is_some_and(|choice| choice != SlotChoice::Inverter)
                     && slot_viability.inverter
                 {
-                    let added = self.change_choice_references(
-                        slot_id,
-                        SlotChoice::Inverter,
-                        1,
-                        &mut stack,
-                    )?;
-                    self.change_choice_references(slot_id, SlotChoice::Inverter, -1, &mut stack)?;
+                    let added = self.trial_choice_area(slot_id, SlotChoice::Inverter)?;
                     let exact = ExactChoice {
                         choice: SlotChoice::Inverter,
                         area: added + inverter.cost.area,
@@ -258,8 +246,7 @@ impl CoverPlanner<'_> {
                     continue;
                 }
                 let choice = SlotChoice::JointOutput(joint_id);
-                let added = self.change_choice_references(slot_id, choice, 1, &mut stack)?;
-                self.change_choice_references(slot_id, choice, -1, &mut stack)?;
+                let added = self.trial_choice_area(slot_id, choice)?;
                 let joint = &self.joints[joint_id as usize];
                 let side = u8::from(joint.slots[1] == slot_id);
                 let exact = ExactChoice {
@@ -274,9 +261,7 @@ impl CoverPlanner<'_> {
             }
             let restored = best.map_or(current, |best| best.choice);
             activated.clear();
-            // Install the committed implementation before activating its
-            // dependencies. A dependency transition can reactivate this slot
-            // through another selected cone and must observe the new choice.
+            // Dependencies activated below must observe the committed choice.
             self.choices[slot_id] = Some(restored);
             self.change_choice_references_tracked(
                 slot_id,
@@ -287,10 +272,7 @@ impl CoverPlanner<'_> {
             )?;
             if restored != current {
                 changes += 1;
-                // Trial removal can temporarily deactivate a shared suffix.
-                // Revisit only slots that are newly active in the committed
-                // cover, including an opposite phase that was already passed
-                // by the reverse-topological scan.
+                // Revisit suffix slots reactivated by the committed cover.
                 activated.sort_unstable();
                 for &activated_slot in &activated {
                     if activated_slot < self.base_slots
@@ -451,10 +433,7 @@ impl CoverPlanner<'_> {
                             "joint {joint_id} failed to remove current choices: {error}"
                         ))
                     })?;
-            // Install the trial choices before activating their dependencies.
-            // One root can become live through the other root's new cone, and
-            // that transition must expand the trial implementation rather than
-            // the stale implementation being replaced.
+            // Activated dependencies must observe both trial choices.
             self.choices[first] = Some(joint_choice);
             self.choices[second] = Some(joint_choice);
             let added = self.change_choices_references(
@@ -589,14 +568,49 @@ impl CoverPlanner<'_> {
         }
     }
 
-    fn change_choice_references(
+    /// Scores a choice using committed reference counts without mutating them.
+    fn trial_choice_area(
         &mut self,
         slot_id: usize,
         choice: SlotChoice,
-        delta: i32,
-        stack: &mut Vec<usize>,
     ) -> Result<f64, crate::SynthError> {
-        self.change_choice_references_tracked(slot_id, choice, delta, stack, None)
+        if self.demand.reference_count(slot_id) == 0 {
+            return Ok(0.0);
+        }
+        #[cfg(test)]
+        let references_before = self.demand.references().to_vec();
+        let mut scratch = std::mem::take(&mut self.trial_scratch);
+        scratch.begin(self.choices.len());
+        let mut frontier = std::mem::take(&mut scratch.frontier);
+        let mut next = std::mem::take(&mut scratch.next);
+        frontier.extend(self.choice_dependencies(slot_id, choice));
+        let mut area = 0.0;
+        let mut error = None;
+        while !frontier.is_empty() && error.is_none() {
+            frontier.sort_unstable();
+            next.clear();
+            for &current in &frontier {
+                if !scratch.mark(current) || self.demand.reference_count(current) != 0 {
+                    continue;
+                }
+                let Some(selected) = self.choices[current] else {
+                    error = Some(crate::SynthError::invariant(
+                        "cover recovery scored a slot without an implementation",
+                    ));
+                    break;
+                };
+                area += self.choice_cell_area(current, selected);
+                next.extend(self.choice_dependencies(current, selected));
+            }
+            std::mem::swap(&mut frontier, &mut next);
+        }
+        scratch.frontier = frontier;
+        scratch.next = next;
+        self.trial_scratch = scratch;
+        let result = error.map_or(Ok(area), Err);
+        #[cfg(test)]
+        assert_eq!(self.demand.references(), references_before);
+        result
     }
 
     fn change_choice_references_tracked(
@@ -623,7 +637,10 @@ impl CoverPlanner<'_> {
             ));
         }
         debug_assert!(pending.is_empty());
-        let mut seeded_roots = Vec::with_capacity(roots.len());
+        let mut scratch = std::mem::take(&mut self.reference_scratch);
+        let ReferenceScratch { seeded_roots, next } = &mut scratch;
+        seeded_roots.clear();
+        next.clear();
         for &(slot_id, choice) in roots {
             if self.demand.reference_count(slot_id) != 0 {
                 pending.extend(self.choice_dependencies(slot_id, choice));
@@ -635,7 +652,6 @@ impl CoverPlanner<'_> {
         let mut area = 0.0;
         while !pending.is_empty() {
             pending.sort_unstable();
-            let mut next = Vec::new();
             let mut start = 0;
             while start < pending.len() {
                 let current = pending[start];
@@ -653,10 +669,7 @@ impl CoverPlanner<'_> {
                     if let Some(crossed_slots) = crossed_slots.as_mut() {
                         crossed_slots.push(current);
                     }
-                    // A root can be inside another replaced root's selected
-                    // cone. Its implementation dependencies were already
-                    // included in the initial batch, so crossing the root
-                    // must not expand or charge them a second time.
+                    // Do not charge a replaced root reached through another root.
                     if seeded_roots.binary_search(&current).is_err() {
                         let selected = self.choices[current].ok_or_else(|| {
                             crate::SynthError::invariant(
@@ -670,8 +683,9 @@ impl CoverPlanner<'_> {
                 start = end;
             }
             pending.clear();
-            pending.append(&mut next);
+            pending.append(next);
         }
+        self.reference_scratch = scratch;
         Ok(area)
     }
 

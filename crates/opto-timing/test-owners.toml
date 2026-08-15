@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-timing"
-expected_tests = 116
+expected_tests = 118
 
 [[owners]]
 path = "src/tests.rs"
@@ -26,7 +26,7 @@ contract = "Typed constraint validation, exception arbitration, priority, and re
 [[owners]]
 path = "src/engine"
 owner = "incremental-engine"
-tests = 41
+tests = 43
 contract = "Transactional incremental edits, rollback, dirty closure, bindings, and optimization quality."
 
 [[owners]]

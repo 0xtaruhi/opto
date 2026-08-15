@@ -8,6 +8,7 @@ use super::{
     LogicNodeId, MappingCost, SlotChoice, SmallVec, TruthTable, analyze_node_cares,
     enumerate_joints, inverter_truth, node_candidates, opposite, slot,
 };
+use super::{ReferenceScratch, TrialScratch};
 use crate::planning::mapping_policy::{
     compare_mapping_cost, compare_mapping_cost_with_required_time,
 };
@@ -270,6 +271,8 @@ impl<'a> CoverPlanner<'a> {
             reference_estimates,
             demand: CoverDemand::empty(total),
             live_nodes: live_nodes.into_boxed_slice(),
+            reference_scratch: ReferenceScratch::default(),
+            trial_scratch: TrialScratch::default(),
         })
     }
 

@@ -6,18 +6,112 @@ use hashbrown::HashSet;
 use opto_ir::mapped::{CellId, ConnectionRef, ConnectionSignal, MappedNetlist, NetId, RegionDelta};
 use opto_library::{TargetCellSet, TargetPinDirection, TargetSequentialKind};
 
+/// One register proved to hold a single constant, with the value each of its
+/// outputs holds.
+pub(super) struct ConstantRegister {
+    cell: CellId,
+    outputs: Vec<(NetId, bool)>,
+}
+
+/// Builds one transaction that removes every proved-constant register together.
+///
+/// Each removal is an independent proof, but each transaction pays one
+/// incremental-STA update over the affected timing closure. Committing them one
+/// at a time costs that update per register; committing the batch pays it once.
+/// Returns `None` when the batch is empty or the mapped region cannot be
+/// snapshotted.
+pub(super) fn constant_register_removal(
+    mapped: &MappedNetlist,
+    registers: &[ConstantRegister],
+) -> Result<Option<PostmapCandidate>, crate::SynthError> {
+    if registers.is_empty() {
+        return Ok(None);
+    }
+    let removed = registers
+        .iter()
+        .map(|register| register.cell)
+        .collect::<HashSet<_>>();
+    let mut cells = registers
+        .iter()
+        .map(|register| register.cell)
+        .collect::<Vec<_>>();
+    let mut rewires = Vec::new();
+    for register in registers {
+        for &(net, value) in &register.outputs {
+            let pins = mapped.pins_on_net(net).ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "constant-register output {net:?} has no pin table"
+                ))
+            })?;
+            for pin in pins {
+                let owner = mapped.pin_owner(pin);
+                if owner == Some(register.cell) {
+                    continue;
+                }
+                // A consumer that is itself leaving keeps its stale connection;
+                // the delta removes the whole cell, so rewiring its pins first
+                // would only churn the snapshot.
+                if owner.is_some_and(|owner| removed.contains(&owner)) {
+                    continue;
+                }
+                rewires.push((pin, value));
+                if let Some(owner) = owner
+                    && !cells.contains(&owner)
+                {
+                    cells.push(owner);
+                }
+            }
+        }
+    }
+    let mut nets = super::mapped_cell_nets(mapped, cells.iter().copied())?;
+    nets.extend(
+        registers
+            .iter()
+            .flat_map(|register| register.outputs.iter().map(|&(net, _)| net)),
+    );
+    let snapshot = mapped
+        .snapshot_region(cells, nets)
+        .map_err(crate::SynthError::from)?;
+    let mut delta = RegionDelta::new(snapshot);
+    for (pin, value) in rewires {
+        delta
+            .reconnect_pin(pin, ConnectionRef::Constant(value))
+            .map_err(crate::SynthError::from)?;
+    }
+    for register in registers {
+        delta
+            .remove_cell(register.cell)
+            .map_err(crate::SynthError::from)?;
+        for &(net, _) in &register.outputs {
+            delta.remove_net(net).map_err(crate::SynthError::from)?;
+        }
+    }
+    Ok(Some(PostmapCandidate::new(delta)))
+}
+
+/// Finds registers that remain at their asynchronous reset value.
+///
+/// The proof assumes reset is asserted before observation, rejects a reset the
+/// netlist holds inactive, and bounds all enumerated combinational work.
 pub(super) fn constant_register_candidates(
     mapped: &MappedNetlist,
     library: &TargetCellSet,
     boundary: &HashSet<NetId>,
-) -> Result<Vec<PostmapCandidate>, crate::SynthError> {
-    let mut candidates = Vec::new();
-    for cell in mapped.cell_ids() {
-        if let Some(candidate) = constant_register_candidate(mapped, library, boundary, cell)? {
-            candidates.push(candidate);
+    scope: Option<&std::collections::HashSet<CellId>>,
+    runtime: &opto_runtime::ExecutionContext,
+) -> Result<Vec<ConstantRegister>, crate::SynthError> {
+    let cells = match scope {
+        Some(scope) => {
+            let mut cells = scope.iter().copied().collect::<Vec<_>>();
+            cells.sort_unstable();
+            cells
         }
-    }
-    Ok(candidates)
+        None => mapped.cell_ids().collect(),
+    };
+    let shards = runtime.analyze_indexed(cells.len(), |index| {
+        constant_register_candidate(mapped, library, boundary, cells[index])
+    })?;
+    Ok(shards.into_iter().flatten().collect())
 }
 
 fn collect_pins<'function>(
@@ -31,12 +125,323 @@ fn collect_pins<'function>(
     });
 }
 
+/// Reports whether a control function can still assert.
+///
+/// Every pin the function reads that is tied to a constant is substituted; a pin
+/// driven by a net can take either value, so the function is assumed assertable.
+/// A control the constants alone hold inactive can never assert, which is what
+/// makes it interesting: the register it resets never reaches its reset value.
+fn control_can_assert(
+    control: opto_library::BooleanFunctionRef<'_>,
+    inputs: &[(&str, ConnectionSignal)],
+) -> bool {
+    let mut names = Vec::new();
+    collect_pins(control, &mut names);
+    let constants = names
+        .iter()
+        .map(|name| {
+            inputs
+                .iter()
+                .find(|(pin, _)| pin == name)
+                .and_then(|&(_, signal)| match signal {
+                    ConnectionSignal::Constant(value) => Some(value),
+                    ConnectionSignal::Net(_) => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    if constants.iter().any(Option::is_none) {
+        return true;
+    }
+    control
+        .eval(&mut |name| {
+            names
+                .iter()
+                .position(|candidate| *candidate == name)
+                .and_then(|index| constants[index])
+        })
+        .unwrap_or(true)
+}
+
+/// Unknown boundary nets a constant-register proof may enumerate. The proof
+/// cost is `2^unknowns`, so this is a hard work bound, not a quality dial.
+const MAX_CONSTANT_REGISTER_UNKNOWNS: usize = 6;
+
+/// Combinational gates one proof may fold behind a register's inputs.
+const MAX_CONSTANT_REGISTER_CONE_GATES: usize = 16;
+
+/// Combinational cells one proof may walk forward from a register's outputs
+/// while deciding which nets its own value can still affect.
+const MAX_CONSTANT_REGISTER_INFLUENCE_CELLS: usize = 64;
+
+/// Collects the nets one register's own outputs can still reach through
+/// combinational logic.
+///
+/// This is what makes the backward fold bounded and meaningful. A net outside
+/// this set cannot depend on the register, so its value is an unconstrained
+/// input to the proof and folding it would only enumerate logic that answers a
+/// question nobody asked. Returns `None` when the register drives more logic
+/// than this proof is willing to walk.
+fn influenced_nets(
+    mapped: &MappedNetlist,
+    library: &TargetCellSet,
+    outputs: &[(NetId, bool)],
+) -> Option<HashSet<NetId>> {
+    let mut influenced = HashSet::new();
+    let mut visited_cells = HashSet::new();
+    let mut pending = outputs.iter().map(|&(net, _)| net).collect::<Vec<_>>();
+    while let Some(net) = pending.pop() {
+        let Some(pins) = mapped.pins_on_net(net) else {
+            continue;
+        };
+        for pin in pins {
+            let Some(cell) = mapped.pin_owner(pin) else {
+                continue;
+            };
+            if !visited_cells.insert(cell) {
+                continue;
+            }
+            if visited_cells.len() > MAX_CONSTANT_REGISTER_INFLUENCE_CELLS {
+                return None;
+            }
+            let Some(mapped_cell) = mapped.cell(cell) else {
+                continue;
+            };
+            let Some(library_index) = mapped_cell.library_cell else {
+                continue;
+            };
+            let Some(target) = library.get(library_index as usize) else {
+                continue;
+            };
+            if target.sequential().next().is_some() {
+                continue;
+            }
+            let Some(connections) = mapped.connections(cell) else {
+                continue;
+            };
+            for connection in connections {
+                let Some(library_pin) = connection.library_pin else {
+                    continue;
+                };
+                let Some(target_pin) = target.pins().nth(library_pin as usize) else {
+                    continue;
+                };
+                if target_pin.direction() != TargetPinDirection::Output {
+                    continue;
+                }
+                if let ConnectionSignal::Net(output) = connection.signal
+                    && influenced.insert(output)
+                {
+                    pending.push(output);
+                }
+            }
+        }
+    }
+    Some(influenced)
+}
+
+/// One folded gate in a driver cone: which library cell it is, which of its
+/// pins is the output being computed, and where each pin is connected.
+struct ConeGate {
+    output: NetId,
+    library_index: usize,
+    output_pin: usize,
+    /// Connections indexed by library pin, so evaluating the output function
+    /// resolves a pin name with one scan rather than one scan per pin per
+    /// assignment. A gate is evaluated once per enumerated assignment, so this
+    /// is the inner loop of the proof.
+    inputs: Vec<Option<ConnectionSignal>>,
+}
+
+/// A bounded combinational cone behind one register's input pins.
+///
+/// Gates are stored in evaluation order, produced by a post-order walk so a
+/// gate's inputs are always resolved before the gate itself. Nets the walk
+/// cannot drive combinationally, and nets that close a structural loop, become
+/// unknown leaves and are enumerated rather than followed.
+struct DriverCone {
+    gates: Vec<ConeGate>,
+    known: Vec<(NetId, bool)>,
+    unknowns: Vec<NetId>,
+}
+
+impl DriverCone {
+    /// Folds the cone feeding `roots`, substituting `known` net values.
+    ///
+    /// Returns `None` when the cone exceeds its gate or unknown budget, which
+    /// is a "do not remove this register" answer rather than an error.
+    fn build(
+        mapped: &MappedNetlist,
+        library: &TargetCellSet,
+        roots: impl Iterator<Item = NetId>,
+        known: &[(NetId, bool)],
+        influenced: &HashSet<NetId>,
+        boundary: &HashSet<NetId>,
+    ) -> Option<Self> {
+        let mut gates = Vec::new();
+        let mut unknowns = Vec::new();
+        let mut emitted = HashSet::new();
+        let mut visiting = HashSet::new();
+        let mut pending_gates = hashbrown::HashMap::new();
+        let mut pending = roots.map(|net| (net, false)).collect::<Vec<_>>();
+        while let Some((net, expanded)) = pending.pop() {
+            if emitted.contains(&net) || known.iter().any(|&(resolved, _)| resolved == net) {
+                continue;
+            }
+            if expanded {
+                let gate = pending_gates.remove(&net)?;
+                if gates.len() == MAX_CONSTANT_REGISTER_CONE_GATES {
+                    return None;
+                }
+                gates.push(gate);
+                emitted.insert(net);
+                continue;
+            }
+            let driver = (influenced.contains(&net) && !boundary.contains(&net))
+                .then(|| combinational_driver(mapped, library, net))
+                .flatten();
+            let Some(gate) = driver.filter(|_| visiting.insert(net)) else {
+                if unknowns.len() == MAX_CONSTANT_REGISTER_UNKNOWNS {
+                    return None;
+                }
+                unknowns.push(net);
+                emitted.insert(net);
+                continue;
+            };
+            pending.push((net, true));
+            pending.extend(gate.input_nets().map(|input| (input, false)));
+            pending_gates.insert(net, gate);
+        }
+        Some(Self {
+            gates,
+            known: known.to_vec(),
+            unknowns,
+        })
+    }
+
+    /// Resolves every cone net for one assignment of the unknown leaves.
+    ///
+    /// `values` is a caller-owned scratch buffer so one proof reuses it across
+    /// all `2^unknowns` assignments. Returns `false` when a gate function does
+    /// not evaluate, which aborts the proof.
+    fn evaluate(
+        &self,
+        library: &TargetCellSet,
+        assignment: u32,
+        values: &mut Vec<(NetId, bool)>,
+    ) -> bool {
+        values.clear();
+        values.extend(self.known.iter().copied());
+        for (index, &net) in self.unknowns.iter().enumerate() {
+            values.push((net, assignment & (1 << index) != 0));
+        }
+        for gate in &self.gates {
+            let Some(value) = gate.evaluate(library, values) else {
+                return false;
+            };
+            values.push((gate.output, value));
+        }
+        true
+    }
+}
+
+impl ConeGate {
+    fn evaluate(&self, library: &TargetCellSet, values: &[(NetId, bool)]) -> Option<bool> {
+        let target = library.get(self.library_index)?;
+        let function = target.pins().nth(self.output_pin)?.function()?;
+        function.eval(&mut |name| {
+            let pin = target.pins().position(|pin| pin.name() == name)?;
+            match self.inputs.get(pin).copied().flatten()? {
+                ConnectionSignal::Constant(value) => Some(value),
+                ConnectionSignal::Net(net) => values
+                    .iter()
+                    .find(|&&(resolved, _)| resolved == net)
+                    .map(|&(_, value)| value),
+            }
+        })
+    }
+
+    /// Iterates the nets this gate reads.
+    fn input_nets(&self) -> impl Iterator<Item = NetId> + '_ {
+        self.inputs.iter().filter_map(|signal| match signal {
+            Some(ConnectionSignal::Net(net)) => Some(*net),
+            _ => None,
+        })
+    }
+}
+
+/// Finds one unconditional combinational driver for a non-boundary net.
+/// Multiple, constant, sequential, three-state, inout, or malformed drivers
+/// conservatively make the net an unknown leaf.
+fn combinational_driver(
+    mapped: &MappedNetlist,
+    library: &TargetCellSet,
+    net: NetId,
+) -> Option<ConeGate> {
+    if mapped
+        .constant_drivers()
+        .iter()
+        .any(|&(driven, _)| driven == net)
+    {
+        return None;
+    }
+    let mut driver = None;
+    for pin in mapped.pins_on_net(net)? {
+        let cell = mapped.pin_owner(pin)?;
+        let mapped_cell = mapped.cell(cell)?;
+        let library_index = mapped_cell.library_cell?;
+        let library_index = library_index as usize;
+        let target = library.get(library_index)?;
+        let connections = mapped.connections(cell)?;
+        let mut output_pin = None;
+        let mut inputs = vec![None; target.pins().count()];
+        for connection in connections {
+            let library_pin = connection.library_pin? as usize;
+            let target_pin = target.pins().nth(library_pin)?;
+            let drives_net = connection.signal == ConnectionSignal::Net(net);
+            match target_pin.direction() {
+                TargetPinDirection::Output => {
+                    if drives_net {
+                        target_pin.three_state().is_none().then_some(())?;
+                        if target.sequential().next().is_some() {
+                            return None;
+                        }
+                        output_pin = Some(library_pin);
+                    }
+                }
+                TargetPinDirection::Inout => {
+                    return None;
+                }
+                TargetPinDirection::Input | TargetPinDirection::Internal => {
+                    if let Some(slot) = inputs.get_mut(library_pin) {
+                        *slot = Some(connection.signal);
+                    }
+                }
+            }
+        }
+        let Some(output_pin) = output_pin else {
+            continue;
+        };
+        if driver
+            .replace(ConeGate {
+                output: net,
+                library_index,
+                output_pin,
+                inputs,
+            })
+            .is_some()
+        {
+            return None;
+        }
+    }
+    driver
+}
+
 fn constant_register_candidate(
     mapped: &MappedNetlist,
     library: &TargetCellSet,
     boundary: &HashSet<NetId>,
     cell: CellId,
-) -> Result<Option<PostmapCandidate>, crate::SynthError> {
+) -> Result<Option<ConstantRegister>, crate::SynthError> {
     let Some(mapped_cell) = mapped.cell(cell) else {
         return Ok(None);
     };
@@ -101,9 +506,17 @@ fn constant_register_candidate(
     if outputs.is_empty() {
         return Ok(None);
     }
+    let ((Some(control), None) | (None, Some(control))) = (sequential.clear(), sequential.preset())
+    else {
+        return Ok(None);
+    };
+    if !control_can_assert(control, &inputs) {
+        return Ok(None);
+    }
     let mut names = Vec::new();
     collect_pins(next_state, &mut names);
     let mut unknowns = Vec::new();
+    let mut driven = Vec::new();
     let mut fixed = Vec::new();
     for name in names {
         let state = if Some(name) == sequential.state_variables().next() {
@@ -124,19 +537,43 @@ fn constant_register_candidate(
                 if let Some(&(_, value)) = outputs.iter().find(|&&(output, _)| output == net) {
                     fixed.push((name, value));
                 } else {
-                    unknowns.push(name);
+                    driven.push((name, net));
                 }
             }
             None => unknowns.push(name),
         }
     }
-    if unknowns.len() > 4 {
+    let Some(influenced) = influenced_nets(mapped, library, &outputs) else {
+        return Ok(None);
+    };
+    let Some(cone) = DriverCone::build(
+        mapped,
+        library,
+        driven.iter().map(|&(_, net)| net),
+        &outputs,
+        &influenced,
+        boundary,
+    ) else {
+        return Ok(None);
+    };
+    let cone_unknowns = cone.unknowns.len();
+    if unknowns.len() + cone_unknowns > MAX_CONSTANT_REGISTER_UNKNOWNS {
         return Ok(None);
     }
-    for assignment in 0u32..1 << unknowns.len() {
+    let mut values = Vec::new();
+    for assignment in 0u32..1 << (unknowns.len() + cone_unknowns) {
+        if !cone.evaluate(library, assignment >> unknowns.len(), &mut values) {
+            return Ok(None);
+        }
         let held = next_state.eval(&mut |name| {
             if let Some(&(_, value)) = fixed.iter().find(|(fixed, _)| *fixed == name) {
                 return Some(value);
+            }
+            if let Some(&(_, net)) = driven.iter().find(|(driven, _)| *driven == name) {
+                return values
+                    .iter()
+                    .find(|&&(resolved, _)| resolved == net)
+                    .map(|&(_, value)| value);
             }
             unknowns
                 .iter()
@@ -150,40 +587,7 @@ fn constant_register_candidate(
     if outputs.iter().any(|(net, _)| boundary.contains(net)) {
         return Ok(None);
     }
-    let mut rewires = Vec::new();
-    let mut cells = vec![cell];
-    for &(net, value) in &outputs {
-        let Some(pins) = mapped.pins_on_net(net) else {
-            return Ok(None);
-        };
-        for pin in pins {
-            let owner = mapped.pin_owner(pin);
-            if owner != Some(cell) {
-                rewires.push((pin, value));
-                if let Some(owner) = owner
-                    && !cells.contains(&owner)
-                {
-                    cells.push(owner);
-                }
-            }
-        }
-    }
-    let mut nets = super::mapped_cell_nets(mapped, [cell])?;
-    nets.extend(outputs.iter().map(|&(net, _)| net));
-    let snapshot = mapped
-        .snapshot_region(cells, nets)
-        .map_err(crate::SynthError::from)?;
-    let mut delta = RegionDelta::new(snapshot);
-    for (pin, value) in rewires {
-        delta
-            .reconnect_pin(pin, ConnectionRef::Constant(value))
-            .map_err(crate::SynthError::from)?;
-    }
-    delta.remove_cell(cell).map_err(crate::SynthError::from)?;
-    for (net, _) in outputs {
-        delta.remove_net(net).map_err(crate::SynthError::from)?;
-    }
-    Ok(Some(PostmapCandidate::new(delta)))
+    Ok(Some(ConstantRegister { cell, outputs }))
 }
 
 #[cfg(test)]
@@ -251,8 +655,143 @@ mod tests {
                 clock_gate: None,
                 memory: None,
             },
+            TargetCell {
+                name: "AND2".to_string(),
+                area: Some(0.5),
+                dont_use: false,
+                usage: opto_library::TargetCellUsage::default(),
+                pins: vec![
+                    pin("A", TargetPinDirection::Input, None),
+                    pin("B", TargetPinDirection::Input, None),
+                    pin("Z", TargetPinDirection::Output, Some("A B")),
+                ],
+                sequential: Vec::new(),
+                clock_gate: None,
+                memory: None,
+            },
         ]
         .into()
+    }
+
+    #[test]
+    fn keeps_registers_behind_a_multiply_driven_net() {
+        let library = library();
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let clock = builder.add_net(Some("clk")).unwrap();
+        let reset = builder.add_net(Some("rst")).unwrap();
+        let enable = builder.add_net(Some("en")).unwrap();
+        let d = builder.add_net(Some("d")).unwrap();
+        let q = builder.add_net(Some("q")).unwrap();
+        builder
+            .add_cell(
+                "r0",
+                "EDFCNQ",
+                Some(0),
+                &[
+                    ("D".to_string(), Some(0), ConnectionSignal::Net(d)),
+                    ("E".to_string(), Some(1), ConnectionSignal::Net(enable)),
+                    ("CP".to_string(), Some(2), ConnectionSignal::Net(clock)),
+                    ("CDN".to_string(), Some(3), ConnectionSignal::Net(reset)),
+                    ("Q".to_string(), Some(4), ConnectionSignal::Net(q)),
+                ],
+            )
+            .unwrap();
+        // `q AND 0` is zero, so folding this driver alone proves the register
+        // constant. `en AND 1` is not, and both drive `d`.
+        for (name, source, constant) in [("u_a", q, false), ("u_b", enable, true)] {
+            builder
+                .add_cell(
+                    name,
+                    "AND2",
+                    Some(2),
+                    &[
+                        ("A".to_string(), Some(0), ConnectionSignal::Net(source)),
+                        (
+                            "B".to_string(),
+                            Some(1),
+                            ConnectionSignal::Constant(constant),
+                        ),
+                        ("Z".to_string(), Some(2), ConnectionSignal::Net(d)),
+                    ],
+                )
+                .unwrap();
+        }
+        let mapped = builder.freeze().unwrap();
+        let registers = constant_register_candidates(
+            &mapped,
+            &library,
+            &HashSet::new(),
+            None,
+            crate::test_runtime(),
+        )
+        .unwrap();
+        assert!(registers.is_empty());
+    }
+
+    #[test]
+    fn keeps_registers_behind_a_cell_and_constant_driven_net() {
+        let library = library();
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let clock = builder.add_net(Some("clk")).unwrap();
+        let reset = builder.add_net(Some("rst")).unwrap();
+        let enable = builder.add_net(Some("en")).unwrap();
+        let d = builder.add_net(Some("d")).unwrap();
+        let q = builder.add_net(Some("q")).unwrap();
+        builder
+            .add_cell(
+                "r0",
+                "EDFCNQ",
+                Some(0),
+                &[
+                    ("D".to_string(), Some(0), ConnectionSignal::Net(d)),
+                    ("E".to_string(), Some(1), ConnectionSignal::Net(enable)),
+                    ("CP".to_string(), Some(2), ConnectionSignal::Net(clock)),
+                    ("CDN".to_string(), Some(3), ConnectionSignal::Net(reset)),
+                    ("Q".to_string(), Some(4), ConnectionSignal::Net(q)),
+                ],
+            )
+            .unwrap();
+        builder
+            .add_cell(
+                "u0",
+                "AND2",
+                Some(2),
+                &[
+                    ("A".to_string(), Some(0), ConnectionSignal::Net(q)),
+                    ("B".to_string(), Some(1), ConnectionSignal::Constant(false)),
+                    ("Z".to_string(), Some(2), ConnectionSignal::Net(d)),
+                ],
+            )
+            .unwrap();
+        builder.drive_constant(d, true);
+        let mapped = builder.freeze().unwrap();
+
+        let registers = constant_register_candidates(
+            &mapped,
+            &library,
+            &HashSet::new(),
+            None,
+            crate::test_runtime(),
+        )
+        .unwrap();
+
+        assert!(registers.is_empty());
+    }
+
+    #[test]
+    fn reports_a_missing_output_pin_table() {
+        let mapped = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL)
+            .unwrap()
+            .freeze()
+            .unwrap();
+        let register = ConstantRegister {
+            cell: CellId::from_index(0).unwrap(),
+            outputs: vec![(NetId::from_index(0).unwrap(), false)],
+        };
+
+        let error = constant_register_removal(&mapped, &[register]).unwrap_err();
+
+        assert!(error.to_string().contains("has no pin table"));
     }
 
     #[test]
@@ -291,14 +830,111 @@ mod tests {
             .unwrap();
         let mut mapped = builder.freeze().unwrap();
         let boundary = HashSet::new();
-        let candidates = constant_register_candidates(&mapped, &library, &boundary).unwrap();
-        assert_eq!(candidates.len(), 1);
-        let PostmapCandidate { delta, .. } = candidates.into_iter().next().unwrap();
+        let registers =
+            constant_register_candidates(&mapped, &library, &boundary, None, crate::test_runtime())
+                .unwrap();
+        assert_eq!(registers.len(), 1);
+        let PostmapCandidate { delta, .. } = constant_register_removal(&mapped, &registers)
+            .unwrap()
+            .unwrap();
         mapped.apply_region_delta(delta).unwrap();
         assert_eq!(mapped.cell_count(), 1);
         let inverter = mapped.cell_ids().next().unwrap();
         let connections = mapped.connections(inverter).unwrap();
         assert_eq!(connections[0].signal, ConnectionSignal::Constant(false));
+    }
+
+    #[test]
+    fn folds_a_self_holding_register_under_the_reset_contract() {
+        let library = library();
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let clock = builder.add_net(Some("clk")).unwrap();
+        let reset = builder.add_net(Some("rst")).unwrap();
+        let enable = builder.add_net(Some("en")).unwrap();
+        let q = builder.add_net(Some("q")).unwrap();
+        let out = builder.add_net(Some("out")).unwrap();
+        builder
+            .add_cell(
+                "r0",
+                "EDFCNQ",
+                Some(0),
+                &[
+                    ("D".to_string(), Some(0), ConnectionSignal::Net(q)),
+                    ("E".to_string(), Some(1), ConnectionSignal::Net(enable)),
+                    ("CP".to_string(), Some(2), ConnectionSignal::Net(clock)),
+                    ("CDN".to_string(), Some(3), ConnectionSignal::Net(reset)),
+                    ("Q".to_string(), Some(4), ConnectionSignal::Net(q)),
+                ],
+            )
+            .unwrap();
+        builder
+            .add_cell(
+                "u0",
+                "INV",
+                Some(1),
+                &[
+                    ("I".to_string(), Some(0), ConnectionSignal::Net(q)),
+                    ("ZN".to_string(), Some(1), ConnectionSignal::Net(out)),
+                ],
+            )
+            .unwrap();
+        let mapped = builder.freeze().unwrap();
+        let registers = constant_register_candidates(
+            &mapped,
+            &library,
+            &HashSet::new(),
+            None,
+            crate::test_runtime(),
+        )
+        .unwrap();
+        assert_eq!(registers.len(), 1);
+    }
+
+    #[test]
+    fn keeps_registers_whose_reset_is_tied_inactive() {
+        let library = library();
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let clock = builder.add_net(Some("clk")).unwrap();
+        let enable = builder.add_net(Some("en")).unwrap();
+        let q = builder.add_net(Some("q")).unwrap();
+        let out = builder.add_net(Some("out")).unwrap();
+        builder
+            .add_cell(
+                "r0",
+                "EDFCNQ",
+                Some(0),
+                &[
+                    ("D".to_string(), Some(0), ConnectionSignal::Constant(false)),
+                    ("E".to_string(), Some(1), ConnectionSignal::Net(enable)),
+                    ("CP".to_string(), Some(2), ConnectionSignal::Net(clock)),
+                    // CDN is active low, so tying it high means this register is
+                    // never cleared.
+                    ("CDN".to_string(), Some(3), ConnectionSignal::Constant(true)),
+                    ("Q".to_string(), Some(4), ConnectionSignal::Net(q)),
+                ],
+            )
+            .unwrap();
+        builder
+            .add_cell(
+                "u0",
+                "INV",
+                Some(1),
+                &[
+                    ("I".to_string(), Some(0), ConnectionSignal::Net(q)),
+                    ("ZN".to_string(), Some(1), ConnectionSignal::Net(out)),
+                ],
+            )
+            .unwrap();
+        let mapped = builder.freeze().unwrap();
+        let registers = constant_register_candidates(
+            &mapped,
+            &library,
+            &HashSet::new(),
+            None,
+            crate::test_runtime(),
+        )
+        .unwrap();
+        assert!(registers.is_empty());
     }
 
     #[test]
@@ -331,7 +967,14 @@ mod tests {
         }
         let mapped = builder.freeze().unwrap();
         let boundary = HashSet::new();
-        let candidates = constant_register_candidates(&mapped, &library, &boundary).unwrap();
-        assert!(candidates.is_empty());
+        let registers =
+            constant_register_candidates(&mapped, &library, &boundary, None, crate::test_runtime())
+                .unwrap();
+        assert!(registers.is_empty());
+        assert!(
+            constant_register_removal(&mapped, &registers)
+                .unwrap()
+                .is_none()
+        );
     }
 }

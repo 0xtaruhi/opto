@@ -1,41 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Static AXM pass scheduling and graph-choice composition.
+//! Static AXM pass scheduling.
 
 use super::network::{LogicGraph, LogicNode, LogicNodeId};
 use super::rewrite::{RewriteIncremental, remap_literal};
 use hashbrown::HashMap;
-use opto_runtime::{ExecutionContext, Task, TaskKey};
-
-pub(super) struct LogicPipelineOutcome {
-    pub(super) network: LogicGraph,
-    pub(super) remap: Box<[Option<LogicNodeId>]>,
-    pub(super) alternatives: Box<[LogicAlternative]>,
-}
-
-pub(super) struct LogicAlternative {
-    pub(super) pass: &'static str,
-    pub(super) roots: Box<[LogicNodeId]>,
-}
-
-struct ChoiceProposal {
-    pass: &'static str,
-    network: LogicGraph,
-    roots: Box<[LogicNodeId]>,
-}
-
-type LogicRoots = (LogicGraph, Box<[LogicNodeId]>);
-type ProposalTransform =
-    fn(&LogicGraph, &[LogicNodeId]) -> Result<Option<LogicRoots>, crate::SynthError>;
-
-#[derive(Clone, Copy)]
-struct ProposalSpec {
-    pass: &'static str,
-    transform: ProposalTransform,
-    round_budget: u8,
-    optimization: OptimizationPolicy,
-}
+use opto_runtime::ExecutionContext;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CopyStyle {
@@ -43,12 +14,13 @@ enum CopyStyle {
     DecomposeMux,
 }
 
-const MUX_DECOMPOSITION: ProposalSpec = ProposalSpec {
-    pass: "mux_decomposition",
-    transform: decompose_muxes,
-    round_budget: 2,
-    optimization: OptimizationPolicy::Factored,
-};
+pub(super) struct LogicPipelineOutcome {
+    pub(super) network: LogicGraph,
+    pub(super) remap: Box<[Option<LogicNodeId>]>,
+}
+
+/// MUX expansion rounds, including one retry after normalization.
+const MUX_DECOMPOSITION_ROUNDS: usize = 2;
 
 pub(super) struct TransformProduct {
     pub(super) network: LogicGraph,
@@ -116,106 +88,104 @@ pub(super) fn optimize(
         ));
     }
     if !enabled {
-        return finish(identity(source), roots, Vec::new());
+        return finish(identity(source), roots);
     }
-    let functional = small_support_choice(&source, roots, requirements, diagnostics, runtime)?;
-    let mut products = runtime.map_ordered_composite(
-        vec![
-            Task::new(TaskKey::new(7, 0), OptimizationTask::Baseline)
-                .with_estimated_work(source.node_count() as u64),
-            Task::new(
-                TaskKey::new(7, 1),
-                OptimizationTask::Proposal(MUX_DECOMPOSITION),
-            )
-            .with_estimated_work(source.node_count() as u64),
-        ],
-        |task, nested| match task {
-            OptimizationTask::Baseline => optimize_baseline(
-                &source,
-                roots,
-                requirements,
-                diagnostics,
-                nested,
-                incremental,
-            )
-            .map(OptimizationProduct::Baseline),
-            OptimizationTask::Proposal(spec) => {
-                build_proposal(spec, &source, roots, requirements, diagnostics, nested)
-                    .map(OptimizationProduct::Proposal)
-            }
-        },
+    let mut state = TransformState::start(roots, identity(source))?;
+    if let Some(reduction) =
+        reduce_functionally(&state.network, &state.roots, diagnostics, runtime)?
+    {
+        state.apply(reduction)?;
+    }
+    let canonical = optimize_canonical(
+        &state.network,
+        &state.roots,
+        requirements,
+        diagnostics,
+        runtime,
+        incremental,
     )?;
-    let OptimizationProduct::Baseline(baseline) = products.remove(0) else {
-        return Err(crate::SynthError::invariant(
-            "AXM optimization portfolio returned products out of order",
-        ));
-    };
-    let OptimizationProduct::Proposal(proposal) = products.remove(0) else {
-        return Err(crate::SynthError::invariant(
-            "AXM optimization portfolio returned products out of order",
-        ));
-    };
-    let mut alternatives = functional.into_iter().collect::<Vec<_>>();
-    alternatives.extend(proposal);
-    finish(baseline, roots, alternatives)
+    state.apply(canonical)?;
+    finish(state.finish(), roots)
 }
 
-#[derive(Clone, Copy)]
-enum OptimizationTask {
-    Baseline,
-    Proposal(ProposalSpec),
+/// Runs one SAT sweep, returning `None` when it proves no substitution.
+fn reduce_functionally(
+    source: &LogicGraph,
+    roots: &[LogicNodeId],
+    diagnostics: crate::SynthesisDiagnostics,
+    runtime: &ExecutionContext,
+) -> Result<Option<TransformProduct>, crate::SynthError> {
+    let started = std::time::Instant::now();
+    let mut metrics = super::sweep::SweepMetrics::default();
+    let before = source.node_count();
+    let reduced = super::sweep::reduce(source, roots, runtime, &mut metrics)?;
+    crate::api::diagnostics::trace!(
+        crate::api::diagnostics::SynthTrace::timing(diagnostics),
+        "logic.sweep",
+        "nodes={before}->{} rounds={} classes={} candidates={} proved={} refuted={} \
+         exhausted={} wall={:?}",
+        reduced
+            .as_ref()
+            .map_or(before, |product| product.network.node_count()),
+        metrics.rounds,
+        metrics.classes,
+        metrics.candidates,
+        metrics.proved,
+        metrics.refuted,
+        metrics.budget_exhausted,
+        started.elapsed()
+    );
+    Ok(reduced)
 }
 
-enum OptimizationProduct {
-    Baseline(TransformProduct),
-    Proposal(Option<ChoiceProposal>),
-}
-
-fn build_proposal(
-    spec: ProposalSpec,
+/// Optimizes the canonical path, expanding MUX structure before normalization.
+fn optimize_canonical(
     source: &LogicGraph,
     roots: &[LogicNodeId],
     requirements: &[Option<f64>],
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
-) -> Result<Option<ChoiceProposal>, crate::SynthError> {
-    let mut transformed = (spec.transform)(source, roots)?;
-    let mut proposal = None;
-    for round in 0..spec.round_budget {
-        let Some((network, roots)) = transformed else {
+    incremental: Option<RewriteIncremental<'_>>,
+) -> Result<TransformProduct, crate::SynthError> {
+    let mut state = TransformState::start(roots, copy_active(source, roots)?)?;
+    let mut expanded = false;
+    for _ in 0..MUX_DECOMPOSITION_ROUNDS {
+        let Some(decomposition) = decompose_muxes(&state.network, &state.roots)? else {
             break;
         };
-        let cache = super::rewrite::RewriteRecipeCache::default();
-        let metrics = crate::incremental::IncrementalRunMetrics::default();
+        state.apply(decomposition)?;
+        expanded = true;
         let optimized = optimize_with(
-            &network,
-            &roots,
+            &state.network,
+            &state.roots,
             requirements,
             diagnostics,
             runtime,
-            RewriteIncremental::new(&cache, &metrics),
-            spec.optimization,
+            None,
+            OptimizationPolicy::Factored,
         )?;
-        let roots = map_roots(&optimized.remap, &roots)?;
-        let candidate = ChoiceProposal {
-            pass: spec.pass,
-            network: optimized.network,
-            roots,
-        };
-        transformed = if round + 1 < spec.round_budget {
-            (spec.transform)(&candidate.network, &candidate.roots)?
-        } else {
-            None
-        };
-        proposal = Some(candidate);
+        state.apply(optimized)?;
     }
-    Ok(proposal)
+    if expanded {
+        return Ok(state.finish());
+    }
+    // A subject with no MUX still needs the baseline optimization once.
+    optimize_with(
+        source,
+        roots,
+        requirements,
+        diagnostics,
+        runtime,
+        incremental,
+        OptimizationPolicy::Baseline,
+    )
 }
 
+/// Expands MUX nodes, returning `None` when no expansion is needed.
 fn decompose_muxes(
     source: &LogicGraph,
     roots: &[LogicNodeId],
-) -> Result<Option<LogicRoots>, crate::SynthError> {
+) -> Result<Option<TransformProduct>, crate::SynthError> {
     if !(0..source.node_count()).any(|index| {
         matches!(
             source.node(LogicNodeId::from_index(index)),
@@ -233,125 +203,35 @@ fn decompose_muxes(
         &mut variables,
         CopyStyle::DecomposeMux,
     )?;
-    let roots = map_roots(&remap, roots)?;
+    map_roots(&remap, roots)?;
     network.freeze();
-    Ok(Some((network, roots)))
-}
-
-fn small_support_choice(
-    source: &LogicGraph,
-    roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-    diagnostics: crate::SynthesisDiagnostics,
-    runtime: &ExecutionContext,
-) -> Result<Option<ChoiceProposal>, crate::SynthError> {
-    let factoring_started = std::time::Instant::now();
-    let Some(subject) = super::pla::build_multi_output(source, roots, runtime)? else {
-        return Ok(None);
-    };
-    crate::api::diagnostics::trace!(
-        crate::api::diagnostics::SynthTrace::timing(diagnostics),
-        "logic.multi_output.factor",
-        "nodes={} cover={:?} factoring={:?} resubstitution={:?} checks={} plans={} wall={:?}",
-        subject.network.node_count(),
-        subject.profile.cover,
-        subject.profile.factoring,
-        subject.profile.resubstitution,
-        subject.profile.relation_checks,
-        subject.profile.plan_queries,
-        factoring_started.elapsed()
-    );
-    let normalization_started = std::time::Instant::now();
-    let normalized = optimize_factored(
-        &subject.network,
-        &subject.roots,
-        requirements,
-        diagnostics,
-        runtime,
-    )?;
-    crate::api::diagnostics::trace!(
-        crate::api::diagnostics::SynthTrace::timing(diagnostics),
-        "logic.multi_output.normalize",
-        "nodes={} wall={:?}",
-        normalized.network.node_count(),
-        normalization_started.elapsed()
-    );
-    let normalized_roots = map_roots(&normalized.remap, &subject.roots)?;
-    Ok(Some(ChoiceProposal {
-        pass: "multi_output_factoring",
-        network: normalized.network,
-        roots: normalized_roots,
+    Ok(Some(TransformProduct {
+        network,
+        remap,
+        analyses: TransformAnalyses::default(),
     }))
 }
 
-pub(super) fn optimize_baseline(
+/// Rewrite policy for one optimization pass.
+#[derive(Clone, Copy)]
+pub(super) enum OptimizationPolicy {
+    Baseline,
+    Factored,
+}
+
+/// Optimizes one implementation under `policy`.
+pub(super) fn optimize_with(
     network: &LogicGraph,
     roots: &[LogicNodeId],
     requirements: &[Option<f64>],
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
     incremental: Option<RewriteIncremental<'_>>,
-) -> Result<TransformProduct, crate::SynthError> {
-    if let Some(incremental) = incremental {
-        optimize_with(
-            network,
-            roots,
-            requirements,
-            diagnostics,
-            runtime,
-            incremental,
-            OptimizationPolicy::Baseline,
-        )
-    } else {
-        let cache = super::rewrite::RewriteRecipeCache::default();
-        let metrics = crate::incremental::IncrementalRunMetrics::default();
-        optimize_with(
-            network,
-            roots,
-            requirements,
-            diagnostics,
-            runtime,
-            RewriteIncremental::new(&cache, &metrics),
-            OptimizationPolicy::Baseline,
-        )
-    }
-}
-
-fn optimize_factored(
-    network: &LogicGraph,
-    roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-    diagnostics: crate::SynthesisDiagnostics,
-    runtime: &ExecutionContext,
+    policy: OptimizationPolicy,
 ) -> Result<TransformProduct, crate::SynthError> {
     let cache = super::rewrite::RewriteRecipeCache::default();
     let metrics = crate::incremental::IncrementalRunMetrics::default();
-    optimize_with(
-        network,
-        roots,
-        requirements,
-        diagnostics,
-        runtime,
-        RewriteIncremental::new(&cache, &metrics),
-        OptimizationPolicy::Factored,
-    )
-}
-
-#[derive(Clone, Copy)]
-enum OptimizationPolicy {
-    Baseline,
-    Factored,
-}
-
-fn optimize_with(
-    network: &LogicGraph,
-    roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-    diagnostics: crate::SynthesisDiagnostics,
-    runtime: &ExecutionContext,
-    incremental: RewriteIncremental<'_>,
-    policy: OptimizationPolicy,
-) -> Result<TransformProduct, crate::SynthError> {
+    let incremental = incremental.unwrap_or_else(|| RewriteIncremental::new(&cache, &metrics));
     if roots.len() != requirements.len() {
         return Err(crate::SynthError::invariant(
             "AXM pass requirements do not align with roots",
@@ -395,51 +275,13 @@ fn optimize_with(
 }
 
 fn finish(
-    baseline: TransformProduct,
+    canonical: TransformProduct,
     source_roots: &[LogicNodeId],
-    alternatives: Vec<ChoiceProposal>,
 ) -> Result<LogicPipelineOutcome, crate::SynthError> {
-    if alternatives.is_empty() {
-        map_roots(&baseline.remap, source_roots)?;
-        return Ok(LogicPipelineOutcome {
-            network: baseline.network,
-            remap: baseline.remap,
-            alternatives: Box::new([]),
-        });
-    }
-
-    let mut network = LogicGraph::new();
-    let mut variables = HashMap::new();
-    let baseline_remap = copy_graph(
-        &baseline.network,
-        None,
-        &mut network,
-        &mut variables,
-        CopyStyle::Preserve,
-    )?;
-    let remap = compose_remaps(&baseline.remap, &baseline_remap);
-    map_roots(&remap, source_roots)?;
-
-    let mut installed = Vec::with_capacity(alternatives.len());
-    for alternative in alternatives {
-        let live = live_nodes(&alternative.network, &alternative.roots);
-        let alternative_remap = copy_graph(
-            &alternative.network,
-            Some(&live),
-            &mut network,
-            &mut variables,
-            CopyStyle::Preserve,
-        )?;
-        installed.push(LogicAlternative {
-            pass: alternative.pass,
-            roots: map_roots(&alternative_remap, &alternative.roots)?,
-        });
-    }
-    network.freeze();
+    map_roots(&canonical.remap, source_roots)?;
     Ok(LogicPipelineOutcome {
-        network,
-        remap,
-        alternatives: installed.into_boxed_slice(),
+        network: canonical.network,
+        remap: canonical.remap,
     })
 }
 
@@ -458,7 +300,7 @@ fn copy_active(
     network: &LogicGraph,
     roots: &[LogicNodeId],
 ) -> Result<TransformProduct, crate::SynthError> {
-    let live = live_nodes(network, roots);
+    let live = network.live_nodes(roots);
     let mut copied = LogicGraph::new();
     let mut variables = HashMap::new();
     let remap = copy_graph(
@@ -497,18 +339,6 @@ pub(super) fn compose_remaps(
         .iter()
         .map(|&literal| literal.and_then(|literal| remap_literal(second, literal)))
         .collect()
-}
-
-fn live_nodes(network: &LogicGraph, roots: &[LogicNodeId]) -> Box<[bool]> {
-    let mut live = vec![false; network.node_count()];
-    let mut pending = roots.iter().map(|root| root.positive()).collect::<Vec<_>>();
-    while let Some(node) = pending.pop() {
-        if std::mem::replace(&mut live[node.index()], true) {
-            continue;
-        }
-        pending.extend(network.node(node).fanins().map(LogicNodeId::positive));
-    }
-    live.into_boxed_slice()
 }
 
 fn copy_graph(
@@ -575,77 +405,6 @@ mod tests {
     use super::*;
     use opto_formal::prove_logic_network_equivalence;
 
-    fn graph(
-        gate: fn(&mut LogicGraph, LogicNodeId, LogicNodeId) -> LogicNodeId,
-    ) -> (LogicGraph, LogicNodeId) {
-        let mut network = LogicGraph::new();
-        let left = network.variable(0).unwrap();
-        let right = network.variable(1).unwrap();
-        let root = gate(&mut network, left, right);
-        network.freeze();
-        (network, root)
-    }
-
-    #[test]
-    fn installs_multiple_choices_once_and_structurally_shares_them() {
-        let (baseline, baseline_root) = graph(LogicGraph::and);
-        let (first, first_root) = graph(LogicGraph::xor);
-        let (second, second_root) = graph(LogicGraph::xor);
-        let outcome = finish(
-            identity(baseline),
-            &[baseline_root],
-            vec![
-                ChoiceProposal {
-                    pass: "first",
-                    network: first,
-                    roots: Box::new([first_root]),
-                },
-                ChoiceProposal {
-                    pass: "second",
-                    network: second,
-                    roots: Box::new([second_root]),
-                },
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(outcome.alternatives.len(), 2);
-        assert_eq!(outcome.alternatives[0].roots, outcome.alternatives[1].roots);
-        assert!(remap_literal(&outcome.remap, baseline_root).is_some());
-    }
-
-    #[test]
-    fn small_support_installs_one_equivalent_mapper_choice() {
-        let mut network = LogicGraph::new();
-        let a = network.variable(0).unwrap();
-        let b = network.variable(1).unwrap();
-        let c = network.variable(2).unwrap();
-        let shared = network.and(a, b);
-        let roots = [network.xor(shared, c), network.and(shared, c.inverted())];
-        network.freeze();
-        let expected = roots.map(|root| network.truth_table(root, 3));
-
-        let outcome = optimize(
-            network,
-            &roots,
-            &[None, None],
-            true,
-            crate::SynthesisDiagnostics::default(),
-            crate::test_runtime(),
-            None,
-        )
-        .unwrap();
-        let actual_roots = map_roots(&outcome.remap, &roots).unwrap();
-
-        assert_eq!(outcome.alternatives.len(), 1);
-        for (&actual, expected) in actual_roots.iter().zip(expected) {
-            assert_eq!(outcome.network.truth_table(actual, 3), expected);
-        }
-        for (&actual, expected) in outcome.alternatives[0].roots.iter().zip(expected) {
-            assert_eq!(outcome.network.truth_table(actual, 3), expected);
-        }
-    }
-
     #[test]
     fn mux_decomposition_preserves_a_wide_multi_output_graph() {
         let mut source = LogicGraph::new();
@@ -660,13 +419,14 @@ mod tests {
             source.mux(inputs[8], right, left),
         ];
         source.freeze();
-        let (decomposed, decomposed_roots) = decompose_muxes(&source, &roots)
+        let decomposed = decompose_muxes(&source, &roots)
             .unwrap()
             .expect("test graph contains genuine MUX nodes");
+        let decomposed_roots = map_roots(&decomposed.remap, &roots).unwrap();
         let proof = prove_logic_network_equivalence(
             source.storage_network(),
             &roots.map(LogicNodeId::lit),
-            decomposed.storage_network(),
+            decomposed.network.storage_network(),
             &decomposed_roots
                 .iter()
                 .copied()
@@ -679,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn optimization_portfolio_is_deterministic_across_worker_counts() {
+    fn canonical_optimization_is_deterministic_across_worker_counts() {
         let build = || {
             let mut source = LogicGraph::new();
             let inputs = (0..6)
@@ -707,20 +467,15 @@ mod tests {
                 &runtime,
                 None,
             )
-            .expect("optimization portfolio succeeds")
+            .expect("canonical optimization succeeds")
         };
 
         let serial = run(1);
         let parallel = run(4);
         assert_eq!(serial.remap, parallel.remap);
-        assert_eq!(serial.alternatives.len(), parallel.alternatives.len());
         for index in 0..serial.network.node_count() {
             let node = LogicNodeId::from_index(index);
             assert_eq!(serial.network.node(node), parallel.network.node(node));
-        }
-        for (serial, parallel) in serial.alternatives.iter().zip(&parallel.alternatives) {
-            assert_eq!(serial.pass, parallel.pass);
-            assert_eq!(serial.roots, parallel.roots);
         }
     }
 }

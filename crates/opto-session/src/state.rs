@@ -229,7 +229,11 @@ impl Default for DatabaseSettings {
             hdl_search_path: vec![PathBuf::from(".")],
             lib_search_path: vec![PathBuf::from(".")],
             synth_effort: SynthesisEffort::Medium,
-            clock_gating: false,
+            // Clock gating is on by default. It is an area, power, and cell
+            // count win wherever the target has an integrated clock gate, and a
+            // target without one produces an empty gate catalog, so the setting
+            // costs nothing there.
+            clock_gating: true,
             clock_gating_style: opto_synth::ClockGatingStyle::default(),
         }
     }

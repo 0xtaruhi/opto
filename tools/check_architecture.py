@@ -48,6 +48,7 @@ ALLOWED_DEPENDENCIES = {
     "opto-synth": {
         "opto-archive",
         "opto-core",
+        "opto-formal",
         "opto-ir",
         "opto-library",
         "opto-runtime",

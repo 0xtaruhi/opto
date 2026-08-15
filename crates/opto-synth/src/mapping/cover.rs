@@ -305,99 +305,19 @@ fn select_subject_cover(
         module,
         request,
     };
-    let implementations = subject.implementations();
-    let timing_driven = request
-        .roots
-        .iter()
-        .any(|root| root.required_time.is_some_and(f64::is_finite));
-    let portfolio_search = if timing_driven {
-        CoverSearch::Estimate
-    } else {
-        CoverSearch::Exact
-    };
-    let baseline = implementations.first().ok_or_else(|| {
-        crate::SynthError::invariant("regional Boolean subject has no baseline implementation")
-    })?;
-    let Some(baseline_outputs) = analyzed_outputs(request.roots, |value| baseline.node(value))?
-    else {
+    let Some(outputs) = analyzed_outputs(request.roots, |value| subject.node(value))? else {
         return Ok(None);
     };
-    let mut implementation_outputs = Vec::with_capacity(implementations.len());
-    implementation_outputs.push(baseline_outputs);
-    for implementation in &implementations[1..] {
-        implementation_outputs.push(
-            analyzed_outputs(request.roots, |value| implementation.node(value))?.ok_or_else(
-                || crate::SynthError::invariant("AXM alternative has no analyzed outputs"),
-            )?,
-        );
-    }
-    let tasks = implementation_outputs
-        .into_iter()
-        .enumerate()
-        .map(|(index, outputs)| {
-            opto_runtime::Task::new(
-                opto_runtime::TaskKey::new(8, index as u64),
-                (index, outputs),
-            )
-            .with_estimated_work(subject.network().node_count() as u64)
-        })
-        .collect();
-    let mut candidates =
-        request
-            .options
-            .runtime
-            .map_ordered_composite(tasks, |(index, outputs), nested| {
-                selector
-                    .select(&outputs, portfolio_search, nested)
-                    .map(|cover| (index, outputs, cover))
-            })?;
-    let (_, mut outputs, baseline_candidate) = candidates.remove(0);
-    let mut selected = baseline_candidate
+    let cover = selector
+        .select(&outputs, request.options.runtime)?
         .ok_or_else(|| crate::SynthError::mapping("regional Boolean network cannot be covered"))?;
-    let mut selected_pass = baseline.pass();
-    for (index, candidate_outputs, candidate) in candidates {
-        let implementation = &implementations[index];
-        let Some(candidate) = candidate else {
-            crate::api::diagnostics::trace!(
-                crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
-                "cover.logic_alternative",
-                "pass={} coverable=false selected=false",
-                implementation.pass()
-            );
-            continue;
-        };
-        let preferred = prefer_cover_rank(candidate.rank, selected.rank, timing_driven);
-        crate::api::diagnostics::trace!(
-            crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
-            "cover.logic_alternative",
-            "pass={} area={:.3} incumbent={:.3} selected={preferred}",
-            implementation.pass(),
-            candidate.cover.total_area,
-            selected.cover.total_area
-        );
-        if preferred {
-            outputs = candidate_outputs;
-            selected = candidate;
-            selected_pass = implementation.pass();
-        }
-    }
-    let portfolio_area = selected.cover.total_area;
-    let selected = if portfolio_search == CoverSearch::Exact {
-        selected
-    } else {
-        selector
-            .select(&outputs, CoverSearch::Exact, request.options.runtime)?
-            .ok_or_else(|| {
-                crate::SynthError::mapping("selected AXM implementation cannot be covered")
-            })?
-    };
     crate::api::diagnostics::trace!(
         crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
-        "cover.logic_portfolio",
-        "pass={selected_pass} portfolio={portfolio_area:.3} exact={:.3}",
-        selected.cover.total_area
+        "cover.logic",
+        "area={:.3}",
+        cover.total_area
     );
-    Ok(Some((outputs, selected.cover)))
+    Ok(Some((outputs, cover)))
 }
 
 fn analyzed_outputs(
@@ -439,9 +359,8 @@ impl CoverSelector<'_, '_> {
     fn select(
         &self,
         outputs: &[AnalyzedRegionOutput],
-        search_kind: CoverSearch,
         runtime: &opto_runtime::ExecutionContext,
-    ) -> Result<Option<RankedCover>, crate::SynthError> {
+    ) -> Result<Option<LibraryCover>, crate::SynthError> {
         let Self {
             subject,
             cuts,
@@ -519,27 +438,15 @@ impl CoverSelector<'_, '_> {
             input_transitions: &input_transitions,
             input_arrivals: &input_arrivals,
         };
-        let cover = match search_kind {
-            CoverSearch::Estimate => search::estimate_logic_network_with_truths(
-                subject.network(),
-                cuts,
-                truths,
-                &nodes,
-                request.catalog,
-                timing,
-                runtime,
-            )?,
-            CoverSearch::Exact => search::cover_logic_network_with_truths(
-                subject.network(),
-                cuts,
-                truths,
-                &nodes,
-                request.catalog,
-                timing,
-                runtime,
-            )?,
-        };
-        let mut cover = cover;
+        let mut cover = search::cover_logic_network_with_truths(
+            subject.network(),
+            cuts,
+            truths,
+            &nodes,
+            request.catalog,
+            timing,
+            runtime,
+        )?;
         if let Some(cover) = &mut cover {
             cover.isolate_outputs(request.catalog).map_err(|error| {
                 crate::SynthError::mapping(format!(
@@ -548,87 +455,7 @@ impl CoverSelector<'_, '_> {
                 ))
             })?;
         }
-        Ok(cover.map(|cover| RankedCover {
-            rank: cover_rank(&cover, &required_times),
-            cover,
-        }))
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CoverSearch {
-    Estimate,
-    Exact,
-}
-
-struct RankedCover {
-    cover: LibraryCover,
-    rank: CoverRank,
-}
-
-fn prefer_cover_rank(candidate: CoverRank, current: CoverRank, timing_driven: bool) -> bool {
-    if timing_driven {
-        candidate < current
-    } else {
-        candidate
-            .area
-            .total_cmp(&current.area)
-            .then_with(|| candidate.delay.total_cmp(&current.delay))
-            .then_with(|| candidate.cells.cmp(&current.cells))
-            .is_lt()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct CoverRank {
-    violating: bool,
-    worst_violation: f64,
-    total_violation: f64,
-    area: f64,
-    delay: f64,
-    cells: usize,
-}
-
-impl Eq for CoverRank {}
-
-impl PartialOrd for CoverRank {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for CoverRank {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.violating
-            .cmp(&other.violating)
-            .then_with(|| self.worst_violation.total_cmp(&other.worst_violation))
-            .then_with(|| self.total_violation.total_cmp(&other.total_violation))
-            .then_with(|| (self.area * self.delay).total_cmp(&(other.area * other.delay)))
-            .then_with(|| self.area.total_cmp(&other.area))
-            .then_with(|| self.delay.total_cmp(&other.delay))
-            .then_with(|| self.cells.cmp(&other.cells))
-    }
-}
-
-fn cover_rank(cover: &LibraryCover, requirements: &[Option<f64>]) -> CoverRank {
-    let mut worst_violation = 0.0f64;
-    let mut total_violation = 0.0f64;
-    let mut delay = 0.0f64;
-    for (cost, required) in cover.output_costs.iter().zip(requirements) {
-        delay = delay.max(cost.electrical_delay);
-        if let Some(required) = required.filter(|required| required.is_finite()) {
-            let violation = (cost.electrical_delay - required).max(0.0);
-            worst_violation = worst_violation.max(violation);
-            total_violation += violation;
-        }
-    }
-    CoverRank {
-        violating: worst_violation > 0.0,
-        worst_violation,
-        total_violation,
-        area: cover.total_area,
-        delay,
-        cells: cover.cells.len(),
+        Ok(cover)
     }
 }
 
@@ -643,49 +470,4 @@ fn merge_root_constraints(merged: &mut MappingRoot, root: MappingRoot) {
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
     };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CoverRank, prefer_cover_rank};
-
-    fn rank(area: f64, delay: f64) -> CoverRank {
-        CoverRank {
-            violating: false,
-            worst_violation: 0.0,
-            total_violation: 0.0,
-            area,
-            delay,
-            cells: 1,
-        }
-    }
-
-    #[test]
-    fn feasible_alternative_minimizes_area_delay_product() {
-        assert!(!prefer_cover_rank(rank(99.8, 1.1), rank(100.0, 1.0), true));
-        assert!(prefer_cover_rank(rank(99.8, 0.9), rank(100.0, 1.0), true));
-        assert!(prefer_cover_rank(rank(100.0, 0.9), rank(100.0, 1.0), true));
-        assert!(prefer_cover_rank(rank(110.0, 0.9), rank(100.0, 1.0), true));
-    }
-
-    #[test]
-    fn constraint_feasibility_precedes_area_delay_product() {
-        let mut violating = rank(1.0, 1.0);
-        violating.violating = true;
-        violating.worst_violation = 0.1;
-        violating.total_violation = 0.1;
-
-        assert!(!prefer_cover_rank(violating, rank(100.0, 100.0), true));
-        assert!(prefer_cover_rank(rank(100.0, 100.0), violating, true));
-    }
-
-    #[test]
-    fn unconstrained_alternative_minimizes_area_before_delay() {
-        assert!(prefer_cover_rank(rank(99.8, 10.0), rank(100.0, 1.0), false));
-        assert!(!prefer_cover_rank(
-            rank(100.1, 0.1),
-            rank(100.0, 1.0),
-            false
-        ));
-    }
 }

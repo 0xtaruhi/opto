@@ -19,6 +19,7 @@ hashbrown = "0.17"
 opto-ir.workspace = true
 opto-archive.workspace = true
 opto-core.workspace = true
+opto-formal.workspace = true
 opto-library.workspace = true
 opto-runtime.workspace = true
 opto-timing.workspace = true
@@ -28,7 +29,6 @@ smallvec.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 opto-formats.workspace = true
-opto-formal.workspace = true
 
 [[bench]]
 name = "synthesis"

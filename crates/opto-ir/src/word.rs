@@ -114,7 +114,7 @@ mod known_bits;
 pub use known_bits::{KnownBit, KnownBits128, KnownBitsAnalysis};
 
 mod module;
-pub use module::WordModule;
+pub use module::{SpeculationCheckpoint, WordModule};
 
 #[cfg(test)]
 mod tests;

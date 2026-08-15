@@ -4,6 +4,7 @@
 use super::{
     CutDatabase, ExecutionContext, HashMap, KCut, LogicGraph, LogicNode, LogicNodeId, TruthTable,
 };
+use crate::boolean::logic::MAX_MATCH_INPUTS as MAX_CUT_LEAVES;
 
 const COVERAGE_NODE_BUDGET: usize = 256;
 
@@ -18,23 +19,15 @@ pub(crate) fn window_cares(
         .copied()
         .filter(|cut| !cut.contains(node) && cut.len() >= 2)
         .max_by_key(|cut| cut.len())?;
-    let observed = cut_list
-        .iter()
-        .flat_map(|cut| cut.leaves().iter().copied())
-        .collect::<Vec<_>>();
-    let tables = network.truth_tables_for_inputs(node, base.leaves(), &observed);
     let mut coverage = CoverageCheck::new(network, base.leaves());
+    let projected = projected_cuts(&mut coverage, cut_list, |cut| cut.leaves() == base.leaves());
+    let observed = projected_leaves(cut_list, &projected).collect::<Vec<_>>();
+    let tables = network.truth_tables_for_inputs(node, base.leaves(), &observed);
     let cares = cut_list
         .iter()
-        .map(|cut| {
-            if cut.leaves() == base.leaves() {
-                return u64::MAX;
-            }
-            if !cut
-                .leaves()
-                .iter()
-                .all(|leaf| coverage.covered(*leaf) == Some(true))
-            {
+        .zip(projected.iter())
+        .map(|(cut, &projected)| {
+            if !projected {
                 return u64::MAX;
             }
             tables
@@ -45,10 +38,40 @@ pub(crate) fn window_cares(
     Some(cares)
 }
 
+/// Marks cuts contained by the window without evaluating outside its inputs.
+pub(crate) fn projected_cuts(
+    coverage: &mut CoverageCheck<'_>,
+    cuts: &[KCut],
+    mut skip: impl FnMut(&KCut) -> bool,
+) -> Box<[bool]> {
+    cuts.iter()
+        .map(|cut| {
+            !skip(cut)
+                && cut
+                    .leaves()
+                    .iter()
+                    .all(|leaf| coverage.covered(*leaf) == Some(true))
+        })
+        .collect()
+}
+
+/// Iterates leaves of cuts contained by the window.
+pub(crate) fn projected_leaves<'cuts>(
+    cuts: &'cuts [KCut],
+    projected: &'cuts [bool],
+) -> impl Iterator<Item = LogicNodeId> + 'cuts {
+    cuts.iter()
+        .zip(projected)
+        .filter(|&(_, &projected)| projected)
+        .flat_map(|(cut, _)| cut.leaves().iter().copied())
+}
+
+/// Bounded, memoized cone-containment checker for one cut-sized seed set.
 pub(crate) struct CoverageCheck<'a> {
     network: &'a LogicGraph,
-    seeds: hashbrown::HashSet<usize>,
+    seeds: smallvec::SmallVec<[usize; MAX_CUT_LEAVES]>,
     memo: HashMap<usize, bool>,
+    stack: Vec<(LogicNodeId, bool)>,
     budget: usize,
 }
 
@@ -58,18 +81,31 @@ impl<'a> CoverageCheck<'a> {
             network,
             seeds: seeds.iter().map(|seed| seed.index()).collect(),
             memo: HashMap::new(),
+            stack: Vec::new(),
             budget: COVERAGE_NODE_BUDGET,
         }
     }
 
+    fn is_seed(&self, node: usize) -> bool {
+        self.seeds.contains(&node)
+    }
+
     pub(crate) fn covered(&mut self, start: LogicNodeId) -> Option<bool> {
-        let mut stack = vec![(start.positive(), false)];
+        let mut stack = std::mem::take(&mut self.stack);
+        stack.clear();
+        stack.push((start.positive(), false));
+        let answer = self.walk(&mut stack, start);
+        self.stack = stack;
+        answer
+    }
+
+    fn walk(&mut self, stack: &mut Vec<(LogicNodeId, bool)>, start: LogicNodeId) -> Option<bool> {
         while let Some((node, expanded)) = stack.pop() {
             let key = node.index();
             if self.memo.contains_key(&key) {
                 continue;
             }
-            if self.seeds.contains(&key) {
+            if self.is_seed(key) {
                 self.memo.insert(key, true);
                 continue;
             }
@@ -93,6 +129,7 @@ impl<'a> CoverageCheck<'a> {
                         self.seeds.contains(&fanin.index())
                             || self.memo.get(&fanin.index()).copied().unwrap_or(false)
                     });
+
                     self.memo.insert(key, all);
                 }
             }
@@ -108,17 +145,34 @@ struct SupportEntry {
 }
 
 pub(super) struct SupportIndex {
+    /// Support entries sorted by key for binary range lookup.
     entries: Box<[SupportEntry]>,
-    entry_ranges: HashMap<KCut, SupportRange>,
+    /// Exact-negative filter; set bits still require an `entries` lookup.
+    key_filter: Box<[u64]>,
     truths: Box<[TruthTable]>,
     truth_ranges: Box<[TruthRange]>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SupportRange {
-    start: u32,
-    len: u32,
+/// Mixes one dense leaf index for order-independent XOR combination.
+pub(super) const fn leaf_fingerprint(leaf: u32) -> u64 {
+    let mut value = (leaf as u64)
+        .wrapping_add(1)
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    value ^= value >> 29;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^ (value >> 32)
 }
+
+/// Combines one support set's fingerprints without order dependence.
+pub(super) fn subset_fingerprint(leaves: impl IntoIterator<Item = u32>) -> u64 {
+    leaves
+        .into_iter()
+        .fold(0, |value, leaf| value ^ leaf_fingerprint(leaf))
+}
+
+/// Deterministic filter density per distinct support key.
+const KEY_FILTER_BITS_PER_KEY: usize = 32;
+const MINIMUM_KEY_FILTER_WORDS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 struct TruthRange {
@@ -127,16 +181,23 @@ struct TruthRange {
 }
 
 impl SupportIndex {
+    /// Returns `false` only when the fingerprint is definitely absent.
+    pub(super) fn may_contain(&self, fingerprint: u64) -> bool {
+        let bits = self.key_filter.len() * u64::BITS as usize;
+        let index = usize::try_from(fingerprint & (bits as u64 - 1))
+            .expect("filter length is a usize, so the masked index fits one");
+        self.key_filter[index / u64::BITS as usize] & (1 << (index % u64::BITS as usize)) != 0
+    }
+
     pub(super) fn entries<'index>(
         &'index self,
         key: &[u32],
     ) -> impl Iterator<Item = &'index (u32, u64)> + 'index {
-        let range = KCut::from_indices(key)
-            .and_then(|key| self.entry_ranges.get(&key))
-            .map_or(0..0, |range| {
-                let start = range.start as usize;
-                start..start + range.len as usize
-            });
+        let range = KCut::from_indices(key).map_or(0..0, |key| {
+            let start = self.entries.partition_point(|entry| entry.key < key);
+            let end = self.entries[start..].partition_point(|entry| entry.key == key) + start;
+            start..end
+        });
         self.entries[range].iter().map(|entry| &entry.value)
     }
 
@@ -171,8 +232,7 @@ pub(super) fn build_support_index(
             for cut in cuts.cuts(node).iter().copied() {
                 let self_cut = cut.contains(node);
                 let truth = if self_cut {
-                    // The self cut is skipped by decision analysis. Preserve
-                    // its compact row slot without evaluating the entire cone.
+                    // Preserve the skipped self-cut row without evaluating it.
                     TruthTable {
                         input_count: cut.len(),
                         bits: 0,
@@ -217,37 +277,31 @@ pub(super) fn build_support_index(
         entries.extend(chunk_entries);
     }
     runtime.sort_unstable(&mut entries);
-    let range_count = usize::from(!entries.is_empty())
+    let key_count = usize::from(!entries.is_empty())
         + entries
             .windows(2)
             .filter(|pair| pair[0].key != pair[1].key)
             .count();
-    let mut entry_ranges = HashMap::with_capacity(range_count);
-    let mut start = 0usize;
-    while start < entries.len() {
-        let key = entries[start].key;
-        let end = entries[start..]
-            .partition_point(|entry| entry.key == key)
-            .checked_add(start)
-            .ok_or_else(|| crate::SynthError::capacity("support range end"))?;
-        let range = SupportRange {
-            start: start
-                .try_into()
-                .map_err(|_| crate::SynthError::capacity("support range start"))?,
-            len: (end - start)
-                .try_into()
-                .map_err(|_| crate::SynthError::capacity("support range length"))?,
-        };
-        if entry_ranges.insert(key, range).is_some() {
-            return Err(crate::SynthError::invariant(
-                "support index contains a duplicate key range",
-            ));
+    let filter_words = (key_count * KEY_FILTER_BITS_PER_KEY)
+        .div_ceil(u64::BITS as usize)
+        .next_power_of_two()
+        .max(MINIMUM_KEY_FILTER_WORDS);
+    let mut key_filter = vec![0u64; filter_words];
+    let filter_bits = filter_words * u64::BITS as usize;
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 && entries[index - 1].key == entry.key {
+            continue;
         }
-        start = end;
+        let fingerprint = subset_fingerprint(entry.key.leaves().iter().map(|leaf| {
+            u32::try_from(leaf.index()).expect("logic node index is bounded by compact storage")
+        }));
+        let bit = usize::try_from(fingerprint & (filter_bits as u64 - 1))
+            .expect("filter length is a usize, so the masked index fits one");
+        key_filter[bit / u64::BITS as usize] |= 1 << (bit % u64::BITS as usize);
     }
     Ok(SupportIndex {
         entries: entries.into_boxed_slice(),
-        entry_ranges,
+        key_filter: key_filter.into_boxed_slice(),
         truths: truths.into_boxed_slice(),
         truth_ranges: truth_ranges.into_boxed_slice(),
     })

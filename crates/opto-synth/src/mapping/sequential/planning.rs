@@ -13,7 +13,6 @@ pub(crate) fn recover_feedback_enables(
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let connected = register_targets(module)?;
-
     let mut candidates = Vec::new();
     for (operation, target) in connected {
         let model = module.operation(operation).ok_or_else(|| {
@@ -35,30 +34,26 @@ pub(crate) fn recover_feedback_enables(
         {
             continue;
         }
+        // Target reads are not a sound hold-value proxy across reset branches.
+        if !register.resets.is_empty() {
+            continue;
+        }
         candidates.push((operation, register.clone(), target, model.source.clone()));
     }
 
     for (operation_id, mut register, target, source) in candidates {
         let start = ownership.start(module)?;
-        let q = read_target(module, &target, &source)?;
-        ownership.claim_since(module, start, &[operation_id])?;
-        let mut budget = MAX_FEEDBACK_MUX_NODES;
-        let Some(plan) = feedback_update_plan(module, register.d, q, &mut budget)? else {
+        let checkpoint = module.speculation_checkpoint();
+        let Some(recovered) = recover_one_enable(module, &register, &target, &source)? else {
+            module
+                .rollback_speculation(checkpoint)
+                .map_err(crate::SynthError::from)?;
             continue;
         };
-        if !plan.saw_hold || matches!(plan.enable, FeedbackEnable::Always | FeedbackEnable::Never) {
-            continue;
-        }
-        if feedback_enable_type(module, &plan.enable).is_none() {
-            continue;
-        }
-        let start = ownership.start(module)?;
-        let enable = emit_feedback_enable(module, &plan.enable, &source)?;
-        let data = emit_feedback_data(module, &plan.data, &source)?;
         ownership.claim_since(module, start, &[operation_id])?;
-        register.d = data;
+        register.d = recovered.data;
         register.enable = Some(word::Enable {
-            value: enable,
+            value: recovered.enable,
             active_high: true,
         });
         module
@@ -67,6 +62,59 @@ pub(crate) fn recover_feedback_enables(
             .kind = word::OpKind::Register(register);
     }
     Ok(())
+}
+
+/// The enable and data one recovery accepted.
+struct RecoveredEnable {
+    enable: word::ValueId,
+    data: word::ValueId,
+}
+
+/// Speculatively decomposes one next state; the caller rewinds on `None`.
+fn recover_one_enable(
+    module: &mut word::WordModule,
+    register: &word::RegisterOp,
+    target: &word::LValue,
+    source: &word::SourceSpan,
+) -> Result<Option<RecoveredEnable>, crate::SynthError> {
+    let q = read_target(module, target, source)?;
+    let mut budget = MAX_FEEDBACK_MUX_NODES;
+    let Some(plan) = feedback_update_plan(module, register.d, q, &mut budget)? else {
+        return Ok(None);
+    };
+    if !plan.saw_hold || matches!(plan.enable, FeedbackEnable::Always | FeedbackEnable::Never) {
+        return Ok(None);
+    }
+    if feedback_enable_type(module, &plan.enable).is_none() {
+        return Ok(None);
+    }
+    let enable = emit_feedback_enable(module, &plan.enable, source)?;
+    let data = emit_feedback_data(module, &plan.data, source)?;
+    let reconstructed = module
+        .mux(enable, data, q, source.clone())
+        .map_err(crate::SynthError::from)?;
+    if !enable_recovery_is_equivalent(module, register.d, reconstructed)? {
+        return Ok(None);
+    }
+    Ok(Some(RecoveredEnable { enable, data }))
+}
+
+/// Proves the recovered next state; a counterexample declines the optimization.
+fn enable_recovery_is_equivalent(
+    module: &word::WordModule,
+    next_state: word::ValueId,
+    reconstructed: word::ValueId,
+) -> Result<bool, crate::SynthError> {
+    let outcome = opto_formal::prove_value_equivalence_under_assumptions(
+        module,
+        next_state,
+        reconstructed,
+        &[],
+    )
+    .map_err(|error| {
+        crate::SynthError::invariant(format!("feedback-enable equivalence proof failed: {error}"))
+    })?;
+    Ok(outcome.require_proved().is_ok())
 }
 
 fn register_targets(
@@ -101,14 +149,15 @@ fn register_targets(
     Ok(connected)
 }
 
+/// Expands enables left after clock gating and enabled-cell selection.
 pub(crate) fn expand_unsupported_enables(
     module: &mut word::WordModule,
     sequential_catalog: &super::SequentialCellCatalog,
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
-    let connected = register_targets(module)?;
     let mut candidates = Vec::new();
-    for (operation, target) in connected {
+    for index in 0..module.operations().len() {
+        let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
         let model = module.operation(operation).ok_or_else(|| {
             crate::SynthError::invariant(format!(
                 "enable candidate references unknown {operation:?}"
@@ -120,6 +169,7 @@ pub(crate) fn expand_unsupported_enables(
         let Some(enable) = register.enable else {
             continue;
         };
+        let result = model.result;
         let has_enable_cell = uniform_async_reset_requests(module, &register.resets)?
             .is_some_and(|requests| sequential_catalog.has_enable_cell(register.edge, &requests));
         if has_enable_cell {
@@ -129,13 +179,20 @@ pub(crate) fn expand_unsupported_enables(
             operation,
             register.clone(),
             enable,
-            target,
+            result,
             model.source.clone(),
         ));
     }
-    for (operation, mut register, enable, target, source) in candidates {
+    let mut generated_names = crate::mapping::word_util::GeneratedNames::new(module)?;
+    for (operation, mut register, enable, result, source) in candidates {
         let start = ownership.start(module)?;
-        let held = read_target(module, &target, &source)?;
+        // The held value must denote the register output, not its assigned target.
+        let held = crate::mapping::word_util::add_generated_boundary_value(
+            &mut generated_names,
+            module,
+            result,
+            &source,
+        )?;
         let (then_value, else_value) = if enable.active_high {
             (register.d, held)
         } else {
@@ -404,14 +461,12 @@ fn same_scalar_value(
     ))
 }
 
+/// Normalizes resets while retaining enables for their owning passes.
 pub(crate) fn lower_controls(
     module: &mut word::WordModule,
-    sequential_catalog: &super::SequentialCellCatalog,
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
-    let mut generated_names = crate::mapping::word_util::GeneratedNames::new(module)?;
     let mut controlled = Vec::new();
-    let mut direct_targets = register_targets(module)?;
     let observability = crate::word::uses::netlist_observability(module)?;
     for (index, operation) in module.operations().iter().enumerate() {
         let word::OpKind::Register(register) = &operation.kind else {
@@ -428,8 +483,6 @@ pub(crate) fn lower_controls(
             operation_id,
             ControlledRegister {
                 register: register.clone(),
-                result: operation.result,
-                target: direct_targets.remove(&operation_id),
                 source: operation.source.clone(),
             },
         ));
@@ -447,18 +500,11 @@ pub(crate) fn lower_controls(
             .copied()
             .filter(|reset| reset.kind == word::ResetKind::Sync)
             .collect::<Vec<_>>();
-        let keep_enable = controlled.register.enable.is_some()
-            && uniform_async_reset_requests(module, &asynchronous_resets)?.is_some_and(
-                |requests| sequential_catalog.has_enable_cell(controlled.register.edge, &requests),
-            );
-        let retained_enable = if keep_enable {
-            let enable = controlled
-                .register
-                .enable
-                .expect("kept register enable is present");
-            if synchronous_resets.is_empty() {
-                Some(enable)
-            } else {
+        // A synchronous reset forces both a clock event and the reset value.
+        let retained_enable = match controlled.register.enable {
+            None => None,
+            Some(enable) if synchronous_resets.is_empty() => Some(enable),
+            Some(enable) => {
                 let enable_active = active_high_control(
                     module,
                     enable.value,
@@ -481,26 +527,8 @@ pub(crate) fn lower_controls(
                     active_high: true,
                 })
             }
-        } else {
-            if let Some(enable) = controlled.register.enable {
-                let q = match &controlled.target {
-                    Some(target) => read_target(module, target, &controlled.source)?,
-                    None => crate::mapping::word_util::add_generated_boundary_value(
-                        &mut generated_names,
-                        module,
-                        controlled.result,
-                        &controlled.source,
-                    )?,
-                };
-                data = if enable.active_high {
-                    module.mux(enable.value, data, q, controlled.source.clone())
-                } else {
-                    module.mux(enable.value, q, data, controlled.source.clone())
-                }
-                .map_err(crate::SynthError::from)?;
-            }
-            None
         };
+
         for reset in synchronous_resets.iter().rev() {
             data = if reset.active_high {
                 module.mux(
@@ -905,8 +933,6 @@ fn read_target(
 
 struct ControlledRegister {
     register: word::RegisterOp,
-    result: word::ValueId,
-    target: Option<word::LValue>,
     source: word::SourceSpan,
 }
 

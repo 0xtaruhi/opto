@@ -152,6 +152,23 @@ impl LogicGraph {
         references
     }
 
+    /// Marks every node reachable from `roots`, ignoring literal polarity.
+    ///
+    /// Passes use this to copy or analyze only the cone that the roots observe;
+    /// a node left false is dead for those roots and is dropped rather than
+    /// carried forward.
+    pub(crate) fn live_nodes(&self, roots: &[LogicNodeId]) -> Box<[bool]> {
+        let mut live = vec![false; self.node_count()];
+        let mut pending = roots.iter().map(|root| root.positive()).collect::<Vec<_>>();
+        while let Some(node) = pending.pop() {
+            if std::mem::replace(&mut live[node.index()], true) {
+                continue;
+            }
+            pending.extend(self.node(node).fanins().map(LogicNodeId::positive));
+        }
+        live.into_boxed_slice()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             builder: Some(LogicBuilder::new()),
@@ -220,7 +237,9 @@ impl LogicGraph {
         }
     }
 
-    #[cfg(test)]
+    /// Borrows the frozen canonical storage for a reader that needs the
+    /// portable `opto-ir` network, such as SAT encoding. The borrow does not
+    /// expose mutation and cannot be taken before the graph is frozen.
     pub(crate) fn storage_network(&self) -> &StoredLogicNetwork {
         self.storage()
     }
@@ -488,7 +507,7 @@ impl LogicNodeId {
         self.0.node().index()
     }
 
-    #[cfg(test)]
+    /// Exposes the portable literal for SAT encoding and equivalence proofs.
     pub(crate) const fn lit(self) -> Lit {
         self.0
     }

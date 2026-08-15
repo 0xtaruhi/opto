@@ -6,6 +6,13 @@
 - Status: proposed
 - Author: Zhengyi Zhang
 - Date: 2026-08-14
+- Revised: 2026-08-14, after the measured QoR decomposition recorded under
+  Motivation
+- Implementation: Phase 1a (functional reduction) and Phase 1b (sequential
+  excess) are implemented and measured, the unconditional post-map area MFS
+  sweep is removed, and the independently optimized AXM implementation named in
+  Phase 3 is deleted. The choice graph and compiled mapping arena are
+  unimplemented, as is every later phase.
 
 ## Summary
 
@@ -20,11 +27,14 @@ architecture:
    model;
 3. lower only the selected candidate of each group into one compact Boolean
    subject that retains equivalent structures as choices;
-4. enumerate bounded cuts, truth functions, and target matches once over that
+4. reduce that subject once by bounded simulation-guided SAT sweeping, so
+   functionally equivalent nodes collapse to one node and the structurally
+   different survivors become choices rather than duplicated logic;
+5. enumerate bounded cuts, truth functions, and target matches once over that
    choice graph;
-5. perform timing-feasible mapping and area recovery by changing compact choice,
+6. perform timing-feasible mapping and area recovery by changing compact choice,
    cut, and match IDs, without rebuilding Boolean logic; and
-6. expose the selected compact implementation directly to exact MMMC timing
+7. expose the selected compact implementation directly to exact MMMC timing
    and bounded closure, then seal that same topology as the published mapped
    netlist.
 
@@ -85,6 +95,77 @@ These experiments do not reject lookup tables, NPN classes, or structural
 rewriting. They reject adding them to an architecture that repeats the expensive
 surrounding work.
 
+### Measured QoR evidence separates the runtime thesis from the quality thesis
+
+The runtime profile above says nothing about quality, and the first revision of
+this RFC assumed without measurement that retained choices were the dominant
+quality mechanism. They are not. The measurements below are local single-run
+snapshots, not checked-in benchmark results, and they were produced from:
+
+- Opto `9dc2f6d`, `cargo build --release --locked --bin opto`, `--threads 8`,
+  `synth_effort high`;
+- Ibex `c6edaa4060b1a3cd27fda928058db4f0ee3d24bd`, top `ibex_core`;
+- Liberty `sky130_fd_sc_hd__tt_025C_1v80.lib`, SHA-256
+  `ec0e1067a35c8bf20b11e58d1e8ac53326067e4dac84a125cc1b917a3518d0d9`;
+- Yosys 0.67 (`2d1509d1b`) with its bundled ABC;
+- one host, no constraints, area-unconstrained objective.
+
+End-to-end mapped area:
+
+| Flow | Total | Combinational | Sequential | Cells | Sequential cells |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Opto | 80,846.3 | 54,210.7 | 26,635.5 | 8,956 | 1,006 |
+| Yosys + ABC | 76,789.9 | 51,037.7 | 25,752.2 | 9,636 | 972 |
+| Opto excess | +4,056.4 | +3,173.0 | +883.3 | | +34 |
+
+The combinational gap was then decomposed by an ablation that holds the design,
+the mapper, and the library fixed. Every row consumes one identical pre-ABC
+netlist written by `synth -top ibex_core -flatten -noabc; dfflibmap`, and every
+row maps it with the same `&nf`, so the only variable is the
+technology-independent optimization in front of the mapper. Sequential area is
+25,752.2 in every row because `dfflibmap` runs before the ablation:
+
+| Technology-independent script before `&nf` | Combinational area |
+| --- | ---: |
+| none | 64,081.5 |
+| `&fraig -x` | 60,640.7 |
+| `dc2` | 54,194.5 |
+| `resyn2` | 53,872.9 |
+| `&fraig -x; dc2` | 52,263.9 |
+| `&fraig -x; dc2; &dch -f` (the Yosys default) | 51,672.1 |
+| *Opto, for reference (its own subject and its own mapper)* | *54,210.7* |
+
+Three conclusions follow, and they redirect this RFC:
+
+1. **Opto's existing rewriting is already at `dc2` quality.** 54,210.7 against
+   54,194.5 is a 0.03% difference. A better rewrite atlas, more NPN classes, or
+   a wider cut policy cannot be the source of the remaining gap.
+2. **Functional reduction is the largest single missing mechanism.** Adding
+   `&fraig -x` in front of `dc2` removes 1,930.6, or 3.6% of combinational
+   area, which is 61% of Opto's total combinational excess. Opto has no
+   simulation-guided SAT sweeping, no functional node merging, and no
+   equivalence-class construction anywhere in the synthesis path; its only
+   structural sharing is the constructor-level hash consing in `LogicGraph`.
+3. **Structural choices are worth 1.1%, not the headline.** Adding `&dch -f`
+   removes a further 591.8. Choices remain worth building, both for quality and
+   because they are the representation that makes functional reduction
+   non-destructive, but they cannot be the primary quality justification for the
+   compile-once cutover.
+
+Two supporting measurements bound the alternative explanations:
+
+- Re-strashing Opto's own mapped netlist and remapping it with the complete ABC
+  script produces 54,533.6 combinational area against Opto's 54,210.7, while
+  reimplementing the register enables that Opto had absorbed into `edfxtp_1`
+  cells. Opto's cut enumeration, matching, and exact-area recovery are therefore
+  not the deficit; the subject handed to them is.
+- Raising `MAX_CUTS_PER_NODE` from 32 to 64 moved the same flow from 80,846.3 to
+  81,057.7. Cut capacity is not the binding constraint, so the cut-count policy
+  in this RFC is a runtime and memory decision rather than a quality decision.
+
+The sequential excess has a separate and simpler cause, recorded under
+Sequential cell selection and register identity.
+
 ### Area-first architecture repair is the wrong main loop
 
 Cadence publicly describes a traditional approach that first favors area and
@@ -113,12 +194,21 @@ choices to one mapping problem; a small fixed cut set controls work and memory.
 
 The lesson for Opto is precise:
 
+- merge functionally equivalent nodes before retaining anything, because a
+  duplicate is not an alternative;
 - retain equivalent nodes, not cloned designs;
 - retain cut and match records, not cloned mapped regions;
 - precompute design-independent facts;
 - make mapping select across structural alternatives; and
 - recover area with mapping reference counts while timing constraints are still
   explicit.
+
+The first item is the one the measurements above rank highest, and it is the
+one the first revision of this RFC omitted. ABC's `&fraig` and the fraiging
+inside `&dch` are the same machinery viewed twice: proving two nodes equal
+either deletes one of them or records them as one equivalence class. Opto needs
+both readings, and it needs the proving engine before it needs the class
+representation.
 
 Supergates are an optional target-catalog technique. They are not the first
 milestone and are not required by this RFC.
@@ -131,16 +221,27 @@ milestone and are not required by this RFC.
    rather than tuning only Ibex.
 3. Preserve or improve exact mapped area, setup/hold timing, electrical
    legality, and equivalence against the accepted baseline.
-4. Make every irreversible semantic or structural choice timing-aware, retain
+4. Close the measured external combinational-area gap on the reference Ibex
+   SKY130 case. The accepted target is combinational area no worse than
+   51,700 with the same inputs and library, which is the measured
+   `&fraig -x; dc2; &dch -f` point and a 4.6% reduction from the current
+   54,210.7. Each contributing mechanism reports its own measured share, so a
+   phase that lands its representation without landing its area is not
+   accepted.
+5. Reduce the sequential excess to at most 100 area units and zero surplus
+   registers on the same case. The mechanism is not yet known; see Phase 1b for
+   the measurements that ruled out register duplication and sequential cell
+   form.
+6. Make every irreversible semantic or structural choice timing-aware, retain
    it as an alternative until timing-aware mapping, or prove it cannot worsen
    the objective.
-5. Bound runtime and memory linearly in the selected subject size, the number
+7. Bound runtime and memory linearly in the selected subject size, the number
    of active timing lanes, and fixed candidate/cut limits.
-6. Preserve bit-identical output across supported worker counts.
-7. Preserve decision-group- and shard-local incremental compilation even though
+8. Preserve bit-identical output across supported worker counts.
+9. Preserve decision-group- and shard-local incremental compilation even though
    final selection uses design-wide read-only analysis.
-8. Keep semantic decision scope independent of scheduling and storage shards so
-   parallel decomposition cannot remove an optimization alternative.
+10. Keep semantic decision scope independent of scheduling and storage shards so
+    parallel decomposition cannot remove an optimization alternative.
 
 ## Non-goals
 
@@ -176,6 +277,10 @@ validated Word IR + constraints + target
                   |
                   v
        lower selected group candidates once
+                  |
+                  v
+   bounded simulation-guided SAT sweeping
+   merge proved-equal nodes, class the rest
                   |
                   v
        one shard-partitioned choice graph
@@ -369,6 +474,71 @@ removed only when dominance holds at every characterized operating point and
 for every supported timing and activity lane. A candidate cannot be removed
 merely because it is worse at one nominal slew/load point.
 
+### Functional reduction
+
+Functional reduction is the first pass over the lowered subject and the highest
+measured quality mechanism in this RFC. It answers one question for pairs of
+nodes: are these two literals the same Boolean function of the subject inputs?
+A proved pair is either merged, when both nodes are ordinary logic, or recorded
+as one equivalence class, when the two structures are worth retaining as
+choices for mapping. Merging and classing are the same proof with two different
+dispositions; they are not two passes and not two owners.
+
+The pass has three bounded stages:
+
+```text
+1. bit-parallel random simulation refines candidate classes
+2. one incremental SAT instance proves or refutes candidate pairs
+3. refuted pairs return their counterexample to the simulation vectors
+```
+
+Stage 1 assigns every node a simulation signature over a fixed vector count and
+partitions nodes by signature and polarity. Two nodes in different partitions
+are definitely different; two nodes in one partition are candidates. Stage 2
+proves candidates against a class representative in one incremental solver
+under bounded conflict, representative, and pair budgets. Stage 3 folds every
+counterexample back into the vector set so one refutation splits every class it
+touches, rather than being rediscovered by a later pair.
+
+`opto-formal::prove_logic_literal_partitions` already implements stage 2 with
+exactly this contract, including the representative and pair budgets, and is
+currently reachable only from its own tests. This RFC does not add a second
+proof engine. It adds the simulation front end, the counterexample feedback,
+the merge and class dispositions, and the production call site.
+
+Determinism is a design constraint, not a solver property:
+
+- simulation vectors come from a fixed seed and a fixed generator that depend
+  only on subject input count and vector count, never on wall time, address
+  values, worker count, or hash iteration order;
+- candidate classes and their representatives use the stable node order, so the
+  representative is the lowest-ID member and not the first prover to finish;
+- conflict, representative, and pair budgets are versioned policy constants,
+  and exhausting a budget leaves the affected class unmerged rather than
+  merged on an unproved guess;
+- a solver timeout is a bounded, reported non-merge, never a fallback path.
+
+The pass never merges on simulation agreement alone. Equal signatures are a
+filter; only an unsatisfiable miter authorizes a merge or a class edge. This is
+the same rule the existing `ChoiceGraph` text states as an equivalence
+certificate, applied one stage earlier.
+
+Functional reduction has a crate-boundary consequence that must be decided
+explicitly rather than discovered during implementation. `opto-formal` is
+currently a dev-dependency of `opto-synth`, and `tools/check_architecture.py`
+does not list it among `opto-synth`'s allowed dependencies. Accepting this RFC
+accepts adding `opto-formal` to `opto-synth`'s production dependencies and to
+that allow list. The direction stays acyclic because `opto-formal` depends only
+on `opto-ir`. No SAT solver is introduced into `opto-core`, `opto-ir`, or any
+timing or library crate.
+
+The measured target for this pass alone is a 3.6% combinational-area reduction
+on the reference Ibex SKY130 case, from 54,210.7 toward 52,300. Its runtime
+budget is included in the one Boolean choice compilation line of the
+performance contract and is not permitted to consume that line by itself. The
+pass reports its own simulation, solve, merge, and class time, its proved,
+refuted, and budget-exhausted pair counts, and the node count it removed.
+
 ### Choice graph
 
 The selected decision-group candidates lower into one compact, shard-partitioned
@@ -474,6 +644,56 @@ and session identities without reconstructing cell connectivity.
 
 There is therefore one topology construction and one topology owner, not a
 temporary mapped netlist followed by a copied published netlist.
+
+### Sequential cell selection and register identity
+
+The measured sequential excess on the reference case is 883.3 area units and 34
+registers. It has two independent causes, and neither is a Boolean or mapping
+problem.
+
+**Sequential cell form is chosen structurally, not by cost.**
+`recover_feedback_enables` rewrites a register whose data input is a feedback
+mux into an enabled register whenever the target library merely *has* an enable
+cell for that edge and reset shape. On the reference case that produces 290
+`edfxtp_1` at 30.03 where the alternative is `dfxtp_1` at 20.02 plus enable
+logic that the mapper can absorb into surrounding cells. The rewrite is not
+wrong; deciding it without comparing the two costs is.
+
+This RFC requires the sequential form decision to be a costed decision in the
+same units as every other selection in the flow:
+
+- both forms are priced from the target: the enabled cell's own area, leakage,
+  and characterized arcs against the plain cell's plus the estimated mapped
+  cost of the enable structure it replaces;
+- the enable structure is priced as logic the mapper will cover, not as a
+  standalone mux, because a standalone-mux price systematically overstates it;
+- with finite required times the comparison respects the same lexicographic
+  order as candidate selection: electrical feasibility, then timing
+  feasibility, then area, then power, then stable identity;
+- absent characterization for either form is an explicit unavailable result,
+  not an assumed zero and not a silent preference for the structural rewrite.
+
+The decision is a decision-group candidate choice in the terms of this RFC. It
+is not a new selector, a new pass, or a post-map repair.
+
+**The surplus registers are not duplicates.** Opto retained 1,006 registers
+where the same design mapped to 972 through Yosys. The obvious explanation is
+that Opto lacks register merging, and `docs/architecture.md` does record that
+absence deliberately: full-domain state equivalence sharing stays out until
+arbitrary initial state, reset, enable, and clock semantics can be proved
+rather than inferred from locally equal data inputs.
+
+That explanation is wrong for this case. The mapped netlist contained no
+register pair sharing a clock, reset, enable, and `D` connection, and at most
+four registers whose output was unobserved or whose `D` was constant. An
+exact-identity merge would have fired on nothing. The excess was hardwired and
+reserved CSR fields whose reachable value is one constant, and Phase 1b records
+how they are proved and removed.
+
+The costed sequential form remains the right contract even though it did not
+recover this gap, because deciding a cell form without pricing it is wrong
+independently of what it happens to cost on one design. It is not urgent: on
+the reference case the structural preference is a 264-unit net win.
 
 ## Compile-time and target-time lookup data
 
@@ -847,7 +1067,7 @@ Phase 0 freezes the comparison contract in a checked benchmark manifest. It
 records the baseline Opto commit and release-binary SHA-256, the exact
 `cargo build --release --locked --bin opto` build, synthesis command, Rust
 toolchain, worker count, host image, RTL and Liberty SHA-256 values, constraints,
-case membership, timeout, and every threshold below. Phase 6 compares the RFC
+case membership, timeout, and every threshold below. Phase 7 compares the RFC
 implementation against that artifact, not against a moving branch or a
 developer build. Baseline and candidate runs are interleaved on the same idle
 host image and use identical inputs and worker limits.
@@ -911,6 +1131,38 @@ reconvergent, high-fanout, memory, and larger production-shaped open designs.
 - Test early/late, rise/fall, unate/non-unate, setup/hold, recovery/removal,
   max/min delay, and electrical lanes independently.
 
+### Functional reduction
+
+- Prove that no merge or class edge is installed without an unsatisfiable
+  miter; a signature match alone must never authorize either disposition.
+- Fuzz the pass against exhaustive truth-table comparison on small subjects,
+  including inverted, constant, and input-projection equalities.
+- Verify that an injected wrong merge is caught by the end-to-end equivalence
+  check, so the pass is covered by the existing proof and not only by its own
+  assertions.
+- Verify identical merges, identical representatives, and identical resulting
+  node IDs across supported worker counts and across two runs of one worker
+  count.
+- Verify that exhausting the conflict, representative, or pair budget leaves
+  the class unmerged, reports the exhaustion, and does not change the result of
+  any other class.
+- Verify that a refutation counterexample is folded back into the simulation
+  vectors, by showing the same refuted pair is not re-proposed.
+- Record proved, refuted, and budget-exhausted pair counts, removed node count,
+  and the area delta attributable to the pass alone.
+
+### Sequential selection
+
+- Verify that the enabled and plain sequential forms are both priced and that
+  the cheaper legal form is selected, on cases constructed to make each form
+  win.
+- Verify that missing characterization for either form produces an explicit
+  unavailable result rather than a default preference.
+- Verify that register merging fires only on exact structural identity, and
+  construct near-miss cases differing only in reset value, enable polarity,
+  initial value, or clock edge that must not merge.
+- Run sequential equivalence on every merged case.
+
 ### Solver
 
 - Enumerate small candidate graphs completely and compare the bounded selector's
@@ -957,7 +1209,7 @@ objective, total-power and leakage-power ratios must then be `<= 1.00` in
 geometric mean and `<= 1.05` per case; missing requested activity or power data
 fails the case. Until that schema revision, power is reported outside the
 normalized gate and is never fabricated as zero. The qualification sidecar is
-likewise versioned before Phase 6; it is not inserted into the current
+likewise versioned before Phase 7; it is not inserted into the current
 `additionalProperties: false` result object.
 
 Primary median runtime uses at least five serial fresh-process runs, each with a
@@ -970,6 +1222,19 @@ also separate and cannot substitute for single-design latency.
 Each phase is a cutover to one production representation. Temporary comparison
 harnesses are test/benchmark-only and are deleted when their decision is made.
 
+The phase order below is the revised order. It front-loads the two mechanisms
+whose quality contribution is measured and whose implementations are small,
+before the large representation cutover whose measured quality contribution is
+1.1%. The reason is not that the compile-once architecture is optional; it is
+that a representation change validated only by "the netlist did not get worse"
+gives no signal, whereas a mechanism with a predicted area delta either lands
+that delta or is wrong. Phases 1a and 1b are independent of each other and of
+the rest, so a stall in one does not block the others.
+
+Phases 1a and 1b apply to the current per-region AXM subject and are re-run
+unchanged on the choice graph once Phase 3 lands. Neither is a temporary
+harness and neither is deleted.
+
 ### Phase 0: checked benchmark and stage accounting
 
 Check in the exact Ibex and public-suite benchmark manifests. Make the stage
@@ -981,7 +1246,102 @@ Accept when repeated release runs identify the same dominant work and all
 benchmark metadata is reproducible. The primary five-second result is a fresh-
 process cold-catalog median; warm resident results use a separate table.
 
-### Phase 1: immutable generated catalogs
+### Phase 1a: functional reduction — implemented
+
+Add bit-parallel simulation signatures, counterexample feedback, and the
+production call site for `prove_logic_literal_partitions` on the existing AXM
+subject. Merge proved-equal ordinary nodes. Move `opto-formal` into
+`opto-synth`'s production dependencies and into the `check_architecture.py`
+allow list in the same change. Do not introduce the choice graph yet; retained
+alternatives arrive with Phase 3.
+
+Accept when end-to-end equivalence holds, the reference Ibex SKY130 case shows
+a combinational-area reduction of at least 3.0% attributable to this pass, the
+merge set is identical across supported worker counts and repeated runs, budget
+exhaustion is reported rather than silently merged, and the pass fits its
+declared share of the Boolean stage budget.
+
+Measured on the reference case when this phase landed, same inputs and host as
+the motivation section:
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| lowered AXM subject nodes | 17,817 | 13,382 |
+| combinational area | 54,210.7 | 51,157.8 |
+| sequential area | 26,635.5 | 26,635.5 |
+| total area | 80,846.3 | 77,793.4 |
+| mapped cells | 8,956 | 8,475 |
+| Boolean stage | 21.0 s | 17.6 s |
+
+The pass proves 2,880 substitutions from 6,889 nominations across eight
+refinement rounds and costs 2.7 s of that stage. It reduces the Boolean stage
+rather than adding to it, because the 25% smaller subject makes the following
+rewrite and cover passes cheaper than the sweep costs. Combinational area is
+now 0.2% above the measured Yosys+ABC point of 51,037.7, so goal 4 is met by
+this phase alone; the remaining external gap is sequential.
+
+Class shards are proved in parallel with one solver per shard. The serial
+formulation cost 15.1 s for the same result, which is a 4.4x reduction with a
+0.008% area difference and no change to determinism: 1, 4, and 8 workers
+produce byte-identical mapped netlists.
+
+### Phase 1b: sequential excess — implemented, but not by the named mechanisms
+
+The two mechanisms this phase originally named were measured against the
+reference case and neither explains the sequential excess:
+
+- **Exact-identity register merging finds nothing.** The mapped netlist has
+  zero register pairs sharing a clock, reset, enable, and `D` connection, and
+  at most four registers whose output is unobserved or whose `D` is constant.
+  Whatever produces 34 surplus registers is not duplication.
+- **The enable-cell preference is a small net win, not a loss.** Disabling
+  `recover_feedback_enables` on the reference case converts only 10 of the 290
+  enabled registers, and costs 264 area units overall: it saves 100 units of
+  sequential area and pays 364 units of combinational area for the enable
+  structure the mapper then has to cover. The remaining 280 enabled registers
+  come from an RTL enable, not from feedback recovery, and Yosys selects 283
+  enabled registers on the same design while still finishing ahead.
+
+Matching the two register sets by RTL path found the real cause. The excess is
+concentrated in hardwired and reserved CSR fields: 23 bits of `dcsr_q`, 8 of
+`mtvec_q`, 6 of `cpuctrlsts_part_q`, and a long tail of ones and twos. Every one
+of them is a register whose reachable value is a single constant, reached
+through a write-enable gate rather than through a constant pin. Opto's
+`constant_register_candidate` already asked the right question, substituting the
+reset value into the register's own next-state function, but it asked it only of
+the register's own pins, so a next state of `write ? 0 : Q` read as unknown.
+Opto is also ahead of Yosys on the opposite side: it re-encodes four FSMs into
+17 fewer registers than Yosys keeps.
+
+The implemented change folds a bounded combinational cone behind the register's
+input pins, following only nets the register's own outputs can still reach and
+enumerating everything else as a leaf. The influence restriction is what makes
+the fold both bounded and meaningful: a net the register cannot affect is an
+unconstrained input to the proof, and following its cone would enumerate logic
+that answers nobody's question. External boundaries, explicit constant drivers,
+multiple drivers, and conditional or unresolved drivers also stop the fold.
+The proof assumes the register's asynchronous reset is asserted before the
+design is observed and declines a reset held inactive by the netlist.
+Independent removals commit as one transaction, because each post-map
+transaction pays one incremental-STA update and paying it per register cost
+5.3 s for 39 removals against 0.24 s for the batch.
+
+Measured on the reference case when this phase landed, on top of Phase 1a and
+the MFS scoping:
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| registers | 1,006 | 967 |
+| sequential area | 26,635.5 | 25,657.1 |
+| combinational area | 51,446.8 | 51,205.4 |
+| total area | 78,082.4 | 76,862.5 |
+
+Opto now keeps five fewer registers than Yosys on the same design, and total
+area is within 0.09% of the measured Yosys+ABC point of 76,789.9. Goal 5 is met.
+The costed sequential-form contract stays in this RFC as the correct rule for
+deciding a cell form, but it is no longer on the critical path for this case.
+
+### Phase 2: immutable generated catalogs
 
 Implement the reproducible RewriteAtlas generator, target MatchCatalog,
 parameterized response templates, and on-demand CandidateResponse projection
@@ -992,7 +1352,45 @@ Accept when generated assets are reproducible, all recipes and matches pass
 exhaustive checks, cold/warm cost is measured, and catalog lookup has no hot
 shared lock.
 
-### Phase 2: decision groups, partition scopes, and choice graph
+This phase is a runtime and infrastructure phase. The measurements in this RFC
+show Opto's existing rewriting already at `dc2` quality, so no area improvement
+is claimed for the atlas and none is required to accept the phase.
+
+### Phase 3a: one optimized implementation — implemented
+
+Before the choice graph can replace independently optimized AXM
+implementations, the second implementation has to stop being independently
+optimized. The portfolio ran a MUX-expanded implementation beside an
+un-expanded one, each through its own rewrite convergence and its own cut,
+truth, candidate, and cover passes, and the retained subject arena carried
+both. On the reference case the expanded implementation won every time and the
+un-expanded one was discarded.
+
+MUX expansion is now part of the one canonical optimization path. Cover still
+selects MUX cells, because it matches cut truth tables against the target
+library rather than AXM node kinds, so nothing about the target's MUX cells
+depended on retaining an un-expanded subject.
+
+Measured on the reference case when this phase landed, on top of Phase 1a,
+Phase 1b, and the hot-path work below. Every table in this section records one
+phase against the state before it, not the state of the branch; `CHANGELOG.md`
+records the head.
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| subject arena nodes | 18,240 | 10,514 |
+| rewrite passes | 24 | 12 |
+| Boolean stage | 14.2 s | 9.8 s |
+| total area | 76,862.5 | 77,000.1 |
+| end to end | 17.3 s | 12.9 s |
+
+The 0.18% area difference is the cost of a smaller node arena changing cut
+enumeration and its tie orders, not a lost optimization: the discarded
+implementation never won a cover. Recovering it is the job of the choice graph
+in Phase 3b, which keeps both structures as per-node alternatives inside one
+compilation instead of as two compilations.
+
+### Phase 3b: decision groups, partition scopes, and choice graph
 
 Introduce complete disjoint decision-group footprints and sealed interfaces.
 Give decision groups, analytical regions, and compilation shards distinct index
@@ -1008,9 +1406,13 @@ reconvergent and coupled multi-output cases, and the compiled arenas can
 reproduce or improve the accepted mapped cover. The implementation review must
 also identify the three authoritative owners, show that derived scopes are
 views or ranges, and find no full-field `Plan`/`Record` conversion in the hot
-path.
+path. The retained equivalence classes must additionally show at least a 1.0%
+combinational-area reduction beyond the Phase 1a result on the reference case,
+which is the measured `&dch -f` contribution; a choice graph that reproduces
+the Phase 1a area is a representation change without its stated benefit and
+does not pass.
 
-### Phase 3: analytical semantic selection
+### Phase 4: analytical semantic selection
 
 Introduce lane-preserving CandidateResponse evaluation and the design-wide
 bounded proposal engine. Delete scalar or independently regional semantic
@@ -1021,7 +1423,7 @@ share-versus-duplicate cases are jointly evaluated, small exhaustive problems
 quantify heuristic gap, analytical/exact correlation is recorded, and the stage
 meets its runtime budget.
 
-### Phase 4: choice-aware mapping and integrated area recovery
+### Phase 5: choice-aware mapping and integrated area recovery
 
 Make required times, loads, slews, and timing prices drive the compiled-record
 selector. Add exact-area recovery over mapping reference counts. Delete
@@ -1030,7 +1432,7 @@ independent proposal cover runs and unconditional default full-netlist area MFS.
 Accept when the complete public QoR gate passes and mapping plus recovery meets
 its stage budget.
 
-### Phase 5: zero-copy exact timing handoff and bounded correction
+### Phase 6: zero-copy exact timing handoff and bounded correction
 
 Make exact MMMC consume the selected compact topology directly. Add one bounded
 compiled-record correction, one exceptional bounded decision-group structural
@@ -1041,7 +1443,7 @@ systematic model error and structural-repair activation are reported, timing-
 only cache reuse follows candidate identity, unresolved electrical illegality
 fails explicitly, and timing/publication meets its stage budget.
 
-### Phase 6: production qualification and deletion
+### Phase 7: production qualification and deletion
 
 Run the complete performance, QoR, equivalence, determinism, checkpoint, and
 incremental suites. Delete displaced plan portfolios, duplicate lowering/cover
@@ -1052,6 +1454,47 @@ Accept only when the reference Ibex median is at most 5.0 seconds, the suite-lev
 3x and QoR gates pass, and no fallback or hidden selector remains.
 
 ## Alternatives
+
+### Treat retained choices as the primary quality mechanism
+
+Rejected by measurement, and this is the change from the first revision. On the
+reference case `&dch -f` is worth 1.1% of combinational area while `&fraig -x`
+is worth 3.6%. Choices stay in the design because they are the correct
+representation for the survivors of functional reduction and because 1.1% is
+real, but a rollout that lands the choice graph first spends its largest
+implementation effort on its smallest measured return and produces no
+intermediate quality signal.
+
+### Add functional reduction later, on top of the choice graph
+
+Rejected. The proof engine is the shared prerequisite: merging a proved-equal
+pair and recording it as a class edge are two dispositions of one result. Doing
+the representation first means building the class machinery with no engine to
+populate it beyond directed rewrites, which is what the current portfolio
+already does at whole-network granularity. Doing the engine first makes the
+class representation a small extension rather than a precondition, and it
+delivers the larger measured share against the existing subject.
+
+### Rely on simulation equivalence without SAT proof
+
+Rejected. Signature agreement over any finite vector set is a filter, not a
+proof, and a wrong merge is a functional bug that the end-to-end equivalence
+check would report as a synthesis failure rather than an area result. The cost
+of the proof is bounded by explicit conflict, representative, and pair budgets;
+the cost of an unproved merge is unbounded.
+
+### Solve the sequential excess with post-map repair
+
+Rejected. Both causes are decisions, not damage. The sequential form is chosen
+before mapping and can be priced there; register identity is visible in the
+Word graph. Recovering either after mapping would rebuild the area-first repair
+loop this RFC rejects for combinational logic.
+
+### Widen the cut policy to close the gap
+
+Rejected by measurement. Raising `MAX_CUTS_PER_NODE` from 32 to 64 on the
+reference case moved total area from 80,846.3 to 81,057.7. Cut capacity is a
+runtime and memory parameter here, not a quality parameter.
 
 ### Keep multiple complete regional cover plans
 
@@ -1140,6 +1583,14 @@ fixed at its source.
 - A. Mishchenko et al., [DAG-Aware AIG Rewriting: A Fresh Look at Combinational
   Logic Synthesis](https://people.eecs.berkeley.edu/~alanmi/courses/2007_290N/papers/synthesis_berkeley_dac06.pdf),
   DAC 2006.
+- A. Mishchenko et al., [Improvements to Combinational Equivalence
+  Checking](https://people.eecs.berkeley.edu/~alanmi/publications/2006/iccad06_cec.pdf),
+  ICCAD 2006, for the simulation-and-SAT fraiging loop this RFC adopts for
+  functional reduction.
+- S. Chatterjee et al., [FRAIGs: A Unifying Representation for Logic
+  Synthesis and Verification](https://people.eecs.berkeley.edu/~alanmi/publications/2005/tech05_fraigs.pdf),
+  ERL technical report, 2005, for the merge-versus-class disposition of one
+  equivalence proof.
 
 External descriptions motivate the representation and search strategy; they do
 not establish an Opto performance or QoR result.
