@@ -62,8 +62,7 @@ pub enum SynthesisEffort {
     /// Run the bounded baseline mapping and post-map flow.
     #[default]
     Medium,
-    /// Add area and timing resynthesis, critical-fanout repair, and repeated
-    /// timing passes.
+    /// Add critical-fanout repair and repeated timing passes.
     High,
 }
 
@@ -73,8 +72,7 @@ pub enum SynthesisEffort {
     reason = "the policy is a derived set of independent pass gates for one effort level"
 )]
 pub(crate) struct SynthesisPolicy {
-    pub(crate) area_resynthesis: bool,
-    pub(crate) timing_resynthesis: bool,
+    pub(crate) resynthesis: bool,
     pub(crate) critical_fanout_cloning: bool,
     pub(crate) repeated_timing_passes: bool,
 }
@@ -83,20 +81,17 @@ impl SynthesisEffort {
     pub(crate) const fn policy(self) -> SynthesisPolicy {
         match self {
             Self::Low => SynthesisPolicy {
-                area_resynthesis: false,
-                timing_resynthesis: false,
+                resynthesis: false,
                 critical_fanout_cloning: false,
                 repeated_timing_passes: false,
             },
             Self::Medium => SynthesisPolicy {
-                area_resynthesis: true,
-                timing_resynthesis: false,
+                resynthesis: true,
                 critical_fanout_cloning: false,
                 repeated_timing_passes: false,
             },
             Self::High => SynthesisPolicy {
-                area_resynthesis: true,
-                timing_resynthesis: true,
+                resynthesis: true,
                 critical_fanout_cloning: true,
                 repeated_timing_passes: true,
             },
