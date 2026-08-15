@@ -1262,6 +1262,27 @@ machinery cost more to carry than it could ever return. RFC 11 keeps a choice
 graph on the roadmap; when it lands it will nominate choices inside one subject
 rather than cover whole implementations against each other.
 
+## Functional Reduction Merges As It Proves
+
+A refinement round proves a batch of candidate equivalences, learns the
+counterexamples the refuted ones produced, and simulates again. The proved
+equivalences are now merged into the subject before the next round, which is
+what makes the next round cheap: two cones that differ only by an equivalence an
+earlier round proved become one node under structural hashing, so the solver is
+never asked about them. Proving every round against the original subject made
+each round re-derive every earlier proof. Signatures are carried onto the merged
+node space rather than re-simulated, because a merged node computes the function
+of every node that mapped onto it.
+
+One limit is worth stating plainly. The sweep bounds how many proofs it
+attempts, per round and in total, but nothing bounds how hard a single proof may
+be. On Ibex SKY130 one miter takes about a second, roughly half the pass, and it
+is not distinguishable by cone depth or cone size from instances that finish in
+microseconds. A deterministic per-proof budget, in conflicts rather than in wall
+clock, is what would bound it; the pinned solver exposes neither a conflict
+limit nor an interrupt, and a wall-clock bound would make the netlist depend on
+machine speed.
+
 ## Mapped Resynthesis Rounds
 
 A resynthesis round derives candidates for a dirty frontier, commits the

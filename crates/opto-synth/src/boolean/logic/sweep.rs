@@ -97,14 +97,13 @@ pub(super) fn reduce(
     runtime: &ExecutionContext,
     metrics: &mut SweepMetrics,
 ) -> Result<Option<TransformProduct>, crate::SynthError> {
-    let mut live = network.live_nodes(roots);
-    // The constant is a class representative even when no root reaches it, so a
-    // cone proved constant can collapse onto it.
-    live[0] = true;
     let mut stimulus = Stimulus::random();
-    let mut substitutions = vec![None; network.node_count()].into_boxed_slice();
     let mut budget = MAX_PROOF_PAIRS;
-    let mut signatures = Signatures::new(network.node_count());
+    let mut reduced: Option<TransformProduct> = None;
+    let mut roots = roots.to_vec();
+    let mut subject = network;
+    let mut live = live_cone(subject, &roots);
+    let mut signatures = Signatures::new(subject.node_count());
     let mut resume = 0usize;
 
     for _ in 0..MAX_REFINEMENT_ROUNDS {
@@ -113,13 +112,14 @@ pub(super) fn reduce(
             break;
         }
         metrics.rounds += 1;
-        simulate(network, &live, &stimulus, &mut signatures, resume);
-        let classes = nominate(network, &live, &substitutions, &signatures, metrics);
+        let mut substitutions = vec![None; subject.node_count()].into_boxed_slice();
+        simulate(subject, &live, &stimulus, &mut signatures, resume);
+        let classes = nominate(subject, &live, &substitutions, &signatures, metrics);
         if classes.is_empty() {
             break;
         }
         let round = prove(
-            network,
+            subject,
             &classes,
             MAX_ROUND_PAIRS.min(budget),
             runtime,
@@ -128,6 +128,25 @@ pub(super) fn reduce(
         budget -= round.attempted().min(budget);
         metrics.proved += round.proved;
         metrics.refuted += round.refutations.len();
+        // Merging is what makes the next round cheap. Two cones that differ only
+        // by an equivalence this round proved become one node under structural
+        // hashing, so the next round never asks the solver about them; leaving
+        // the merges out of the subject made every later round re-derive every
+        // earlier proof.
+        if round.proved != 0 {
+            let product = rebuild(subject, &live, &substitutions);
+            signatures = signatures.projected(&product.remap, product.network.node_count());
+            roots = roots
+                .iter()
+                .map(|&root| mapped_literal(&product.remap, root))
+                .collect();
+            reduced = Some(match &reduced {
+                Some(previous) => compose(previous, product),
+                None => product,
+            });
+            subject = &reduced.as_ref().expect("a merge just produced one").network;
+            live = live_cone(subject, &roots);
+        }
         if round.refutations.is_empty() {
             break;
         }
@@ -139,10 +158,26 @@ pub(super) fn reduce(
         resume = changed;
     }
 
-    if metrics.proved == 0 {
-        return Ok(None);
+    Ok(reduced)
+}
+
+/// The live cone of the roots, with the constant always retained.
+///
+/// A cone proved constant collapses onto the constant node, so it is a class
+/// representative whether or not a root reaches it.
+fn live_cone(network: &LogicGraph, roots: &[LogicNodeId]) -> Box<[bool]> {
+    let mut live = network.live_nodes(roots);
+    live[0] = true;
+    live
+}
+
+/// Chains two reductions into one, so callers only ever see their own nodes.
+fn compose(first: &TransformProduct, second: TransformProduct) -> TransformProduct {
+    TransformProduct {
+        remap: super::pipeline::compose_remaps(&first.remap, &second.remap),
+        network: second.network,
+        analyses: TransformAnalyses::default(),
     }
-    Ok(Some(rebuild(network, &live, &substitutions)))
 }
 
 /// The stimulus applied to boundary inputs.
@@ -252,6 +287,31 @@ impl Signatures {
     fn row(&self, node: usize) -> &[u64] {
         let base = node * SIGNATURE_STRIDE;
         &self.values[base..base + self.active]
+    }
+
+    /// Carries the rows onto a merged node space.
+    ///
+    /// A merged node computes the function of every node that mapped onto it, so
+    /// its words are that node's words, complemented when the map inverted it.
+    /// Copying them is what keeps refinement incremental across a merge:
+    /// re-simulating the learned stimulus from the first word would cost more
+    /// than the merge saves.
+    fn projected(&self, remap: &[Option<LogicNodeId>], node_count: usize) -> Self {
+        let mut projected = Self::new(node_count);
+        projected.active = self.active;
+        for (node, mapped) in remap.iter().enumerate() {
+            let Some(mapped) = *mapped else {
+                continue;
+            };
+            let source = node * SIGNATURE_STRIDE;
+            let target = mapped.index() * SIGNATURE_STRIDE;
+            for word in 0..self.active {
+                let value = self.values[source + word];
+                projected.values[target + word] =
+                    if mapped.is_inverted() { !value } else { value };
+            }
+        }
+        projected
     }
 }
 
