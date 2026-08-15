@@ -532,20 +532,36 @@ impl TimingGraph {
         Ok(graph)
     }
 
+    /// Appends the nets one net's arrival depends on: every incoming arc's
+    /// source, and the enable of every latch-data arc.
+    ///
+    /// This is the propagation plan's dependency relation, and it has one
+    /// definition because two places consume it: the plan is built from it, and
+    /// region editing decides whether the retained plan still describes the
+    /// graph from it. Deciding reuse from `from`/`to` adjacency instead silently
+    /// keeps a plan whose latch-enable dependency has moved, since replacing a
+    /// latch can change its enable without changing adjacency at all.
+    pub(super) fn plan_dependencies<'graph>(
+        &'graph self,
+        arcs: &'graph [GraphArcId],
+    ) -> impl Iterator<Item = usize> + 'graph {
+        arcs.iter().flat_map(move |&arc| {
+            let arc = self.arc(arc);
+            let enable = match arc.kind {
+                GraphArcKind::Combinational => None,
+                GraphArcKind::LatchData { enable_net, .. } => Some(enable_net.index()),
+            };
+            [Some(arc.from.index()), enable].into_iter().flatten()
+        })
+    }
+
     pub(super) fn assign_topological_order(
         &mut self,
         order: Vec<usize>,
     ) -> Result<(), crate::TimingError> {
         let propagation_plan =
             opto_runtime::DependencyPlan::from_topological_order(self.net_count, &order, |net| {
-                self.incoming[net].iter().flat_map(|&arc| {
-                    let arc = self.arc(arc);
-                    let enable = match arc.kind {
-                        GraphArcKind::Combinational => None,
-                        GraphArcKind::LatchData { enable_net, .. } => Some(enable_net.index()),
-                    };
-                    [Some(arc.from.index()), enable].into_iter().flatten()
-                })
+                self.plan_dependencies(&self.incoming[net])
             })?;
         let mut positions = vec![u32::MAX; self.net_count];
         for (position, &net) in order.iter().enumerate() {

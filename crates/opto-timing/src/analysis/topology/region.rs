@@ -274,7 +274,11 @@ impl TimingGraph {
                 }),
             };
         }
-        let (structure_changed, added_edges) = self.region_edge_changes(&edit, &touched);
+        let RegionEdgeChanges {
+            structure_changed,
+            dependencies_changed,
+            added: added_edges,
+        } = self.region_edge_changes(&edit, &touched);
         if structure_changed {
             edit.structure_changed = true;
             for net in edit.old_net_len..self.net_count {
@@ -305,18 +309,33 @@ impl TimingGraph {
             // This matters because a rebuild is `O(nets + arcs)` per edit per
             // timing view, and post-map optimization applies many small edits.
             // Cell resizing and constant-register removal both land here.
-            self.topological_order_stale |=
-                !added_edges.is_empty() || self.net_count != edit.old_net_len;
+            self.topological_order_stale |= dependencies_changed
+                || !added_edges.is_empty()
+                || self.net_count != edit.old_net_len;
         }
         Ok((edit, dirty.into_iter().collect()))
     }
+}
 
+/// What one region edit changed about the timing graph.
+struct RegionEdgeChanges {
+    /// Whether any arc set the edit touched differs from its snapshot.
+    structure_changed: bool,
+    /// Whether any touched net's propagation-plan dependencies differ. This is
+    /// what decides plan reuse; adjacency alone does not see a latch enable.
+    dependencies_changed: bool,
+    /// Adjacency edges the edit introduced, for cycle validation.
+    added: Vec<(usize, usize)>,
+}
+
+impl TimingGraph {
     fn region_edge_changes(
         &self,
         edit: &InstanceRegionGraphEdit,
         touched: &BTreeSet<usize>,
-    ) -> (bool, Vec<(usize, usize)>) {
+    ) -> RegionEdgeChanges {
         let mut changed = self.net_count != edit.old_net_len;
+        let mut dependencies_changed = false;
         let mut added = Vec::new();
         let mut old_edges = Vec::new();
         let mut new_edges = Vec::new();
@@ -344,22 +363,27 @@ impl TimingGraph {
                     .map(|to| (net, to)),
             );
             if let Some(old) = edit.old_nets.get(&net) {
+                // The incoming side decides whether the retained propagation
+                // plan still describes this net, so it compares exactly what the
+                // plan consumes: arc sources and latch enables. A latch replaced
+                // with the same data and output nets but a different enable
+                // changes this set while leaving `from`/`to` adjacency alone.
                 old_edges.clear();
                 new_edges.clear();
-                old_edges.extend(old.incoming.iter().map(|&arc| self.arc(arc).from.index()));
-                new_edges.extend(
-                    self.incoming[net]
-                        .iter()
-                        .map(|&arc| self.arc(arc).from.index()),
-                );
+                old_edges.extend(self.plan_dependencies(&old.incoming));
+                new_edges.extend(self.plan_dependencies(&self.incoming[net]));
                 old_edges.sort_unstable();
                 old_edges.dedup();
                 new_edges.sort_unstable();
                 new_edges.dedup();
-                changed |= old_edges != new_edges;
+                dependencies_changed |= old_edges != new_edges;
             }
         }
-        (changed, added)
+        RegionEdgeChanges {
+            structure_changed: changed || dependencies_changed,
+            dependencies_changed,
+            added,
+        }
     }
 
     fn added_edges_create_cycle(&mut self, added: &[(usize, usize)]) -> bool {

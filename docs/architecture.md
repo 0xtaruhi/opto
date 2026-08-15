@@ -1262,6 +1262,24 @@ machinery cost more to carry than it could ever return. RFC 11 keeps a choice
 graph on the roadmap; when it lands it will nominate choices inside one subject
 rather than cover whole implementations against each other.
 
+## One Definition of a Propagation Dependency
+
+The propagation plan orders a net's arrival after every incoming arc's source
+and after the enable of every latch-data arc. Region editing decides whether the
+retained plan still describes the graph, and it now asks the same question from
+the same definition. Deciding it from `from`/`to` adjacency instead was wrong in
+one specific way: a latch enable reaches the graph inside the data arc rather
+than as an edge, so replacing a latch with the same data and output nets but a
+different enable changed the plan's dependency set without changing adjacency at
+all. The plan was retained, and a later edit confined to the new enable's cone
+never rescheduled the latch output.
+
+A related limit is worth recording: the topological order itself is computed
+from arcs only, so it does not order a latch enable before the latch output.
+The plan then declares a dependency the order does not provide, and building the
+model fails with a dependency-ordering error. A design whose latch enable cone
+is longer than its data cone reaches that today.
+
 ## Functional Reduction Merges As It Proves
 
 A refinement round proves a batch of candidate equivalences, learns the
