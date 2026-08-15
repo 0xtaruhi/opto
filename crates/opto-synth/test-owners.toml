@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 400
+expected_tests = 402
 
 [[owners]]
 path = "src/api"
@@ -62,7 +62,7 @@ contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and mat
 [[owners]]
 path = "src/closure"
 owner = "closure"
-tests = 56
+tests = 58
 contract = "MMMC measurement, power objectives, mapped boundaries, and transactional post-map repair."
 
 [[owners]]

@@ -1262,6 +1262,29 @@ machinery cost more to carry than it could ever return. RFC 11 keeps a choice
 graph on the roadmap; when it lands it will nominate choices inside one subject
 rather than cover whole implementations against each other.
 
+## The Initial-State Contract
+
+Constant-register removal proves a register constant by induction over that one
+register: the base case is that it holds its reset value, and the step is that
+its next state is that same value. Only registers with an asynchronous clear or
+preset are considered and only the reset value is ever folded, so the base case
+is exactly one assumption, stated here rather than derived: every such register
+is reset before the design is observed.
+
+Nothing in a mapped netlist can establish that assumption, so the pass enforces
+what it can. A register whose own reset the netlist holds inactive is declined,
+because the assumption cannot reach it. And the qualification harness applies
+the assumption rather than relying on it: an asynchronous reset is a falling
+edge, so a reset that is merely low at time zero never fires one and every
+asynchronously reset flop keeps its simulator initial value. The harness now
+drives reset high, low, and back, and releases on a falling clock edge.
+
+The case that makes the contract visible is a register whose next state is its
+own output. It satisfies the induction, and in hardware it holds its power-up
+value forever; folding it to the reset value is correct exactly when the
+contract holds. A test pins that behaviour so the assumption appears in the
+suite instead of being implied by the proof.
+
 ## One Definition of a Propagation Dependency
 
 The propagation plan orders a net's arrival after every incoming arc's source

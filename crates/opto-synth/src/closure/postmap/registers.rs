@@ -9,6 +9,20 @@ use opto_library::{TargetCellSet, TargetPinDirection, TargetSequentialKind};
 /// Proposes one removal per register whose reachable value is a single
 /// constant.
 ///
+/// # Initial-state contract
+///
+/// A removal is proved by induction over one register: the base case is that
+/// the register is at its reset value, and the step is that its next state is
+/// that same value. Only registers that have an asynchronous clear or preset
+/// are considered, and only the reset value is ever folded, so the base case is
+/// exactly the synthesis contract that every such register is reset before the
+/// design is observed. Nothing in a mapped netlist can establish that contract,
+/// so it is a stated assumption, not a derived fact; a register whose own reset
+/// the netlist holds inactive is declined because even the assumption cannot
+/// reach it. A design run without asserting reset is outside the contract, and
+/// a register whose next state is its own output is the case that shows it: the
+/// induction holds, and the hardware holds its power-up value forever.
+///
 /// Generation is read-only, so it is sharded across the worker pool and the
 /// shards are concatenated in cell order. Selection and commit stay ordered in
 /// the caller, so no accepted edit depends on completion order.
@@ -126,6 +140,43 @@ fn collect_pins<'function>(
             names.push(name);
         }
     });
+}
+
+/// Reports whether a control function can still assert.
+///
+/// Every pin the function reads that is tied to a constant is substituted; a pin
+/// driven by a net can take either value, so the function is assumed assertable.
+/// A control the constants alone hold inactive can never assert, which is what
+/// makes it interesting: the register it resets never reaches its reset value.
+fn control_can_assert(
+    control: opto_library::BooleanFunctionRef<'_>,
+    inputs: &[(&str, ConnectionSignal)],
+) -> bool {
+    let mut names = Vec::new();
+    collect_pins(control, &mut names);
+    let constants = names
+        .iter()
+        .map(|name| {
+            inputs
+                .iter()
+                .find(|(pin, _)| pin == name)
+                .and_then(|&(_, signal)| match signal {
+                    ConnectionSignal::Constant(value) => Some(value),
+                    ConnectionSignal::Net(_) => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    if constants.iter().any(Option::is_none) {
+        return true;
+    }
+    control
+        .eval(&mut |name| {
+            names
+                .iter()
+                .position(|candidate| *candidate == name)
+                .and_then(|index| constants[index])
+        })
+        .unwrap_or(true)
 }
 
 /// Unknown boundary nets a constant-register proof may enumerate. The proof
@@ -477,6 +528,17 @@ fn constant_register_candidate(
     if outputs.is_empty() {
         return Ok(None);
     }
+    // The proof below is an induction over this register, and its base case is
+    // the reset. A register whose reset can never assert has no base case: its
+    // power-up value is arbitrary and stays arbitrary, so the reset value is not
+    // the value it holds.
+    let ((Some(control), None) | (None, Some(control))) = (sequential.clear(), sequential.preset())
+    else {
+        return Ok(None);
+    };
+    if !control_can_assert(control, &inputs) {
+        return Ok(None);
+    }
     let mut names = Vec::new();
     collect_pins(next_state, &mut names);
     let mut unknowns = Vec::new();
@@ -676,6 +738,107 @@ mod tests {
         let inverter = mapped.cell_ids().next().unwrap();
         let connections = mapped.connections(inverter).unwrap();
         assert_eq!(connections[0].signal, ConnectionSignal::Constant(false));
+    }
+
+    /// Pins the initial-state contract on the case that makes it visible.
+    ///
+    /// A register whose data is its own output satisfies the induction while
+    /// holding whatever it powered up with, so folding it is correct exactly
+    /// when the contract holds. The test exists so that the assumption is
+    /// visible in the suite rather than implied by the proof.
+    #[test]
+    fn folds_a_self_holding_register_under_the_reset_contract() {
+        let library = library();
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let clock = builder.add_net(Some("clk")).unwrap();
+        let reset = builder.add_net(Some("rst")).unwrap();
+        let enable = builder.add_net(Some("en")).unwrap();
+        let q = builder.add_net(Some("q")).unwrap();
+        let out = builder.add_net(Some("out")).unwrap();
+        builder
+            .add_cell(
+                "r0",
+                "EDFCNQ",
+                Some(0),
+                &[
+                    ("D".to_string(), Some(0), ConnectionSignal::Net(q)),
+                    ("E".to_string(), Some(1), ConnectionSignal::Net(enable)),
+                    ("CP".to_string(), Some(2), ConnectionSignal::Net(clock)),
+                    ("CDN".to_string(), Some(3), ConnectionSignal::Net(reset)),
+                    ("Q".to_string(), Some(4), ConnectionSignal::Net(q)),
+                ],
+            )
+            .unwrap();
+        builder
+            .add_cell(
+                "u0",
+                "INV",
+                Some(1),
+                &[
+                    ("I".to_string(), Some(0), ConnectionSignal::Net(q)),
+                    ("ZN".to_string(), Some(1), ConnectionSignal::Net(out)),
+                ],
+            )
+            .unwrap();
+        let mapped = builder.freeze().unwrap();
+        let registers = constant_register_candidates(
+            &mapped,
+            &library,
+            &HashSet::new(),
+            None,
+            crate::test_runtime(),
+        )
+        .unwrap();
+        assert_eq!(registers.len(), 1);
+    }
+
+    /// A register the netlist can never reset has no base case for the
+    /// induction, so its power-up value is arbitrary and it is not constant.
+    #[test]
+    fn keeps_registers_whose_reset_is_tied_inactive() {
+        let library = library();
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let clock = builder.add_net(Some("clk")).unwrap();
+        let enable = builder.add_net(Some("en")).unwrap();
+        let q = builder.add_net(Some("q")).unwrap();
+        let out = builder.add_net(Some("out")).unwrap();
+        builder
+            .add_cell(
+                "r0",
+                "EDFCNQ",
+                Some(0),
+                &[
+                    ("D".to_string(), Some(0), ConnectionSignal::Constant(false)),
+                    ("E".to_string(), Some(1), ConnectionSignal::Net(enable)),
+                    ("CP".to_string(), Some(2), ConnectionSignal::Net(clock)),
+                    // CDN is active low, so tying it high means this register is
+                    // never cleared.
+                    ("CDN".to_string(), Some(3), ConnectionSignal::Constant(true)),
+                    ("Q".to_string(), Some(4), ConnectionSignal::Net(q)),
+                ],
+            )
+            .unwrap();
+        builder
+            .add_cell(
+                "u0",
+                "INV",
+                Some(1),
+                &[
+                    ("I".to_string(), Some(0), ConnectionSignal::Net(q)),
+                    ("ZN".to_string(), Some(1), ConnectionSignal::Net(out)),
+                ],
+            )
+            .unwrap();
+        let mapped = builder.freeze().unwrap();
+        let registers = constant_register_candidates(
+            &mapped,
+            &library,
+            &HashSet::new(),
+            None,
+            crate::test_runtime(),
+        )
+        .unwrap();
+        assert!(registers.is_empty());
     }
 
     #[test]

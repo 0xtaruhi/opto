@@ -9,7 +9,7 @@ module ibex_smoke_tb;
     localparam int unsigned MAXIMUM_CYCLES = 500;
 
     logic clk_i = 1'b0;
-    logic rst_ni = 1'b0;
+    logic rst_ni = 1'b1;
     logic instr_req_o;
     logic instr_gnt_i;
     logic instr_rvalid_i;
@@ -82,8 +82,18 @@ module ibex_smoke_tb;
 
     always #5 clk_i = ~clk_i;
 
+    // Reset must fall, not merely start low. An asynchronous reset is a
+    // `negedge rst_ni` event, so a signal that is already low at time zero
+    // never triggers one, and every asynchronously reset flop keeps its
+    // simulator initial value instead of its reset value. Synthesis assumes the
+    // design is reset before it is observed; this is where that assumption is
+    // applied. Release on a falling clock edge so the release does not race the
+    // capture edge it precedes.
     initial begin
+        @(negedge clk_i);
+        rst_ni = 1'b0;
         repeat (8) @(posedge clk_i);
+        @(negedge clk_i);
         rst_ni = 1'b1;
     end
 
