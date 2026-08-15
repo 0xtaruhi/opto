@@ -291,18 +291,7 @@ impl LogicBuilder {
     /// Returns [`LogicError`] if the canonical result requires a node beyond
     /// the compact arena capacity.
     pub fn or(&mut self, left: Lit, right: Lit, origin: u32) -> Result<Lit, LogicError> {
-        // Recognize the sum-of-products mux form before De Morgan lowering;
-        // doing so preserves a mux primitive for mapping and avoids four nodes.
-        if let (Some(left_product), Some(right_product)) = (
-            self.binary_fanins(left, NodeKind::And),
-            self.binary_fanins(right, NodeKind::And),
-        ) && let Some((select, when_true, when_false)) =
-            complementary_product_factor(left_product, right_product)
-        {
-            return self.mux(select, when_true, when_false, origin);
-        }
-        self.and(left.inverted(), right.inverted(), origin)
-            .map(Lit::inverted)
+        canonical_or(self, left, right, origin)
     }
 
     /// Builds a canonical conjunction and applies local simplifications.
@@ -312,53 +301,7 @@ impl LogicBuilder {
     /// Returns [`LogicError`] if the canonical result requires a node beyond
     /// the compact arena capacity.
     pub fn and(&mut self, left: Lit, right: Lit, origin: u32) -> Result<Lit, LogicError> {
-        // Constant, idempotence, absorption, and consensus identities run
-        // before interning so semantically redundant nodes never enter the
-        // structural hash table.
-        if left == Lit::FALSE || right == Lit::FALSE || left == right.inverted() {
-            return Ok(Lit::FALSE);
-        }
-        if left == Lit::TRUE {
-            return Ok(right);
-        }
-        if right == Lit::TRUE || left == right {
-            return Ok(left);
-        }
-        if self
-            .binary_fanins(left, NodeKind::And)
-            .is_some_and(|fanins| fanins.0 == right || fanins.1 == right)
-        {
-            return Ok(left);
-        }
-        if self
-            .binary_fanins(right, NodeKind::And)
-            .is_some_and(|fanins| fanins.0 == left || fanins.1 == left)
-        {
-            return Ok(right);
-        }
-        if right.is_inverted()
-            && self
-                .binary_fanins(right.positive(), NodeKind::And)
-                .is_some_and(|fanins| fanins.0 == left.inverted() || fanins.1 == left.inverted())
-        {
-            return Ok(left);
-        }
-        if left.is_inverted()
-            && self
-                .binary_fanins(left.positive(), NodeKind::And)
-                .is_some_and(|fanins| fanins.0 == right.inverted() || fanins.1 == right.inverted())
-        {
-            return Ok(right);
-        }
-        let (left, right) = ordered(left, right);
-        self.intern(
-            NodeKey::And(left, right),
-            NodeKind::And,
-            left,
-            right,
-            Lit::FALSE,
-            origin,
-        )
+        canonical_and(self, left, right, origin)
     }
 
     /// Builds a canonical exclusive-or and applies parity simplifications.
@@ -368,58 +311,7 @@ impl LogicBuilder {
     /// Returns [`LogicError`] if the canonical result requires a node beyond
     /// the compact arena capacity.
     pub fn xor(&mut self, left: Lit, right: Lit, origin: u32) -> Result<Lit, LogicError> {
-        if left == Lit::FALSE {
-            return Ok(right);
-        }
-        if right == Lit::FALSE {
-            return Ok(left);
-        }
-        if left == Lit::TRUE {
-            return Ok(right.inverted());
-        }
-        if right == Lit::TRUE {
-            return Ok(left.inverted());
-        }
-        if left == right {
-            return Ok(Lit::FALSE);
-        }
-        if left == right.inverted() {
-            return Ok(Lit::TRUE);
-        }
-        // Phase is normalized onto the result; the structural key therefore
-        // contains only positive fanins and has a unique commutative form.
-        let inverted = left.is_inverted() ^ right.is_inverted();
-        let left = left.positive();
-        let right = right.positive();
-        if left == right {
-            return Ok(Self::constant(inverted));
-        }
-        let left_fanins = self.binary_fanins(left, NodeKind::Xor);
-        let right_fanins = self.binary_fanins(right, NodeKind::Xor);
-        if let Some(remaining) = left_fanins.and_then(|fanins| xor_remaining(fanins, right)) {
-            return Ok(with_phase(remaining, inverted));
-        }
-        if let Some(remaining) = right_fanins.and_then(|fanins| xor_remaining(fanins, left)) {
-            return Ok(with_phase(remaining, inverted));
-        }
-        if let (Some(left_fanins), Some(right_fanins)) = (left_fanins, right_fanins)
-            && let Some((left_remaining, right_remaining)) =
-                xor_shared_remaining(left_fanins, right_fanins)
-        {
-            return self
-                .xor(left_remaining, right_remaining, origin)
-                .map(|value| with_phase(value, inverted));
-        }
-        let (left, right) = ordered(left, right);
-        self.intern(
-            NodeKey::Xor(left, right),
-            NodeKind::Xor,
-            left,
-            right,
-            Lit::FALSE,
-            origin,
-        )
-        .map(|value| with_phase(value, inverted))
+        canonical_xor(self, left, right, origin)
     }
 
     /// Builds a canonical two-way multiplexer.
@@ -431,10 +323,6 @@ impl LogicBuilder {
     ///
     /// Returns [`LogicError`] if the canonical result requires a node beyond
     /// the compact arena capacity.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the ordered mux identities form one canonicalization decision table"
-    )]
     pub fn mux(
         &mut self,
         select: Lit,
@@ -442,123 +330,7 @@ impl LogicBuilder {
         else_value: Lit,
         origin: u32,
     ) -> Result<Lit, LogicError> {
-        if select == Lit::FALSE {
-            return Ok(else_value);
-        }
-        if select == Lit::TRUE || then_value == else_value {
-            return Ok(then_value);
-        }
-        if then_value == Lit::TRUE && else_value == Lit::FALSE {
-            return Ok(select);
-        }
-        if then_value == Lit::FALSE && else_value == Lit::TRUE {
-            return Ok(select.inverted());
-        }
-        // Normalize an inverted selector by swapping arms, then push a common
-        // inverted arm phase onto the result. This makes the intern key unique.
-        let (select, mut then_value, mut else_value) = if select.is_inverted() {
-            (select.positive(), else_value, then_value)
-        } else {
-            (select, then_value, else_value)
-        };
-        let inverted = then_value.is_inverted() && else_value.is_inverted();
-        if inverted {
-            then_value = then_value.positive();
-            else_value = else_value.positive();
-        }
-        if then_value == else_value.inverted() {
-            return self
-                .xor(select, else_value, origin)
-                .map(|value| with_phase(value, inverted));
-        }
-        let reduced = if then_value == Lit::TRUE || then_value == select {
-            Some(self.or(select, else_value, origin)?)
-        } else if then_value == Lit::FALSE || then_value == select.inverted() {
-            Some(self.and(select.inverted(), else_value, origin)?)
-        } else if else_value == Lit::FALSE || else_value == select {
-            Some(self.and(select, then_value, origin)?)
-        } else if else_value == Lit::TRUE || else_value == select.inverted() {
-            Some(self.or(select.inverted(), then_value, origin)?)
-        } else {
-            None
-        };
-        if let Some(reduced) = reduced {
-            return Ok(with_phase(reduced, inverted));
-        }
-        // Collapse nested muxes controlled by the same selector before trying
-        // the more expensive cross-arm factoring rules below.
-        let mut changed = false;
-        if let Some((inner_select, inner_then, _)) = self.mux_fanins(then_value)
-            && inner_select == select
-        {
-            then_value = inner_then;
-            changed = true;
-        }
-        if let Some((inner_select, _, inner_else)) = self.mux_fanins(else_value)
-            && inner_select == select
-        {
-            else_value = inner_else;
-            changed = true;
-        }
-        if changed {
-            return self
-                .mux(select, then_value, else_value, origin)
-                .map(|value| with_phase(value, inverted));
-        }
-        if let Some((inner_select, inner_then, inner_else)) = self.mux_fanins(then_value) {
-            let combined = if else_value == inner_else {
-                Some(self.and(select, inner_select, origin)?)
-            } else if else_value == inner_then {
-                Some(self.or(select.inverted(), inner_select, origin)?)
-            } else {
-                None
-            };
-            if let Some(combined) = combined {
-                return self
-                    .mux(combined, inner_then, inner_else, origin)
-                    .map(|value| with_phase(value, inverted));
-            }
-        }
-        if let Some((inner_select, inner_then, inner_else)) = self.mux_fanins(else_value) {
-            let combined = if then_value == inner_then {
-                Some(self.or(select, inner_select, origin)?)
-            } else if then_value == inner_else {
-                Some(self.and(select.inverted(), inner_select, origin)?)
-            } else {
-                None
-            };
-            if let Some(combined) = combined {
-                return self
-                    .mux(combined, inner_then, inner_else, origin)
-                    .map(|value| with_phase(value, inverted));
-            }
-        }
-        if let (Some(then_mux), Some(else_mux)) =
-            (self.mux_fanins(then_value), self.mux_fanins(else_value))
-            && then_mux.0 == else_mux.0
-        {
-            let factored = if then_mux.1 == else_mux.1 {
-                let remaining = self.mux(select, then_mux.2, else_mux.2, origin)?;
-                Some(self.mux(then_mux.0, then_mux.1, remaining, origin)?)
-            } else if then_mux.2 == else_mux.2 {
-                let remaining = self.mux(select, then_mux.1, else_mux.1, origin)?;
-                Some(self.mux(then_mux.0, remaining, then_mux.2, origin)?)
-            } else {
-                None
-            };
-            if let Some(factored) = factored {
-                return Ok(with_phase(factored, inverted));
-            }
-        }
-        let result = self.intern(
-            NodeKey::Mux(select, then_value, else_value),
-            NodeKind::Mux,
-            select,
-            then_value,
-            else_value,
-            origin,
-        )?;
-        Ok(with_phase(result, inverted))
+        canonical_mux(self, select, then_value, else_value, origin)
     }
 
     /// Seals the builder into immutable, tightly sized storage.
@@ -589,24 +361,6 @@ impl LogicBuilder {
         let literal = self.push(kind, fanin0, fanin1, fanin2, origin)?;
         self.interned.insert(key, literal.node());
         Ok(literal)
-    }
-
-    fn binary_fanins(&self, value: Lit, kind: NodeKind) -> Option<(Lit, Lit)> {
-        if value.is_inverted() || self.kind(value.node())? != kind {
-            return None;
-        }
-        Some((self.fanin(value.node(), 0)?, self.fanin(value.node(), 1)?))
-    }
-
-    fn mux_fanins(&self, value: Lit) -> Option<(Lit, Lit, Lit)> {
-        if value.is_inverted() || self.kind(value.node())? != NodeKind::Mux {
-            return None;
-        }
-        Some((
-            self.fanin(value.node(), 0)?,
-            self.fanin(value.node(), 1)?,
-            self.fanin(value.node(), 2)?,
-        ))
     }
 
     fn push(
@@ -685,9 +439,512 @@ fn with_phase(value: Lit, inverted: bool) -> Lit {
     if inverted { value.inverted() } else { value }
 }
 
+/// The read-and-resolve surface the canonicalization rules need.
+///
+/// Implemented once by [`LogicBuilder`], which allocates a node whenever a
+/// canonical key is missing, and once by [`LogicProbe`], which reports the key
+/// as absent instead. Both therefore agree on which structural node a given
+/// expression denotes, which is what lets a caller price a replacement by the
+/// nodes it would actually have to create.
+trait Canonical {
+    /// Reported when a canonical key has no node, as [`LogicProbe`] does.
+    type Error;
+
+    fn kind(&self, node: NodeId) -> Option<NodeKind>;
+
+    fn fanin(&self, node: NodeId, index: usize) -> Option<Lit>;
+
+    fn resolve(
+        &mut self,
+        key: NodeKey,
+        kind: NodeKind,
+        fanin0: Lit,
+        fanin1: Lit,
+        fanin2: Lit,
+        origin: u32,
+    ) -> Result<Lit, Self::Error>;
+}
+
+impl Canonical for LogicBuilder {
+    type Error = LogicError;
+
+    fn kind(&self, node: NodeId) -> Option<NodeKind> {
+        Self::kind(self, node)
+    }
+
+    fn fanin(&self, node: NodeId, index: usize) -> Option<Lit> {
+        Self::fanin(self, node, index)
+    }
+
+    fn resolve(
+        &mut self,
+        key: NodeKey,
+        kind: NodeKind,
+        fanin0: Lit,
+        fanin1: Lit,
+        fanin2: Lit,
+        origin: u32,
+    ) -> Result<Lit, Self::Error> {
+        self.intern(key, kind, fanin0, fanin1, fanin2, origin)
+    }
+}
+
+/// Structural hash table of a frozen [`LogicNetwork`], rebuilt from its nodes.
+///
+/// [`LogicBuilder::freeze`] drops the builder's table because the frozen
+/// network never allocates again; a caller that wants to ask whether an
+/// expression is already present rebuilds it once and shares it.
+#[derive(Debug, Clone, Default)]
+pub struct StructuralIndex {
+    nodes: HashMap<NodeKey, NodeId>,
+}
+
+impl StructuralIndex {
+    #[must_use]
+    /// Indexes every gate of `network` under its canonical structural key.
+    pub fn of(network: &LogicNetwork) -> Self {
+        let mut nodes = HashMap::new();
+        for index in 0..network.node_count() {
+            let Some(node) = NodeId::from_index(index).ok() else {
+                break;
+            };
+            let fanin = |slot| network.fanin(node, slot).unwrap_or(Lit::FALSE);
+            let key = match network.kind(node) {
+                Some(NodeKind::And) => NodeKey::And(fanin(0), fanin(1)),
+                Some(NodeKind::Xor) => NodeKey::Xor(fanin(0), fanin(1)),
+                Some(NodeKind::Mux) => NodeKey::Mux(fanin(0), fanin(1), fanin(2)),
+                _ => continue,
+            };
+            nodes.insert(key, node);
+        }
+        Self { nodes }
+    }
+}
+
+/// Marks a canonical key that the indexed network does not contain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Absent;
+
+/// Read-only view that answers which literal an expression *would* denote in an
+/// already frozen network, without building anything.
+///
+/// Every method returns [`Absent`] as soon as one canonical key is missing.
+/// That is exact rather than conservative: a node the network does not contain
+/// cannot be a fanin of one it does, so no ancestor can be present either.
+#[derive(Debug, Clone, Copy)]
+pub struct LogicProbe<'a> {
+    network: &'a LogicNetwork,
+    index: &'a StructuralIndex,
+}
+
+impl<'a> LogicProbe<'a> {
+    #[must_use]
+    /// Views `network` through `index`, which must have been built from it.
+    pub fn new(network: &'a LogicNetwork, index: &'a StructuralIndex) -> Self {
+        Self { network, index }
+    }
+
+    /// Resolves a conjunction against the network.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Absent`] when the network contains no such node.
+    pub fn and(&mut self, left: Lit, right: Lit) -> Result<Lit, Absent> {
+        canonical_and(self, left, right, 0)
+    }
+
+    /// Resolves a disjunction against the network.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Absent`] when the network contains no such node.
+    pub fn or(&mut self, left: Lit, right: Lit) -> Result<Lit, Absent> {
+        canonical_or(self, left, right, 0)
+    }
+
+    /// Resolves an exclusive-or against the network.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Absent`] when the network contains no such node.
+    pub fn xor(&mut self, left: Lit, right: Lit) -> Result<Lit, Absent> {
+        canonical_xor(self, left, right, 0)
+    }
+
+    /// Resolves a multiplexer against the network.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Absent`] when the network contains no such node.
+    pub fn mux(&mut self, select: Lit, then_value: Lit, else_value: Lit) -> Result<Lit, Absent> {
+        canonical_mux(self, select, then_value, else_value, 0)
+    }
+}
+
+impl Canonical for LogicProbe<'_> {
+    type Error = Absent;
+
+    fn kind(&self, node: NodeId) -> Option<NodeKind> {
+        self.network.kind(node)
+    }
+
+    fn fanin(&self, node: NodeId, index: usize) -> Option<Lit> {
+        self.network.fanin(node, index)
+    }
+
+    fn resolve(
+        &mut self,
+        key: NodeKey,
+        _kind: NodeKind,
+        _fanin0: Lit,
+        _fanin1: Lit,
+        _fanin2: Lit,
+        _origin: u32,
+    ) -> Result<Lit, Self::Error> {
+        let node = self.index.nodes.get(&key).copied().ok_or(Absent)?;
+        Lit::from_node(node).map_err(|_| Absent)
+    }
+}
+
+/// Canonicalizes a conjunction. Shared by every [`Canonical`] store so the builder and
+/// the read-only probe agree on which structural node an expression denotes.
+fn canonical_and<C: Canonical + ?Sized>(
+    store: &mut C,
+    left: Lit,
+    right: Lit,
+    origin: u32,
+) -> Result<Lit, C::Error> {
+    // Constant, idempotence, absorption, and consensus identities run
+    // before interning so semantically redundant nodes never enter the
+    // structural hash table.
+    if left == Lit::FALSE || right == Lit::FALSE || left == right.inverted() {
+        return Ok(Lit::FALSE);
+    }
+    if left == Lit::TRUE {
+        return Ok(right);
+    }
+    if right == Lit::TRUE || left == right {
+        return Ok(left);
+    }
+    if binary_fanins(store, left, NodeKind::And)
+        .is_some_and(|fanins| fanins.0 == right || fanins.1 == right)
+    {
+        return Ok(left);
+    }
+    if binary_fanins(store, right, NodeKind::And)
+        .is_some_and(|fanins| fanins.0 == left || fanins.1 == left)
+    {
+        return Ok(right);
+    }
+    if right.is_inverted()
+        && binary_fanins(store, right.positive(), NodeKind::And)
+            .is_some_and(|fanins| fanins.0 == left.inverted() || fanins.1 == left.inverted())
+    {
+        return Ok(left);
+    }
+    if left.is_inverted()
+        && binary_fanins(store, left.positive(), NodeKind::And)
+            .is_some_and(|fanins| fanins.0 == right.inverted() || fanins.1 == right.inverted())
+    {
+        return Ok(right);
+    }
+    let (left, right) = ordered(left, right);
+    store.resolve(
+        NodeKey::And(left, right),
+        NodeKind::And,
+        left,
+        right,
+        Lit::FALSE,
+        origin,
+    )
+}
+
+/// Canonicalizes a disjunction. Shared by every [`Canonical`] store so the builder and
+/// the read-only probe agree on which structural node an expression denotes.
+fn canonical_or<C: Canonical + ?Sized>(
+    store: &mut C,
+    left: Lit,
+    right: Lit,
+    origin: u32,
+) -> Result<Lit, C::Error> {
+    // Recognize the sum-of-products mux form before De Morgan lowering;
+    // doing so preserves a mux primitive for mapping and avoids four nodes.
+    if let (Some(left_product), Some(right_product)) = (
+        binary_fanins(store, left, NodeKind::And),
+        binary_fanins(store, right, NodeKind::And),
+    ) && let Some((select, when_true, when_false)) =
+        complementary_product_factor(left_product, right_product)
+    {
+        return canonical_mux(store, select, when_true, when_false, origin);
+    }
+    canonical_and(store, left.inverted(), right.inverted(), origin).map(Lit::inverted)
+}
+
+/// Canonicalizes a exclusive-or. Shared by every [`Canonical`] store so the builder and
+/// the read-only probe agree on which structural node an expression denotes.
+fn canonical_xor<C: Canonical + ?Sized>(
+    store: &mut C,
+    left: Lit,
+    right: Lit,
+    origin: u32,
+) -> Result<Lit, C::Error> {
+    if left == Lit::FALSE {
+        return Ok(right);
+    }
+    if right == Lit::FALSE {
+        return Ok(left);
+    }
+    if left == Lit::TRUE {
+        return Ok(right.inverted());
+    }
+    if right == Lit::TRUE {
+        return Ok(left.inverted());
+    }
+    if left == right {
+        return Ok(Lit::FALSE);
+    }
+    if left == right.inverted() {
+        return Ok(Lit::TRUE);
+    }
+    // Phase is normalized onto the result; the structural key therefore
+    // contains only positive fanins and has a unique commutative form.
+    let inverted = left.is_inverted() ^ right.is_inverted();
+    let left = left.positive();
+    let right = right.positive();
+    if left == right {
+        return Ok(LogicBuilder::constant(inverted));
+    }
+    let left_fanins = binary_fanins(store, left, NodeKind::Xor);
+    let right_fanins = binary_fanins(store, right, NodeKind::Xor);
+    if let Some(remaining) = left_fanins.and_then(|fanins| xor_remaining(fanins, right)) {
+        return Ok(with_phase(remaining, inverted));
+    }
+    if let Some(remaining) = right_fanins.and_then(|fanins| xor_remaining(fanins, left)) {
+        return Ok(with_phase(remaining, inverted));
+    }
+    if let (Some(left_fanins), Some(right_fanins)) = (left_fanins, right_fanins)
+        && let Some((left_remaining, right_remaining)) =
+            xor_shared_remaining(left_fanins, right_fanins)
+    {
+        return canonical_xor(store, left_remaining, right_remaining, origin)
+            .map(|value| with_phase(value, inverted));
+    }
+    let (left, right) = ordered(left, right);
+    store
+        .resolve(
+            NodeKey::Xor(left, right),
+            NodeKind::Xor,
+            left,
+            right,
+            Lit::FALSE,
+            origin,
+        )
+        .map(|value| with_phase(value, inverted))
+}
+
+/// Canonicalizes a two-way multiplexer. Shared by every [`Canonical`] store so the builder and
+/// the read-only probe agree on which structural node an expression denotes.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ordered mux identities form one canonicalization decision table"
+)]
+fn canonical_mux<C: Canonical + ?Sized>(
+    store: &mut C,
+    select: Lit,
+    then_value: Lit,
+    else_value: Lit,
+    origin: u32,
+) -> Result<Lit, C::Error> {
+    if select == Lit::FALSE {
+        return Ok(else_value);
+    }
+    if select == Lit::TRUE || then_value == else_value {
+        return Ok(then_value);
+    }
+    if then_value == Lit::TRUE && else_value == Lit::FALSE {
+        return Ok(select);
+    }
+    if then_value == Lit::FALSE && else_value == Lit::TRUE {
+        return Ok(select.inverted());
+    }
+    // Normalize an inverted selector by swapping arms, then push a common
+    // inverted arm phase onto the result. This makes the intern key unique.
+    let (select, mut then_value, mut else_value) = if select.is_inverted() {
+        (select.positive(), else_value, then_value)
+    } else {
+        (select, then_value, else_value)
+    };
+    let inverted = then_value.is_inverted() && else_value.is_inverted();
+    if inverted {
+        then_value = then_value.positive();
+        else_value = else_value.positive();
+    }
+    if then_value == else_value.inverted() {
+        return canonical_xor(store, select, else_value, origin)
+            .map(|value| with_phase(value, inverted));
+    }
+    let reduced = if then_value == Lit::TRUE || then_value == select {
+        Some(canonical_or(store, select, else_value, origin)?)
+    } else if then_value == Lit::FALSE || then_value == select.inverted() {
+        Some(canonical_and(store, select.inverted(), else_value, origin)?)
+    } else if else_value == Lit::FALSE || else_value == select {
+        Some(canonical_and(store, select, then_value, origin)?)
+    } else if else_value == Lit::TRUE || else_value == select.inverted() {
+        Some(canonical_or(store, select.inverted(), then_value, origin)?)
+    } else {
+        None
+    };
+    if let Some(reduced) = reduced {
+        return Ok(with_phase(reduced, inverted));
+    }
+    // Collapse nested muxes controlled by the same selector before trying
+    // the more expensive cross-arm factoring rules below.
+    let mut changed = false;
+    if let Some((inner_select, inner_then, _)) = mux_fanins(store, then_value)
+        && inner_select == select
+    {
+        then_value = inner_then;
+        changed = true;
+    }
+    if let Some((inner_select, _, inner_else)) = mux_fanins(store, else_value)
+        && inner_select == select
+    {
+        else_value = inner_else;
+        changed = true;
+    }
+    if changed {
+        return canonical_mux(store, select, then_value, else_value, origin)
+            .map(|value| with_phase(value, inverted));
+    }
+    if let Some((inner_select, inner_then, inner_else)) = mux_fanins(store, then_value) {
+        let combined = if else_value == inner_else {
+            Some(canonical_and(store, select, inner_select, origin)?)
+        } else if else_value == inner_then {
+            Some(canonical_or(
+                store,
+                select.inverted(),
+                inner_select,
+                origin,
+            )?)
+        } else {
+            None
+        };
+        if let Some(combined) = combined {
+            return canonical_mux(store, combined, inner_then, inner_else, origin)
+                .map(|value| with_phase(value, inverted));
+        }
+    }
+    if let Some((inner_select, inner_then, inner_else)) = mux_fanins(store, else_value) {
+        let combined = if then_value == inner_then {
+            Some(canonical_or(store, select, inner_select, origin)?)
+        } else if then_value == inner_else {
+            Some(canonical_and(
+                store,
+                select.inverted(),
+                inner_select,
+                origin,
+            )?)
+        } else {
+            None
+        };
+        if let Some(combined) = combined {
+            return canonical_mux(store, combined, inner_then, inner_else, origin)
+                .map(|value| with_phase(value, inverted));
+        }
+    }
+    if let (Some(then_mux), Some(else_mux)) =
+        (mux_fanins(store, then_value), mux_fanins(store, else_value))
+        && then_mux.0 == else_mux.0
+    {
+        let factored = if then_mux.1 == else_mux.1 {
+            let remaining = canonical_mux(store, select, then_mux.2, else_mux.2, origin)?;
+            Some(canonical_mux(
+                store, then_mux.0, then_mux.1, remaining, origin,
+            )?)
+        } else if then_mux.2 == else_mux.2 {
+            let remaining = canonical_mux(store, select, then_mux.1, else_mux.1, origin)?;
+            Some(canonical_mux(
+                store, then_mux.0, remaining, then_mux.2, origin,
+            )?)
+        } else {
+            None
+        };
+        if let Some(factored) = factored {
+            return Ok(with_phase(factored, inverted));
+        }
+    }
+    let result = store.resolve(
+        NodeKey::Mux(select, then_value, else_value),
+        NodeKind::Mux,
+        select,
+        then_value,
+        else_value,
+        origin,
+    )?;
+    Ok(with_phase(result, inverted))
+}
+
+fn binary_fanins<C: Canonical + ?Sized>(
+    store: &C,
+    value: Lit,
+    kind: NodeKind,
+) -> Option<(Lit, Lit)> {
+    if value.is_inverted() || store.kind(value.node())? != kind {
+        return None;
+    }
+    Some((store.fanin(value.node(), 0)?, store.fanin(value.node(), 1)?))
+}
+
+fn mux_fanins<C: Canonical + ?Sized>(store: &C, value: Lit) -> Option<(Lit, Lit, Lit)> {
+    if value.is_inverted() || store.kind(value.node())? != NodeKind::Mux {
+        return None;
+    }
+    Some((
+        store.fanin(value.node(), 0)?,
+        store.fanin(value.node(), 1)?,
+        store.fanin(value.node(), 2)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_resolves_exactly_the_expressions_the_builder_would_not_allocate() {
+        let mut builder = LogicBuilder::new();
+        let inputs = (1..=4)
+            .map(|origin| builder.input(origin).unwrap())
+            .collect::<Vec<_>>();
+        let [a, b, c, d] = [inputs[0], inputs[1], inputs[2], inputs[3]];
+        let ab = builder.and(a, b, 0).unwrap();
+        let cd = builder.and(c, d, 0).unwrap();
+        let parity = builder.xor(a, c, 0).unwrap();
+        let chosen = builder.mux(b, ab, cd, 0).unwrap();
+        let network = builder.clone().freeze();
+        let index = StructuralIndex::of(&network);
+        let mut probe = LogicProbe::new(&network, &index);
+
+        // Every expression already built resolves to the same literal, through
+        // interning, commutativity, and edge-phase normalization alike.
+        assert_eq!(probe.and(b, a), Ok(ab));
+        assert_eq!(probe.and(d, c), Ok(cd));
+        assert_eq!(probe.xor(c, a), Ok(parity));
+        assert_eq!(probe.xor(c.inverted(), a), Ok(parity.inverted()));
+        assert_eq!(probe.mux(b, ab, cd), Ok(chosen));
+
+        // Identities that allocate nothing hold without consulting the index.
+        assert_eq!(probe.and(ab, ab), Ok(ab));
+        assert_eq!(probe.and(ab, ab.inverted()), Ok(Lit::FALSE));
+        assert_eq!(probe.and(ab, a), Ok(ab));
+
+        // An expression with no node reports itself absent, and so does every
+        // expression built on top of it.
+        let missing = builder.and(a, c, 0).unwrap();
+        assert_eq!(probe.and(a, c), Err(Absent));
+        assert_eq!(probe.and(builder.and(a, c, 0).unwrap(), d), Err(Absent));
+        assert_eq!(builder.and(a, c, 0).unwrap(), missing);
+    }
 
     #[test]
     fn mixed_network_hashes_nodes_and_encodes_inversion_on_edges() {

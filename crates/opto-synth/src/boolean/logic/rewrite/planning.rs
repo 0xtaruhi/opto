@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    ApprovedDivisors, CandidateDecision, CutDatabase, DIVISOR_CAP, Decision, DivisorFunctions,
-    DivisorRef, Divisors, KCut, LogicGraph, LogicNodeId, MAX_PLAN_NODES, MFFC_NODE_BUDGET,
-    MffcScratch, Plan, PlanRecipe, RecipeNode, RewriteRecipeCache, RewriteRecipeKey, SupportIndex,
-    Synthesizer, TimingBudget, WINDOW_CUT_LEAVES, node_weight, window_cares,
+    AND_WEIGHT, ApprovedDivisors, CandidateDecision, CutDatabase, DIVISOR_CAP, Decision,
+    DivisorFunctions, DivisorRef, Divisors, KCut, LogicGraph, LogicNodeId, MAX_PLAN_NODES,
+    MFFC_NODE_BUDGET, MUX_WEIGHT, MffcScratch, Plan, PlanInputs, PlanRecipe, RecipeNode,
+    RewriteRecipeCache, RewriteRecipeKey, SupportIndex, Synthesizer, TimingBudget,
+    WINDOW_CUT_LEAVES, XOR_WEIGHT, node_weight, window_cares,
 };
+use opto_ir::logic::{Lit, LogicProbe, StructuralIndex};
 
 #[derive(Clone, Copy)]
 pub(super) struct DecisionAnalysis<'a> {
@@ -20,6 +22,7 @@ pub(super) struct DecisionAnalysis<'a> {
     pub(super) recipe_cache: &'a RewriteRecipeCache,
     pub(super) incremental_metrics: &'a crate::incremental::IncrementalRunMetrics,
     pub(super) check_incremental: bool,
+    pub(super) structural: &'a StructuralIndex,
 }
 
 pub(super) fn decide_node(
@@ -39,6 +42,7 @@ pub(super) fn decide_node(
         recipe_cache,
         incremental_metrics,
         check_incremental,
+        structural,
     } = *analysis;
     if active.is_some_and(|active| !active[index]) {
         return Ok(None);
@@ -93,14 +97,23 @@ pub(super) fn decide_node(
             }
             recipe.map(|recipe| (cost, recipe))
         };
-        if let Some((plain_cost, recipe)) = plain
+        if let Some((_, recipe)) = plain
             && recipe.proves(truth, u64::MAX, &[])
             && let Some(score) = proposal_score(
                 network,
                 timing,
                 node,
                 RegionCost::removed(network, node, available, dying.len()),
-                RegionCost::replacement_recipe(plain_cost, &recipe, &levels[..cut.len()]),
+                RegionCost::replacement_recipe(
+                    added_cost(
+                        &recipe,
+                        cut.leaves(),
+                        dying,
+                        &mut LogicProbe::new(network.storage_network(), structural),
+                    ),
+                    &recipe,
+                    &levels[..cut.len()],
+                ),
             )
             && best_score.is_none_or(|best| score > best)
         {
@@ -170,7 +183,17 @@ pub(super) fn decide_node(
                 node,
                 RegionCost::removed(network, node, available, dying.len()),
                 RegionCost::replacement_recipe(
-                    cost,
+                    divisor_leaves(cut, &divisors).map_or(
+                        (recipe_ops(&recipe), cost),
+                        |leaves: PlanInputs| {
+                            added_cost(
+                                &recipe,
+                                leaves.as_slice(),
+                                dying,
+                                &mut LogicProbe::new(network.storage_network(), structural),
+                            )
+                        },
+                    ),
                     &recipe,
                     &levels[..cut.len() + divisors.len()],
                 ),
@@ -209,6 +232,88 @@ pub(super) struct RegionCost {
     depth: u32,
 }
 
+/// Collects the recipe inputs of a divisor proposal as network literals.
+///
+/// A virtual divisor has no node yet, so its plan cannot be priced against the
+/// network and the caller falls back to charging the whole recipe.
+fn divisor_leaves(cut: KCut, divisors: &Divisors) -> Option<PlanInputs> {
+    let mut leaves = cut.leaves().iter().copied().collect::<PlanInputs>();
+    for &(divisor, _) in divisors {
+        match divisor {
+            DivisorRef::Node(node) => leaves.push(node),
+            DivisorRef::Virtual(_) => return None,
+        }
+    }
+    Some(leaves)
+}
+
+/// Counts the recipe operations that structural hashing would have to create,
+/// and the weight they would add, given a network that already contains some of
+/// them. Resolution runs through [`opto_ir::logic::LogicProbe`], so the answer
+/// is the one materialization will produce rather than an estimate.
+///
+/// `dying` is the replaced region: those nodes are removed by the very rewrite
+/// being priced, so a plan cannot reuse them. Counting them as present would
+/// credit their removal and their reuse at the same time, which scores a
+/// rewrite that keeps the region alive as if it had deleted it.
+pub(super) fn added_cost(
+    recipe: &PlanRecipe,
+    leaves: &[LogicNodeId],
+    dying: &[u32],
+    probe: &mut LogicProbe<'_>,
+) -> (u32, u32) {
+    let mut values: Vec<Option<Lit>> = Vec::with_capacity(recipe.0.len());
+    let (mut gates, mut weight) = (0, 0);
+    for node in &recipe.0 {
+        let resolved = match *node {
+            RecipeNode::Constant(value) => Some(Ok(LogicGraph::constant(value).lit())),
+            RecipeNode::Literal { var, inverted } => {
+                let leaf = leaves[usize::from(var)];
+                Some(Ok(if inverted { leaf.inverted() } else { leaf }.lit()))
+            }
+            RecipeNode::And(left, right) => values[usize::from(left)]
+                .zip(values[usize::from(right)])
+                .map(|(left, right)| probe.and(left, right)),
+            RecipeNode::Or(left, right) => values[usize::from(left)]
+                .zip(values[usize::from(right)])
+                .map(|(left, right)| probe.or(left, right)),
+            RecipeNode::Xor(left, right) => values[usize::from(left)]
+                .zip(values[usize::from(right)])
+                .map(|(left, right)| probe.xor(left, right)),
+            RecipeNode::Mux {
+                select,
+                then_plan,
+                else_plan,
+            } => values[usize::from(then_plan)]
+                .zip(values[usize::from(else_plan)])
+                .map(|(then_value, else_value)| {
+                    probe.mux(leaves[usize::from(select)].lit(), then_value, else_value)
+                }),
+        };
+        let value = match resolved {
+            Some(Ok(value))
+                if u32::try_from(value.node().index())
+                    .is_ok_and(|index| !dying.contains(&index)) =>
+            {
+                Some(value)
+            }
+            // Absent, dying, or built on one of those: materialization creates it.
+            Some(_) | None => None,
+        };
+        if value.is_none() {
+            gates += 1;
+            weight += match node {
+                RecipeNode::Constant(_) | RecipeNode::Literal { .. } => 0,
+                RecipeNode::And(..) | RecipeNode::Or(..) => AND_WEIGHT,
+                RecipeNode::Xor(..) => XOR_WEIGHT,
+                RecipeNode::Mux { .. } => MUX_WEIGHT,
+            };
+        }
+        values.push(value);
+    }
+    (gates, weight)
+}
+
 impl RegionCost {
     fn removed(network: &LogicGraph, node: LogicNodeId, weight: u32, gates: usize) -> Self {
         Self {
@@ -220,10 +325,16 @@ impl RegionCost {
         }
     }
 
-    fn replacement_recipe(weight: u32, plan: &PlanRecipe, inputs: &[u32]) -> Self {
+    /// Prices a replacement by the nodes materialization would actually add.
+    ///
+    /// `new` is the gate count and weight of the recipe operations the network
+    /// does not already contain; structural hashing gives the rest away, so
+    /// charging for them would reject rewrites that cost nothing.
+    fn replacement_recipe(new: (u32, u32), plan: &PlanRecipe, inputs: &[u32]) -> Self {
+        let (gates, weight) = new;
         Self {
             weight,
-            gates: recipe_ops(plan),
+            gates,
             depth: recipe_level(plan, inputs),
         }
     }
