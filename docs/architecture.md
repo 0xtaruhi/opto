@@ -1262,6 +1262,23 @@ machinery cost more to carry than it could ever return. RFC 11 keeps a choice
 graph on the roadmap; when it lands it will nominate choices inside one subject
 rather than cover whole implementations against each other.
 
+## Mapped Resynthesis Rounds
+
+A resynthesis round derives candidates for a dirty frontier, commits the
+non-conflicting ones, and re-derives whatever the commits invalidated. Two facts
+about that loop were being thrown away between rounds.
+
+A candidate that conflicts with a selected one is still derived from a mapped
+generation no commit has reached, so it is carried to the next round and
+scheduled in its frontier position rather than derived again. And a search that
+found nothing depends only on the cells it read, which the invalidation walk
+over-approximates by design; recording that read set keeps a handful of cells
+with an expensive exhaustive search from being asked the same question every
+round. On Ibex SKY130 one cell answered "nothing" in 70 ms, 23 times.
+
+Both are exact: a carried candidate whose cells a commit reached is dropped, and
+a recorded search is repeated as soon as any cell it read is touched.
+
 ## Window Care Sets and Exact Recovery
 
 Two analyses decide what they need before they compute it, because doing so

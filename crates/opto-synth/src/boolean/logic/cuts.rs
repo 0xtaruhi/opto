@@ -15,6 +15,43 @@ use crate::boolean::logic::TruthTable;
 
 const CUT_ANALYSIS_CHUNK_ITEMS: usize = 4096;
 
+/// Decides whether translating a node's predecessors' cut leaves keeps their
+/// order, which is what makes a translated cut set equal to a recomputed one.
+///
+/// The rows are already sorted by old node index, so the union is walked as a
+/// merge rather than rebuilt and sorted.
+fn translation_preserves_predecessor_rank(
+    leaves: &opto_core::PackedRows<u32>,
+    old_predecessors: &[Option<u32>; 3],
+    old_to_new: &[Option<LogicNodeId>],
+) -> bool {
+    let mut rows = [[].as_slice(); 3];
+    let mut row_count = 0;
+    for old in old_predecessors.iter().flatten() {
+        rows[row_count] = leaves.row(*old as usize);
+        row_count += 1;
+    }
+    let rows = &mut rows[..row_count];
+    let mut previous_new = None;
+    loop {
+        let Some(next) = rows.iter().filter_map(|row| row.first().copied()).min() else {
+            return true;
+        };
+        for row in rows.iter_mut() {
+            while row.first() == Some(&next) {
+                *row = &row[1..];
+            }
+        }
+        let Some(mapped) = old_to_new.get(next as usize).copied().flatten() else {
+            return false;
+        };
+        if previous_new.is_some_and(|previous| previous >= mapped.index()) {
+            return false;
+        }
+        previous_new = Some(mapped.index());
+    }
+}
+
 fn cut_segment_count(levels: &[Vec<usize>]) -> Result<usize, crate::SynthError> {
     levels.iter().try_fold(0usize, |count, level| {
         count
@@ -292,6 +329,12 @@ impl CutDatabase {
         for index in 0..node_count {
             levels[network.level(LogicNodeId::from_index(index)) as usize].push(index);
         }
+        // The rank check reads the union of a node's predecessors' cut leaves,
+        // and that union is a property of the predecessor, not of the consumer.
+        // Collecting and sorting it per consumer dominated the pass; collecting
+        // it once per predecessor is both fewer passes over the same leaves and
+        // work that happens outside the level-serialized loop.
+        let predecessor_leaves = previous.sorted_leaves(runtime)?;
         let segment_count = cut_segment_count(&levels)?;
         let mut arena = Vec::<Box<[KCut]>>::with_capacity(segment_count);
         let mut ranges = vec![CutRange::UNINITIALIZED; node_count];
@@ -314,7 +357,8 @@ impl CutDatabase {
                         .all(|(new, old)| new_to_old[new.index()] == Some(*old));
                     let rank_preserved = fanins_unchanged
                         && predecessors_correspond
-                        && previous.translation_preserves_predecessor_rank(
+                        && translation_preserves_predecessor_rank(
+                            &predecessor_leaves,
                             &old_predecessors[index],
                             old_to_new,
                         );
@@ -406,33 +450,30 @@ impl CutDatabase {
         Some(translated)
     }
 
-    fn translation_preserves_predecessor_rank(
+    /// The distinct cut leaves of every node, sorted, one row per node.
+    ///
+    /// This is the input to the incremental rank check, hoisted out of it: the
+    /// same leaf union was otherwise rebuilt and re-sorted once per consumer.
+    fn sorted_leaves(
         &self,
-        old_predecessors: &[Option<u32>; 3],
-        old_to_new: &[Option<LogicNodeId>],
-    ) -> bool {
-        let mut leaves = old_predecessors
-            .iter()
-            .flatten()
-            .map(|old| LogicNodeId::from_index(*old as usize))
-            .flat_map(|old_fanin| self.cuts(old_fanin))
-            .flat_map(KCut::leaves)
-            .map(|leaf| leaf.index())
-            .collect::<Vec<_>>();
-        leaves.sort_unstable();
-        leaves.dedup();
-        let mut previous = None;
-        for leaf in leaves {
-            let Some(mapped) = old_to_new.get(leaf).copied().flatten() else {
-                return false;
-            };
-            let mapped = mapped.index();
-            if previous.is_some_and(|previous| previous >= mapped) {
-                return false;
-            }
-            previous = Some(mapped);
-        }
-        true
+        runtime: &ExecutionContext,
+    ) -> Result<opto_core::PackedRows<u32>, crate::SynthError> {
+        let rows = runtime.analyze_indexed(self.rows.row_count(), |index| {
+            let mut leaves = self
+                .cuts(LogicNodeId::from_index(index))
+                .iter()
+                .flat_map(KCut::leaves)
+                .map(|leaf| {
+                    u32::try_from(leaf.index())
+                        .expect("logic node index is bounded by compact graph storage")
+                })
+                .collect::<Vec<_>>();
+            leaves.sort_unstable();
+            leaves.dedup();
+            Ok::<_, crate::SynthError>(leaves)
+        })?;
+        opto_core::PackedRows::try_from_row_iter(rows.into_iter().map(Vec::into_iter))
+            .map_err(|_| crate::SynthError::capacity("logic cut leaf index exceeds capacity"))
     }
 
     pub(crate) fn assert_same(&self, other: &Self) {

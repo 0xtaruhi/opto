@@ -113,6 +113,45 @@ pub(super) fn optimize(
     if !policy.area_resynthesis {
         return Ok(session.finish());
     }
+    resynthesize_dirty_cells(
+        &mut session,
+        ResynthesisScope {
+            catalog,
+            runtime,
+            trace,
+            diagnostics,
+            optimization_boundary: &optimization_boundary,
+        },
+        cleanup_dirty,
+        phase_started,
+    )?;
+    Ok(session.finish())
+}
+
+/// Everything one resynthesis sweep reads but never edits.
+#[derive(Clone, Copy)]
+struct ResynthesisScope<'a> {
+    catalog: &'a super::candidates::PostmapCellCatalog,
+    runtime: &'a opto_runtime::ExecutionContext,
+    trace: crate::api::diagnostics::SynthTrace,
+    diagnostics: crate::SynthesisDiagnostics,
+    optimization_boundary: &'a hashbrown::HashSet<opto_ir::mapped::NetId>,
+}
+
+/// Rewrites mapped cells whose context moved, until nothing is left to rewrite.
+fn resynthesize_dirty_cells(
+    session: &mut AreaOptimizationSession<'_>,
+    scope: ResynthesisScope<'_>,
+    cleanup_dirty: std::collections::HashSet<opto_ir::mapped::CellId>,
+    phase_started: std::time::Instant,
+) -> Result<(), crate::SynthError> {
+    let ResynthesisScope {
+        catalog,
+        runtime,
+        trace,
+        diagnostics,
+        optimization_boundary,
+    } = scope;
     let functions = catalog.mfs_functions();
     let resynthesis = catalog.mfs_resynthesis(super::mfs::ResynthesisObjective::Area);
     let evaluation_budget = super::session::default_evaluation_budget(session.mapped.cell_count());
@@ -139,7 +178,7 @@ pub(super) fn optimize(
             session.mapped,
             functions,
             &drivers,
-            &optimization_boundary,
+            optimization_boundary,
             seeds,
             &mut dirty,
         );
@@ -147,14 +186,31 @@ pub(super) fn optimize(
     // Candidate generation is read-only and parallel within a sweep. Selection
     // and commit are ordered afterward, so every task observes one mapped
     // generation and no accepted edit depends on worker completion order.
+    //
+    // A candidate held over from the previous round is derived from a mapped
+    // generation no committed edit has reached, so it is scheduled in its
+    // frontier position but not derived again. Scheduling over the whole
+    // frontier keeps the selection order independent of which candidates were
+    // carried and which were derived.
+    let mut retained = std::collections::HashMap::<opto_ir::mapped::CellId, _>::new();
+    // A search that found nothing depends only on the cells it read, which the
+    // invalidation walk deliberately over-approximates. Remembering the read set
+    // keeps the few cells with an expensive search from being asked the same
+    // question every round.
+    let mut barren = std::collections::HashMap::<opto_ir::mapped::CellId, Vec<_>>::new();
     loop {
         if evaluations >= evaluation_budget {
             break;
         }
+        let frontier = dirty
+            .iter()
+            .copied()
+            .chain(retained.keys().copied())
+            .collect::<std::collections::HashSet<_>>();
         let work = super::region::scoped_work(
             session.mapped,
-            &dirty,
-            super::region::scheduling_cell_budget(dirty.len(), runtime.parallelism()),
+            &frontier,
+            super::region::scheduling_cell_budget(frontier.len(), runtime.parallelism()),
         )?;
         let cell_count = work.iter().map(|work| work.cells.len()).sum::<usize>();
         if work.is_empty() {
@@ -171,7 +227,6 @@ pub(super) fn optimize(
             let mapped = &*session.mapped;
             let implementations = &*session.implementations;
             let drivers = &drivers;
-            let optimization_boundary = &optimization_boundary;
             let context = super::mfs::OptimizationContext {
                 mapped,
                 implementations,
@@ -181,11 +236,20 @@ pub(super) fn optimize(
                 boundary: optimization_boundary,
                 diagnostics: diagnostics.mfs,
             };
+            let dirty = &dirty;
             runtime.map_ordered(tasks, move |work| {
                 Ok::<_, crate::SynthError>(
                     work.cells
                         .into_iter()
-                        .map(|cell| (cell, super::mfs::optimization_candidate(context, cell)))
+                        .map(|cell| {
+                            let mut read = Vec::new();
+                            let candidate = dirty.contains(&cell).then(|| {
+                                super::mfs::optimization_candidate_reading(
+                                    context, cell, &mut read,
+                                )
+                            });
+                            (cell, candidate.flatten(), read)
+                        })
                         .collect::<Vec<_>>(),
                 )
             })?
@@ -193,16 +257,27 @@ pub(super) fn optimize(
         crate::api::diagnostics::trace!(
             trace,
             "postmap.area.mfs_generate",
-            "scoped_cells={cell_count} cells={} wall={:?} par={}",
-            session.mapped.cell_count(),
-            sweep_started.elapsed(),
-            runtime.parallelism()
+            "scoped_cells={cell_count} derived={} wall={:?}",
+            dirty.len(),
+            sweep_started.elapsed()
         );
         let apply_started = std::time::Instant::now();
         let mut touched = std::collections::HashSet::new();
         let mut next_dirty = std::collections::HashSet::new();
-        let batch = select_non_conflicting(candidates.into_iter().flatten());
-        next_dirty.extend(batch.deferred);
+        let pool = candidates
+            .into_iter()
+            .flatten()
+            .map(|(cell, candidate, read)| {
+                if candidate.is_none() && !read.is_empty() {
+                    barren.insert(cell, read);
+                }
+                let candidate = candidate.or_else(|| retained.remove(&cell));
+                (cell, candidate)
+            })
+            .collect::<Vec<_>>();
+        let batch = select_non_conflicting(pool);
+        retained.clear();
+        retained.extend(batch.deferred);
         for (cell, candidate) in batch.selected {
             if evaluations >= evaluation_budget {
                 break;
@@ -228,6 +303,7 @@ pub(super) fn optimize(
                 }
             }
         }
+        let touched_cells = touched.clone();
         crate::api::diagnostics::trace!(
             trace,
             "postmap.area.mfs_apply",
@@ -239,17 +315,22 @@ pub(super) fn optimize(
         if evaluations >= evaluation_budget {
             break;
         }
-        if touched.is_empty() && next_dirty.is_empty() {
+        if touched.is_empty() && next_dirty.is_empty() && retained.is_empty() {
             break;
         }
         super::mfs::extend_candidate_invalidation(
             session.mapped,
             functions,
             &drivers,
-            &optimization_boundary,
+            optimization_boundary,
             touched,
             &mut next_dirty,
         );
+        // A committed edit reached these cells, so any candidate carried for
+        // them describes a netlist that no longer exists. Derive them again.
+        retained.retain(|cell, _| !next_dirty.contains(cell));
+        barren.retain(|_, read| !read.iter().any(|cell| touched_cells.contains(cell)));
+        next_dirty.retain(|cell| !barren.contains_key(cell));
         dirty = next_dirty;
     }
 
@@ -260,7 +341,7 @@ pub(super) fn optimize(
         session.mapped.cell_count(),
         phase_started.elapsed()
     );
-    Ok(session.finish())
+    Ok(())
 }
 
 /// Removes every cell whose output no design object reads, and records the cells

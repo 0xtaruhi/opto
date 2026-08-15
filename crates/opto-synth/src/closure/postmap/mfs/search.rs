@@ -351,6 +351,7 @@ impl<F: FnMut(&[usize], &[u64])> ProjectionTraversal<'_, '_, F> {
 pub(super) fn wire_replacement_for(
     context: OptimizationContext<'_>,
     cell: CellId,
+    read: &mut Vec<CellId>,
 ) -> Option<PostmapCandidate> {
     let OptimizationContext {
         mapped,
@@ -484,6 +485,11 @@ pub(super) fn wire_replacement_for(
             guard.push(cone_cell);
         }
     }
+    read.extend(guard.iter().copied());
+    read.extend(consumers.iter().filter_map(|&pin| mapped.pin_owner(pin)));
+    read.push(cell);
+    read.sort_unstable();
+    read.dedup();
     let full_words = filled(true, input_count);
     let nets = sorted_candidate_nets(&window.bits, &tainted);
     let mffc_area = driver_mffc(mapped, implementations, functions, boundary, cell, &[])

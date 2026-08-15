@@ -294,8 +294,24 @@ pub(super) fn optimization_candidate(
     context: OptimizationContext<'_>,
     cell: CellId,
 ) -> Option<PostmapCandidate> {
+    optimization_candidate_reading(context, cell, &mut Vec::new())
+}
+
+/// Derives one cell's candidate and reports the cells the derivation read.
+///
+/// A search that finds nothing has to be repeated only when one of those cells
+/// changes. The invalidation walk is deliberately a superset of that, so a few
+/// cells with an expensive search were re-derived every round to learn the same
+/// answer. `read` is left empty when the search stopped before it knew its
+/// window, which keeps the caller conservative.
+pub(super) fn optimization_candidate_reading(
+    context: OptimizationContext<'_>,
+    cell: CellId,
+    read: &mut Vec<CellId>,
+) -> Option<PostmapCandidate> {
+    read.clear();
     dead_cell_candidate(context.mapped, context.functions, context.boundary, cell)
-        .or_else(|| wire_replacement_for(context, cell))
+        .or_else(|| wire_replacement_for(context, cell, read))
 }
 
 const ODC_DEPTH: usize = 5;
