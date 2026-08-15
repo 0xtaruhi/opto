@@ -7,8 +7,8 @@
 //! inputs with the same origin share one SAT literal across compared networks.
 
 use super::{FormalError, ProofOutcome, ProofReport};
+use crate::sat::{Lit, SatSolver};
 use std::collections::BTreeMap;
-use varisat::{ExtendFormula, Lit, Solver};
 
 /// Proves equivalence between two Boolean networks at corresponding outputs.
 ///
@@ -172,7 +172,7 @@ fn prove_encoded_literal_equivalence(
                 source,
             })?;
         if separable {
-            refutations.push(encoder.boundary_assignment());
+            refutations.push(encoder.boundary_assignment()?);
             return Ok(false);
         }
     }
@@ -180,7 +180,7 @@ fn prove_encoded_literal_equivalence(
 }
 
 struct LogicMiter {
-    solver: Solver<'static>,
+    solver: SatSolver,
     constant_false: Lit,
     inputs: BTreeMap<u32, Lit>,
     clauses: usize,
@@ -289,7 +289,7 @@ pub(crate) fn encode_logic_network(
 
 impl LogicMiter {
     fn new() -> Self {
-        let mut solver = Solver::new();
+        let mut solver = SatSolver::new();
         let constant_false = solver.new_lit();
         solver.add_clause(&[!constant_false]);
         Self {
@@ -301,23 +301,27 @@ impl LogicMiter {
         }
     }
 
-    /// Reads assigned encoded inputs in ascending origin order.
-    fn boundary_assignment(&self) -> BoundaryRefutation {
-        let model = self.solver.model().unwrap_or_default();
-        let mut values = vec![None; model.iter().map(|lit| lit.index() + 1).max().unwrap_or(0)];
-        for literal in model {
-            values[literal.index()] = Some(literal.is_positive());
-        }
-        BoundaryRefutation {
-            assignment: self
-                .inputs
-                .iter()
-                .filter_map(|(&origin, literal)| {
-                    let value = values.get(literal.index()).copied().flatten()?;
-                    Some((origin, value != literal.is_negative()))
-                })
-                .collect(),
-        }
+    /// Reads the boundary half of the current satisfying assignment.
+    ///
+    /// Only encoded inputs are reported, in ascending origin order, so the
+    /// result is stable across solver runs that assign unrelated internal
+    /// variables differently.
+    fn boundary_assignment(&self) -> Result<BoundaryRefutation, FormalError> {
+        let assignment = self
+            .inputs
+            .iter()
+            .filter_map(|(&origin, &literal)| {
+                self.solver
+                    .literal_value(literal)
+                    .transpose()
+                    .map(|result| result.map(|value| (origin, value != literal.is_neg())))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| FormalError::Solver {
+                context: "logic equivalence counterexample",
+                source,
+            })?;
+        Ok(BoundaryRefutation { assignment })
     }
 
     fn encode_network(

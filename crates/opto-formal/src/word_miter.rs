@@ -9,12 +9,12 @@
 
 use super::logic::{LogicEncoding, encode_logic_network};
 use super::{FormalError, ProofOutcome, ProofReport};
+use crate::sat::{Lit, SatSolver};
 use opto_ir::BitVal;
 use opto_ir::word;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod arithmetic;
-use varisat::{ExtendFormula, Lit, Solver};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Exact finite transition relation under the encoded signal-cut model.
@@ -689,7 +689,7 @@ fn prove_value_bits_with_cut(
 }
 struct CnfEncoder<'model> {
     module: &'model word::WordModule,
-    solver: Solver<'static>,
+    solver: SatSolver,
     values: Vec<Option<Vec<Lit>>>,
     signals: BTreeMap<(word::SignalId, u32), Lit>,
     encoded_values: usize,
@@ -705,7 +705,7 @@ impl<'model> CnfEncoder<'model> {
     fn new(module: &'model word::WordModule) -> Self {
         Self {
             module,
-            solver: Solver::new(),
+            solver: SatSolver::new(),
             values: vec![None; module.values().len()],
             signals: BTreeMap::new(),
             encoded_values: 0,

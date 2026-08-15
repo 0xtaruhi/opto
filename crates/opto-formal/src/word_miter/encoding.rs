@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{BitVal, CnfEncoder, ExtendFormula, FormalError, Lit, word};
+use super::{BitVal, CnfEncoder, FormalError, Lit, word};
 
 impl CnfEncoder<'_> {
     pub(super) fn value(&mut self, id: word::ValueId) -> Result<Vec<Lit>, FormalError> {
@@ -520,19 +520,19 @@ impl CnfEncoder<'_> {
         if let Some(&literal) = self.signals.get(&(signal, bit)) {
             return literal;
         }
-        let literal = self.solver.new_var().positive();
+        let literal = self.solver.new_lit();
         self.signals.insert((signal, bit), literal);
         literal
     }
 
     pub(super) fn constant(&mut self, value: bool) -> Lit {
-        let literal = self.solver.new_var().positive();
+        let literal = self.solver.new_lit();
         self.clause(&[if value { literal } else { !literal }]);
         literal
     }
 
     pub(super) fn and(&mut self, left: Lit, right: Lit) -> Lit {
-        let output = self.solver.new_var().positive();
+        let output = self.solver.new_lit();
         self.clause(&[!left, !right, output]);
         self.clause(&[left, !output]);
         self.clause(&[right, !output]);
@@ -540,7 +540,7 @@ impl CnfEncoder<'_> {
     }
 
     pub(super) fn or(&mut self, left: Lit, right: Lit) -> Lit {
-        let output = self.solver.new_var().positive();
+        let output = self.solver.new_lit();
         self.clause(&[left, right, !output]);
         self.clause(&[!left, output]);
         self.clause(&[!right, output]);
@@ -548,7 +548,7 @@ impl CnfEncoder<'_> {
     }
 
     pub(super) fn xor(&mut self, left: Lit, right: Lit) -> Lit {
-        let output = self.solver.new_var().positive();
+        let output = self.solver.new_lit();
         self.clause(&[!left, !right, !output]);
         self.clause(&[left, right, !output]);
         self.clause(&[left, !right, output]);
@@ -557,7 +557,7 @@ impl CnfEncoder<'_> {
     }
 
     pub(super) fn select(&mut self, cond: Lit, then_value: Lit, else_value: Lit) -> Lit {
-        let output = self.solver.new_var().positive();
+        let output = self.solver.new_lit();
         self.clause(&[!cond, !then_value, output]);
         self.clause(&[!cond, then_value, !output]);
         self.clause(&[cond, !else_value, output]);
