@@ -1262,6 +1262,22 @@ machinery cost more to carry than it could ever return. RFC 11 keeps a choice
 graph on the roadmap; when it lands it will nominate choices inside one subject
 rather than cover whole implementations against each other.
 
+## Speculative Construction Rewinds
+
+Feedback-enable recovery has to build an expression before it can prove whether
+to keep it: the enable and data it extracts are only checkable once they exist
+as Word values. It used to build them in the production module and then walk
+away on a failed proof, leaving the reads, the expressions, the reconstructed
+mux, and their ownership entries resident. They were unreachable, so
+materialization dropped them, but every Word pass, ownership traversal, and
+partition build between then and there still walked them.
+
+The construction now takes an arena boundary first and rewinds to it on every
+declining path. The rewind refuses rather than guesses: values and operations
+are append-only and SSA-ordered, so truncating a suffix cannot strand a
+reference, but a signal, connect, or instance appended over the same span could,
+and the module reports that instead of undoing it.
+
 ## The Initial-State Contract
 
 Constant-register removal proves a register constant by induction over that one

@@ -48,38 +48,23 @@ pub(crate) fn recover_feedback_enables(
     }
 
     for (operation_id, mut register, target, source) in candidates {
+        // Everything the recovery builds is speculative until the proof accepts
+        // it, so the arena boundary is taken first and every declining path
+        // rewinds to it. Leaving the rejected reads, expressions, and mux behind
+        // costs every later Word pass, ownership traversal, and partition build
+        // that has to walk them, on a design where most candidates are rejected.
         let start = ownership.start(module)?;
-        let q = read_target(module, &target, &source)?;
-        ownership.claim_since(module, start, &[operation_id])?;
-        let mut budget = MAX_FEEDBACK_MUX_NODES;
-        let Some(plan) = feedback_update_plan(module, register.d, q, &mut budget)? else {
+        let checkpoint = module.speculation_checkpoint();
+        let Some(recovered) = recover_one_enable(module, &register, &target, &source)? else {
+            module
+                .rollback_speculation(checkpoint)
+                .map_err(crate::SynthError::from)?;
             continue;
         };
-        if !plan.saw_hold || matches!(plan.enable, FeedbackEnable::Always | FeedbackEnable::Never) {
-            continue;
-        }
-        if feedback_enable_type(module, &plan.enable).is_none() {
-            continue;
-        }
-        let start = ownership.start(module)?;
-        let enable = emit_feedback_enable(module, &plan.enable, &source)?;
-        let data = emit_feedback_data(module, &plan.data, &source)?;
-        let reconstructed = module
-            .mux(enable, data, q, source.clone())
-            .map_err(crate::SynthError::from)?;
         ownership.claim_since(module, start, &[operation_id])?;
-        // The decomposition walks a next-state mux tree looking for paths that
-        // hold the register's own output. Nothing about that walk guarantees the
-        // enable and data it extracts reconstruct the original next state, and
-        // an enable that is too narrow silently freezes the register: the design
-        // keeps its reset value and only a long random-stimulus simulation
-        // notices. Prove the identity, and decline the rewrite otherwise.
-        if !enable_recovery_is_equivalent(module, register.d, reconstructed)? {
-            continue;
-        }
-        register.d = data;
+        register.d = recovered.data;
         register.enable = Some(word::Enable {
-            value: enable,
+            value: recovered.enable,
             active_high: true,
         });
         module
@@ -88,6 +73,51 @@ pub(crate) fn recover_feedback_enables(
             .kind = word::OpKind::Register(register);
     }
     Ok(())
+}
+
+/// The enable and data one recovery accepted.
+struct RecoveredEnable {
+    enable: word::ValueId,
+    data: word::ValueId,
+}
+
+/// Decomposes one register's next state into an enable and a data path.
+///
+/// Returns `None` on every declining path. The caller owns the arena rewind,
+/// because the expressions this builds are only reachable through the value it
+/// returns.
+fn recover_one_enable(
+    module: &mut word::WordModule,
+    register: &word::RegisterOp,
+    target: &word::LValue,
+    source: &word::SourceSpan,
+) -> Result<Option<RecoveredEnable>, crate::SynthError> {
+    let q = read_target(module, target, source)?;
+    let mut budget = MAX_FEEDBACK_MUX_NODES;
+    let Some(plan) = feedback_update_plan(module, register.d, q, &mut budget)? else {
+        return Ok(None);
+    };
+    if !plan.saw_hold || matches!(plan.enable, FeedbackEnable::Always | FeedbackEnable::Never) {
+        return Ok(None);
+    }
+    if feedback_enable_type(module, &plan.enable).is_none() {
+        return Ok(None);
+    }
+    let enable = emit_feedback_enable(module, &plan.enable, source)?;
+    let data = emit_feedback_data(module, &plan.data, source)?;
+    let reconstructed = module
+        .mux(enable, data, q, source.clone())
+        .map_err(crate::SynthError::from)?;
+    // The decomposition walks a next-state mux tree looking for paths that hold
+    // the register's own output. Nothing about that walk guarantees the enable
+    // and data it extracts reconstruct the original next state, and an enable
+    // that is too narrow silently freezes the register: the design keeps its
+    // reset value and only a long random-stimulus simulation notices. Prove the
+    // identity, and decline the rewrite otherwise.
+    if !enable_recovery_is_equivalent(module, register.d, reconstructed)? {
+        return Ok(None);
+    }
+    Ok(Some(RecoveredEnable { enable, data }))
 }
 
 /// Proves that a recovered enable and data reconstruct the original next state

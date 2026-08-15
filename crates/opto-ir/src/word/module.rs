@@ -55,6 +55,16 @@ pub struct WordModule {
     pub(super) named_instances: Vec<Option<InstId>>,
 }
 
+/// One module's arena boundary, taken before a speculative construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeculationCheckpoint {
+    values: usize,
+    operations: usize,
+    signals: usize,
+    connects: usize,
+    instances: usize,
+}
+
 fn dense_id<T: Copy>(index: &[Option<T>], name: NameId) -> Option<T> {
     index.get(name.raw() as usize).copied().flatten()
 }
@@ -881,6 +891,56 @@ impl WordModule {
             value,
             source,
         });
+        Ok(())
+    }
+
+    /// Records the arena boundary a speculative construction starts from.
+    ///
+    /// A pass that has to build an expression before it can decide whether to
+    /// keep it takes one of these first and rolls back on every path that
+    /// declines. See [`WordModule::rollback_speculation`].
+    #[must_use]
+    pub fn speculation_checkpoint(&self) -> SpeculationCheckpoint {
+        SpeculationCheckpoint {
+            values: self.values.len(),
+            operations: self.operations.len(),
+            signals: self.signals.len(),
+            connects: self.connects.len(),
+            instances: self.instances.len(),
+        }
+    }
+
+    /// Discards the values and operations appended since `checkpoint`.
+    ///
+    /// Both arenas are append-only and SSA-ordered, so an operation can only
+    /// name values that precede it and truncating a suffix cannot strand a
+    /// reference from what remains. What could strand one is a signal, connect,
+    /// or instance appended over the same span, because those name values
+    /// without ordering constraints; the rollback refuses rather than guess.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WordError`] when the module grew in a way this cannot undo, or
+    /// when `checkpoint` is not a boundary of this module.
+    pub fn rollback_speculation(
+        &mut self,
+        checkpoint: SpeculationCheckpoint,
+    ) -> Result<(), WordError> {
+        if checkpoint.values > self.values.len() || checkpoint.operations > self.operations.len() {
+            return Err(WordError::new(
+                "speculation checkpoint is ahead of the module it came from",
+            ));
+        }
+        if checkpoint.signals != self.signals.len()
+            || checkpoint.connects != self.connects.len()
+            || checkpoint.instances != self.instances.len()
+        {
+            return Err(WordError::new(
+                "speculation added a signal, connection, or instance that rollback cannot undo",
+            ));
+        }
+        self.values.truncate(checkpoint.values);
+        self.operations.truncate(checkpoint.operations);
         Ok(())
     }
 
