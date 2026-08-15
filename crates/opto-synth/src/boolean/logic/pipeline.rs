@@ -188,12 +188,14 @@ fn optimize_canonical(
         };
         state.apply(decomposition)?;
         expanded = true;
-        let optimized = optimize_factored(
+        let optimized = optimize_with(
             &state.network,
             &state.roots,
             requirements,
             diagnostics,
             runtime,
+            None,
+            OptimizationPolicy::Factored,
         )?;
         state.apply(optimized)?;
     }
@@ -203,13 +205,14 @@ fn optimize_canonical(
     // A subject with no MUX node never entered the loop, so it has not been
     // optimized yet. The baseline policy owns that case because it also runs the
     // global sharing census.
-    optimize_baseline(
+    optimize_with(
         source,
         roots,
         requirements,
         diagnostics,
         runtime,
         incremental,
+        OptimizationPolicy::Baseline,
     )
 }
 
@@ -271,12 +274,14 @@ fn small_support_choice(
         factoring_started.elapsed()
     );
     let normalization_started = std::time::Instant::now();
-    let normalized = optimize_factored(
+    let normalized = optimize_with(
         &subject.network,
         &subject.roots,
         requirements,
         diagnostics,
         runtime,
+        None,
+        OptimizationPolicy::Factored,
     )?;
     crate::api::diagnostics::trace!(
         crate::api::diagnostics::SynthTrace::timing(diagnostics),
@@ -293,74 +298,30 @@ fn small_support_choice(
     }))
 }
 
-pub(super) fn optimize_baseline(
+/// The rewrite an optimization path runs, and the only thing that separates
+/// the two paths.
+#[derive(Clone, Copy)]
+pub(super) enum OptimizationPolicy {
+    Baseline,
+    Factored,
+}
+
+/// Optimizes one implementation under `policy`.
+///
+/// A caller without a recipe cache of its own gets a fresh one for the call.
+/// Building it here keeps that fallback in one place rather than once per path.
+pub(super) fn optimize_with(
     network: &LogicGraph,
     roots: &[LogicNodeId],
     requirements: &[Option<f64>],
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
     incremental: Option<RewriteIncremental<'_>>,
-) -> Result<TransformProduct, crate::SynthError> {
-    if let Some(incremental) = incremental {
-        optimize_with(
-            network,
-            roots,
-            requirements,
-            diagnostics,
-            runtime,
-            incremental,
-            OptimizationPolicy::Baseline,
-        )
-    } else {
-        let cache = super::rewrite::RewriteRecipeCache::default();
-        let metrics = crate::incremental::IncrementalRunMetrics::default();
-        optimize_with(
-            network,
-            roots,
-            requirements,
-            diagnostics,
-            runtime,
-            RewriteIncremental::new(&cache, &metrics),
-            OptimizationPolicy::Baseline,
-        )
-    }
-}
-
-fn optimize_factored(
-    network: &LogicGraph,
-    roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-    diagnostics: crate::SynthesisDiagnostics,
-    runtime: &ExecutionContext,
+    policy: OptimizationPolicy,
 ) -> Result<TransformProduct, crate::SynthError> {
     let cache = super::rewrite::RewriteRecipeCache::default();
     let metrics = crate::incremental::IncrementalRunMetrics::default();
-    optimize_with(
-        network,
-        roots,
-        requirements,
-        diagnostics,
-        runtime,
-        RewriteIncremental::new(&cache, &metrics),
-        OptimizationPolicy::Factored,
-    )
-}
-
-#[derive(Clone, Copy)]
-enum OptimizationPolicy {
-    Baseline,
-    Factored,
-}
-
-fn optimize_with(
-    network: &LogicGraph,
-    roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-    diagnostics: crate::SynthesisDiagnostics,
-    runtime: &ExecutionContext,
-    incremental: RewriteIncremental<'_>,
-    policy: OptimizationPolicy,
-) -> Result<TransformProduct, crate::SynthError> {
+    let incremental = incremental.unwrap_or_else(|| RewriteIncremental::new(&cache, &metrics));
     if roots.len() != requirements.len() {
         return Err(crate::SynthError::invariant(
             "AXM pass requirements do not align with roots",

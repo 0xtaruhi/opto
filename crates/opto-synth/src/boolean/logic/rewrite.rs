@@ -191,7 +191,15 @@ pub(crate) fn optimize_network(
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
 ) -> Result<TransformProduct, crate::SynthError> {
-    super::pipeline::optimize_baseline(network, roots, requirements, diagnostics, runtime, None)
+    super::pipeline::optimize_with(
+        network,
+        roots,
+        requirements,
+        diagnostics,
+        runtime,
+        None,
+        super::pipeline::OptimizationPolicy::Baseline,
+    )
 }
 
 #[cfg(test)]
@@ -203,13 +211,14 @@ pub(crate) fn optimize_network_cached(
     runtime: &ExecutionContext,
     incremental: RewriteIncremental<'_>,
 ) -> Result<TransformProduct, crate::SynthError> {
-    super::pipeline::optimize_baseline(
+    super::pipeline::optimize_with(
         network,
         roots,
         requirements,
         diagnostics,
         runtime,
         Some(incremental),
+        super::pipeline::OptimizationPolicy::Baseline,
     )
 }
 
