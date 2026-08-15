@@ -29,7 +29,7 @@ jobs:
     steps:
       - name: Restore pinned Yosys installation
         id: yosys-cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/opto-yosys
           key: linux-x64-yosys-a0fbe6e13311d4909938c63eeb28b6c730467e6c-v1
@@ -212,7 +212,7 @@ jobs:
 
       - name: Install mdBook
         if: github.ref_name == github.event.repository.default_branch
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
         with:
           tool: mdbook
 
