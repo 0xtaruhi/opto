@@ -97,7 +97,8 @@ pub(super) fn optimize(
     // built from one duplicate-free subject rather than rediscovering the same
     // equal cones.
     let mut state = TransformState::start(roots, identity(source))?;
-    if let Some(reduction) = reduce_functionally(&state.network, &state.roots, diagnostics, runtime)?
+    if let Some(reduction) =
+        reduce_functionally(&state.network, &state.roots, diagnostics, runtime)?
     {
         state.apply(reduction)?;
     }

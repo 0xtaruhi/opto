@@ -112,11 +112,7 @@ impl<'a> CoverageCheck<'a> {
         answer
     }
 
-    fn walk(
-        &mut self,
-        stack: &mut Vec<(LogicNodeId, bool)>,
-        start: LogicNodeId,
-    ) -> Option<bool> {
+    fn walk(&mut self, stack: &mut Vec<(LogicNodeId, bool)>, start: LogicNodeId) -> Option<bool> {
         while let Some((node, expanded)) = stack.pop() {
             let key = node.index();
             if self.memo.contains_key(&key) {
@@ -184,7 +180,9 @@ pub(super) struct SupportIndex {
 /// The combination is XOR, so this must destroy the low-order structure of a
 /// dense node index or subsets that differ by a swap would collide constantly.
 pub(super) const fn leaf_fingerprint(leaf: u32) -> u64 {
-    let mut value = (leaf as u64).wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mut value = (leaf as u64)
+        .wrapping_add(1)
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15);
     value ^= value >> 29;
     value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value ^ (value >> 32)
@@ -193,7 +191,9 @@ pub(super) const fn leaf_fingerprint(leaf: u32) -> u64 {
 /// Combines per-leaf fingerprints for one subset. Order-independent, because a
 /// support key is a set.
 pub(super) fn subset_fingerprint(leaves: impl IntoIterator<Item = u32>) -> u64 {
-    leaves.into_iter().fold(0, |value, leaf| value ^ leaf_fingerprint(leaf))
+    leaves
+        .into_iter()
+        .fold(0, |value, leaf| value ^ leaf_fingerprint(leaf))
 }
 
 /// Filter bits allocated per distinct key. One bit per key would saturate; this

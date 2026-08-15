@@ -266,4 +266,3 @@ mod tests {
         assert!(!live[dead_operation.index()]);
     }
 }
-

@@ -459,7 +459,6 @@ impl CoverSelector<'_, '_> {
     }
 }
 
-
 fn merge_root_constraints(merged: &mut MappingRoot, root: MappingRoot) {
     merged.required_time = match (merged.required_time, root.required_time) {
         (Some(left), Some(right)) => Some(left.min(right)),

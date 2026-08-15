@@ -194,7 +194,8 @@ pub(crate) fn observability_cares(
     let cut_list = cuts.cuts(node);
     let projected =
         crate::boolean::logic::projected_cuts(&mut coverage, cut_list, |cut| cut.contains(node));
-    let observed = crate::boolean::logic::projected_leaves(cut_list, &projected).collect::<Vec<_>>();
+    let observed =
+        crate::boolean::logic::projected_leaves(cut_list, &projected).collect::<Vec<_>>();
     let tables = network.truth_tables_for_inputs(consumer, &inputs, &observed);
     let (function, _) = tables.care_projection(consumer, &inputs)?;
     let window = base.len();

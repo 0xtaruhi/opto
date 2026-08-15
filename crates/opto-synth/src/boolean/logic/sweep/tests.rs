@@ -54,13 +54,21 @@ fn merges_an_inverted_equivalent_node() {
     let roots = [sum_of_products, factored.inverted()];
     let expected = roots.map(|root| network.truth_table(root, 3));
 
-    let product = reduce(&network, &roots, crate::test_runtime(), &mut SweepMetrics::default())
-        .expect("sweep succeeds")
-        .expect("sweep finds the duplicate");
+    let product = reduce(
+        &network,
+        &roots,
+        crate::test_runtime(),
+        &mut SweepMetrics::default(),
+    )
+    .expect("sweep succeeds")
+    .expect("sweep finds the duplicate");
     let reduced_roots = map_roots(&product.remap, &roots).unwrap();
 
     assert_eq!(reduced_roots[0].positive(), reduced_roots[1].positive());
-    assert_ne!(reduced_roots[0].is_inverted(), reduced_roots[1].is_inverted());
+    assert_ne!(
+        reduced_roots[0].is_inverted(),
+        reduced_roots[1].is_inverted()
+    );
     for (&actual, expected) in reduced_roots.iter().zip(expected) {
         assert_eq!(product.network.truth_table(actual, 3), expected);
     }
@@ -86,9 +94,14 @@ fn folds_a_node_that_is_functionally_constant() {
     };
     network.freeze();
 
-    let product = reduce(&network, &[root], crate::test_runtime(), &mut SweepMetrics::default())
-        .expect("sweep succeeds")
-        .expect("sweep folds the constant");
+    let product = reduce(
+        &network,
+        &[root],
+        crate::test_runtime(),
+        &mut SweepMetrics::default(),
+    )
+    .expect("sweep succeeds")
+    .expect("sweep folds the constant");
     let reduced = map_roots(&product.remap, &[root]).unwrap();
 
     assert_eq!(product.network.truth_table(reduced[0], 3).bits, 0);
@@ -103,16 +116,25 @@ fn leaves_inequivalent_nodes_alone() {
     network.freeze();
     let mut metrics = SweepMetrics::default();
 
-    assert!(reduce(&network, &roots, crate::test_runtime(), &mut metrics).unwrap().is_none());
+    assert!(
+        reduce(&network, &roots, crate::test_runtime(), &mut metrics)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(metrics.proved, 0);
 }
 
 #[test]
 fn preserves_equivalence_on_a_reconvergent_subject() {
     let (network, roots) = majority_pair();
-    let product = reduce(&network, &roots, crate::test_runtime(), &mut SweepMetrics::default())
-        .unwrap()
-        .unwrap();
+    let product = reduce(
+        &network,
+        &roots,
+        crate::test_runtime(),
+        &mut SweepMetrics::default(),
+    )
+    .unwrap()
+    .unwrap();
     let reduced_roots = map_roots(&product.remap, &roots).unwrap();
     let proof = opto_formal::prove_logic_network_equivalence(
         network.storage_network(),

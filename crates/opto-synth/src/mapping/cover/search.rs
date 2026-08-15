@@ -83,17 +83,15 @@ pub(crate) fn cover_logic_network_with_truths(
     timing_constraints: CoverTiming<'_>,
     runtime: &ExecutionContext,
 ) -> Result<Option<LibraryCover>, crate::SynthError> {
-    cover_logic_network_with_recovery(
-        CoverProblem {
-            network,
-            cuts,
-            truths,
-            outputs,
-            catalog,
-            timing: timing_constraints,
-            runtime,
-        },
-    )
+    cover_logic_network_with_recovery(CoverProblem {
+        network,
+        cuts,
+        truths,
+        outputs,
+        catalog,
+        timing: timing_constraints,
+        runtime,
+    })
 }
 
 #[derive(Clone, Copy)]

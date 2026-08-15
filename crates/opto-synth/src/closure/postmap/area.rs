@@ -61,8 +61,19 @@ pub(super) fn optimize(
 
     let optimization_boundary =
         super::mfs::optimization_boundary_nets(session.mapped, session.implementations)?;
-    remove_dead_cells(&mut session, catalog, &optimization_boundary, &mut cleanup_dirty)?;
-    remove_constant_registers(&mut session, options, runtime, &optimization_boundary, &mut cleanup_dirty)?;
+    remove_dead_cells(
+        &mut session,
+        catalog,
+        &optimization_boundary,
+        &mut cleanup_dirty,
+    )?;
+    remove_constant_registers(
+        &mut session,
+        options,
+        runtime,
+        &optimization_boundary,
+        &mut cleanup_dirty,
+    )?;
 
     crate::api::diagnostics::trace!(
         trace,
@@ -244,9 +255,7 @@ fn resynthesize_dirty_cells(
                         .map(|cell| {
                             let mut read = Vec::new();
                             let candidate = dirty.contains(&cell).then(|| {
-                                super::mfs::optimization_candidate_reading(
-                                    context, cell, &mut read,
-                                )
+                                super::mfs::optimization_candidate_reading(context, cell, &mut read)
                             });
                             (cell, candidate.flatten(), read)
                         })

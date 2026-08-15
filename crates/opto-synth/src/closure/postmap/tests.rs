@@ -1256,7 +1256,11 @@ fn candidate_batch_selects_stable_disjoint_cell_and_net_regions() {
         [driver, second_sink]
     );
     assert_eq!(
-        batch.deferred.iter().map(|(cell, _)| *cell).collect::<Vec<_>>(),
+        batch
+            .deferred
+            .iter()
+            .map(|(cell, _)| *cell)
+            .collect::<Vec<_>>(),
         [first_sink]
     );
 }

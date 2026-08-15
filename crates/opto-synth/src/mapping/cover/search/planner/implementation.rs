@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{ReferenceScratch, TrialScratch};
 use super::{
     Candidate, CandidateContext, CandidateIndex, CandidateRange, CellBinding, CellCost,
     CombinationalCellCatalog, CoverDemand, CoverPlanner, CoverTiming, CutDatabase,
@@ -9,6 +8,7 @@ use super::{
     LogicNodeId, MappingCost, SlotChoice, SmallVec, TruthTable, analyze_node_cares,
     enumerate_joints, inverter_truth, node_candidates, opposite, slot,
 };
+use super::{ReferenceScratch, TrialScratch};
 use crate::planning::mapping_policy::{
     compare_mapping_cost, compare_mapping_cost_with_required_time,
 };

@@ -176,7 +176,13 @@ pub(crate) fn expand_unsupported_enables(
         if has_enable_cell {
             continue;
         }
-        candidates.push((operation, register.clone(), enable, result, model.source.clone()));
+        candidates.push((
+            operation,
+            register.clone(),
+            enable,
+            result,
+            model.source.clone(),
+        ));
     }
     let mut generated_names = crate::mapping::word_util::GeneratedNames::new(module)?;
     for (operation, mut register, enable, result, source) in candidates {

@@ -307,8 +307,7 @@ impl Signatures {
             let target = mapped.index() * SIGNATURE_STRIDE;
             for word in 0..self.active {
                 let value = self.values[source + word];
-                projected.values[target + word] =
-                    if mapped.is_inverted() { !value } else { value };
+                projected.values[target + word] = if mapped.is_inverted() { !value } else { value };
             }
         }
         projected
@@ -437,7 +436,10 @@ fn nominate(
     // total order independent of hash iteration.
     classes.sort_unstable_by_key(|members| members[0].0);
     metrics.classes = metrics.classes.max(classes.len());
-    metrics.candidates += classes.iter().map(|members| members.len() - 1).sum::<usize>();
+    metrics.candidates += classes
+        .iter()
+        .map(|members| members.len() - 1)
+        .sum::<usize>();
     classes
         .into_iter()
         .map(|members| Class { members })
@@ -471,7 +473,11 @@ fn prove(
                 .iter()
                 .map(|&(node, inverted)| {
                     let literal = node.lit();
-                    if inverted { literal.inverted() } else { literal }
+                    if inverted {
+                        literal.inverted()
+                    } else {
+                        literal
+                    }
                 })
                 .collect::<Vec<_>>()
         })
@@ -483,10 +489,8 @@ fn prove(
     let shard_size = SHARD_CLASSES.min(literals.len().max(1));
     let shard_count = literals.len().div_ceil(shard_size);
     let shard_pairs = max_pairs.div_ceil(shard_count.max(1));
-    let shards = runtime.analyze_indexed_with_grain(
-        shard_count,
-        std::num::NonZeroUsize::MIN,
-        |shard| {
+    let shards =
+        runtime.analyze_indexed_with_grain(shard_count, std::num::NonZeroUsize::MIN, |shard| {
             let start = shard * shard_size;
             let end = (start + shard_size).min(literals.len());
             let mut shard_refutations = Vec::new();
@@ -503,8 +507,7 @@ fn prove(
                 ))
             })?;
             Ok::<_, crate::SynthError>((partitions, shard_refutations))
-        },
-    )?;
+        })?;
     let mut partitions = Vec::with_capacity(classes.len());
     let mut refutations = Vec::new();
     for (shard_partitions, shard_refutations) in shards {
@@ -619,8 +622,7 @@ fn rebuild(
 }
 
 fn mapped_literal(remap: &[Option<LogicNodeId>], literal: LogicNodeId) -> LogicNodeId {
-    let mapped =
-        remap[literal.index()].expect("AXM graph is topological within its live cone");
+    let mapped = remap[literal.index()].expect("AXM graph is topological within its live cone");
     if literal.is_inverted() {
         mapped.inverted()
     } else {

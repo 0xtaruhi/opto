@@ -403,11 +403,7 @@ pub(super) fn collect_divisors(
 /// by a hash set: the cap is sixteen, so the scan is a handful of register
 /// comparisons, while a set costs one allocation per call and this runs once per
 /// cut of every node of every pass.
-pub(super) fn insert_divisor(
-    divisors: &mut Divisors,
-    divisor: DivisorRef,
-    function: u64,
-) -> bool {
+pub(super) fn insert_divisor(divisors: &mut Divisors, divisor: DivisorRef, function: u64) -> bool {
     if divisors.len() == DIVISOR_CAP {
         return false;
     }
