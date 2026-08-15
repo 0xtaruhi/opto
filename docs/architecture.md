@@ -1279,6 +1279,15 @@ round. On Ibex SKY130 one cell answered "nothing" in 70 ms, 23 times.
 Both are exact: a carried candidate whose cells a commit reached is dropped, and
 a recorded search is repeated as soon as any cell it read is touched.
 
+## The Support Index Is Its Own Key Index
+
+Rewriting looks up which nodes have a given cut as their support. The entries
+are sorted by that key, so equal keys are already contiguous and a range lookup
+is a binary search over them. Carrying a second map from key to range meant
+hashing a whole cut once per distinct key on every rewrite pass, which cost more
+than every other part of building the index put together. The negative filter
+stays: it answers "no such key" without touching the entries at all.
+
 ## Window Care Sets and Exact Recovery
 
 Two analyses decide what they need before they compute it, because doing so

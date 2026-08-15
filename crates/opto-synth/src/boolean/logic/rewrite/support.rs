@@ -162,9 +162,11 @@ struct SupportEntry {
 }
 
 pub(super) struct SupportIndex {
+    /// Support entries sorted by key, which is also the key index: equal keys
+    /// are contiguous, so a range lookup is a binary search over this slice and
+    /// needs no second map to hash a whole cut into.
     entries: Box<[SupportEntry]>,
-    entry_ranges: HashMap<KCut, SupportRange>,
-    /// Exact negative filter over the keys present in `entry_ranges`.
+    /// Exact negative filter over the keys present in `entries`.
     ///
     /// Divisor collection probes every subset of a cut's leaves, and on real
     /// designs almost nine in ten of those subsets are not the support of any
@@ -201,12 +203,6 @@ const KEY_FILTER_BITS_PER_KEY: usize = 32;
 const MINIMUM_KEY_FILTER_WORDS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
-struct SupportRange {
-    start: u32,
-    len: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
 struct TruthRange {
     start: u32,
     len: u8,
@@ -231,12 +227,11 @@ impl SupportIndex {
         &'index self,
         key: &[u32],
     ) -> impl Iterator<Item = &'index (u32, u64)> + 'index {
-        let range = KCut::from_indices(key)
-            .and_then(|key| self.entry_ranges.get(&key))
-            .map_or(0..0, |range| {
-                let start = range.start as usize;
-                start..start + range.len as usize
-            });
+        let range = KCut::from_indices(key).map_or(0..0, |key| {
+            let start = self.entries.partition_point(|entry| entry.key < key);
+            let end = self.entries[start..].partition_point(|entry| entry.key == key) + start;
+            start..end
+        });
         self.entries[range].iter().map(|entry| &entry.value)
     }
 
@@ -317,49 +312,30 @@ pub(super) fn build_support_index(
         entries.extend(chunk_entries);
     }
     runtime.sort_unstable(&mut entries);
-    let range_count = usize::from(!entries.is_empty())
+    let key_count = usize::from(!entries.is_empty())
         + entries
             .windows(2)
             .filter(|pair| pair[0].key != pair[1].key)
             .count();
-    let mut entry_ranges = HashMap::with_capacity(range_count);
-    let filter_words = (range_count * KEY_FILTER_BITS_PER_KEY)
+    let filter_words = (key_count * KEY_FILTER_BITS_PER_KEY)
         .div_ceil(u64::BITS as usize)
         .next_power_of_two()
         .max(MINIMUM_KEY_FILTER_WORDS);
     let mut key_filter = vec![0u64; filter_words];
     let filter_bits = filter_words * u64::BITS as usize;
-    let mut start = 0usize;
-    while start < entries.len() {
-        let key = entries[start].key;
-        let end = entries[start..]
-            .partition_point(|entry| entry.key == key)
-            .checked_add(start)
-            .ok_or_else(|| crate::SynthError::capacity("support range end"))?;
-        let range = SupportRange {
-            start: start
-                .try_into()
-                .map_err(|_| crate::SynthError::capacity("support range start"))?,
-            len: (end - start)
-                .try_into()
-                .map_err(|_| crate::SynthError::capacity("support range length"))?,
-        };
-        let fingerprint = subset_fingerprint(key.leaves().iter().map(|leaf| {
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 && entries[index - 1].key == entry.key {
+            continue;
+        }
+        let fingerprint = subset_fingerprint(entry.key.leaves().iter().map(|leaf| {
             u32::try_from(leaf.index()).expect("logic node index is bounded by compact storage")
         }));
         let bit = usize::try_from(fingerprint & (filter_bits as u64 - 1))
             .expect("filter length is a usize, so the masked index fits one");
         key_filter[bit / u64::BITS as usize] |= 1 << (bit % u64::BITS as usize);
-        if entry_ranges.insert(key, range).is_some() {
-            return Err(crate::SynthError::invariant(
-                "support index contains a duplicate key range",
-            ));
-        }
-        start = end;
     }
     Ok(SupportIndex {
         entries: entries.into_boxed_slice(),
-        entry_ranges,
         key_filter: key_filter.into_boxed_slice(),
         truths: truths.into_boxed_slice(),
         truth_ranges: truth_ranges.into_boxed_slice(),
