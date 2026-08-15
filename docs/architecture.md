@@ -1322,6 +1322,13 @@ each round re-derive every earlier proof. Signatures are carried onto the merged
 node space rather than re-simulated, because a merged node computes the function
 of every node that mapped onto it.
 
+A round's proof budget is partitioned across shards exactly, quotient and
+remainder, so the quotas sum to the budget. Handing every shard the rounded-up
+share overshot by up to one proof per shard, and once the remaining budget fell
+below the shard count it gave every shard a quota of one: a round with a single
+proof left could still launch one per shard. The caller's subtraction is exact
+for the same reason, where it used to clamp and absorb the overshoot.
+
 One limit is worth stating plainly. The sweep bounds how many proofs it
 attempts, per round and in total, but nothing bounds how hard a single proof may
 be. On Ibex SKY130 one miter takes about a second, roughly half the pass, and it

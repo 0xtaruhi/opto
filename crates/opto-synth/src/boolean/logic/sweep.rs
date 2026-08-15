@@ -125,7 +125,12 @@ pub(super) fn reduce(
             runtime,
             &mut substitutions,
         )?;
-        budget -= round.attempted().min(budget);
+        // The round could only attempt what its shard quotas allowed, and those
+        // partition `MAX_ROUND_PAIRS.min(budget)`, so this subtraction is exact.
+        // Clamping it to the budget is what used to absorb an overshoot instead
+        // of reporting one.
+        debug_assert!(round.attempted() <= budget);
+        budget = budget.saturating_sub(round.attempted());
         metrics.proved += round.proved;
         metrics.refuted += round.refutations.len();
         // Merging is what makes the next round cheap. Two cones that differ only
@@ -446,6 +451,19 @@ fn nominate(
         .collect()
 }
 
+/// One shard's share of a round's proof budget.
+///
+/// The quotas partition the budget exactly, so their sum is the budget and no
+/// shard is rounded up into an allowance the round does not have. Handing every
+/// shard `ceil(budget / shards)` overshot by up to one proof per shard, and once
+/// the remaining budget fell below the shard count it gave every shard a quota
+/// of one: a round with a single proof left could still launch one per shard,
+/// and any one of them may be expensive.
+fn shard_quota(max_pairs: usize, shard_count: usize, shard: usize) -> usize {
+    let shard_count = shard_count.max(1);
+    max_pairs / shard_count + usize::from(shard < max_pairs % shard_count)
+}
+
 /// What one proof round established.
 struct Round {
     proved: usize,
@@ -488,7 +506,6 @@ fn prove(
     // the substitution set independent of completion order and worker count.
     let shard_size = SHARD_CLASSES.min(literals.len().max(1));
     let shard_count = literals.len().div_ceil(shard_size);
-    let shard_pairs = max_pairs.div_ceil(shard_count.max(1));
     let shards =
         runtime.analyze_indexed_with_grain(shard_count, std::num::NonZeroUsize::MIN, |shard| {
             let start = shard * shard_size;
@@ -498,7 +515,7 @@ fn prove(
                 network.storage_network(),
                 &literals[start..end],
                 MAX_REPRESENTATIVE_ROUNDS,
-                shard_pairs,
+                shard_quota(max_pairs, shard_count, shard),
                 &mut shard_refutations,
             )
             .map_err(|error| {

@@ -219,3 +219,23 @@ fn nominated_classes_are_ordered_by_their_lowest_member() {
         assert!(class.members.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }
 }
+
+#[test]
+fn shard_quotas_partition_the_round_budget() {
+    for (max_pairs, shard_count) in [
+        (4_000, 130),
+        (4_000, 834),
+        (1, 130),
+        (0, 7),
+        (7, 1),
+        (13, 5),
+    ] {
+        let total = (0..shard_count)
+            .map(|shard| super::shard_quota(max_pairs, shard_count, shard))
+            .sum::<usize>();
+        assert_eq!(
+            total, max_pairs,
+            "quotas for {shard_count} shards must sum to {max_pairs}"
+        );
+    }
+}
