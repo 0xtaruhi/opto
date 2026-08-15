@@ -9,7 +9,6 @@ mod balance;
 pub(crate) mod cuts;
 pub(crate) mod network;
 mod pipeline;
-mod pla;
 mod rewrite;
 mod subject;
 mod sweep;

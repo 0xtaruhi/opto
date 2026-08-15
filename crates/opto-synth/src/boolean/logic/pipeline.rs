@@ -1,34 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Static AXM pass scheduling and graph-choice composition.
+//! Static AXM pass scheduling.
 
 use super::network::{LogicGraph, LogicNode, LogicNodeId};
 use super::rewrite::{RewriteIncremental, remap_literal};
 use hashbrown::HashMap;
 use opto_runtime::ExecutionContext;
 
-pub(super) struct LogicPipelineOutcome {
-    pub(super) network: LogicGraph,
-    pub(super) remap: Box<[Option<LogicNodeId>]>,
-    pub(super) alternatives: Box<[LogicAlternative]>,
-}
-
-pub(super) struct LogicAlternative {
-    pub(super) pass: &'static str,
-    pub(super) roots: Box<[LogicNodeId]>,
-}
-
-struct ChoiceProposal {
-    pass: &'static str,
-    network: LogicGraph,
-    roots: Box<[LogicNodeId]>,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CopyStyle {
     Preserve,
     DecomposeMux,
+}
+
+pub(super) struct LogicPipelineOutcome {
+    pub(super) network: LogicGraph,
+    pub(super) remap: Box<[Option<LogicNodeId>]>,
 }
 
 /// Expansion rounds in the canonical path. Normalization can synthesize a fresh
@@ -101,20 +89,18 @@ pub(super) fn optimize(
         ));
     }
     if !enabled {
-        return finish(identity(source), roots, Vec::new());
+        return finish(identity(source), roots);
     }
     // One destructive state owns the whole path, so every node map composes
     // through the same mechanism and callers only ever see their own node
-    // space. Functional reduction runs first, so the canonical optimization and
-    // every retained alternative are built from one duplicate-free subject
-    // rather than rediscovering the same equal cones.
+    // space. Functional reduction runs first, so the canonical optimization is
+    // built from one duplicate-free subject rather than rediscovering the same
+    // equal cones.
     let mut state = TransformState::start(roots, identity(source))?;
     if let Some(reduction) = reduce_functionally(&state.network, &state.roots, diagnostics, runtime)?
     {
         state.apply(reduction)?;
     }
-    let functional =
-        small_support_choice(&state.network, &state.roots, requirements, diagnostics, runtime)?;
     let canonical = optimize_canonical(
         &state.network,
         &state.roots,
@@ -124,7 +110,7 @@ pub(super) fn optimize(
         incremental,
     )?;
     state.apply(canonical)?;
-    finish(state.finish(), roots, functional.into_iter().collect())
+    finish(state.finish(), roots)
 }
 
 /// Runs one SAT sweep over the freshly lowered subject.
@@ -250,54 +236,6 @@ fn decompose_muxes(
     }))
 }
 
-fn small_support_choice(
-    source: &LogicGraph,
-    roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-    diagnostics: crate::SynthesisDiagnostics,
-    runtime: &ExecutionContext,
-) -> Result<Option<ChoiceProposal>, crate::SynthError> {
-    let factoring_started = std::time::Instant::now();
-    let Some(subject) = super::pla::build_multi_output(source, roots, runtime)? else {
-        return Ok(None);
-    };
-    crate::api::diagnostics::trace!(
-        crate::api::diagnostics::SynthTrace::timing(diagnostics),
-        "logic.multi_output.factor",
-        "nodes={} cover={:?} factoring={:?} resubstitution={:?} checks={} plans={} wall={:?}",
-        subject.network.node_count(),
-        subject.profile.cover,
-        subject.profile.factoring,
-        subject.profile.resubstitution,
-        subject.profile.relation_checks,
-        subject.profile.plan_queries,
-        factoring_started.elapsed()
-    );
-    let normalization_started = std::time::Instant::now();
-    let normalized = optimize_with(
-        &subject.network,
-        &subject.roots,
-        requirements,
-        diagnostics,
-        runtime,
-        None,
-        OptimizationPolicy::Factored,
-    )?;
-    crate::api::diagnostics::trace!(
-        crate::api::diagnostics::SynthTrace::timing(diagnostics),
-        "logic.multi_output.normalize",
-        "nodes={} wall={:?}",
-        normalized.network.node_count(),
-        normalization_started.elapsed()
-    );
-    let normalized_roots = map_roots(&normalized.remap, &subject.roots)?;
-    Ok(Some(ChoiceProposal {
-        pass: "multi_output_factoring",
-        network: normalized.network,
-        roots: normalized_roots,
-    }))
-}
-
 /// The rewrite an optimization path runs, and the only thing that separates
 /// the two paths.
 #[derive(Clone, Copy)]
@@ -364,57 +302,14 @@ pub(super) fn optimize_with(
     Ok(state.finish())
 }
 
-/// Installs the canonical implementation and every retained alternative into one
-/// hash-consed subject.
-///
-/// Alternatives share that subject's nodes and inputs, so cut, truth, and match
-/// analysis is computed once over the union rather than once per structure.
 fn finish(
     canonical: TransformProduct,
     source_roots: &[LogicNodeId],
-    alternatives: Vec<ChoiceProposal>,
 ) -> Result<LogicPipelineOutcome, crate::SynthError> {
-    if alternatives.is_empty() {
-        map_roots(&canonical.remap, source_roots)?;
-        return Ok(LogicPipelineOutcome {
-            network: canonical.network,
-            remap: canonical.remap,
-            alternatives: Box::new([]),
-        });
-    }
-
-    let mut network = LogicGraph::new();
-    let mut variables = HashMap::new();
-    let canonical_remap = copy_graph(
-        &canonical.network,
-        None,
-        &mut network,
-        &mut variables,
-        CopyStyle::Preserve,
-    )?;
-    let remap = compose_remaps(&canonical.remap, &canonical_remap);
-    map_roots(&remap, source_roots)?;
-
-    let mut installed = Vec::with_capacity(alternatives.len());
-    for alternative in alternatives {
-        let live = alternative.network.live_nodes(&alternative.roots);
-        let alternative_remap = copy_graph(
-            &alternative.network,
-            Some(&live),
-            &mut network,
-            &mut variables,
-            CopyStyle::Preserve,
-        )?;
-        installed.push(LogicAlternative {
-            pass: alternative.pass,
-            roots: map_roots(&alternative_remap, &alternative.roots)?,
-        });
-    }
-    network.freeze();
+    map_roots(&canonical.remap, source_roots)?;
     Ok(LogicPipelineOutcome {
-        network,
-        remap,
-        alternatives: installed.into_boxed_slice(),
+        network: canonical.network,
+        remap: canonical.remap,
     })
 }
 
@@ -538,77 +433,6 @@ mod tests {
     use super::*;
     use opto_formal::prove_logic_network_equivalence;
 
-    fn graph(
-        gate: fn(&mut LogicGraph, LogicNodeId, LogicNodeId) -> LogicNodeId,
-    ) -> (LogicGraph, LogicNodeId) {
-        let mut network = LogicGraph::new();
-        let left = network.variable(0).unwrap();
-        let right = network.variable(1).unwrap();
-        let root = gate(&mut network, left, right);
-        network.freeze();
-        (network, root)
-    }
-
-    #[test]
-    fn installs_multiple_choices_once_and_structurally_shares_them() {
-        let (baseline, baseline_root) = graph(LogicGraph::and);
-        let (first, first_root) = graph(LogicGraph::xor);
-        let (second, second_root) = graph(LogicGraph::xor);
-        let outcome = finish(
-            identity(baseline),
-            &[baseline_root],
-            vec![
-                ChoiceProposal {
-                    pass: "first",
-                    network: first,
-                    roots: Box::new([first_root]),
-                },
-                ChoiceProposal {
-                    pass: "second",
-                    network: second,
-                    roots: Box::new([second_root]),
-                },
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(outcome.alternatives.len(), 2);
-        assert_eq!(outcome.alternatives[0].roots, outcome.alternatives[1].roots);
-        assert!(remap_literal(&outcome.remap, baseline_root).is_some());
-    }
-
-    #[test]
-    fn small_support_installs_one_equivalent_mapper_choice() {
-        let mut network = LogicGraph::new();
-        let a = network.variable(0).unwrap();
-        let b = network.variable(1).unwrap();
-        let c = network.variable(2).unwrap();
-        let shared = network.and(a, b);
-        let roots = [network.xor(shared, c), network.and(shared, c.inverted())];
-        network.freeze();
-        let expected = roots.map(|root| network.truth_table(root, 3));
-
-        let outcome = optimize(
-            network,
-            &roots,
-            &[None, None],
-            true,
-            crate::SynthesisDiagnostics::default(),
-            crate::test_runtime(),
-            None,
-        )
-        .unwrap();
-        let actual_roots = map_roots(&outcome.remap, &roots).unwrap();
-
-        assert_eq!(outcome.alternatives.len(), 1);
-        for (&actual, expected) in actual_roots.iter().zip(expected) {
-            assert_eq!(outcome.network.truth_table(actual, 3), expected);
-        }
-        for (&actual, expected) in outcome.alternatives[0].roots.iter().zip(expected) {
-            assert_eq!(outcome.network.truth_table(actual, 3), expected);
-        }
-    }
-
     #[test]
     fn mux_decomposition_preserves_a_wide_multi_output_graph() {
         let mut source = LogicGraph::new();
@@ -671,20 +495,15 @@ mod tests {
                 &runtime,
                 None,
             )
-            .expect("optimization portfolio succeeds")
+            .expect("canonical optimization succeeds")
         };
 
         let serial = run(1);
         let parallel = run(4);
         assert_eq!(serial.remap, parallel.remap);
-        assert_eq!(serial.alternatives.len(), parallel.alternatives.len());
         for index in 0..serial.network.node_count() {
             let node = LogicNodeId::from_index(index);
             assert_eq!(serial.network.node(node), parallel.network.node(node));
-        }
-        for (serial, parallel) in serial.alternatives.iter().zip(&parallel.alternatives) {
-            assert_eq!(serial.pass, parallel.pass);
-            assert_eq!(serial.roots, parallel.roots);
         }
     }
 }

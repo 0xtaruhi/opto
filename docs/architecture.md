@@ -1250,6 +1250,18 @@ single definition of every Word IR value read — before dropping connects.
 With both fixed, clock gating is on by default and gates 24 register banks on
 Ibex SKY130 instead of 6.
 
+## One Boolean Implementation
+
+Technology mapping covers one AXM implementation. The subject used to carry a
+portfolio: a PLA-based multi-output resynthesis proposed an alternative, the
+pipeline installed every proposal into one hash-consed graph, and the cover
+selector covered each implementation and ranked the results. The alternative
+only ever existed for a region whose whole subject had at most seven primary
+inputs, which no real design reaches, so the portfolio ranked one member and the
+machinery cost more to carry than it could ever return. RFC 11 keeps a choice
+graph on the roadmap; when it lands it will nominate choices inside one subject
+rather than cover whole implementations against each other.
+
 ## Window Care Sets and Exact Recovery
 
 Two analyses decide what they need before they compute it, because doing so
