@@ -13,9 +13,11 @@ publish = false
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 thiserror.workspace = true
 opto-ir.workspace = true
-varisat = "=0.2.2"
+rustsat.workspace = true
+rustsat-cadical.workspace = true
 
 [[test]]
 name = "yosys_differential"

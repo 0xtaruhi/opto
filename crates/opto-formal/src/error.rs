@@ -22,7 +22,7 @@ pub enum FormalError {
         context: &'static str,
         /// The underlying SAT solver failure.
         #[source]
-        source: varisat::solver::SolverError,
+        source: anyhow::Error,
     },
     /// The word IR could not be queried or validated.
     #[error("equivalence proof: {0}")]

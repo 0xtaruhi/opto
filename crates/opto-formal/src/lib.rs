@@ -15,6 +15,7 @@
 mod error;
 mod logic;
 mod outcome;
+mod sat;
 mod word_miter;
 
 pub use error::FormalError;
