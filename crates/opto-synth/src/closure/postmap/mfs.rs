@@ -452,6 +452,33 @@ fn driver_mffc(
     root: CellId,
     keep_nets: &[NetId],
 ) -> Vec<(CellId, NetId, f64)> {
+    driver_mffc_reading(
+        mapped,
+        implementations,
+        functions,
+        boundary,
+        root,
+        keep_nets,
+        &mut Vec::new(),
+    )
+}
+
+/// Grows the cone and records every cell the growth looked at.
+///
+/// The answer depends on more cells than it returns: a driver it rejected, and
+/// every consumer of a net it considered, each participated in the decision. A
+/// caller that caches this answer has to invalidate on all of them, so they are
+/// reported rather than inferred from the result.
+fn driver_mffc_reading(
+    mapped: &MappedNetlist,
+    implementations: &ImplementationDb,
+    functions: &HashMap<String, CellFunction>,
+    boundary: &HashSet<NetId>,
+    root: CellId,
+    keep_nets: &[NetId],
+    inspected: &mut Vec<CellId>,
+) -> Vec<(CellId, NetId, f64)> {
+    inspected.push(root);
     let mut dying_cells = vec![root];
     let mut dying = Vec::new();
     let mut changed = true;
@@ -476,6 +503,9 @@ fn driver_mffc(
                 || dying.iter().any(|&(_, dead, _)| dead == net)
             {
                 continue;
+            }
+            if let Some(pins) = mapped.pins_on_net(net) {
+                inspected.extend(pins.filter_map(|pin| mapped.pin_owner(pin)));
             }
             let Some(driver) = mapped.pins_on_net(net).and_then(|mut pins| {
                 pins.find_map(|pin| {

@@ -1353,7 +1353,12 @@ with an expensive exhaustive search from being asked the same question every
 round. On Ibex SKY130 one cell answered "nothing" in 70 ms, 23 times.
 
 Both are exact: a carried candidate whose cells a commit reached is dropped, and
-a recorded search is repeated as soon as any cell it read is touched.
+a recorded search is repeated as soon as any cell it read is touched. The
+recorded set has to be the whole set, which is more than the window: the cost
+model grows a fanout-free cone backward from the replaced cell, and a driver it
+rejected or a consumer it counted took part in the answer without appearing in
+the window. That growth reports every cell it inspected rather than only the
+cells it kept.
 
 ## The Support Index Is Its Own Key Index
 

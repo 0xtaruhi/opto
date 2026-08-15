@@ -5,8 +5,9 @@ use super::{
     CELL_INPUT_CAP, CellFunction, CellId, ConnectionRef, ConnectionSignal, DriverReplacement,
     HashMap, HashSet, ImplementationDb, MappedNetlist, NetId, OptimizationContext, PinId,
     PostmapCandidate, ResynthesisCell, ResynthesisCells, RewireReplacement, SmallVec,
-    cell_output_pin, collect_window, debug_mfs, driver_mffc, filled, observability_care,
-    replace_driver_candidate, rewire_candidate, sorted_candidate_nets, truth_mask,
+    cell_output_pin, collect_window, debug_mfs, driver_mffc, driver_mffc_reading, filled,
+    observability_care, replace_driver_candidate, rewire_candidate, sorted_candidate_nets,
+    truth_mask,
 };
 
 const DIRECT_REMAP_NET_CAP: usize = 16;
@@ -488,14 +489,25 @@ pub(super) fn wire_replacement_for(
     read.extend(guard.iter().copied());
     read.extend(consumers.iter().filter_map(|&pin| mapped.pin_owner(pin)));
     read.push(cell);
-    read.sort_unstable();
-    read.dedup();
     let full_words = filled(true, input_count);
     let nets = sorted_candidate_nets(&window.bits, &tainted);
-    let mffc_area = driver_mffc(mapped, implementations, functions, boundary, cell, &[])
-        .iter()
-        .map(|&(_, _, area)| area)
-        .sum::<f64>();
+    let mffc_area = driver_mffc_reading(
+        mapped,
+        implementations,
+        functions,
+        boundary,
+        cell,
+        &[],
+        read,
+    )
+    .iter()
+    .map(|&(_, _, area)| area)
+    .sum::<f64>();
+    // The cost model reads cells the window never named, so the recorded set has
+    // to cover them too or a cached "found nothing" outlives the netlist it was
+    // derived from.
+    read.sort_unstable();
+    read.dedup();
     WireReplacementSearch {
         mapped,
         implementations,
