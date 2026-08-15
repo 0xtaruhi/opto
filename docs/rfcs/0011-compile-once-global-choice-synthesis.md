@@ -1318,9 +1318,13 @@ input pins, following only nets the register's own outputs can still reach and
 enumerating everything else as a leaf. The influence restriction is what makes
 the fold both bounded and meaningful: a net the register cannot affect is an
 unconstrained input to the proof, and following its cone would enumerate logic
-that answers nobody's question. Independent removals commit as one transaction,
-because each post-map transaction pays one incremental-STA update and paying it
-per register cost 5.3 s for 39 removals against 0.24 s for the batch.
+that answers nobody's question. External boundaries, explicit constant drivers,
+multiple drivers, and conditional or unresolved drivers also stop the fold.
+The proof assumes the register's asynchronous reset is asserted before the
+design is observed and declines a reset held inactive by the netlist.
+Independent removals commit as one transaction, because each post-map
+transaction pays one incremental-STA update and paying it per register cost
+5.3 s for 39 removals against 0.24 s for the batch.
 
 Measured on the reference case when this phase landed, on top of Phase 1a and
 the MFS scoping:

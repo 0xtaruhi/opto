@@ -297,13 +297,7 @@ pub(super) fn optimization_candidate(
     optimization_candidate_reading(context, cell, &mut Vec::new())
 }
 
-/// Derives one cell's candidate and reports the cells the derivation read.
-///
-/// A search that finds nothing has to be repeated only when one of those cells
-/// changes. The invalidation walk is deliberately a superset of that, so a few
-/// cells with an expensive search were re-derived every round to learn the same
-/// answer. `read` is left empty when the search stopped before it knew its
-/// window, which keeps the caller conservative.
+/// Derives one candidate and records the reads needed to invalidate a miss.
 pub(super) fn optimization_candidate_reading(
     context: OptimizationContext<'_>,
     cell: CellId,
@@ -463,12 +457,7 @@ fn driver_mffc(
     )
 }
 
-/// Grows the cone and records every cell the growth looked at.
-///
-/// The answer depends on more cells than it returns: a driver it rejected, and
-/// every consumer of a net it considered, each participated in the decision. A
-/// caller that caches this answer has to invalidate on all of them, so they are
-/// reported rather than inferred from the result.
+/// Grows the cone and records every cell that influenced the decision.
 fn driver_mffc_reading(
     mapped: &MappedNetlist,
     implementations: &ImplementationDb,
@@ -482,9 +471,7 @@ fn driver_mffc_reading(
     let mut dying_cells = vec![root];
     let mut dying = Vec::new();
     let mut changed = true;
-    // Grow the maximum fanout-free cone backward from the replaced root. A net
-    // may die only when every consumer is already in the cone; the hard cap
-    // bounds both snapshot size and formal proof cost.
+    // Bound both the transaction snapshot and the formal proof cone.
     while changed && dying.len() < 8 {
         changed = false;
         let mut inputs = Vec::new();
@@ -570,18 +557,7 @@ pub(super) fn dead_cell_candidate(
     Some(PostmapCandidate::new(delta))
 }
 
-/// Proposes one transaction removing every cell whose output no design object
-/// reads, transitively.
-///
-/// This is structural dead-code elimination, not resynthesis: it asks only
-/// whether a net has a reader, so it costs one pass over the pins rather than a
-/// cut and care-set analysis per cell. Buffering, cloning, and register removal
-/// can all leave a driver whose last sink went away, and the cell that then
-/// becomes dead is usually another driver, so removal iterates to a fixpoint
-/// before it builds the delta. Removals commit together because each post-map
-/// transaction pays one incremental-STA update.
-///
-/// Returns `None` when nothing is dead.
+/// Builds one transaction that removes structurally dead cells to a fixpoint.
 pub(super) fn dead_cell_removal(
     mapped: &MappedNetlist,
     functions: &HashMap<String, CellFunction>,

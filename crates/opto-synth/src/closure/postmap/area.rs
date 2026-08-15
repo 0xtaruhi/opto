@@ -168,12 +168,8 @@ fn resynthesize_dirty_cells(
     let evaluation_budget = super::session::default_evaluation_budget(session.mapped.cell_count());
     let mut drivers = super::mfs::DriverIndex::build(session.mapped, functions);
     let mut evaluations = 0usize;
-    // Mapped resynthesis seeds from a measured dirty cone, never from the whole
-    // netlist. A region-owned cell was selected by cover under the same care set
-    // and the same library, with exact-area recovery already applied, so
-    // re-deriving it here repeats a decision that has not changed. The seeds are
-    // the cells whose context did move: the ones this closure has already edited
-    // above, and the retained non-region instances that cover never costed.
+    // Region-owned cells are already exact-area covered; seed only changed or
+    // otherwise uncosted cells.
     let mut seeds = cleanup_dirty;
     for cell in session.mapped.cell_ids() {
         if !matches!(
@@ -194,20 +190,10 @@ fn resynthesize_dirty_cells(
             &mut dirty,
         );
     }
-    // Candidate generation is read-only and parallel within a sweep. Selection
-    // and commit are ordered afterward, so every task observes one mapped
-    // generation and no accepted edit depends on worker completion order.
-    //
-    // A candidate held over from the previous round is derived from a mapped
-    // generation no committed edit has reached, so it is scheduled in its
-    // frontier position but not derived again. Scheduling over the whole
-    // frontier keeps the selection order independent of which candidates were
-    // carried and which were derived.
+    // Retained candidates share the current generation; stable frontier order
+    // keeps selection independent of derivation scheduling.
     let mut retained = std::collections::HashMap::<opto_ir::mapped::CellId, _>::new();
-    // A search that found nothing depends only on the cells it read, which the
-    // invalidation walk deliberately over-approximates. Remembering the read set
-    // keeps the few cells with an expensive search from being asked the same
-    // question every round.
+    // Cache barren searches until one of their recorded reads changes.
     let mut barren = std::collections::HashMap::<opto_ir::mapped::CellId, Vec<_>>::new();
     loop {
         if evaluations >= evaluation_budget {
@@ -335,8 +321,7 @@ fn resynthesize_dirty_cells(
             touched,
             &mut next_dirty,
         );
-        // A committed edit reached these cells, so any candidate carried for
-        // them describes a netlist that no longer exists. Derive them again.
+        // Discard retained candidates invalidated by the committed edit.
         retained.retain(|cell, _| !next_dirty.contains(cell));
         barren.retain(|_, read| !read.iter().any(|cell| touched_cells.contains(cell)));
         next_dirty.retain(|cell| !barren.contains_key(cell));
@@ -353,13 +338,7 @@ fn resynthesize_dirty_cells(
     Ok(())
 }
 
-/// Removes every cell whose output no design object reads, and records the cells
-/// the removals reached.
-///
-/// This runs before the rest of the closure so later phases do not evaluate,
-/// time, or resynthesize logic that is already unobservable. Buffering, cloning,
-/// and constant-register removal can each strand a driver, so the sweep repeats
-/// until a scan finds nothing.
+/// Removes unobserved cells to a fixpoint and records the affected frontier.
 fn remove_dead_cells(
     session: &mut AreaOptimizationSession<'_>,
     catalog: &super::candidates::PostmapCellCatalog,
@@ -382,12 +361,7 @@ fn remove_dead_cells(
     }
 }
 
-/// Removes every register whose reachable value is one constant, and records the
-/// cells the removals reached so later phases can rescope from them.
-///
-/// One round proves and commits the whole independent batch. A committed round
-/// can expose the next register, so rounds repeat until a scan of the reached
-/// cells proves nothing.
+/// Removes proved-constant register batches to a scoped fixpoint.
 fn remove_constant_registers(
     session: &mut AreaOptimizationSession<'_>,
     options: &crate::SynthesisOptions,
@@ -434,13 +408,7 @@ fn extend_cleanup_frontier(
     }
 }
 
-/// Owns the mapped netlist and the running objective for common post-map
-/// cleanup. When timing exists, the same candidate path also preserves or
-/// improves constraint closure.
-///
-/// This mirrors [`super::session::TimingOptimizationSession`]: passes ask the
-/// session to evaluate a candidate and never assemble the transaction inputs or
-/// publish progress themselves.
+/// Owns post-map state and the running area/timing acceptance objective.
 struct AreaOptimizationSession<'a> {
     mapped: &'a mut MappedNetlist,
     implementations: &'a mut ImplementationDb,
@@ -466,8 +434,7 @@ impl AreaOptimizationSession<'_> {
         }
     }
 
-    /// Evaluates one candidate and, when it is accepted, publishes progress and
-    /// returns the nets and cells its edit touched.
+    /// Evaluates a candidate and returns the accepted edit frontier.
     fn evaluate(
         &mut self,
         candidate: PostmapCandidate,

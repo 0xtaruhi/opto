@@ -532,15 +532,7 @@ impl TimingGraph {
         Ok(graph)
     }
 
-    /// Appends the nets one net's arrival depends on: every incoming arc's
-    /// source, and the enable of every latch-data arc.
-    ///
-    /// This is the propagation plan's dependency relation, and it has one
-    /// definition because two places consume it: the plan is built from it, and
-    /// region editing decides whether the retained plan still describes the
-    /// graph from it. Deciding reuse from `from`/`to` adjacency instead silently
-    /// keeps a plan whose latch-enable dependency has moved, since replacing a
-    /// latch can change its enable without changing adjacency at all.
+    /// Appends incoming arc sources and latch enables used by the propagation plan.
     pub(super) fn plan_dependencies<'graph>(
         &'graph self,
         arcs: &'graph [GraphArcId],
@@ -576,9 +568,7 @@ impl TimingGraph {
         Ok(())
     }
 
-    /// Counts how many times the topological order and its dependency plan have
-    /// been rebuilt. Tests use it to assert that an edit which adds no
-    /// dependency edge reuses the retained plan instead of rebuilding it.
+    /// Counts topological-order and dependency-plan rebuilds.
     #[cfg(test)]
     pub(crate) fn topological_generation(&self) -> u64 {
         self.topological_generation

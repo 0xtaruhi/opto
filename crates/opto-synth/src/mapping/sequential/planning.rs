@@ -34,13 +34,7 @@ pub(crate) fn recover_feedback_enables(
         {
             continue;
         }
-        // Recovery infers an enable by matching a hold path against a read of
-        // the register's target signal. That read denotes the register's output
-        // only when the clocked process assigns the signal on one branch; a
-        // process with a reset branch assigns it on two, and the inferred enable
-        // then comes out narrower than the design's. Registers whose enable the
-        // frontend already knows do not come here at all, so declining these
-        // costs only the registers whose enable is written as a mux.
+        // Target reads are not a sound hold-value proxy across reset branches.
         if !register.resets.is_empty() {
             continue;
         }
@@ -48,11 +42,6 @@ pub(crate) fn recover_feedback_enables(
     }
 
     for (operation_id, mut register, target, source) in candidates {
-        // Everything the recovery builds is speculative until the proof accepts
-        // it, so the arena boundary is taken first and every declining path
-        // rewinds to it. Leaving the rejected reads, expressions, and mux behind
-        // costs every later Word pass, ownership traversal, and partition build
-        // that has to walk them, on a design where most candidates are rejected.
         let start = ownership.start(module)?;
         let checkpoint = module.speculation_checkpoint();
         let Some(recovered) = recover_one_enable(module, &register, &target, &source)? else {
@@ -81,11 +70,7 @@ struct RecoveredEnable {
     data: word::ValueId,
 }
 
-/// Decomposes one register's next state into an enable and a data path.
-///
-/// Returns `None` on every declining path. The caller owns the arena rewind,
-/// because the expressions this builds are only reachable through the value it
-/// returns.
+/// Speculatively decomposes one next state; the caller rewinds on `None`.
 fn recover_one_enable(
     module: &mut word::WordModule,
     register: &word::RegisterOp,
@@ -108,23 +93,13 @@ fn recover_one_enable(
     let reconstructed = module
         .mux(enable, data, q, source.clone())
         .map_err(crate::SynthError::from)?;
-    // The decomposition walks a next-state mux tree looking for paths that hold
-    // the register's own output. Nothing about that walk guarantees the enable
-    // and data it extracts reconstruct the original next state, and an enable
-    // that is too narrow silently freezes the register: the design keeps its
-    // reset value and only a long random-stimulus simulation notices. Prove the
-    // identity, and decline the rewrite otherwise.
     if !enable_recovery_is_equivalent(module, register.d, reconstructed)? {
         return Ok(None);
     }
     Ok(Some(RecoveredEnable { enable, data }))
 }
 
-/// Proves that a recovered enable and data reconstruct the original next state
-/// for every value of the register and its inputs.
-///
-/// A disproved identity is a "do not rewrite this register" answer, not an
-/// error: recovery is an optimization and declining it leaves a correct design.
+/// Proves the recovered next state; a counterexample declines the optimization.
 fn enable_recovery_is_equivalent(
     module: &word::WordModule,
     next_state: word::ValueId,
@@ -174,13 +149,7 @@ fn register_targets(
     Ok(connected)
 }
 
-/// Turns every enable the target cannot realize as an enabled cell into a
-/// next-state mux.
-///
-/// This is the only site that consumes an enable into the next state. It runs
-/// last, so clock gating and enabled-cell selection have already taken the
-/// enables they can use, and no earlier pass has to destroy an exact control
-/// that a later one would have to recover.
+/// Expands enables left after clock gating and enabled-cell selection.
 pub(crate) fn expand_unsupported_enables(
     module: &mut word::WordModule,
     sequential_catalog: &super::SequentialCellCatalog,
@@ -217,10 +186,7 @@ pub(crate) fn expand_unsupported_enables(
     let mut generated_names = crate::mapping::word_util::GeneratedNames::new(module)?;
     for (operation, mut register, enable, result, source) in candidates {
         let start = ownership.start(module)?;
-        // The held value is the register's own output, read through a wire this
-        // pass owns. Reading the register's target signal instead would denote
-        // whichever assignment to that signal ran last, which is not the same
-        // thing when a clocked process assigns it on more than one branch.
+        // The held value must denote the register output, not its assigned target.
         let held = crate::mapping::word_util::add_generated_boundary_value(
             &mut generated_names,
             module,
@@ -495,12 +461,7 @@ fn same_scalar_value(
     ))
 }
 
-/// Normalizes register and latch controls without consuming any of them.
-///
-/// Resets are normalized, and a synchronous reset is composed into the enable
-/// and into the next state. The enable itself is retained: whether it becomes a
-/// gated clock, an enabled cell, or a next-state mux is decided later by the
-/// passes that own those choices.
+/// Normalizes resets while retaining enables for their owning passes.
 pub(crate) fn lower_controls(
     module: &mut word::WordModule,
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
@@ -539,16 +500,7 @@ pub(crate) fn lower_controls(
             .copied()
             .filter(|reset| reset.kind == word::ResetKind::Sync)
             .collect::<Vec<_>>();
-        // The enable is retained, never expanded here. Expansion is owned by
-        // `expand_unsupported_enables`, which runs after clock gating has had
-        // its chance to consume the enable. Folding it into the next state at
-        // this point destroyed an exact control that a later pass then had to
-        // recover by pattern matching, and a recovered enable is only ever as
-        // good as the pattern.
-        //
-        // A synchronous reset is composed into the enable as well as into the
-        // next state: the register must be clocked on a reset cycle, and it must
-        // take the reset value on that cycle.
+        // A synchronous reset forces both a clock event and the reset value.
         let retained_enable = match controlled.register.enable {
             None => None,
             Some(enable) if synchronous_resets.is_empty() => Some(enable),

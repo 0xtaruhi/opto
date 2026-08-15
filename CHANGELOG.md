@@ -24,7 +24,8 @@ confused:
 | end to end | 26.9 s | 13.3 s |
 
 Command `opto -f run.tcl` on the pinned public Ibex SKY130 case, manifest
-`qualification/upstream/ibex-core/manifest.tsv` (md5 `e95d15b2cd016546`),
+`qualification/upstream/ibex-core/manifest.tsv` (md5
+`e95d15b2cd016546843a90ed8f62a9d0`),
 library `sky130_fd_sc_hd__tt_025C_1v80`, 80 workers, Intel Xeon Gold 6148 at
 2.40 GHz. Netlist md5 `2e02688e1a5d8b56778e5f78f5f9ec6b`, byte-identical at 1
 and 80 workers, and 20,000-cycle random-stimulus co-simulation against the RTL
@@ -42,7 +43,9 @@ is clean across 30 output ports.
 
 - Constant-register removal proved through a bounded influence cone. A register
   whose reachable value is one constant is folded away with its dead driver
-  logic; independent removals commit as one transaction. On the public Ibex
+  logic under the documented assumption that its asynchronous reset is asserted
+  before observation; an inactive reset or unresolved/multiple driver keeps the
+  register. Independent removals commit as one transaction. On the public Ibex
   SKY130 case this removes 39 registers and 1,220 area units.
 
 - The production region-parallel synthesis engine: stable Word-region

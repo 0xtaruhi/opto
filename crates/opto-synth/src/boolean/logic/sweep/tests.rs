@@ -230,12 +230,22 @@ fn shard_quotas_partition_the_round_budget() {
         (7, 1),
         (13, 5),
     ] {
-        let total = (0..shard_count)
+        let quotas = (0..shard_count)
             .map(|shard| super::shard_quota(max_pairs, shard_count, shard))
-            .sum::<usize>();
+            .collect::<Vec<_>>();
+        let total = quotas.iter().sum::<usize>();
         assert_eq!(
             total, max_pairs,
             "quotas for {shard_count} shards must sum to {max_pairs}"
         );
+        let base = max_pairs / shard_count;
+        let remainder = max_pairs % shard_count;
+        for (shard, quota) in quotas.into_iter().enumerate() {
+            assert_eq!(
+                quota,
+                base + usize::from(shard < remainder),
+                "shard {shard} of {shard_count} received the wrong quota"
+            );
+        }
     }
 }

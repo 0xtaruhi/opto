@@ -1272,11 +1272,13 @@ mux, and their ownership entries resident. They were unreachable, so
 materialization dropped them, but every Word pass, ownership traversal, and
 partition build between then and there still walked them.
 
-The construction now takes an arena boundary first and rewinds to it on every
-declining path. The rewind refuses rather than guesses: values and operations
-are append-only and SSA-ordered, so truncating a suffix cannot strand a
-reference, but a signal, connect, or instance appended over the same span could,
-and the module reports that instead of undoing it.
+The construction now takes a module checkpoint first and rewinds to it on every
+declining path. A rewind rejects any change to another arena and checks every
+retained annotation, directive, memory port, value, operation,
+connection, and instance for references into the suffix, then discards the
+suffix and rewinds interned names. Every rejection happens before mutation, so
+the public rollback operation is atomic without requiring the intermediate
+module to satisfy unrelated publication invariants.
 
 ## The Initial-State Contract
 
@@ -1288,15 +1290,14 @@ is exactly one assumption, stated here rather than derived: every such register
 is reset before the design is observed.
 
 The cone the proof folds carries a second obligation. It rewrites a net into a
-Boolean function of its inputs, so exactly one cell must put a value on that
-net, unconditionally. Every pin on the net is scanned rather than the first
-driver taken: a second output driver, an `Inout` pin, or a three-state output
-each mean the net's value is a resolution the cone does not represent, and each
+Boolean function of its inputs, so exactly one non-boundary cell must drive that
+net unconditionally. A second output, an explicit constant driver, an external
+design boundary, an `Inout` pin, a three-state output, or an unresolved driver
 makes the net an unknown leaf instead.
 
 Nothing in a mapped netlist can establish the initial-state assumption, so the
-pass enforces what it can. A register whose own reset the netlist holds inactive is declined,
-because the assumption cannot reach it. And the qualification harness applies
+pass enforces what it can. A register whose own reset the netlist holds inactive
+is declined because the assumption cannot reach it. The qualification harness applies
 the assumption rather than relying on it: an asynchronous reset is a falling
 edge, so a reset that is merely low at time zero never fires one and every
 asynchronously reset flop keeps its simulator initial value. The harness now

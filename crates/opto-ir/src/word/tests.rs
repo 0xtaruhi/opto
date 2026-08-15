@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+use crate::ConstBits;
+use std::num::NonZeroU32;
 
 #[test]
 fn source_spans_remain_compact_for_large_designs() {
@@ -152,8 +154,6 @@ fn black_box_definition_rejects_synthesizable_body_state() {
         "black-box definition must contain only its declared ports"
     );
 }
-use crate::ConstBits;
-use std::num::NonZeroU32;
 
 fn bits(width: u32) -> WordType {
     WordType::bits(width).unwrap()
@@ -168,6 +168,114 @@ fn constant(module: &mut WordModule, text: &str) -> ValueId {
             SourceSpan::default(),
         )
         .unwrap()
+}
+
+#[test]
+fn speculative_rollback_is_atomic_when_an_annotation_retains_the_suffix() {
+    let mut module = WordModule::new("top");
+    module
+        .add_annotation(
+            AnnotationTarget::Module,
+            "temporary",
+            AnnotationValueSpec::String("candidate".to_string()),
+            SourceSpan::default(),
+        )
+        .unwrap();
+    let checkpoint = module.speculation_checkpoint();
+    let speculative = constant(&mut module, "0");
+    module.annotations[0].target = AnnotationTarget::Value(speculative);
+
+    let error = module.rollback_speculation(checkpoint).unwrap_err();
+
+    assert!(error.to_string().contains("would strand"));
+    assert!(module.value(speculative).is_some());
+    module.annotations[0].target = AnnotationTarget::Module;
+    module.rollback_speculation(checkpoint).unwrap();
+    assert!(module.value(speculative).is_none());
+    module.validate().unwrap();
+}
+
+#[test]
+fn speculative_rollback_is_atomic_when_a_retained_operation_reads_the_suffix() {
+    let mut module = WordModule::new("top");
+    let zero = constant(&mut module, "0");
+    let result = module
+        .unary(UnaryOp::BitNot, zero, SourceSpan::default())
+        .unwrap();
+    let ValueKind::Operation(operation) = module.value(result).unwrap().kind else {
+        panic!("unary result must name its operation");
+    };
+    let checkpoint = module.speculation_checkpoint();
+    let speculative = constant(&mut module, "1");
+    module.operation_mut(operation).unwrap().kind = OpKind::Unary {
+        op: UnaryOp::BitNot,
+        arg: speculative,
+    };
+
+    let error = module.rollback_speculation(checkpoint).unwrap_err();
+
+    assert!(error.to_string().contains("would strand"));
+    assert!(module.value(speculative).is_some());
+    module.operation_mut(operation).unwrap().kind = OpKind::Unary {
+        op: UnaryOp::BitNot,
+        arg: zero,
+    };
+    module.rollback_speculation(checkpoint).unwrap();
+    assert!(module.value(speculative).is_none());
+    module.validate().unwrap();
+}
+
+#[test]
+fn speculative_rollback_is_atomic_when_a_memory_port_retains_the_suffix() {
+    let mut module = WordModule::new("top");
+    let memory = module
+        .add_memory(
+            "mem",
+            bits(1),
+            NonZeroU32::new(2).unwrap(),
+            SourceSpan::default(),
+        )
+        .unwrap();
+    let data = module
+        .add_wire("read_data", bits(1), SourceSpan::default())
+        .unwrap();
+    let address = constant(&mut module, "0");
+    let read_port = module
+        .add_memory_read_port(MemoryReadPort {
+            memory,
+            address,
+            data,
+            timing: MemoryReadTiming::Asynchronous,
+            read_during_write: ReadDuringWrite::OldData,
+            source: SourceSpan::default(),
+        })
+        .unwrap();
+    let checkpoint = module.speculation_checkpoint();
+    let speculative = constant(&mut module, "1");
+    module.memory_read_ports[read_port.index()].address = speculative;
+
+    let error = module.rollback_speculation(checkpoint).unwrap_err();
+
+    assert!(error.to_string().contains("would strand"));
+    assert!(module.value(speculative).is_some());
+    module.memory_read_ports[read_port.index()].address = address;
+    module.rollback_speculation(checkpoint).unwrap();
+    assert!(module.value(speculative).is_none());
+    module.validate().unwrap();
+}
+
+#[test]
+fn speculative_rollback_rejects_a_checkpoint_from_another_module() {
+    let source = WordModule::new("source");
+    let checkpoint = source.speculation_checkpoint();
+    let mut target = WordModule::new("target");
+    let speculative = constant(&mut target, "0");
+
+    let error = target.rollback_speculation(checkpoint).unwrap_err();
+
+    assert!(error.to_string().contains("different module"));
+    assert!(target.value(speculative).is_some());
+    target.validate().unwrap();
 }
 
 #[test]

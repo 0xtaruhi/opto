@@ -62,12 +62,7 @@ pub fn prove_logic_network_equivalence(
     }))
 }
 
-/// One boundary assignment that separates a refuted pair.
-///
-/// The caller owns the meaning of the origins: they are the `origin` values of
-/// the encoded network's input nodes. Only inputs the solver actually assigned
-/// appear, so a caller folding these into simulation vectors must supply its own
-/// value for an absent origin rather than assuming a default.
+/// Assigned boundary origins that separate one refuted pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryRefutation {
     assignment: Vec<(u32, bool)>,
@@ -81,15 +76,9 @@ impl BoundaryRefutation {
     }
 }
 
-/// Partition simulation-equivalent literal classes using one incremental SAT
-/// instance. Each returned member names an earlier, formally equivalent
-/// representative in its input class. The explicit budgets bound both solver
-/// work and the amount of equivalence information retained by callers.
-///
-/// Every refuted pair appends one [`BoundaryRefutation`] to `refutations`. A
-/// caller that refines its own candidate nomination from those assignments
-/// converges in far fewer solver calls than one that re-nominates the same
-/// separable pair every round.
+/// Partitions candidate literal classes with one budgeted incremental SAT instance.
+/// Returned representatives are earlier and proved equivalent; counterexamples
+/// are appended to `refutations` for caller-owned stimulus refinement.
 ///
 /// # Errors
 ///
@@ -312,11 +301,7 @@ impl LogicMiter {
         }
     }
 
-    /// Reads the boundary half of the current satisfying assignment.
-    ///
-    /// Only encoded inputs are reported, in ascending origin order, so the
-    /// result is stable across solver runs that assign unrelated internal
-    /// variables differently.
+    /// Reads assigned encoded inputs in ascending origin order.
     fn boundary_assignment(&self) -> BoundaryRefutation {
         let model = self.solver.model().unwrap_or_default();
         let mut values = vec![None; model.iter().map(|lit| lit.index() + 1).max().unwrap_or(0)];

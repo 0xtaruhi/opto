@@ -231,9 +231,7 @@ impl DependencyPublicationPlan {
         row_count: usize,
         rows: impl IntoIterator<Item = (usize, usize)>,
     ) -> Result<Self, RuntimeError> {
-        // Validate the counts before anything is sized from them: an owner
-        // table one entry per row is the first allocation this makes, and a row
-        // count it cannot represent has to be reported, not aborted on.
+        // Reject unrepresentable counts before sizing the owner table.
         let _ = row_count
             .checked_add(1)
             .ok_or_else(|| invalid("dependency row count exceeds addressable capacity"))?;
@@ -508,23 +506,12 @@ impl DependencyExecution {
 }
 
 impl CsrEdges {
-    /// Builds one CSR edge table, removing duplicate edges.
-    ///
-    /// Rows are bucketed with a counting pass rather than a comparison sort over
-    /// every edge. The packed-row builder already groups entries by row, so a
-    /// global sort only ever bought duplicate removal, and duplicates can only
-    /// occur inside one row: a multi-pin instance contributes the same source
-    /// net once per arc. Sorting each row instead keeps the result identical and
-    /// deterministic while turning `O(E log E)` into `O(E + R)` plus tiny
-    /// per-row sorts. Plan construction runs on every incremental region edit,
-    /// so this is a hot path in post-map optimization.
+    /// Builds deterministic CSR rows, sorting and deduplicating within each row.
     fn seal(row_count: usize, edges: &[(usize, usize)]) -> Result<Self, RuntimeError> {
         if edges.len() > u32::MAX as usize {
             return Err(invalid("dependency edge count exceeds 32-bit capacity"));
         }
-        // The offsets array is one longer than the row count, so a row count at
-        // the top of the address space is a structured error rather than an
-        // allocation that overflows before it can be reported.
+        // CSR offsets require one sentinel beyond the last row.
         let offset_len = row_count
             .checked_add(1)
             .ok_or_else(|| invalid("dependency row count exceeds addressable capacity"))?;

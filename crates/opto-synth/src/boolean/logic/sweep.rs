@@ -3,67 +3,37 @@
 
 //! Simulation-guided SAT sweeping over one frozen AXM subject.
 //!
-//! Structural hash consing in [`LogicGraph`] merges only syntactically identical
-//! nodes. Bit lowering, operator recipes, and independently rewritten cones all
-//! produce nodes that compute the same function through different structure, and
-//! those duplicates survive rewriting because a local window never observes the
-//! distant twin. This pass removes them once, before cut enumeration and cover,
-//! so the mapper sees each function exactly once.
-//!
-//! Ownership and phase. The pass owns no persistent state. It reads one frozen
-//! graph plus its roots and returns one [`TransformProduct`] whose remap is
-//! composed by [`TransformState`] like any other destructive pass. It runs
-//! before the optimization portfolio so every implementation shares its result.
-//!
-//! Determinism. Simulation vectors come from a fixed seed and depend only on the
-//! input origin and the word index, never on node identity, worker count, or
-//! iteration order. Candidate classes are emitted in ascending node order and
-//! each class elects its lowest-ID member as representative, so the substitution
-//! set does not depend on which proof finishes first.
-//!
-//! Soundness. Equal simulation signatures only nominate a pair. A substitution
-//! is installed exclusively for a pair whose miter `opto-formal` proved
-//! unsatisfiable; a refuted or budget-exhausted pair leaves both nodes intact.
+//! Simulation only nominates equivalences; `opto-formal` must prove each
+//! substitution. Stable stimulus, class, representative, and shard ordering
+//! make the result independent of worker scheduling.
 
 use super::network::{LogicGraph, LogicNode, LogicNodeId};
 use super::pipeline::{TransformAnalyses, TransformProduct};
 use hashbrown::HashMap;
 use opto_runtime::ExecutionContext;
 
-/// Random simulation words per node. Each word carries 64 input patterns, so
-/// the pass filters candidate pairs with 512 random patterns before any solver
-/// call.
+/// Random simulation words per node; each word carries 64 patterns.
 const RANDOM_WORDS: usize = 8;
 
-/// Words reserved for patterns learned from refutations. Every refuted pair
-/// contributes the boundary assignment that separates it, and one such pattern
-/// usually splits a whole class of biased nodes that random stimulus could not
-/// separate.
+/// Words reserved for boundary assignments learned from refutations.
 const LEARNED_WORDS: usize = 96;
 
-/// Refinement rounds. Each round nominates from the current stimulus, proves a
-/// bounded number of pairs, and folds the refutations back into the stimulus.
+/// Maximum simulation/proof refinement rounds.
 const MAX_REFINEMENT_ROUNDS: usize = 8;
 
-/// Representative rounds inside one proof call. A later round re-elects a
-/// representative from the members the previous round refuted.
+/// Representative re-election rounds inside one proof call.
 const MAX_REPRESENTATIVE_ROUNDS: usize = 2;
 
 /// Proved-or-refuted pair budget for one refinement round.
 const MAX_ROUND_PAIRS: usize = 4_000;
 
-/// Total pair budget for one subject. Exhausting it leaves the remaining
-/// classes unmerged and is reported, never silently merged.
+/// Total pair budget for one subject.
 const MAX_PROOF_PAIRS: usize = 24_000;
 
-/// Classes per parallel proof shard. Each shard encodes its own CNF, so a small
-/// shard wastes encoding work while a large one serializes solving; this is the
-/// measured balance for subjects in the ten-thousand-node range.
+/// Classes per proof shard; each shard owns one solver encoding.
 const SHARD_CLASSES: usize = 12;
 
-/// Largest candidate class the pass will sweep in one round. A very wide class
-/// is dominated by refutations that stimulus refinement should separate first,
-/// and its pair count is quadratic in the member count.
+/// Largest candidate class swept in one round.
 const MAX_CLASS_MEMBERS: usize = 16;
 
 /// One node's disposition after sweeping: the earlier node it collapses into,
@@ -74,8 +44,7 @@ struct Substitution {
     inverted: bool,
 }
 
-/// Counts reported by one sweep. Every field is a diagnostic; none of them
-/// participates in a synthesis decision.
+/// Diagnostic counts reported by one sweep.
 #[derive(Clone, Copy, Default)]
 pub(super) struct SweepMetrics {
     pub(super) rounds: usize,
@@ -86,11 +55,7 @@ pub(super) struct SweepMetrics {
     pub(super) budget_exhausted: bool,
 }
 
-/// Sweeps `network` and returns the reduced graph, or `None` when simulation
-/// nominates no candidate pair at all.
-///
-/// The returned product's remap is expressed in `network`'s node space, so the
-/// caller composes it exactly like a rewrite product.
+/// Returns a proven reduction whose remap is expressed in `network`'s space.
 pub(super) fn reduce(
     network: &LogicGraph,
     roots: &[LogicNodeId],
@@ -125,19 +90,10 @@ pub(super) fn reduce(
             runtime,
             &mut substitutions,
         )?;
-        // The round could only attempt what its shard quotas allowed, and those
-        // partition `MAX_ROUND_PAIRS.min(budget)`, so this subtraction is exact.
-        // Clamping it to the budget is what used to absorb an overshoot instead
-        // of reporting one.
         debug_assert!(round.attempted() <= budget);
         budget = budget.saturating_sub(round.attempted());
         metrics.proved += round.proved;
         metrics.refuted += round.refutations.len();
-        // Merging is what makes the next round cheap. Two cones that differ only
-        // by an equivalence this round proved become one node under structural
-        // hashing, so the next round never asks the solver about them; leaving
-        // the merges out of the subject made every later round re-derive every
-        // earlier proof.
         if round.proved != 0 {
             let product = rebuild(subject, &live, &substitutions);
             signatures = signatures.projected(&product.remap, product.network.node_count());
@@ -156,8 +112,6 @@ pub(super) fn reduce(
             break;
         }
         let Some(changed) = stimulus.learn(&round.refutations) else {
-            // No room left for learned patterns; another round would nominate
-            // exactly the same classes and repeat the same refutations.
             break;
         };
         resume = changed;
@@ -166,17 +120,13 @@ pub(super) fn reduce(
     Ok(reduced)
 }
 
-/// The live cone of the roots, with the constant always retained.
-///
-/// A cone proved constant collapses onto the constant node, so it is a class
-/// representative whether or not a root reaches it.
+/// The live cone of the roots, retaining the constant as a representative.
 fn live_cone(network: &LogicGraph, roots: &[LogicNodeId]) -> Box<[bool]> {
     let mut live = network.live_nodes(roots);
     live[0] = true;
     live
 }
 
-/// Chains two reductions into one, so callers only ever see their own nodes.
 fn compose(first: &TransformProduct, second: TransformProduct) -> TransformProduct {
     TransformProduct {
         remap: super::pipeline::compose_remaps(&first.remap, &second.remap),
@@ -185,16 +135,9 @@ fn compose(first: &TransformProduct, second: TransformProduct) -> TransformProdu
     }
 }
 
-/// The stimulus applied to boundary inputs.
-///
-/// The random half is a pure function of origin and word index, so it never
-/// depends on node identity, construction order, or worker count. The learned
-/// half accumulates the boundary assignments that separated refuted pairs, in
-/// the order the prover reported them; because the prover is driven by an
-/// order-stable nomination, that order is itself stable.
+/// Deterministic random stimulus plus learned boundary assignments.
 struct Stimulus {
-    /// One entry per learned pattern: the origins the solver assigned and their
-    /// values, in ascending origin order.
+    /// Assigned origins for each learned pattern, sorted by origin.
     learned: Vec<Vec<(u32, bool)>>,
 }
 
@@ -209,12 +152,7 @@ impl Stimulus {
         RANDOM_WORDS + self.learned.len().div_ceil(u64::BITS as usize)
     }
 
-    /// Appends the boundary assignments of `refutations`.
-    ///
-    /// Returns the index of the first stimulus word whose content changed, or
-    /// `None` when the learned budget is full and nothing was appended. Every
-    /// earlier word is immutable once written, which is what lets simulation
-    /// resume instead of restarting.
+    /// Appends refutations and returns the first changed word.
     fn learn(&mut self, refutations: &[opto_formal::BoundaryRefutation]) -> Option<usize> {
         let capacity = LEARNED_WORDS * u64::BITS as usize;
         let before = self.learned.len();
@@ -227,11 +165,7 @@ impl Stimulus {
         (self.learned.len() > before).then(|| RANDOM_WORDS + before / u64::BITS as usize)
     }
 
-    /// Builds the complete stimulus word for one boundary origin.
-    ///
-    /// A learned pattern that left this origin unassigned falls back to the
-    /// random bit for that position, so an unconstrained input keeps varying
-    /// instead of collapsing every learned pattern onto the same value.
+    /// Builds one input word, retaining random bits for unassigned origins.
     fn input_word(&self, origin: u32, word: usize) -> u64 {
         if word < RANDOM_WORDS {
             return random_word(origin, word);
@@ -255,9 +189,7 @@ impl Stimulus {
     }
 }
 
-/// Deterministic random word. The pattern for one input depends only on its
-/// boundary origin and the word index, so two runs, two worker counts, and two
-/// node orderings all simulate the same stimulus.
+/// Deterministic random word keyed only by boundary origin and word index.
 fn random_word(origin: u32, word: usize) -> u64 {
     let mut value = (u64::from(origin) << 32)
         ^ (word as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -267,13 +199,7 @@ fn random_word(origin: u32, word: usize) -> u64 {
     value ^ (value >> 31)
 }
 
-/// Simulation signatures, one fixed-stride row per node.
-///
-/// The stride is the maximum stimulus width rather than the current one, so a
-/// later round appends words without moving any earlier value. That is what
-/// makes refinement incremental: learning only ever appends patterns, so
-/// resuming at the first changed word reproduces exactly the signatures a full
-/// re-simulation would produce.
+/// Fixed-stride simulation rows that permit incremental stimulus extension.
 struct Signatures {
     values: Vec<u64>,
     active: usize,
@@ -294,13 +220,7 @@ impl Signatures {
         &self.values[base..base + self.active]
     }
 
-    /// Carries the rows onto a merged node space.
-    ///
-    /// A merged node computes the function of every node that mapped onto it, so
-    /// its words are that node's words, complemented when the map inverted it.
-    /// Copying them is what keeps refinement incremental across a merge:
-    /// re-simulating the learned stimulus from the first word would cost more
-    /// than the merge saves.
+    /// Projects active rows onto a merged node space.
     fn projected(&self, remap: &[Option<LogicNodeId>], node_count: usize) -> Self {
         let mut projected = Self::new(node_count);
         projected.active = self.active;
@@ -319,8 +239,7 @@ impl Signatures {
     }
 }
 
-/// Fills stimulus words `from..` for every live node, leaving earlier words as
-/// the previous round computed them.
+/// Fills stimulus words `from..` while retaining earlier results.
 fn simulate(
     network: &LogicGraph,
     live: &[bool],
@@ -400,19 +319,12 @@ fn nominate(
             continue;
         }
         let node = LogicNodeId::from_index(index);
-        // Constants and inputs are nominated as well as gates. A gate that is
-        // provably constant or provably a projection of one input removes its
-        // whole cone, which is the largest single win available to this pass,
-        // and index order makes the constant or input the class representative.
-        // The constant-true literal is the complement of node zero and never
-        // exists as its own node, so nominating it would duplicate the constant
-        // class.
+        // True is the complemented constant-zero literal, not a distinct node.
         if matches!(network.node(node), LogicNode::Const(true)) {
             continue;
         }
         let mut key = signatures.row(index).to_vec();
-        // Normalize by the phase of the first simulated pattern so a node and its
-        // complement nominate one class instead of two.
+        // Normalize phase so a node and its complement nominate one class.
         let inverted = key[0] & 1 == 1;
         if inverted {
             for word in &mut key {
@@ -429,16 +341,11 @@ fn nominate(
         .into_values()
         .filter(|members| members.len() > 1)
         .map(|mut members| {
-            // A class wider than the per-round bound is truncated to its
-            // lowest-ID members. Truncation is deterministic and the remainder
-            // returns in the next round once refinement has split it.
             members.truncate(MAX_CLASS_MEMBERS);
             members
         })
         .collect::<Vec<_>>();
-    // Members arrive in ascending node order because the scan is index-ordered.
-    // Sorting classes by their first member gives the whole nomination a stable
-    // total order independent of hash iteration.
+    // Restore stable order after hash-map collection.
     classes.sort_unstable_by_key(|members| members[0].0);
     metrics.classes = metrics.classes.max(classes.len());
     metrics.candidates += classes
@@ -451,14 +358,7 @@ fn nominate(
         .collect()
 }
 
-/// One shard's share of a round's proof budget.
-///
-/// The quotas partition the budget exactly, so their sum is the budget and no
-/// shard is rounded up into an allowance the round does not have. Handing every
-/// shard `ceil(budget / shards)` overshot by up to one proof per shard, and once
-/// the remaining budget fell below the shard count it gave every shard a quota
-/// of one: a round with a single proof left could still launch one per shard,
-/// and any one of them may be expensive.
+/// Partitions the round budget exactly across shards.
 fn shard_quota(max_pairs: usize, shard_count: usize, shard: usize) -> usize {
     let shard_count = shard_count.max(1);
     max_pairs / shard_count + usize::from(shard < max_pairs % shard_count)
@@ -500,10 +400,7 @@ fn prove(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    // Classes are independent proof problems over one immutable network, so each
-    // shard owns its own solver. Shards are contiguous ranges of the stable
-    // class order and their results are reassembled in that order, which keeps
-    // the substitution set independent of completion order and worker count.
+    // Contiguous stable shards own independent solver encodings.
     let shard_size = SHARD_CLASSES.min(literals.len().max(1));
     let shard_count = literals.len().div_ceil(shard_size);
     let shards =
@@ -541,9 +438,6 @@ fn prove(
             let (node, inverted) = class.members[member];
             let (target, target_inverted) = class.members[representative];
             debug_assert!(target.index() < node.index());
-            // A representative may itself have collapsed in an earlier round.
-            // Following that chain keeps every substitution target a surviving
-            // node, so the rebuild never dereferences a removed node.
             let (target, target_inverted) =
                 resolve(substitutions, target, inverted != target_inverted);
             substitutions[node.index()] = Some(Substitution {
@@ -560,9 +454,7 @@ fn prove(
     })
 }
 
-/// Follows an existing substitution chain to the surviving node, accumulating
-/// phase. Chains are acyclic because every substitution points at a strictly
-/// lower node index.
+/// Resolves a lower-ID substitution chain and its accumulated phase.
 fn resolve(
     substitutions: &[Option<Substitution>],
     node: LogicNodeId,

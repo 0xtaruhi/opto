@@ -299,16 +299,8 @@ impl TimingGraph {
                     }),
                 };
             }
-            // The retained order and dependency plan stay usable when the edit
-            // added no dependency edge and no net. Removing an arc cannot move a
-            // net earlier than a predecessor, and a plan that still lists the
-            // removed edge is conservative: propagation recomputes the sink from
-            // its live predecessors. Appending a net does invalidate the plan,
-            // because its position arena no longer covers the arena.
-            //
-            // This matters because a rebuild is `O(nets + arcs)` per edit per
-            // timing view, and post-map optimization applies many small edits.
-            // Cell resizing and constant-register removal both land here.
+            // Removed edges leave the retained order conservative; new edges or
+            // nets require a plan whose positions cover the changed graph.
             self.topological_order_stale |= dependencies_changed
                 || !added_edges.is_empty()
                 || self.net_count != edit.old_net_len;
@@ -363,11 +355,8 @@ impl TimingGraph {
                     .map(|to| (net, to)),
             );
             if let Some(old) = edit.old_nets.get(&net) {
-                // The incoming side decides whether the retained propagation
-                // plan still describes this net, so it compares exactly what the
-                // plan consumes: arc sources and latch enables. A latch replaced
-                // with the same data and output nets but a different enable
-                // changes this set while leaving `from`/`to` adjacency alone.
+                // Compare the plan relation, including latch enables, not only
+                // graph adjacency.
                 old_edges.clear();
                 new_edges.clear();
                 old_edges.extend(self.plan_dependencies(&old.incoming));

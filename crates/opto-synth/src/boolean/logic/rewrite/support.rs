@@ -38,15 +38,7 @@ pub(crate) fn window_cares(
     Some(cares)
 }
 
-/// Decides which of a node's cuts a window contains, in the caller's cut order.
-///
-/// A cut the window does not contain is projected as fully cared, so its leaves
-/// are never read back from the truth tables. Answering this before the tables
-/// are built keeps evaluation inside the window: observing an uncontained leaf
-/// expands its whole cone, which reaches past the window's inputs and can run
-/// all the way to the primary inputs. `skip` names the cuts the caller projects
-/// by other means, and the coverage queries short circuit, so the checker's
-/// shared traversal budget is spent on exactly the same leaves either way.
+/// Marks cuts contained by the window without evaluating outside its inputs.
 pub(crate) fn projected_cuts(
     coverage: &mut CoverageCheck<'_>,
     cuts: &[KCut],
@@ -63,7 +55,7 @@ pub(crate) fn projected_cuts(
         .collect()
 }
 
-/// The leaves worth observing: those of the cuts the window contains.
+/// Iterates leaves of cuts contained by the window.
 pub(crate) fn projected_leaves<'cuts>(
     cuts: &'cuts [KCut],
     projected: &'cuts [bool],
@@ -74,12 +66,7 @@ pub(crate) fn projected_leaves<'cuts>(
         .flat_map(|(cut, _)| cut.leaves().iter().copied())
 }
 
-/// Decides whether a node's cone is contained in a seed set.
-///
-/// The seed set is one cut, so it has at most [`MAX_CUT_LEAVES`] members and a
-/// linear scan beats hashing. The traversal stack is owned by the checker rather
-/// than allocated per query, because one checker answers a query for every cut
-/// of its node and this runs for every node of every rewrite pass.
+/// Bounded, memoized cone-containment checker for one cut-sized seed set.
 pub(crate) struct CoverageCheck<'a> {
     network: &'a LogicGraph,
     seeds: smallvec::SmallVec<[usize; MAX_CUT_LEAVES]>,
@@ -158,27 +145,15 @@ struct SupportEntry {
 }
 
 pub(super) struct SupportIndex {
-    /// Support entries sorted by key, which is also the key index: equal keys
-    /// are contiguous, so a range lookup is a binary search over this slice and
-    /// needs no second map to hash a whole cut into.
+    /// Support entries sorted by key for binary range lookup.
     entries: Box<[SupportEntry]>,
-    /// Exact negative filter over the keys present in `entries`.
-    ///
-    /// Divisor collection probes every subset of a cut's leaves, and on real
-    /// designs almost nine in ten of those subsets are not the support of any
-    /// node. Hashing a full key and probing the map to learn that is the
-    /// dominant cost of rewriting. A set bit only means "probe the map"; a
-    /// clear bit is a proof of absence, so the filter changes cost and never
-    /// changes which divisors are found.
+    /// Exact-negative filter; set bits still require an `entries` lookup.
     key_filter: Box<[u64]>,
     truths: Box<[TruthTable]>,
     truth_ranges: Box<[TruthRange]>,
 }
 
-/// Mixes one leaf node index into the value combined by [`subset_fingerprint`].
-///
-/// The combination is XOR, so this must destroy the low-order structure of a
-/// dense node index or subsets that differ by a swap would collide constantly.
+/// Mixes one dense leaf index for order-independent XOR combination.
 pub(super) const fn leaf_fingerprint(leaf: u32) -> u64 {
     let mut value = (leaf as u64)
         .wrapping_add(1)
@@ -188,17 +163,14 @@ pub(super) const fn leaf_fingerprint(leaf: u32) -> u64 {
     value ^ (value >> 32)
 }
 
-/// Combines per-leaf fingerprints for one subset. Order-independent, because a
-/// support key is a set.
+/// Combines one support set's fingerprints without order dependence.
 pub(super) fn subset_fingerprint(leaves: impl IntoIterator<Item = u32>) -> u64 {
     leaves
         .into_iter()
         .fold(0, |value, leaf| value ^ leaf_fingerprint(leaf))
 }
 
-/// Filter bits allocated per distinct key. One bit per key would saturate; this
-/// keeps the false-probe rate low while staying a fixed function of the key
-/// count, so the filter is identical across runs and worker counts.
+/// Deterministic filter density per distinct support key.
 const KEY_FILTER_BITS_PER_KEY: usize = 32;
 const MINIMUM_KEY_FILTER_WORDS: usize = 64;
 
@@ -209,14 +181,8 @@ struct TruthRange {
 }
 
 impl SupportIndex {
-    /// Reports whether any key with this fingerprint exists.
-    ///
-    /// A `false` answer is exact: the caller may skip building the key and
-    /// probing the map. A `true` answer still requires the probe.
+    /// Returns `false` only when the fingerprint is definitely absent.
     pub(super) fn may_contain(&self, fingerprint: u64) -> bool {
-        // The filter length is a power of two, so reducing the fingerprint is a
-        // mask rather than a division. Masking first keeps the value inside the
-        // filter on every pointer width.
         let bits = self.key_filter.len() * u64::BITS as usize;
         let index = usize::try_from(fingerprint & (bits as u64 - 1))
             .expect("filter length is a usize, so the masked index fits one");
@@ -266,8 +232,7 @@ pub(super) fn build_support_index(
             for cut in cuts.cuts(node).iter().copied() {
                 let self_cut = cut.contains(node);
                 let truth = if self_cut {
-                    // The self cut is skipped by decision analysis. Preserve
-                    // its compact row slot without evaluating the entire cone.
+                    // Preserve the skipped self-cut row without evaluating it.
                     TruthTable {
                         input_count: cut.len(),
                         bits: 0,

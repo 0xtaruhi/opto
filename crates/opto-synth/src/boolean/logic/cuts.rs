@@ -15,11 +15,7 @@ use crate::boolean::logic::TruthTable;
 
 const CUT_ANALYSIS_CHUNK_ITEMS: usize = 4096;
 
-/// Decides whether translating a node's predecessors' cut leaves keeps their
-/// order, which is what makes a translated cut set equal to a recomputed one.
-///
-/// The rows are already sorted by old node index, so the union is walked as a
-/// merge rather than rebuilt and sorted.
+/// Checks whether translated predecessor leaves preserve their sorted rank.
 fn translation_preserves_predecessor_rank(
     leaves: &opto_core::PackedRows<u32>,
     old_predecessors: &[Option<u32>; 3],
@@ -329,11 +325,7 @@ impl CutDatabase {
         for index in 0..node_count {
             levels[network.level(LogicNodeId::from_index(index)) as usize].push(index);
         }
-        // The rank check reads the union of a node's predecessors' cut leaves,
-        // and that union is a property of the predecessor, not of the consumer.
-        // Collecting and sorting it per consumer dominated the pass; collecting
-        // it once per predecessor is both fewer passes over the same leaves and
-        // work that happens outside the level-serialized loop.
+        // Precompute each predecessor's leaf union once for rank checks.
         let predecessor_leaves = previous.sorted_leaves(runtime)?;
         let segment_count = cut_segment_count(&levels)?;
         let mut arena = Vec::<Box<[KCut]>>::with_capacity(segment_count);
@@ -450,30 +442,41 @@ impl CutDatabase {
         Some(translated)
     }
 
-    /// The distinct cut leaves of every node, sorted, one row per node.
-    ///
-    /// This is the input to the incremental rank check, hoisted out of it: the
-    /// same leaf union was otherwise rebuilt and re-sorted once per consumer.
+    /// Packs each node's sorted distinct cut leaves in bounded chunks.
     fn sorted_leaves(
         &self,
         runtime: &ExecutionContext,
     ) -> Result<opto_core::PackedRows<u32>, crate::SynthError> {
-        let rows = runtime.analyze_indexed(self.rows.row_count(), |index| {
-            let mut leaves = self
-                .cuts(LogicNodeId::from_index(index))
-                .iter()
-                .flat_map(KCut::leaves)
-                .map(|leaf| {
-                    u32::try_from(leaf.index())
-                        .expect("logic node index is bounded by compact graph storage")
-                })
-                .collect::<Vec<_>>();
-            leaves.sort_unstable();
-            leaves.dedup();
-            Ok::<_, crate::SynthError>(leaves)
-        })?;
-        opto_core::PackedRows::try_from_row_iter(rows.into_iter().map(Vec::into_iter))
-            .map_err(|_| crate::SynthError::capacity("logic cut leaf index exceeds capacity"))
+        let row_count = self.rows.row_count();
+        let mut rows = opto_core::PackedRowsBuilder::try_with_capacity(row_count, 0)
+            .map_err(|_| crate::SynthError::capacity("logic cut leaf index exceeds capacity"))?;
+        runtime.analyze_indexed_chunks(
+            row_count,
+            CUT_ANALYSIS_CHUNK_ITEMS,
+            |index| {
+                let mut leaves = self
+                    .cuts(LogicNodeId::from_index(index))
+                    .iter()
+                    .flat_map(KCut::leaves)
+                    .map(|leaf| {
+                        u32::try_from(leaf.index())
+                            .expect("logic node index is bounded by compact graph storage")
+                    })
+                    .collect::<Vec<_>>();
+                leaves.sort_unstable();
+                leaves.dedup();
+                Ok::<_, crate::SynthError>(leaves)
+            },
+            |_, chunk| {
+                for leaves in chunk {
+                    rows.try_push_row(leaves).map_err(|_| {
+                        crate::SynthError::capacity("logic cut leaf index exceeds capacity")
+                    })?;
+                }
+                Ok::<_, crate::SynthError>(())
+            },
+        )?;
+        Ok(rows.finish())
     }
 
     pub(crate) fn assert_same(&self, other: &Self) {

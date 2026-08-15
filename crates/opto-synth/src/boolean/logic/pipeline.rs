@@ -19,8 +19,7 @@ pub(super) struct LogicPipelineOutcome {
     pub(super) remap: Box<[Option<LogicNodeId>]>,
 }
 
-/// Expansion rounds in the canonical path. Normalization can synthesize a fresh
-/// MUX from expanded structure, so one retry is allowed and no more.
+/// MUX expansion rounds, including one retry after normalization.
 const MUX_DECOMPOSITION_ROUNDS: usize = 2;
 
 pub(super) struct TransformProduct {
@@ -91,11 +90,6 @@ pub(super) fn optimize(
     if !enabled {
         return finish(identity(source), roots);
     }
-    // One destructive state owns the whole path, so every node map composes
-    // through the same mechanism and callers only ever see their own node
-    // space. Functional reduction runs first, so the canonical optimization is
-    // built from one duplicate-free subject rather than rediscovering the same
-    // equal cones.
     let mut state = TransformState::start(roots, identity(source))?;
     if let Some(reduction) =
         reduce_functionally(&state.network, &state.roots, diagnostics, runtime)?
@@ -114,10 +108,7 @@ pub(super) fn optimize(
     finish(state.finish(), roots)
 }
 
-/// Runs one SAT sweep over the freshly lowered subject.
-///
-/// Returns `None` when the sweep proved nothing, which lets the caller skip a
-/// composition rather than compose an identity.
+/// Runs one SAT sweep, returning `None` when it proves no substitution.
 fn reduce_functionally(
     source: &LogicGraph,
     roots: &[LogicNodeId],
@@ -147,18 +138,7 @@ fn reduce_functionally(
     Ok(reduced)
 }
 
-/// Optimizes the one canonical AXM implementation.
-///
-/// MUX decomposition is part of this path rather than a competing branch. A
-/// genuine MUX node is expanded into AND/inverter structure so cover can share
-/// NAND/NOR across what was one atom, and the ordinary normalizer runs after
-/// each expansion. Normalization can synthesize a fresh MUX, so the expansion is
-/// retried once; the bound is a fixed round budget, not a fixpoint.
-///
-/// Optimizing an un-expanded implementation alongside this one doubled every
-/// rewrite, cut, truth, and cover pass to produce an alternative that mapping
-/// then discarded. Cover still selects MUX cells, because it matches cut truth
-/// tables against the target library rather than AXM node kinds.
+/// Optimizes the canonical path, expanding MUX structure before normalization.
 fn optimize_canonical(
     source: &LogicGraph,
     roots: &[LogicNodeId],
@@ -189,9 +169,7 @@ fn optimize_canonical(
     if expanded {
         return Ok(state.finish());
     }
-    // A subject with no MUX node never entered the loop, so it has not been
-    // optimized yet. The baseline policy owns that case because it also runs the
-    // global sharing census.
+    // A subject with no MUX still needs the baseline optimization once.
     optimize_with(
         source,
         roots,
@@ -203,10 +181,7 @@ fn optimize_canonical(
     )
 }
 
-/// Expands every genuine MUX node into AND/inverter structure.
-///
-/// Returns `None` when the subject has no MUX node, which is the signal that
-/// the canonical path has nothing left to expand.
+/// Expands MUX nodes, returning `None` when no expansion is needed.
 fn decompose_muxes(
     source: &LogicGraph,
     roots: &[LogicNodeId],
@@ -237,8 +212,7 @@ fn decompose_muxes(
     }))
 }
 
-/// The rewrite an optimization path runs, and the only thing that separates
-/// the two paths.
+/// Rewrite policy for one optimization pass.
 #[derive(Clone, Copy)]
 pub(super) enum OptimizationPolicy {
     Baseline,
@@ -246,9 +220,6 @@ pub(super) enum OptimizationPolicy {
 }
 
 /// Optimizes one implementation under `policy`.
-///
-/// A caller without a recipe cache of its own gets a fresh one for the call.
-/// Building it here keeps that fallback in one place rather than once per path.
 pub(super) fn optimize_with(
     network: &LogicGraph,
     roots: &[LogicNodeId],

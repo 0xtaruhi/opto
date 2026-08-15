@@ -6,26 +6,6 @@ use hashbrown::HashSet;
 use opto_ir::mapped::{CellId, ConnectionRef, ConnectionSignal, MappedNetlist, NetId, RegionDelta};
 use opto_library::{TargetCellSet, TargetPinDirection, TargetSequentialKind};
 
-/// Proposes one removal per register whose reachable value is a single
-/// constant.
-///
-/// # Initial-state contract
-///
-/// A removal is proved by induction over one register: the base case is that
-/// the register is at its reset value, and the step is that its next state is
-/// that same value. Only registers that have an asynchronous clear or preset
-/// are considered, and only the reset value is ever folded, so the base case is
-/// exactly the synthesis contract that every such register is reset before the
-/// design is observed. Nothing in a mapped netlist can establish that contract,
-/// so it is a stated assumption, not a derived fact; a register whose own reset
-/// the netlist holds inactive is declined because even the assumption cannot
-/// reach it. A design run without asserting reset is outside the contract, and
-/// a register whose next state is its own output is the case that shows it: the
-/// induction holds, and the hardware holds its power-up value forever.
-///
-/// Generation is read-only, so it is sharded across the worker pool and the
-/// shards are concatenated in cell order. Selection and commit stay ordered in
-/// the caller, so no accepted edit depends on completion order.
 /// One register proved to hold a single constant, with the value each of its
 /// outputs holds.
 pub(super) struct ConstantRegister {
@@ -58,9 +38,11 @@ pub(super) fn constant_register_removal(
     let mut rewires = Vec::new();
     for register in registers {
         for &(net, value) in &register.outputs {
-            let Some(pins) = mapped.pins_on_net(net) else {
-                return Ok(None);
-            };
+            let pins = mapped.pins_on_net(net).ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "constant-register output {net:?} has no pin table"
+                ))
+            })?;
             for pin in pins {
                 let owner = mapped.pin_owner(pin);
                 if owner == Some(register.cell) {
@@ -107,6 +89,10 @@ pub(super) fn constant_register_removal(
     Ok(Some(PostmapCandidate::new(delta)))
 }
 
+/// Finds registers that remain at their asynchronous reset value.
+///
+/// The proof assumes reset is asserted before observation, rejects a reset the
+/// netlist holds inactive, and bounds all enumerated combinational work.
 pub(super) fn constant_register_candidates(
     mapped: &MappedNetlist,
     library: &TargetCellSet,
@@ -114,9 +100,6 @@ pub(super) fn constant_register_candidates(
     scope: Option<&std::collections::HashSet<CellId>>,
     runtime: &opto_runtime::ExecutionContext,
 ) -> Result<Vec<ConstantRegister>, crate::SynthError> {
-    // A scoped round visits only the registers whose inputs an accepted removal
-    // just changed. Rescanning the whole netlist after every removal costs one
-    // full sweep per removed register and finds the same answer.
     let cells = match scope {
         Some(scope) => {
             let mut cells = scope.iter().copied().collect::<Vec<_>>();
@@ -292,6 +275,7 @@ impl DriverCone {
         roots: impl Iterator<Item = NetId>,
         known: &[(NetId, bool)],
         influenced: &HashSet<NetId>,
+        boundary: &HashSet<NetId>,
     ) -> Option<Self> {
         let mut gates = Vec::new();
         let mut unknowns = Vec::new();
@@ -303,13 +287,7 @@ impl DriverCone {
             if emitted.contains(&net) || known.iter().any(|&(resolved, _)| resolved == net) {
                 continue;
             }
-            // Only a net the register can still affect is worth folding. Every
-            // other net is an unconstrained input, so it becomes one enumerated
-            // leaf instead of dragging its own cone into the proof.
             if expanded {
-                // Every input of this gate has been resolved, so the gate can be
-                // appended in evaluation order. `expanded` entries are only
-                // pushed once the driver has been found.
                 let gate = pending_gates.remove(&net)?;
                 if gates.len() == MAX_CONSTANT_REGISTER_CONE_GATES {
                     return None;
@@ -318,8 +296,7 @@ impl DriverCone {
                 emitted.insert(net);
                 continue;
             }
-            let driver = influenced
-                .contains(&net)
+            let driver = (influenced.contains(&net) && !boundary.contains(&net))
                 .then(|| combinational_driver(mapped, library, net))
                 .flatten();
             let Some(gate) = driver.filter(|_| visiting.insert(net)) else {
@@ -392,32 +369,26 @@ impl ConeGate {
     }
 }
 
-/// Finds the combinational cell driving `net`, when exactly one does.
-///
-/// The cone folds this net into a Boolean function of its inputs, so it has to
-/// be the whole story of what puts a value on the net. Every pin on the net is
-/// scanned, not just until a driver is found: a second output driver, an `Inout`
-/// pin, or a three-state output all mean the net's value is a resolution the
-/// cone does not represent, and each returns `None`. A sequential driver, an
-/// unresolvable library reference, and a net driven by nothing return `None` for
-/// the same reason. The caller reads `None` as "this net is an unknown leaf",
-/// which is the conservative answer in every one of those cases.
+/// Finds one unconditional combinational driver for a non-boundary net.
+/// Multiple, constant, sequential, three-state, inout, or malformed drivers
+/// conservatively make the net an unknown leaf.
 fn combinational_driver(
     mapped: &MappedNetlist,
     library: &TargetCellSet,
     net: NetId,
 ) -> Option<ConeGate> {
+    if mapped
+        .constant_drivers()
+        .iter()
+        .any(|&(driven, _)| driven == net)
+    {
+        return None;
+    }
     let mut driver = None;
     for pin in mapped.pins_on_net(net)? {
-        let Some(cell) = mapped.pin_owner(pin) else {
-            continue;
-        };
-        let Some(mapped_cell) = mapped.cell(cell) else {
-            continue;
-        };
-        let Some(library_index) = mapped_cell.library_cell else {
-            continue;
-        };
+        let cell = mapped.pin_owner(pin)?;
+        let mapped_cell = mapped.cell(cell)?;
+        let library_index = mapped_cell.library_cell?;
         let library_index = library_index as usize;
         let target = library.get(library_index)?;
         let connections = mapped.connections(cell)?;
@@ -430,9 +401,6 @@ fn combinational_driver(
             match target_pin.direction() {
                 TargetPinDirection::Output => {
                     if drives_net {
-                        // A conditional output puts a value on the net only when
-                        // its enable says so, and the cone has no way to say
-                        // "and otherwise whatever else drives this net".
                         target_pin.three_state().is_none().then_some(())?;
                         if target.sequential().next().is_some() {
                             return None;
@@ -441,9 +409,6 @@ fn combinational_driver(
                     }
                 }
                 TargetPinDirection::Inout => {
-                    // An `Inout` pin on this net may be driving it. Nothing here
-                    // distinguishes that from it only reading, so the net stops
-                    // being a function of one driver either way.
                     return None;
                 }
                 TargetPinDirection::Input | TargetPinDirection::Internal => {
@@ -541,10 +506,6 @@ fn constant_register_candidate(
     if outputs.is_empty() {
         return Ok(None);
     }
-    // The proof below is an induction over this register, and its base case is
-    // the reset. A register whose reset can never assert has no base case: its
-    // power-up value is arbitrary and stays arbitrary, so the reset value is not
-    // the value it holds.
     let ((Some(control), None) | (None, Some(control))) = (sequential.clear(), sequential.preset())
     else {
         return Ok(None);
@@ -582,12 +543,6 @@ fn constant_register_candidate(
             None => unknowns.push(name),
         }
     }
-    // A reserved or hardwired RTL field usually reaches its register through a
-    // write-enable gate rather than through a constant pin, so the pin-local
-    // question "is D tied to my reset value" answers no while the design still
-    // never leaves that value. Folding a bounded cone behind the driven pins,
-    // with this register's own outputs already substituted, asks the question
-    // the design actually poses.
     let Some(influenced) = influenced_nets(mapped, library, &outputs) else {
         return Ok(None);
     };
@@ -597,6 +552,7 @@ fn constant_register_candidate(
         driven.iter().map(|&(_, net)| net),
         &outputs,
         &influenced,
+        boundary,
     ) else {
         return Ok(None);
     };
@@ -717,12 +673,6 @@ mod tests {
         .into()
     }
 
-    /// A net two cells drive is not a function of either of them, so the cone
-    /// cannot fold it and the register behind it is not provably constant.
-    ///
-    /// The net is on the feedback path from the register's own output back to
-    /// its data pin, which is where the cone actually looks. Read alone, the
-    /// first driver says the data is constant zero.
     #[test]
     fn keeps_registers_behind_a_multiply_driven_net() {
         let library = library();
@@ -779,6 +729,72 @@ mod tests {
     }
 
     #[test]
+    fn keeps_registers_behind_a_cell_and_constant_driven_net() {
+        let library = library();
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let clock = builder.add_net(Some("clk")).unwrap();
+        let reset = builder.add_net(Some("rst")).unwrap();
+        let enable = builder.add_net(Some("en")).unwrap();
+        let d = builder.add_net(Some("d")).unwrap();
+        let q = builder.add_net(Some("q")).unwrap();
+        builder
+            .add_cell(
+                "r0",
+                "EDFCNQ",
+                Some(0),
+                &[
+                    ("D".to_string(), Some(0), ConnectionSignal::Net(d)),
+                    ("E".to_string(), Some(1), ConnectionSignal::Net(enable)),
+                    ("CP".to_string(), Some(2), ConnectionSignal::Net(clock)),
+                    ("CDN".to_string(), Some(3), ConnectionSignal::Net(reset)),
+                    ("Q".to_string(), Some(4), ConnectionSignal::Net(q)),
+                ],
+            )
+            .unwrap();
+        builder
+            .add_cell(
+                "u0",
+                "AND2",
+                Some(2),
+                &[
+                    ("A".to_string(), Some(0), ConnectionSignal::Net(q)),
+                    ("B".to_string(), Some(1), ConnectionSignal::Constant(false)),
+                    ("Z".to_string(), Some(2), ConnectionSignal::Net(d)),
+                ],
+            )
+            .unwrap();
+        builder.drive_constant(d, true);
+        let mapped = builder.freeze().unwrap();
+
+        let registers = constant_register_candidates(
+            &mapped,
+            &library,
+            &HashSet::new(),
+            None,
+            crate::test_runtime(),
+        )
+        .unwrap();
+
+        assert!(registers.is_empty());
+    }
+
+    #[test]
+    fn reports_a_missing_output_pin_table() {
+        let mapped = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL)
+            .unwrap()
+            .freeze()
+            .unwrap();
+        let register = ConstantRegister {
+            cell: CellId::from_index(0).unwrap(),
+            outputs: vec![(NetId::from_index(0).unwrap(), false)],
+        };
+
+        let error = constant_register_removal(&mapped, &[register]).unwrap_err();
+
+        assert!(error.to_string().contains("has no pin table"));
+    }
+
+    #[test]
     fn folds_enable_registers_holding_their_reset_value() {
         let library = library();
         let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
@@ -828,12 +844,6 @@ mod tests {
         assert_eq!(connections[0].signal, ConnectionSignal::Constant(false));
     }
 
-    /// Pins the initial-state contract on the case that makes it visible.
-    ///
-    /// A register whose data is its own output satisfies the induction while
-    /// holding whatever it powered up with, so folding it is correct exactly
-    /// when the contract holds. The test exists so that the assumption is
-    /// visible in the suite rather than implied by the proof.
     #[test]
     fn folds_a_self_holding_register_under_the_reset_contract() {
         let library = library();
@@ -880,8 +890,6 @@ mod tests {
         assert_eq!(registers.len(), 1);
     }
 
-    /// A register the netlist can never reset has no base case for the
-    /// induction, so its power-up value is arbitrary and it is not constant.
     #[test]
     fn keeps_registers_whose_reset_is_tied_inactive() {
         let library = library();
