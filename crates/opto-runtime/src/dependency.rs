@@ -231,6 +231,12 @@ impl DependencyPublicationPlan {
         row_count: usize,
         rows: impl IntoIterator<Item = (usize, usize)>,
     ) -> Result<Self, RuntimeError> {
+        // Validate the counts before anything is sized from them: an owner
+        // table one entry per row is the first allocation this makes, and a row
+        // count it cannot represent has to be reported, not aborted on.
+        let _ = row_count
+            .checked_add(1)
+            .ok_or_else(|| invalid("dependency row count exceeds addressable capacity"))?;
         let mut rows = rows.into_iter().collect::<Vec<_>>();
         if rows
             .iter()
@@ -516,7 +522,13 @@ impl CsrEdges {
         if edges.len() > u32::MAX as usize {
             return Err(invalid("dependency edge count exceeds 32-bit capacity"));
         }
-        let mut offsets = vec![0u32; row_count + 1];
+        // The offsets array is one longer than the row count, so a row count at
+        // the top of the address space is a structured error rather than an
+        // allocation that overflows before it can be reported.
+        let offset_len = row_count
+            .checked_add(1)
+            .ok_or_else(|| invalid("dependency row count exceeds addressable capacity"))?;
+        let mut offsets = vec![0u32; offset_len];
         for &(row, _) in edges {
             let slot = offsets
                 .get_mut(row + 1)
