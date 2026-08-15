@@ -1261,7 +1261,8 @@ merge set is identical across supported worker counts and repeated runs, budget
 exhaustion is reported rather than silently merged, and the pass fits its
 declared share of the Boolean stage budget.
 
-Measured on the reference case, same inputs and host as the motivation section:
+Measured on the reference case when this phase landed, same inputs and host as
+the motivation section:
 
 | Metric | Before | After |
 | --- | ---: | ---: |
@@ -1321,7 +1322,8 @@ that answers nobody's question. Independent removals commit as one transaction,
 because each post-map transaction pays one incremental-STA update and paying it
 per register cost 5.3 s for 39 removals against 0.24 s for the batch.
 
-Measured on the reference case, on top of Phase 1a and the MFS scoping:
+Measured on the reference case when this phase landed, on top of Phase 1a and
+the MFS scoping:
 
 | Metric | Before | After |
 | --- | ---: | ---: |
@@ -1365,8 +1367,10 @@ selects MUX cells, because it matches cut truth tables against the target
 library rather than AXM node kinds, so nothing about the target's MUX cells
 depended on retaining an un-expanded subject.
 
-Measured on the reference case, on top of Phase 1a, Phase 1b, and the hot-path
-work below:
+Measured on the reference case when this phase landed, on top of Phase 1a,
+Phase 1b, and the hot-path work below. Every table in this section records one
+phase against the state before it, not the state of the branch; `CHANGELOG.md`
+records the head.
 
 | Metric | Before | After |
 | --- | ---: | ---: |
