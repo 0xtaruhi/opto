@@ -392,16 +392,22 @@ impl ConeGate {
     }
 }
 
-/// Finds the combinational cell driving `net`, if exactly that is what drives it.
+/// Finds the combinational cell driving `net`, when exactly one does.
 ///
-/// A sequential driver, an unresolvable library reference, or a net driven by
-/// something other than a cell output all return `None`, which the caller reads
-/// as "this net is an unknown leaf".
+/// The cone folds this net into a Boolean function of its inputs, so it has to
+/// be the whole story of what puts a value on the net. Every pin on the net is
+/// scanned, not just until a driver is found: a second output driver, an `Inout`
+/// pin, or a three-state output all mean the net's value is a resolution the
+/// cone does not represent, and each returns `None`. A sequential driver, an
+/// unresolvable library reference, and a net driven by nothing return `None` for
+/// the same reason. The caller reads `None` as "this net is an unknown leaf",
+/// which is the conservative answer in every one of those cases.
 fn combinational_driver(
     mapped: &MappedNetlist,
     library: &TargetCellSet,
     net: NetId,
 ) -> Option<ConeGate> {
+    let mut driver = None;
     for pin in mapped.pins_on_net(net)? {
         let Some(cell) = mapped.pin_owner(pin) else {
             continue;
@@ -413,49 +419,56 @@ fn combinational_driver(
             continue;
         };
         let library_index = library_index as usize;
-        let Some(target) = library.get(library_index) else {
-            continue;
-        };
-        if target.sequential().next().is_some() {
-            continue;
-        }
-        let Some(connections) = mapped.connections(cell) else {
-            continue;
-        };
+        let target = library.get(library_index)?;
+        let connections = mapped.connections(cell)?;
         let mut output_pin = None;
         let mut inputs = vec![None; target.pins().count()];
-        let mut complete = true;
         for connection in connections {
-            let Some(library_pin) = connection.library_pin else {
-                complete = false;
-                break;
-            };
-            let library_pin = library_pin as usize;
-            let Some(target_pin) = target.pins().nth(library_pin) else {
-                complete = false;
-                break;
-            };
-            if target_pin.direction() == TargetPinDirection::Output {
-                if connection.signal == ConnectionSignal::Net(net) {
-                    output_pin = Some(library_pin);
+            let library_pin = connection.library_pin? as usize;
+            let target_pin = target.pins().nth(library_pin)?;
+            let drives_net = connection.signal == ConnectionSignal::Net(net);
+            match target_pin.direction() {
+                TargetPinDirection::Output => {
+                    if drives_net {
+                        // A conditional output puts a value on the net only when
+                        // its enable says so, and the cone has no way to say
+                        // "and otherwise whatever else drives this net".
+                        target_pin.three_state().is_none().then_some(())?;
+                        if target.sequential().next().is_some() {
+                            return None;
+                        }
+                        output_pin = Some(library_pin);
+                    }
                 }
-            } else if let Some(slot) = inputs.get_mut(library_pin) {
-                *slot = Some(connection.signal);
+                TargetPinDirection::Inout => {
+                    // An `Inout` pin on this net may be driving it. Nothing here
+                    // distinguishes that from it only reading, so the net stops
+                    // being a function of one driver either way.
+                    return None;
+                }
+                TargetPinDirection::Input | TargetPinDirection::Internal => {
+                    if let Some(slot) = inputs.get_mut(library_pin) {
+                        *slot = Some(connection.signal);
+                    }
+                }
             }
         }
-        if !complete {
+        let Some(output_pin) = output_pin else {
             continue;
-        }
-        if let Some(output_pin) = output_pin {
-            return Some(ConeGate {
+        };
+        if driver
+            .replace(ConeGate {
                 output: net,
                 library_index,
                 output_pin,
                 inputs,
-            });
+            })
+            .is_some()
+        {
+            return None;
         }
     }
-    None
+    driver
 }
 
 fn constant_register_candidate(
@@ -686,8 +699,83 @@ mod tests {
                 clock_gate: None,
                 memory: None,
             },
+            TargetCell {
+                name: "AND2".to_string(),
+                area: Some(0.5),
+                dont_use: false,
+                usage: opto_library::TargetCellUsage::default(),
+                pins: vec![
+                    pin("A", TargetPinDirection::Input, None),
+                    pin("B", TargetPinDirection::Input, None),
+                    pin("Z", TargetPinDirection::Output, Some("A B")),
+                ],
+                sequential: Vec::new(),
+                clock_gate: None,
+                memory: None,
+            },
         ]
         .into()
+    }
+
+    /// A net two cells drive is not a function of either of them, so the cone
+    /// cannot fold it and the register behind it is not provably constant.
+    ///
+    /// The net is on the feedback path from the register's own output back to
+    /// its data pin, which is where the cone actually looks. Read alone, the
+    /// first driver says the data is constant zero.
+    #[test]
+    fn keeps_registers_behind_a_multiply_driven_net() {
+        let library = library();
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let clock = builder.add_net(Some("clk")).unwrap();
+        let reset = builder.add_net(Some("rst")).unwrap();
+        let enable = builder.add_net(Some("en")).unwrap();
+        let d = builder.add_net(Some("d")).unwrap();
+        let q = builder.add_net(Some("q")).unwrap();
+        builder
+            .add_cell(
+                "r0",
+                "EDFCNQ",
+                Some(0),
+                &[
+                    ("D".to_string(), Some(0), ConnectionSignal::Net(d)),
+                    ("E".to_string(), Some(1), ConnectionSignal::Net(enable)),
+                    ("CP".to_string(), Some(2), ConnectionSignal::Net(clock)),
+                    ("CDN".to_string(), Some(3), ConnectionSignal::Net(reset)),
+                    ("Q".to_string(), Some(4), ConnectionSignal::Net(q)),
+                ],
+            )
+            .unwrap();
+        // `q AND 0` is zero, so folding this driver alone proves the register
+        // constant. `en AND 1` is not, and both drive `d`.
+        for (name, source, constant) in [("u_a", q, false), ("u_b", enable, true)] {
+            builder
+                .add_cell(
+                    name,
+                    "AND2",
+                    Some(2),
+                    &[
+                        ("A".to_string(), Some(0), ConnectionSignal::Net(source)),
+                        (
+                            "B".to_string(),
+                            Some(1),
+                            ConnectionSignal::Constant(constant),
+                        ),
+                        ("Z".to_string(), Some(2), ConnectionSignal::Net(d)),
+                    ],
+                )
+                .unwrap();
+        }
+        let mapped = builder.freeze().unwrap();
+        let registers = constant_register_candidates(
+            &mapped,
+            &library,
+            &HashSet::new(),
+            None,
+            crate::test_runtime(),
+        )
+        .unwrap();
+        assert!(registers.is_empty());
     }
 
     #[test]

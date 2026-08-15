@@ -1271,8 +1271,15 @@ preset are considered and only the reset value is ever folded, so the base case
 is exactly one assumption, stated here rather than derived: every such register
 is reset before the design is observed.
 
-Nothing in a mapped netlist can establish that assumption, so the pass enforces
-what it can. A register whose own reset the netlist holds inactive is declined,
+The cone the proof folds carries a second obligation. It rewrites a net into a
+Boolean function of its inputs, so exactly one cell must put a value on that
+net, unconditionally. Every pin on the net is scanned rather than the first
+driver taken: a second output driver, an `Inout` pin, or a three-state output
+each mean the net's value is a resolution the cone does not represent, and each
+makes the net an unknown leaf instead.
+
+Nothing in a mapped netlist can establish the initial-state assumption, so the
+pass enforces what it can. A register whose own reset the netlist holds inactive is declined,
 because the assumption cannot reach it. And the qualification harness applies
 the assumption rather than relying on it: an asynchronous reset is a falling
 edge, so a reset that is merely low at time zero never fires one and every
