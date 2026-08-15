@@ -25,7 +25,7 @@ use recipe::{
     CandidateDecision, Decision, PlanRecipe, RecipeNode, build_pair_function, census_divisors,
     remap_pair_truth,
 };
-pub(crate) use support::{CoverageCheck, window_cares};
+pub(crate) use support::{CoverageCheck, projected_cuts, projected_leaves, window_cares};
 use support::{REWRITE_CUTS_PER_NODE, SupportIndex, build_support_index};
 
 const WINDOW_CUT_LEAVES: usize = 6;

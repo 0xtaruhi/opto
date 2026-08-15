@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+use super::ReferenceScratch;
 use super::{
     Candidate, CellBinding, CoverDemand, CoverPlanner, ExactChoice, ExactViability,
     ExecutionContext, KCut, LibraryCover, LibraryCoverBinding, LibraryCoverCell,
@@ -213,8 +214,7 @@ impl CoverPlanner<'_> {
                 let choice = SlotChoice::Cell(u32::try_from(candidate_index).map_err(|_| {
                     crate::SynthError::capacity("cover candidate count exceeds compact capacity")
                 })?);
-                let added = self.change_choice_references(slot_id, choice, 1, &mut stack)?;
-                self.change_choice_references(slot_id, choice, -1, &mut stack)?;
+                let added = self.trial_choice_area(slot_id, choice)?;
                 let exact = ExactChoice {
                     choice,
                     area: added + candidate.nominal_cost(self.catalog).area,
@@ -230,13 +230,7 @@ impl CoverPlanner<'_> {
                 if self.choices[other].is_some_and(|choice| choice != SlotChoice::Inverter)
                     && slot_viability.inverter
                 {
-                    let added = self.change_choice_references(
-                        slot_id,
-                        SlotChoice::Inverter,
-                        1,
-                        &mut stack,
-                    )?;
-                    self.change_choice_references(slot_id, SlotChoice::Inverter, -1, &mut stack)?;
+                    let added = self.trial_choice_area(slot_id, SlotChoice::Inverter)?;
                     let exact = ExactChoice {
                         choice: SlotChoice::Inverter,
                         area: added + inverter.cost.area,
@@ -258,8 +252,7 @@ impl CoverPlanner<'_> {
                     continue;
                 }
                 let choice = SlotChoice::JointOutput(joint_id);
-                let added = self.change_choice_references(slot_id, choice, 1, &mut stack)?;
-                self.change_choice_references(slot_id, choice, -1, &mut stack)?;
+                let added = self.trial_choice_area(slot_id, choice)?;
                 let joint = &self.joints[joint_id as usize];
                 let side = u8::from(joint.slots[1] == slot_id);
                 let exact = ExactChoice {
@@ -589,14 +582,53 @@ impl CoverPlanner<'_> {
         }
     }
 
-    fn change_choice_references(
+    /// Reports the area a choice would add, without installing it.
+    ///
+    /// Exact recovery scores every viable candidate of a slot, and it used to
+    /// score one by installing the choice and immediately removing it again,
+    /// walking the newly activated cone twice and writing every reference count
+    /// on the way. A slot is charged exactly when it is unreferenced and this
+    /// trial has not reached it yet, which the visited marks decide without
+    /// touching the cover. The frontier is walked and sorted exactly as
+    /// [`CoverPlanner::change_choices_references`] walks it, so the areas are
+    /// summed in the same order and the two agree bit for bit.
+    fn trial_choice_area(
         &mut self,
         slot_id: usize,
         choice: SlotChoice,
-        delta: i32,
-        stack: &mut Vec<usize>,
     ) -> Result<f64, crate::SynthError> {
-        self.change_choice_references_tracked(slot_id, choice, delta, stack, None)
+        if self.demand.reference_count(slot_id) == 0 {
+            return Ok(0.0);
+        }
+        let mut scratch = std::mem::take(&mut self.trial_scratch);
+        scratch.begin(self.choices.len());
+        let mut frontier = std::mem::take(&mut scratch.frontier);
+        let mut next = std::mem::take(&mut scratch.next);
+        frontier.extend(self.choice_dependencies(slot_id, choice));
+        let mut area = 0.0;
+        let mut error = None;
+        while !frontier.is_empty() && error.is_none() {
+            frontier.sort_unstable();
+            next.clear();
+            for &current in &frontier {
+                if !scratch.mark(current) || self.demand.reference_count(current) != 0 {
+                    continue;
+                }
+                let Some(selected) = self.choices[current] else {
+                    error = Some(crate::SynthError::invariant(
+                        "cover recovery scored a slot without an implementation",
+                    ));
+                    break;
+                };
+                area += self.choice_cell_area(current, selected);
+                next.extend(self.choice_dependencies(current, selected));
+            }
+            std::mem::swap(&mut frontier, &mut next);
+        }
+        scratch.frontier = frontier;
+        scratch.next = next;
+        self.trial_scratch = scratch;
+        error.map_or(Ok(area), Err)
     }
 
     fn change_choice_references_tracked(
@@ -623,7 +655,10 @@ impl CoverPlanner<'_> {
             ));
         }
         debug_assert!(pending.is_empty());
-        let mut seeded_roots = Vec::with_capacity(roots.len());
+        let mut scratch = std::mem::take(&mut self.reference_scratch);
+        let ReferenceScratch { seeded_roots, next } = &mut scratch;
+        seeded_roots.clear();
+        next.clear();
         for &(slot_id, choice) in roots {
             if self.demand.reference_count(slot_id) != 0 {
                 pending.extend(self.choice_dependencies(slot_id, choice));
@@ -635,7 +670,6 @@ impl CoverPlanner<'_> {
         let mut area = 0.0;
         while !pending.is_empty() {
             pending.sort_unstable();
-            let mut next = Vec::new();
             let mut start = 0;
             while start < pending.len() {
                 let current = pending[start];
@@ -670,8 +704,9 @@ impl CoverPlanner<'_> {
                 start = end;
             }
             pending.clear();
-            pending.append(&mut next);
+            pending.append(next);
         }
+        self.reference_scratch = scratch;
         Ok(area)
     }
 

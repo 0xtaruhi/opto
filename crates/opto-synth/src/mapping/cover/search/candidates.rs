@@ -190,13 +190,12 @@ pub(crate) fn observability_cares(
         .max_by_key(|cut| cut.len())?;
     let mut inputs = base.leaves().to_vec();
     inputs.push(node);
-    let observed = cuts
-        .cuts(node)
-        .iter()
-        .flat_map(|cut| cut.leaves().iter().copied())
-        .collect::<Vec<_>>();
-    let tables = network.truth_tables_for_inputs(consumer, &inputs, &observed);
     let mut coverage = crate::boolean::logic::CoverageCheck::new(network, base.leaves());
+    let cut_list = cuts.cuts(node);
+    let projected =
+        crate::boolean::logic::projected_cuts(&mut coverage, cut_list, |cut| cut.contains(node));
+    let observed = crate::boolean::logic::projected_leaves(cut_list, &projected).collect::<Vec<_>>();
+    let tables = network.truth_tables_for_inputs(consumer, &inputs, &observed);
     let (function, _) = tables.care_projection(consumer, &inputs)?;
     let window = base.len();
     let mut sensitive = 0u64;
@@ -209,18 +208,15 @@ pub(crate) fn observability_cares(
     if sensitive == full_window {
         return None;
     }
-    let cares = cuts
-        .cuts(node)
+    let cares = cut_list
         .iter()
-        .map(|cut| {
-            if cut.contains(node) {
+        .zip(projected.iter())
+        .map(|(cut, &projected)| {
+            if !projected {
                 return u64::MAX;
             }
             let mut leaf_functions = Vec::with_capacity(cut.len());
             for leaf in cut.leaves() {
-                if coverage.covered(*leaf) != Some(true) {
-                    return u64::MAX;
-                }
                 match tables.care_projection(*leaf, &inputs) {
                     Some((truth, _)) => leaf_functions.push(truth),
                     None => return u64::MAX,

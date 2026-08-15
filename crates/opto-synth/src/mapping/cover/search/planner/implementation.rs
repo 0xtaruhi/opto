@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+use super::{ReferenceScratch, TrialScratch};
 use super::{
     Candidate, CandidateContext, CandidateIndex, CandidateRange, CellBinding, CellCost,
     CombinationalCellCatalog, CoverDemand, CoverPlanner, CoverTiming, CutDatabase,
@@ -270,6 +271,8 @@ impl<'a> CoverPlanner<'a> {
             reference_estimates,
             demand: CoverDemand::empty(total),
             live_nodes: live_nodes.into_boxed_slice(),
+            reference_scratch: ReferenceScratch::default(),
+            trial_scratch: TrialScratch::default(),
         })
     }
 

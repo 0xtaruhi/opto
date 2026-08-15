@@ -19,23 +19,15 @@ pub(crate) fn window_cares(
         .copied()
         .filter(|cut| !cut.contains(node) && cut.len() >= 2)
         .max_by_key(|cut| cut.len())?;
-    let observed = cut_list
-        .iter()
-        .flat_map(|cut| cut.leaves().iter().copied())
-        .collect::<Vec<_>>();
-    let tables = network.truth_tables_for_inputs(node, base.leaves(), &observed);
     let mut coverage = CoverageCheck::new(network, base.leaves());
+    let projected = projected_cuts(&mut coverage, cut_list, |cut| cut.leaves() == base.leaves());
+    let observed = projected_leaves(cut_list, &projected).collect::<Vec<_>>();
+    let tables = network.truth_tables_for_inputs(node, base.leaves(), &observed);
     let cares = cut_list
         .iter()
-        .map(|cut| {
-            if cut.leaves() == base.leaves() {
-                return u64::MAX;
-            }
-            if !cut
-                .leaves()
-                .iter()
-                .all(|leaf| coverage.covered(*leaf) == Some(true))
-            {
+        .zip(projected.iter())
+        .map(|(cut, &projected)| {
+            if !projected {
                 return u64::MAX;
             }
             tables
@@ -44,6 +36,42 @@ pub(crate) fn window_cares(
         })
         .collect::<Box<[u64]>>();
     Some(cares)
+}
+
+/// Decides which of a node's cuts a window contains, in the caller's cut order.
+///
+/// A cut the window does not contain is projected as fully cared, so its leaves
+/// are never read back from the truth tables. Answering this before the tables
+/// are built keeps evaluation inside the window: observing an uncontained leaf
+/// expands its whole cone, which reaches past the window's inputs and can run
+/// all the way to the primary inputs. `skip` names the cuts the caller projects
+/// by other means, and the coverage queries short circuit, so the checker's
+/// shared traversal budget is spent on exactly the same leaves either way.
+pub(crate) fn projected_cuts(
+    coverage: &mut CoverageCheck<'_>,
+    cuts: &[KCut],
+    mut skip: impl FnMut(&KCut) -> bool,
+) -> Box<[bool]> {
+    cuts.iter()
+        .map(|cut| {
+            !skip(cut)
+                && cut
+                    .leaves()
+                    .iter()
+                    .all(|leaf| coverage.covered(*leaf) == Some(true))
+        })
+        .collect()
+}
+
+/// The leaves worth observing: those of the cuts the window contains.
+pub(crate) fn projected_leaves<'cuts>(
+    cuts: &'cuts [KCut],
+    projected: &'cuts [bool],
+) -> impl Iterator<Item = LogicNodeId> + 'cuts {
+    cuts.iter()
+        .zip(projected)
+        .filter(|&(_, &projected)| projected)
+        .flat_map(|(cut, _)| cut.leaves().iter().copied())
 }
 
 /// Decides whether a node's cone is contained in a seed set.

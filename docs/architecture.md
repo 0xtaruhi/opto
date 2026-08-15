@@ -1250,6 +1250,28 @@ single definition of every Word IR value read — before dropping connects.
 With both fixed, clock gating is on by default and gates 24 register banks on
 Ibex SKY130 instead of 6.
 
+## Window Care Sets and Exact Recovery
+
+Two analyses decide what they need before they compute it, because doing so
+bounds the work rather than trimming it.
+
+A window care set projects each of a node's cuts onto the largest cut that is
+not the node itself. A cut the window does not contain is projected as fully
+cared, so its leaves are never read back. Building the truth tables first meant
+observing those leaves anyway, and observing a leaf the window does not reach
+expands its whole cone, past the window's inputs and on toward the primary
+inputs. Coverage is therefore decided first, in cut order and short circuiting,
+so the traversal budget is spent on the same leaves either way; only the cones
+outside the window go unevaluated.
+
+Exact area recovery scores every viable candidate of a slot. It used to score
+one by installing the choice and immediately removing it again, which walked the
+newly activated cone twice and wrote every reference count on the way. A slot is
+charged exactly when it is unreferenced and the trial has not reached it yet,
+which visited marks decide without touching the cover. The trial walks and sorts
+its frontier exactly as the committing update does, so the two sum areas in the
+same order and agree bit for bit.
+
 ## Known Architectural Gaps
 
 The remaining unproven product targets are multi-million-gate runtime/RSS and
