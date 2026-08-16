@@ -199,6 +199,7 @@ impl CoverPlanner<'_> {
             for &removed_slot in &removed {
                 was_removed[removed_slot] = true;
             }
+            let timing_driven = self.required_arrivals[slot_id].is_finite();
             let mut best: Option<ExactChoice> = None;
             for candidate_index in 0..self.candidates[slot_id].len() {
                 if !slot_viability.candidates[candidate_index] {
@@ -212,10 +213,14 @@ impl CoverPlanner<'_> {
                 let exact = ExactChoice {
                     choice,
                     area: added + candidate.nominal_cost(self.catalog).area,
+                    arrival: self.candidate_arrival_estimate(slot_id, candidate),
                     truth: candidate.truth(),
                     order: (candidate.cut, candidate.inversions, 0),
                 };
-                if best.as_ref().is_none_or(|best| exact.prefers_over(best)) {
+                if best
+                    .as_ref()
+                    .is_none_or(|best| exact.prefers_over(best, timing_driven))
+                {
                     best = Some(exact);
                 }
             }
@@ -228,10 +233,15 @@ impl CoverPlanner<'_> {
                     let exact = ExactChoice {
                         choice: SlotChoice::Inverter,
                         area: added + inverter.cost.area,
+                        arrival: self.flows[other].electrical_delay
+                            + self.inverter_electrical_cost(slot_id, inverter).delay,
                         truth: inverter_truth(),
                         order: (u8::MAX, u8::MAX, 0),
                     };
-                    if best.as_ref().is_none_or(|best| exact.prefers_over(best)) {
+                    if best
+                        .as_ref()
+                        .is_none_or(|best| exact.prefers_over(best, timing_driven))
+                    {
                         best = Some(exact);
                     }
                 }
@@ -252,10 +262,14 @@ impl CoverPlanner<'_> {
                 let exact = ExactChoice {
                     choice,
                     area: added,
+                    arrival: self.joint_arrival_estimate(joint_id),
                     truth: joint.truths[usize::from(side)],
                     order: (u8::MAX - 1, side, joint_id),
                 };
-                if best.as_ref().is_none_or(|best| exact.prefers_over(best)) {
+                if best
+                    .as_ref()
+                    .is_none_or(|best| exact.prefers_over(best, timing_driven))
+                {
                     best = Some(exact);
                 }
             }

@@ -53,6 +53,36 @@ pub(super) fn lower_logic(
     for prepared in &mut prepared_regions {
         prepared.binding.resolve_sequential_sources(&source)?;
     }
+    let mut publication_by_bit = std::collections::BTreeMap::<
+        (opto_ir::word::ValueId, u32),
+        crate::boolean::bitblast::RegionalPublicationOwner,
+    >::new();
+    for entry in prepared_regions
+        .iter()
+        .flat_map(|prepared| prepared.publication.iter().copied())
+    {
+        if let Some(current) = publication_by_bit.get_mut(&(entry.target, entry.bit)) {
+            *current = current.merge(entry.owner).ok_or_else(|| {
+                let target_kind = source.value(entry.target).map(|stored| &stored.kind);
+                crate::SynthError::invariant(format!(
+                    "regional publication {:?}[{}] ({target_kind:?}) has incompatible owners {:?} and {:?}",
+                    entry.target, entry.bit, *current, entry.owner,
+                ))
+            })?;
+        } else {
+            publication_by_bit.insert((entry.target, entry.bit), entry.owner);
+        }
+    }
+    let regional_publication = publication_by_bit
+        .into_iter()
+        .map(
+            |((target, bit), owner)| crate::boolean::bitblast::RegionalPublicationBit {
+                target,
+                bit,
+                owner,
+            },
+        )
+        .collect::<Vec<_>>();
     let memory_ownership = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.selected_memory_lowering".to_string()
@@ -114,6 +144,7 @@ pub(super) fn lower_logic(
                 binding,
                 architecture,
                 operators: _,
+                publication: _,
             } = prepared;
             provenance.import_private_architecture(architecture, &source)?;
             regional_plans.push(super::regional_mapping::RegionalPlanRow { plan, binding });
@@ -124,6 +155,7 @@ pub(super) fn lower_logic(
             &mut provenance,
             &operation_regions,
             &regional_binding_values,
+            &regional_publication,
             crate::boolean::bitblast::GlobalBitblastScope::RegionalShell,
         )?;
         Ok::<_, crate::SynthError>((provenance, ownership, regional_plans))

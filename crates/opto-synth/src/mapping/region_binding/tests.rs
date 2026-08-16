@@ -18,6 +18,43 @@ fn epoch_snapshot_shares_immutable_binding_arenas() {
 }
 
 #[test]
+fn memory_logic_ownership_separates_cover_inputs_from_outputs() {
+    let combinational = word::ValueId::from_index(0).unwrap();
+    let sequential = word::ValueId::from_index(1).unwrap();
+    let memory = word::MemoryId::from_index(0).unwrap();
+    let mut sources = BindingMap::new();
+    let mut outputs = BindingMap::new();
+
+    bind_owned_memory_logic_bit(
+        &mut sources,
+        &mut outputs,
+        RegionalMemoryLogicKind::Combinational,
+        combinational,
+        RegionPlanValueBinding::MemoryLogicBit {
+            memory,
+            ordinal: 0,
+            bit: 0,
+        },
+    );
+    bind_owned_memory_logic_bit(
+        &mut sources,
+        &mut outputs,
+        RegionalMemoryLogicKind::SequentialState,
+        sequential,
+        RegionPlanValueBinding::MemoryLogicBit {
+            memory,
+            ordinal: 1,
+            bit: 0,
+        },
+    );
+
+    assert!(!sources.contains_key(&combinational));
+    assert!(outputs.contains_key(&combinational));
+    assert!(sources.contains_key(&sequential));
+    assert!(!outputs.contains_key(&sequential));
+}
+
+#[test]
 fn collapsed_root_keeps_input_and_output_identities_separate() {
     let ty = word::WordType::bits(1).unwrap();
     let source_span = word::SourceSpan::default();
@@ -56,7 +93,8 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
             local_module: &local,
             source_to_local: &source_to_local,
             boundary_bindings: &[(source_input, local_input)],
-            memory_values: &[],
+            owned_memory_logic: &[],
+            memory_states: &[],
             operation_sources: &[],
             root_bindings: &[(source_root, root_signal)],
             ownership: &ownership,
@@ -144,7 +182,8 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
             local_module: &local,
             source_to_local: &source_to_local,
             boundary_bindings: &[(port_value, local_input)],
-            memory_values: &[],
+            owned_memory_logic: &[],
+            memory_states: &[],
             operation_sources: &[],
             root_bindings: &[(source_root, root_signal)],
             ownership: &ownership,
@@ -172,7 +211,7 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
 }
 
 #[test]
-fn root_publication_replaces_the_private_memory_handle() {
+fn root_publication_replaces_the_private_memory_state_handle() {
     let ty = word::WordType::bits(1).unwrap();
     let span = word::SourceSpan::default();
     let mut source = word::WordModule::new("source");
@@ -192,7 +231,7 @@ fn root_publication_replaces_the_private_memory_handle() {
         .constant(opto_ir::ConstBits::from_bin_str("0").unwrap(), ty, span)
         .unwrap();
     let memory = word::MemoryId::from_index(0).unwrap();
-    let memory_binding = RegionPlanValueBinding::MemoryOperationBit {
+    let memory_binding = RegionPlanValueBinding::MemoryStateBit {
         memory,
         ordinal: 0,
         bit: 0,

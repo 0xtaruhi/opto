@@ -10,7 +10,8 @@ mod search;
 
 pub(crate) use envelope::{RegionCostEnvelopeSet, StructuralTargetModel};
 pub(crate) use lowering::{
-    RegionalMemoryValueBinding, RegionalMemoryValueKind, RegionalWordCone, RegionalWordConeRequest,
+    RegionalMemoryLogicBinding, RegionalMemoryLogicKind, RegionalMemoryStateBinding,
+    RegionalWordCone, RegionalWordConeRequest,
 };
 pub(crate) use private::optimize_structure as optimize_private_structure;
 pub(crate) use search::{RegionalSearchRequest, select_architectures};

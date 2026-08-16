@@ -149,6 +149,28 @@ fn cost(area: f64, delay: f64) -> MappingCost {
     }
 }
 
+fn exact_choice(area: f64, arrival: f64) -> ExactChoice {
+    ExactChoice {
+        choice: SlotChoice::Constant(false),
+        area,
+        arrival,
+        truth: TruthTable {
+            input_count: 0,
+            bits: 0,
+        },
+        order: (0, 0, 0),
+    }
+}
+
+#[test]
+fn exact_recovery_uses_area_delay_only_for_timing_driven_logic() {
+    let smaller_slower = exact_choice(9.0, 1.2);
+    let larger_faster = exact_choice(10.0, 1.0);
+
+    assert!(smaller_slower.prefers_over(&larger_faster, false));
+    assert!(larger_faster.prefers_over(&smaller_slower, true));
+}
+
 #[test]
 fn required_time_prefers_area_only_after_both_choices_meet_budget() {
     assert_eq!(

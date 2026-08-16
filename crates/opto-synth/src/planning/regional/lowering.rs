@@ -13,7 +13,8 @@ pub(crate) struct RegionalWordCone {
     pub(crate) source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     pub(crate) boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
     pub(crate) operation_sources: Box<[Option<word::OpId>]>,
-    pub(crate) memory_values: Box<[RegionalMemoryValueBinding]>,
+    pub(crate) owned_memory_logic: Box<[RegionalMemoryLogicBinding]>,
+    pub(crate) memory_states: Box<[RegionalMemoryStateBinding]>,
     pub(crate) root_bindings: Box<[(word::ValueId, word::SignalId)]>,
 }
 
@@ -31,17 +32,24 @@ pub(crate) struct RegionalWordConeRequest<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RegionalMemoryValueBinding {
+pub(crate) struct RegionalMemoryStateBinding {
     pub(crate) local: word::ValueId,
     pub(crate) source_memory: word::MemoryId,
-    pub(crate) kind: RegionalMemoryValueKind,
     pub(crate) ordinal: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum RegionalMemoryValueKind {
-    Operation,
-    State,
+pub(crate) struct RegionalMemoryLogicBinding {
+    pub(crate) local: word::ValueId,
+    pub(crate) source_memory: word::MemoryId,
+    pub(crate) kind: RegionalMemoryLogicKind,
+    pub(crate) ordinal: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegionalMemoryLogicKind {
+    Combinational,
+    SequentialState,
 }
 
 impl RegionalWordCone {
@@ -141,46 +149,67 @@ impl RegionalWordCone {
         importer
             .operation_sources
             .extend((imported_operation_count..importer.module.operations().len()).map(|_| None));
-        let mut memory_values = Vec::new();
+        let mut owned_memory_logic = Vec::new();
+        let mut memory_states = Vec::new();
         for (local_memory_index, &source_memory) in memories.iter().enumerate() {
             let local_memory =
                 word::MemoryId::from_index(local_memory_index).map_err(crate::SynthError::from)?;
-            memory_values.extend(
+            owned_memory_logic.extend(
                 memory_ownership
                     .operations()
                     .filter_map(|(operation, owner)| {
                         (owner == local_memory)
-                            .then_some(
+                            .then(|| {
                                 importer
                                     .module
                                     .operation(operation)
-                                    .map(|operation| operation.result),
-                            )
+                                    .map(|operation| operation.result)
+                            })
                             .flatten()
                     })
                     .enumerate()
                     .map(|(ordinal, local)| {
-                        Ok(RegionalMemoryValueBinding {
+                        let kind = match importer.module.value(local).and_then(|stored| {
+                            let word::ValueKind::Operation(operation) = stored.kind else {
+                                return None;
+                            };
+                            importer.module.operation(operation)
+                        }) {
+                            Some(operation)
+                                if matches!(
+                                    operation.kind,
+                                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                                ) =>
+                            {
+                                RegionalMemoryLogicKind::SequentialState
+                            }
+                            Some(_) => RegionalMemoryLogicKind::Combinational,
+                            None => {
+                                return Err(crate::SynthError::invariant(
+                                    "region-owned memory logic has no generating operation",
+                                ));
+                            }
+                        };
+                        Ok(RegionalMemoryLogicBinding {
                             local,
                             source_memory,
-                            kind: RegionalMemoryValueKind::Operation,
+                            kind,
                             ordinal: u32::try_from(ordinal).map_err(|_| {
-                                crate::SynthError::capacity("region-local memory operation ordinal")
+                                crate::SynthError::capacity("region-owned memory logic ordinal")
                             })?,
                         })
                     })
                     .collect::<Result<Vec<_>, crate::SynthError>>()?,
             );
-            memory_values.extend(
+            memory_states.extend(
                 memory_ownership
                     .state_values()
                     .filter_map(|(local, owner)| (owner == local_memory).then_some(local))
                     .enumerate()
                     .map(|(ordinal, local)| {
-                        Ok(RegionalMemoryValueBinding {
+                        Ok(RegionalMemoryStateBinding {
                             local,
                             source_memory,
-                            kind: RegionalMemoryValueKind::State,
                             ordinal: u32::try_from(ordinal).map_err(|_| {
                                 crate::SynthError::capacity("region-local memory state ordinal")
                             })?,
@@ -194,7 +223,8 @@ impl RegionalWordCone {
             source_to_local: importer.source_to_local,
             boundary_bindings: importer.boundary_bindings.into_boxed_slice(),
             operation_sources: importer.operation_sources.into_boxed_slice(),
-            memory_values: memory_values.into_boxed_slice(),
+            owned_memory_logic: owned_memory_logic.into_boxed_slice(),
+            memory_states: memory_states.into_boxed_slice(),
             root_bindings: root_bindings.into_boxed_slice(),
         })
     }

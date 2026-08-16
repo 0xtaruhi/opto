@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::planning::regional::{RegionalMemoryValueBinding, RegionalMemoryValueKind};
+use crate::planning::regional::{
+    RegionalMemoryLogicBinding, RegionalMemoryLogicKind, RegionalMemoryStateBinding,
+};
 use opto_ir::word;
 use std::sync::Arc;
 
@@ -11,7 +13,7 @@ pub(crate) enum RegionPlanValueBinding {
         value: word::ValueId,
         bit: u32,
     },
-    MemoryOperationBit {
+    MemoryLogicBit {
         memory: word::MemoryId,
         ordinal: u32,
         bit: u32,
@@ -62,7 +64,7 @@ impl RegionPlanBinding {
             .chain(self.outputs.iter())
             .filter_map(|binding| match *binding {
                 RegionPlanValueBinding::SourceBit { value, .. } => Some(value),
-                RegionPlanValueBinding::MemoryOperationBit { .. }
+                RegionPlanValueBinding::MemoryLogicBit { .. }
                 | RegionPlanValueBinding::MemoryStateBit { .. }
                 | RegionPlanValueBinding::SequentialInputBit { .. }
                 | RegionPlanValueBinding::Lowered(_) => None,
@@ -89,14 +91,14 @@ impl RegionPlanBinding {
     ) -> Result<(), crate::SynthError> {
         let resolve = |binding: &mut RegionPlanValueBinding| -> Result<(), crate::SynthError> {
             let (value, bit) = match *binding {
-                RegionPlanValueBinding::MemoryOperationBit {
+                RegionPlanValueBinding::MemoryLogicBit {
                     memory,
                     ordinal,
                     bit,
                 } => {
                     let operation = memories.operation(memory, ordinal).ok_or_else(|| {
                         crate::SynthError::invariant(
-                            "regional plan memory operation failed shell reconstruction",
+                            "region-owned memory logic failed shell reconstruction",
                         )
                     })?;
                     let value = module
@@ -104,7 +106,7 @@ impl RegionPlanBinding {
                         .map(|operation| operation.result)
                         .ok_or_else(|| {
                             crate::SynthError::invariant(
-                                "regional plan memory operation references an unknown operation",
+                                "region-owned memory logic references an unknown operation",
                             )
                         })?;
                     (value, bit)
@@ -201,14 +203,14 @@ impl RegionPlanBinding {
          -> Result<(), crate::SynthError> {
             let (value, bit) = match *binding {
                 RegionPlanValueBinding::SourceBit { value, bit } => (value, bit),
-                RegionPlanValueBinding::MemoryOperationBit {
+                RegionPlanValueBinding::MemoryLogicBit {
                     memory,
                     ordinal,
                     bit,
                 } => {
                     let operation = memories.operation(memory, ordinal).ok_or_else(|| {
                         crate::SynthError::invariant(
-                            "regional plan memory operation failed global reconstruction",
+                            "region-owned memory logic failed global reconstruction",
                         )
                     })?;
                     let value = module
@@ -216,7 +218,7 @@ impl RegionPlanBinding {
                         .map(|operation| operation.result)
                         .ok_or_else(|| {
                             crate::SynthError::invariant(
-                                "regional plan memory operation references an unknown operation",
+                                "region-owned memory logic references an unknown operation",
                             )
                         })?;
                     (value, bit)
@@ -302,7 +304,7 @@ impl RegionPlanBinding {
             .filter_map(|binding| match *binding {
                 RegionPlanValueBinding::Lowered(value) => Some(value),
                 RegionPlanValueBinding::SourceBit { .. }
-                | RegionPlanValueBinding::MemoryOperationBit { .. }
+                | RegionPlanValueBinding::MemoryLogicBit { .. }
                 | RegionPlanValueBinding::MemoryStateBit { .. }
                 | RegionPlanValueBinding::SequentialInputBit { .. } => None,
             })
@@ -347,13 +349,35 @@ pub(crate) struct CandidateBindingDomain<'a> {
     pub(crate) local_module: &'a word::WordModule,
     pub(crate) source_to_local: &'a std::collections::BTreeMap<word::ValueId, word::ValueId>,
     pub(crate) boundary_bindings: &'a [(word::ValueId, word::ValueId)],
-    pub(crate) memory_values: &'a [RegionalMemoryValueBinding],
+    pub(crate) owned_memory_logic: &'a [RegionalMemoryLogicBinding],
+    pub(crate) memory_states: &'a [RegionalMemoryStateBinding],
     pub(crate) operation_sources: &'a [Option<word::OpId>],
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
     pub(crate) ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
 }
 
 type BindingMap = std::collections::BTreeMap<word::ValueId, Vec<RegionPlanValueBinding>>;
+
+fn bind_owned_memory_logic_bit(
+    sources: &mut BindingMap,
+    outputs: &mut BindingMap,
+    kind: RegionalMemoryLogicKind,
+    lowered: word::ValueId,
+    binding: RegionPlanValueBinding,
+) {
+    match kind {
+        RegionalMemoryLogicKind::Combinational => {
+            // Region-owned combinational lowering is an output identity only.
+            // Its complete fan-in must remain covered.
+            outputs.entry(lowered).or_default().push(binding);
+        }
+        RegionalMemoryLogicKind::SequentialState => {
+            // A sequential result is published by the state artifact and
+            // enters, but is never implemented by, the cover.
+            sources.entry(lowered).or_default().push(binding);
+        }
+    }
+}
 
 fn bind_root_outputs(
     source_module: &word::WordModule,
@@ -418,7 +442,8 @@ pub(crate) fn build_candidate_binding<'a>(
         local_module,
         source_to_local,
         boundary_bindings,
-        memory_values,
+        owned_memory_logic,
+        memory_states,
         operation_sources,
         root_bindings,
         ownership,
@@ -451,36 +476,40 @@ pub(crate) fn build_candidate_binding<'a>(
                 .push(RegionPlanValueBinding::SourceBit { value: source, bit });
         }
     }
-    for memory_value in memory_values {
-        let Some(bits) = ownership.lowered_bits(memory_value.local) else {
+    for memory_state in memory_states {
+        let Some(bits) = ownership.lowered_bits(memory_state.local) else {
             continue;
         };
         for (bit, &lowered) in bits.iter().enumerate() {
             let bit = u32::try_from(bit)
                 .map_err(|_| crate::SynthError::capacity("regional memory bit index"))?;
-            let binding = match memory_value.kind {
-                RegionalMemoryValueKind::Operation => RegionPlanValueBinding::MemoryOperationBit {
-                    memory: memory_value.source_memory,
-                    ordinal: memory_value.ordinal,
-                    bit,
-                },
-                RegionalMemoryValueKind::State => RegionPlanValueBinding::MemoryStateBit {
-                    memory: memory_value.source_memory,
-                    ordinal: memory_value.ordinal,
-                    bit,
-                },
+            let binding = RegionPlanValueBinding::MemoryStateBit {
+                memory: memory_state.source_memory,
+                ordinal: memory_state.ordinal,
+                bit,
             };
-            match memory_value.kind {
-                RegionalMemoryValueKind::Operation => {
-                    // A macro read is published by the memory substrate and is
-                    // simultaneously an immutable input to its Boolean fanout.
-                    local_to_sources.entry(lowered).or_default().push(binding);
-                    local_to_outputs.entry(lowered).or_default().push(binding);
-                }
-                RegionalMemoryValueKind::State => {
-                    local_to_sources.entry(lowered).or_default().push(binding);
-                }
-            }
+            local_to_sources.entry(lowered).or_default().push(binding);
+        }
+    }
+    for memory_logic in owned_memory_logic {
+        let Some(bits) = ownership.lowered_bits(memory_logic.local) else {
+            continue;
+        };
+        for (bit, &lowered) in bits.iter().enumerate() {
+            let bit = u32::try_from(bit)
+                .map_err(|_| crate::SynthError::capacity("region-owned memory logic bit index"))?;
+            let binding = RegionPlanValueBinding::MemoryLogicBit {
+                memory: memory_logic.source_memory,
+                ordinal: memory_logic.ordinal,
+                bit,
+            };
+            bind_owned_memory_logic_bit(
+                &mut local_to_sources,
+                &mut local_to_outputs,
+                memory_logic.kind,
+                lowered,
+                binding,
+            );
         }
     }
     canonicalize_bindings(local_module, &mut local_to_sources)?;
@@ -538,7 +567,7 @@ pub(crate) fn build_candidate_binding<'a>(
         .chain(local_to_outputs.values_mut())
     {
         bindings.sort_unstable_by_key(|binding| match *binding {
-            RegionPlanValueBinding::MemoryOperationBit {
+            RegionPlanValueBinding::MemoryLogicBit {
                 memory,
                 ordinal,
                 bit,
@@ -559,9 +588,9 @@ pub(crate) fn build_candidate_binding<'a>(
                     Some(word::ValueKind::Constant(_)) => 4,
                     Some(word::ValueKind::Operation(_)) | None => 5,
                 };
-                (kind, value.raw(), bit, 0)
+                (kind + 3, value.raw(), bit, 0)
             }
-            RegionPlanValueBinding::Lowered(value) => (6, value.raw(), 0, 0),
+            RegionPlanValueBinding::Lowered(value) => (9, value.raw(), 0, 0),
         });
         bindings.dedup();
     }
@@ -846,7 +875,7 @@ fn resolve_plan_value(
     match binding {
         RegionPlanValueBinding::Lowered(value) => Ok(value),
         RegionPlanValueBinding::SourceBit { .. }
-        | RegionPlanValueBinding::MemoryOperationBit { .. }
+        | RegionPlanValueBinding::MemoryLogicBit { .. }
         | RegionPlanValueBinding::MemoryStateBit { .. }
         | RegionPlanValueBinding::SequentialInputBit { .. } => Err(crate::SynthError::invariant(
             "regional plan binding was not materialized against the selected global lowering",

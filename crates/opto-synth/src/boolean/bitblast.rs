@@ -57,6 +57,7 @@ pub(crate) fn bitblast_module_with_plan(
         provenance,
         &[],
         &[],
+        &[],
         GlobalBitblastScope::Complete,
     )
     .map(|_| ())
@@ -217,6 +218,7 @@ pub(crate) fn bitblast_module_with_regions(
     provenance: &mut ProvenanceBuilder,
     operation_regions: &[Option<crate::RegionRowId>],
     required_values: &[word::ValueId],
+    regional_publication: &[RegionalPublicationBit],
     scope: GlobalBitblastScope,
 ) -> Result<LoweredRegionOwnership, crate::SynthError> {
     if !module.memories().is_empty()
@@ -234,7 +236,8 @@ pub(crate) fn bitblast_module_with_regions(
             "source operation ownership does not cover the lowering module",
         ));
     }
-    let frozen_semantics = freeze_regional_semantics(module, operation_regions, scope)?;
+    let publication_contract =
+        freeze_publication_contract(module, operation_regions, regional_publication, scope)?;
     let mut blaster = BitBlaster::<WordBackend>::new(
         module,
         BitBlasterRequest {
@@ -246,7 +249,7 @@ pub(crate) fn bitblast_module_with_regions(
             source_operations: None,
             source_values: None,
             global_scope: scope,
-            frozen_semantics,
+            publication_contract,
         },
     )?;
     for connect in connects {
@@ -271,6 +274,57 @@ pub(crate) struct LocalRegionBooleanLowering {
     pub(crate) subject: crate::boolean::logic::CanonicalRegionLogic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegionalPublicationBit {
+    pub(crate) target: word::ValueId,
+    pub(crate) bit: u32,
+    pub(crate) owner: RegionalPublicationOwner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegionalPublicationOwner {
+    RegionArtifact,
+    SequentialArtifact,
+    SubstrateConstant(BitVal),
+    SubstrateValue { value: word::ValueId, bit: u32 },
+}
+
+impl RegionalPublicationOwner {
+    /// Joins independent regional views into one physical publication owner.
+    ///
+    /// Region and sequential artifacts are authoritative producers. Constants
+    /// and immutable values are fallback observations from regions that only
+    /// consume the bit. Two distinct authoritative producers or incompatible
+    /// fallback observations remain a hard consistency failure.
+    pub(crate) fn merge(self, other: Self) -> Option<Self> {
+        if self == other {
+            return Some(self);
+        }
+        match (self, other) {
+            (Self::RegionArtifact, Self::SubstrateConstant(_) | Self::SubstrateValue { .. })
+            | (Self::SubstrateConstant(_) | Self::SubstrateValue { .. }, Self::RegionArtifact) => {
+                Some(Self::RegionArtifact)
+            }
+            (
+                Self::SequentialArtifact,
+                Self::SubstrateConstant(_) | Self::SubstrateValue { .. },
+            )
+            | (
+                Self::SubstrateConstant(_) | Self::SubstrateValue { .. },
+                Self::SequentialArtifact,
+            ) => Some(Self::SequentialArtifact),
+            (
+                Self::RegionArtifact | Self::SequentialArtifact,
+                Self::RegionArtifact | Self::SequentialArtifact,
+            )
+            | (
+                Self::SubstrateConstant(_) | Self::SubstrateValue { .. },
+                Self::SubstrateConstant(_) | Self::SubstrateValue { .. },
+            ) => None,
+        }
+    }
+}
+
 pub(crate) struct LocalRegionBooleanRequest<'a> {
     pub(crate) plan: &'a ArchitectureDecisions,
     pub(crate) operators: &'a crate::DurableOperatorArena,
@@ -278,7 +332,10 @@ pub(crate) struct LocalRegionBooleanRequest<'a> {
     pub(crate) owner: crate::RegionRowId,
     pub(crate) boundary_inputs: &'a [word::ValueId],
     pub(crate) roots: &'a [word::ValueId],
-    pub(crate) binding_values: &'a [word::ValueId],
+    /// Values whose scalar identities must remain addressable after lowering.
+    /// This includes region-owned logic as well as portable boundary handles;
+    /// cross-boundary authority is defined separately by the binding contract.
+    pub(crate) tracked_values: &'a [word::ValueId],
 }
 
 pub(crate) fn lower_local_region_boolean(
@@ -292,7 +349,7 @@ pub(crate) fn lower_local_region_boolean(
         owner,
         boundary_inputs,
         roots,
-        binding_values,
+        tracked_values,
     } = request;
     operators.validate_decisions(plan, module.operations().len())?;
     let operation_regions = vec![Some(owner); module.operations().len()];
@@ -307,18 +364,18 @@ pub(crate) fn lower_local_region_boolean(
             source_operations: None,
             source_values: None,
             global_scope: GlobalBitblastScope::Complete,
-            frozen_semantics: FrozenSubstrateSemantics::default(),
+            publication_contract: FrozenPublicationContract::default(),
         },
     )?;
     for &root in roots {
         blaster.value(root)?;
     }
-    for &value in binding_values {
+    for &value in tracked_values {
         blaster.value(value)?;
     }
     let mut bindings = roots
         .iter()
-        .chain(binding_values)
+        .chain(tracked_values)
         .copied()
         .collect::<Vec<_>>();
     bindings.sort_unstable();
@@ -427,26 +484,37 @@ fn binding_represents_original_bit(
     }
 }
 
-type FrozenBitConstants = BTreeMap<word::ValueId, Box<[Option<BitVal>]>>;
-
-#[derive(Default)]
-struct FrozenSubstrateSemantics {
-    aliases: BTreeMap<word::ValueId, word::ValueId>,
-    constants: FrozenBitConstants,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrozenPublicationBit {
+    RegionArtifact,
+    SubstrateConstant(BitVal),
+    SubstrateValue { value: word::ValueId, bit: u32 },
 }
 
-fn freeze_regional_semantics(
+/// Immutable per-bit ownership at the regional publication boundary.
+///
+/// This contract is captured from the complete Word design before lowering
+/// mutates connectivity. Regional shell endpoints and the mapped substrate
+/// consume it directly; neither may rediscover ownership from a partial view.
+#[derive(Default)]
+struct FrozenPublicationContract {
+    aliases: BTreeMap<word::ValueId, word::ValueId>,
+    bits: BTreeMap<word::ValueId, Box<[FrozenPublicationBit]>>,
+}
+
+fn freeze_publication_contract(
     module: &word::WordModule,
     operation_regions: &[Option<crate::RegionRowId>],
+    regional_publication: &[RegionalPublicationBit],
     scope: GlobalBitblastScope,
-) -> Result<FrozenSubstrateSemantics, crate::SynthError> {
+) -> Result<FrozenPublicationContract, crate::SynthError> {
     if scope != GlobalBitblastScope::RegionalShell {
-        return Ok(FrozenSubstrateSemantics::default());
+        return Ok(FrozenPublicationContract::default());
     }
     let semantics = crate::mapping::FullDomainRootSemantics::new(module)?;
     let mut facts = word::KnownBitsAnalysis::new(module);
     let mut aliases = BTreeMap::new();
-    let mut constants = BTreeMap::new();
+    let mut bits = BTreeMap::new();
     for (index, operation) in module.operations().iter().enumerate() {
         if operation_regions.get(index).copied().flatten().is_none()
             || matches!(
@@ -474,18 +542,76 @@ fn freeze_regional_semantics(
             })?
             .ty
             .width();
-        let bits = (0..width)
+        let publication = (0..width)
             .map(|bit| match facts.bit(module, operation.result, bit) {
-                word::KnownBit::Zero => Some(BitVal::Zero),
-                word::KnownBit::One => Some(BitVal::One),
-                word::KnownBit::Unknown => None,
+                word::KnownBit::Zero => FrozenPublicationBit::SubstrateConstant(BitVal::Zero),
+                word::KnownBit::One => FrozenPublicationBit::SubstrateConstant(BitVal::One),
+                word::KnownBit::Unknown => FrozenPublicationBit::RegionArtifact,
             })
             .collect::<Box<[_]>>();
-        if bits.iter().any(Option::is_some) {
-            constants.insert(operation.result, bits);
-        }
+        bits.insert(operation.result, publication);
     }
-    Ok(FrozenSubstrateSemantics { aliases, constants })
+    for publication in regional_publication {
+        let stored = module.value(publication.target).ok_or_else(|| {
+            crate::SynthError::invariant(
+                "regional publication contract references an unknown target",
+            )
+        })?;
+        if publication.bit >= stored.ty.width() {
+            return Err(crate::SynthError::invariant(
+                "regional publication contract bit exceeds its target",
+            ));
+        }
+        let operation = match stored.kind {
+            word::ValueKind::Operation(operation) => operation,
+            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => continue,
+        };
+        if publication.owner == RegionalPublicationOwner::SequentialArtifact {
+            if module.operation(operation).is_some_and(|operation| {
+                matches!(
+                    operation.kind,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                )
+            }) {
+                continue;
+            }
+            return Err(crate::SynthError::invariant(
+                "sequential publication owner does not name a state operation",
+            ));
+        }
+        if operation_regions
+            .get(operation.index())
+            .copied()
+            .flatten()
+            .is_none()
+        {
+            continue;
+        }
+        let contract = bits.get_mut(&publication.target).ok_or_else(|| {
+            crate::SynthError::invariant(format!(
+                "regional publication contract target {:?}[{}] with owner {:?} has no frozen shell owner ({:?})",
+                publication.target,
+                publication.bit,
+                publication.owner,
+                module.operation(operation).map(|operation| &operation.kind),
+            ))
+        })?;
+        contract[publication.bit as usize] = match publication.owner {
+            RegionalPublicationOwner::RegionArtifact => FrozenPublicationBit::RegionArtifact,
+            RegionalPublicationOwner::SequentialArtifact => {
+                return Err(crate::SynthError::invariant(
+                    "sequential publication reached a combinational shell",
+                ));
+            }
+            RegionalPublicationOwner::SubstrateConstant(value) => {
+                FrozenPublicationBit::SubstrateConstant(value)
+            }
+            RegionalPublicationOwner::SubstrateValue { value, bit } => {
+                FrozenPublicationBit::SubstrateValue { value, bit }
+            }
+        };
+    }
+    Ok(FrozenPublicationContract { aliases, bits })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,7 +647,7 @@ pub(super) struct BitBlaster<'a, B: BitBackend = WordBackend> {
     source_operations: Option<&'a [Option<word::OpId>]>,
     source_values: Option<&'a BTreeMap<word::ValueId, word::ValueId>>,
     global_scope: GlobalBitblastScope,
-    frozen_semantics: FrozenSubstrateSemantics,
+    publication_contract: FrozenPublicationContract,
     backend: B,
 }
 
@@ -534,7 +660,7 @@ struct BitBlasterRequest<'a> {
     source_operations: Option<&'a [Option<word::OpId>]>,
     source_values: Option<&'a BTreeMap<word::ValueId, word::ValueId>>,
     global_scope: GlobalBitblastScope,
-    frozen_semantics: FrozenSubstrateSemantics,
+    publication_contract: FrozenPublicationContract,
 }
 
 #[derive(Clone, Copy)]
@@ -557,7 +683,7 @@ impl<'a, B: BitBackend> BitBlaster<'a, B> {
             source_operations,
             source_values,
             global_scope,
-            frozen_semantics,
+            publication_contract,
         } = request;
         let value_count = module.values().len();
         let signal_drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
@@ -579,7 +705,7 @@ impl<'a, B: BitBackend> BitBlaster<'a, B> {
             source_operations,
             source_values,
             global_scope,
-            frozen_semantics,
+            publication_contract,
             backend: B::default(),
         })
     }

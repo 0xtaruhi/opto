@@ -13,6 +13,12 @@ pub(crate) struct MappingRoot {
     pub(crate) requires_combinational_cover: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalPublicationBit {
+    Value { value: word::ValueId, bit: u32 },
+    Constant(opto_ir::BitVal),
+}
+
 /// Full-Word publication proof frozen before any region-local simplification.
 pub(crate) struct FullDomainRootSemantics<'a> {
     module: &'a word::WordModule,
@@ -46,6 +52,128 @@ impl<'a> FullDomainRootSemantics<'a> {
         bit: u32,
     ) -> Result<bool, crate::SynthError> {
         self.prove_bit(value, bit, &mut BTreeSet::new())
+    }
+
+    pub(crate) fn canonical_publication_bit(
+        &self,
+        value: word::ValueId,
+        bit: u32,
+    ) -> Result<CanonicalPublicationBit, crate::SynthError> {
+        self.resolve_publication_bit(value, bit, &mut BTreeSet::new())
+    }
+
+    fn resolve_publication_bit(
+        &self,
+        value: word::ValueId,
+        bit: u32,
+        active: &mut BTreeSet<(word::ValueId, u32)>,
+    ) -> Result<CanonicalPublicationBit, crate::SynthError> {
+        let stored = self.module.value(value).ok_or_else(|| {
+            crate::SynthError::invariant("publication bit references an unknown Word value")
+        })?;
+        if bit >= stored.ty.width() {
+            return Err(crate::SynthError::invariant(
+                "publication bit exceeds its Word value",
+            ));
+        }
+        if !active.insert((value, bit)) {
+            return Err(crate::SynthError::invariant(
+                "publication bit identity contains a cycle",
+            ));
+        }
+        let resolved = match &stored.kind {
+            word::ValueKind::Constant(bits) => {
+                let bit = bits.bit_lsb(bit).ok_or_else(|| {
+                    crate::SynthError::invariant("publication constant bit is absent")
+                })?;
+                CanonicalPublicationBit::Constant(crate::boolean::resolve_publication_bit(
+                    bit,
+                    self.module.name(),
+                    &stored.source,
+                )?)
+            }
+            word::ValueKind::Signal(reference) => {
+                match self.drivers.resolve_reference(*reference) {
+                    Some(drivers) if !drivers.is_empty() => {
+                        let (driver, driver_bit) =
+                            drivers.get(bit as usize).copied().ok_or_else(|| {
+                                crate::SynthError::invariant(
+                                    "publication bit exceeds its resolved signal drivers",
+                                )
+                            })?;
+                        self.resolve_publication_bit(driver, driver_bit, active)?
+                    }
+                    _ => CanonicalPublicationBit::Value { value, bit },
+                }
+            }
+            word::ValueKind::Operation(operation) => {
+                let operation = self.module.operation(*operation).ok_or_else(|| {
+                    crate::SynthError::invariant("publication operation is unknown")
+                })?;
+                match &operation.kind {
+                    word::OpKind::Extract { value, lsb, .. } => self.resolve_publication_bit(
+                        *value,
+                        lsb.checked_add(bit).ok_or_else(|| {
+                            crate::SynthError::capacity("publication extract bit")
+                        })?,
+                        active,
+                    )?,
+                    word::OpKind::Concat { parts } => {
+                        let mut remaining = bit;
+                        let mut resolved = None;
+                        for &part in parts.iter().rev() {
+                            let width = self
+                                .module
+                                .value(part)
+                                .ok_or_else(|| {
+                                    crate::SynthError::invariant(
+                                        "publication concatenation part is unknown",
+                                    )
+                                })?
+                                .ty
+                                .width();
+                            if remaining < width {
+                                resolved =
+                                    Some(self.resolve_publication_bit(part, remaining, active)?);
+                                break;
+                            }
+                            remaining -= width;
+                        }
+                        resolved.ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "publication bit exceeds its concatenation",
+                            )
+                        })?
+                    }
+                    word::OpKind::Cast { kind, value, .. } => {
+                        let width = self
+                            .module
+                            .value(*value)
+                            .ok_or_else(|| {
+                                crate::SynthError::invariant("publication cast input is unknown")
+                            })?
+                            .ty
+                            .width();
+                        if bit < width {
+                            self.resolve_publication_bit(*value, bit, active)?
+                        } else if *kind == word::CastKind::SignExtend {
+                            self.resolve_publication_bit(*value, width - 1, active)?
+                        } else {
+                            CanonicalPublicationBit::Constant(opto_ir::BitVal::Zero)
+                        }
+                    }
+                    word::OpKind::Unary { .. }
+                    | word::OpKind::Binary { .. }
+                    | word::OpKind::Mux { .. }
+                    | word::OpKind::DynamicExtract { .. }
+                    | word::OpKind::DynamicInsert { .. }
+                    | word::OpKind::Register(_)
+                    | word::OpKind::Latch(_) => CanonicalPublicationBit::Value { value, bit },
+                }
+            }
+        };
+        active.remove(&(value, bit));
+        Ok(resolved)
     }
 
     pub(crate) fn canonical_root(

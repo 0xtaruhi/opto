@@ -101,8 +101,7 @@ impl Session {
     pub fn report_qor(&self) -> Result<String, SessionError> {
         let record = self.current_record()?;
         let context = area_report_context(self)?;
-        let timing = if record.synthesized.is_none()
-            || !self.state.timing.has_path_constraints()
+        let timing = if !self.state.timing.has_path_constraints()
             || self
                 .timing_library()?
                 .cells

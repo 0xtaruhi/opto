@@ -8,6 +8,60 @@
 use super::*;
 
 #[test]
+fn report_qor_analyzes_a_linked_pre_mapped_netlist() {
+    let dir = temp_dir("report-qor-pre-mapped");
+    std::fs::write(
+        dir.join("demo.lib"),
+        r#"
+library (demo) {
+  cell (BUF) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        timing_sense : positive_unate;
+        cell_rise (delay_template) { values ( "0.20" ); }
+        cell_fall (delay_template) { values ( "0.20" ); }
+      }
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let netlist = dir.join("mapped.v");
+    std::fs::write(
+        &netlist,
+        "module top(input a, output y); BUF U1(.A(a), .Y(y)); endmodule\n",
+    )
+    .unwrap();
+
+    let mut session = Session::new();
+    session.set_lib_search_path(vec![PathBuf::from(dir.display().to_string())]);
+    session.read_libs(&[PathBuf::from("demo.lib")]).unwrap();
+    session
+        .import_verilog(std::slice::from_ref(&netlist), &FrontendOptions::default())
+        .unwrap();
+    let from = session
+        .resolve_timing_endpoints("set_max_delay", &["a".to_string()])
+        .unwrap();
+    let to = session
+        .resolve_timing_endpoints("set_max_delay", &["y".to_string()])
+        .unwrap();
+    session.set_max_delay(1.0, from, to).unwrap();
+
+    let qor = session.report_qor().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+
+    assert!(qor.contains("Timing paths: 1"), "{qor}");
+    assert!(qor.contains("Critical Path Length: 0.200000"), "{qor}");
+    assert!(qor.contains("Critical Path Slack: 0.800000"), "{qor}");
+}
+
+#[test]
 fn report_timing_analyzes_mapped_register_setup_and_hold() {
     let dir = temp_dir("report-timing-register-path");
     std::fs::write(

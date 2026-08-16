@@ -45,6 +45,14 @@ impl MemoryLoweringOwnership {
             })
     }
 
+    pub(crate) fn operation(&self, memory: word::MemoryId, ordinal: u32) -> Option<word::OpId> {
+        self.memories
+            .get(memory.index())?
+            .operations
+            .get(ordinal as usize)
+            .copied()
+    }
+
     pub(crate) fn state_values(
         &self,
     ) -> impl Iterator<Item = (word::ValueId, word::MemoryId)> + '_ {
@@ -60,14 +68,6 @@ impl MemoryLoweringOwnership {
                     .copied()
                     .map(move |value| (value, memory))
             })
-    }
-
-    pub(crate) fn operation(&self, memory: word::MemoryId, ordinal: u32) -> Option<word::OpId> {
-        self.memories
-            .get(memory.index())?
-            .operations
-            .get(ordinal as usize)
-            .copied()
     }
 
     pub(crate) fn state_value(

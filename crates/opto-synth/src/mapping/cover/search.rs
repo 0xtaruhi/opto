@@ -409,14 +409,21 @@ struct FlowChoice {
 struct ExactChoice {
     choice: SlotChoice,
     area: f64,
+    arrival: f64,
     truth: TruthTable,
     order: (u8, u8, u32),
 }
 
 impl ExactChoice {
-    fn prefers_over(&self, current: &Self) -> bool {
-        self.area
-            .total_cmp(&current.area)
+    fn prefers_over(&self, current: &Self, timing_driven: bool) -> bool {
+        let objective = if timing_driven {
+            (self.area * self.arrival).total_cmp(&(current.area * current.arrival))
+        } else {
+            self.area.total_cmp(&current.area)
+        };
+        objective
+            .then_with(|| self.area.total_cmp(&current.area))
+            .then_with(|| self.arrival.total_cmp(&current.arrival))
             .then_with(|| self.truth.cmp(&current.truth))
             .then_with(|| self.order.cmp(&current.order))
             .is_lt()
