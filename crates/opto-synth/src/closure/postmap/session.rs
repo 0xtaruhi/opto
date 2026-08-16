@@ -103,10 +103,6 @@ impl<'a> TimingOptimizationSession<'a> {
         &self.state.design_rules
     }
 
-    pub(super) fn diagnostics(&self) -> crate::SynthesisDiagnostics {
-        self.state.diagnostics
-    }
-
     /// Returns this session's timing-diagnostics sink.
     pub(super) fn trace(&self) -> crate::api::diagnostics::SynthTrace {
         crate::api::diagnostics::SynthTrace::timing(self.state.diagnostics)

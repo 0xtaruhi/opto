@@ -3,7 +3,6 @@
 
 use crate::artifact::implementation::ImplementationDelta;
 use opto_ir::mapped::{CellId, RegionDelta, TempCellId};
-use std::collections::HashSet;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct PostmapCandidate {
@@ -17,49 +16,6 @@ pub(super) enum CandidateDisposition<T> {
     Accepted(T),
     Rejected,
     Stale,
-}
-
-pub(super) struct CandidateBatch {
-    pub(super) selected: Vec<(CellId, PostmapCandidate)>,
-    /// Candidates that conflict with a selected one, kept whole.
-    ///
-    /// A deferred candidate was derived from the same mapped generation as the
-    /// selected ones, so it stays valid unless a committed edit reaches its
-    /// cells. Returning the cell alone made the next round derive it again, and
-    /// on a dense cone that meant re-deriving the whole frontier to commit one
-    /// edit.
-    pub(super) deferred: Vec<(CellId, PostmapCandidate)>,
-}
-
-pub(super) fn select_non_conflicting(
-    candidates: impl IntoIterator<Item = (CellId, Option<PostmapCandidate>)>,
-) -> CandidateBatch {
-    let mut selected = Vec::new();
-    let mut deferred = Vec::new();
-    let mut reserved_cells = HashSet::new();
-    let mut reserved_nets = HashSet::new();
-    for (key, candidate) in candidates {
-        let Some(candidate) = candidate else {
-            continue;
-        };
-        let snapshot = candidate.delta.snapshot();
-        let cell_conflict = candidate
-            .guard
-            .iter()
-            .copied()
-            .chain(snapshot.cell_ids())
-            .any(|cell| reserved_cells.contains(&cell));
-        let net_conflict = snapshot.net_ids().any(|net| reserved_nets.contains(&net));
-        if cell_conflict || net_conflict {
-            deferred.push((key, candidate));
-            continue;
-        }
-        reserved_cells.extend(candidate.guard.iter().copied());
-        reserved_cells.extend(snapshot.cell_ids());
-        reserved_nets.extend(snapshot.net_ids());
-        selected.push((key, candidate));
-    }
-    CandidateBatch { selected, deferred }
 }
 
 impl PostmapCandidate {

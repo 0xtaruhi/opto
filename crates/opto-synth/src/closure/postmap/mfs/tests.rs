@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    CellFunction, DriverIndex, OptimizationContext, ResynthesisObjective, cell_functions,
-    closed_dying_cone, optimization_boundary_nets, optimization_candidate, resynthesis_cells,
-    sorted_candidate_nets,
+    CellFunction, DriverIndex, OptimizationContext, cell_functions, closed_dying_cone,
+    optimization_boundary_nets, optimization_candidate, resynthesis_cells, sorted_candidate_nets,
 };
 use crate::artifact::implementation::{InitialCellOwner, OriginSetId};
 use hashbrown::{HashMap, HashSet};
@@ -74,7 +73,7 @@ fn mfs_catalog_excludes_forbidden_cells() {
 }
 
 #[test]
-fn equal_area_resynthesis_cells_use_name_as_a_stable_tie_breaker() {
+fn equivalent_resynthesis_cells_use_name_as_a_stable_tie_breaker() {
     let functions = HashMap::from([
         function("INV_Z", 1, 0b01),
         function("INV_A", 1, 0b01),
@@ -85,7 +84,7 @@ fn equal_area_resynthesis_cells_use_name_as_a_stable_tie_breaker() {
         function("WIDE", 6, 0x8000_0000_0000_0000),
     ]);
 
-    let cells = resynthesis_cells(&functions, ResynthesisObjective::Area);
+    let cells = resynthesis_cells(&functions);
 
     assert_eq!(
         cells.inverter.as_ref().map(|cell| cell.name.as_str()),
@@ -139,7 +138,7 @@ fn driver_index_refreshes_only_edited_nets() {
 }
 
 #[test]
-fn timing_resynthesis_catalog_selects_fast_cells_independently_of_area_catalog() {
+fn resynthesis_catalog_uses_one_stable_representative_per_truth() {
     let (slow_name, mut slow) = function("AND_SMALL", 2, 0b1000);
     slow.area = 1.0;
     slow.delay = 2.0;
@@ -148,10 +147,8 @@ fn timing_resynthesis_catalog_selects_fast_cells_independently_of_area_catalog()
     fast.delay = 0.5;
     let functions = HashMap::from([(slow_name, slow), (fast_name, fast)]);
 
-    let area = resynthesis_cells(&functions, ResynthesisObjective::Area);
-    let timing = resynthesis_cells(&functions, ResynthesisObjective::Timing);
-    assert_eq!(area.by_input_count[2][0].name, "AND_SMALL");
-    assert_eq!(timing.by_input_count[2][0].name, "AND_FAST");
+    let cells = resynthesis_cells(&functions);
+    assert_eq!(cells.by_input_count[2][0].name, "AND_SMALL");
 }
 
 #[test]
@@ -268,7 +265,7 @@ fn output_boundary_identity_blocks_wire_replacement() {
         .unwrap();
     let mapped = builder.freeze().unwrap();
     let functions = HashMap::from([function("BUF", 1, 0b10)]);
-    let resynthesis = resynthesis_cells(&functions, ResynthesisObjective::Area);
+    let resynthesis = resynthesis_cells(&functions);
     let drivers = DriverIndex::build(&mapped, &functions);
     let implementations = crate::ImplementationDb::empty(mapped.cell_slot_count());
     let boundary = optimization_boundary_nets(&mapped, &implementations).unwrap();

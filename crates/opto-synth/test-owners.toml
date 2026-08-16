@@ -38,7 +38,7 @@ contract = "Region-owned Word optimization, recognition, resource choice, and ar
 [[owners]]
 path = "src/boolean"
 owner = "boolean"
-tests = 102
+tests = 103
 contract = "Bit lowering, canonical Boolean subject construction, rewriting, and graph analysis."
 
 [[owners]]
@@ -62,7 +62,7 @@ contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and mat
 [[owners]]
 path = "src/closure"
 owner = "closure"
-tests = 61
+tests = 60
 contract = "MMMC measurement, power objectives, mapped boundaries, and transactional post-map repair."
 
 [[owners]]
@@ -74,7 +74,7 @@ contract = "Durable implementation ownership, publication identity, and source p
 [[focused_contracts]]
 path = "src/closure/postmap/tests.rs"
 owner = "postmap"
-tests = 28
+tests = 27
 contract = "Transactional candidate evaluation, mapped edits, rollback, and deterministic closure ordering."
 
 [[focused_contracts]]

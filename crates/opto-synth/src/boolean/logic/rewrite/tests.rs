@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::planning::{collect_divisors, mffc_weight};
+use super::planning::{added_cost, collect_divisors, mffc_weight};
 use super::recipe::PAIR_TRUTHS;
 use super::*;
 
@@ -432,4 +432,68 @@ fn rewrite_is_deterministic_across_worker_counts() {
             serial.network.truth_table(serial_root, 6)
         );
     }
+}
+
+#[test]
+fn replacement_cost_charges_only_nodes_the_network_does_not_already_hold() {
+    // (a & b) feeds two consumers, so the sharing landscape a rewrite of one
+    // consumer sees contains it; (c & d) is private to the rewritten cone.
+    let mut network = LogicGraph::new();
+    let inputs = (0..4)
+        .map(|origin| network.variable(origin).unwrap())
+        .collect::<Vec<_>>();
+    let [a, b, c, d] = [inputs[0], inputs[1], inputs[2], inputs[3]];
+    let ab = network.and(a, b);
+    let cd = network.and(c, d);
+    let root = network.and(ab, cd);
+    network.freeze();
+
+    let index = opto_ir::logic::StructuralIndex::of(network.storage_network());
+    let recipe = PlanRecipe::from_plan(&Plan::And(
+        Arc::new(Plan::And(
+            Arc::new(Plan::Literal {
+                var: 0,
+                inverted: false,
+            }),
+            Arc::new(Plan::Literal {
+                var: 1,
+                inverted: false,
+            }),
+        )),
+        Arc::new(Plan::And(
+            Arc::new(Plan::Literal {
+                var: 2,
+                inverted: false,
+            }),
+            Arc::new(Plan::Literal {
+                var: 3,
+                inverted: false,
+            }),
+        )),
+    ))
+    .unwrap();
+    let leaves = [a, b, c, d];
+    let probe = |dying: &[u32]| {
+        added_cost(
+            &recipe,
+            &leaves,
+            dying,
+            &mut opto_ir::logic::LogicProbe::new(network.storage_network(), &index),
+        )
+    };
+
+    // Rebuilding the whole cone costs nothing: every node is already there.
+    assert_eq!(probe(&[]), (0, 0));
+
+    // Replacing `root` removes `cd` with it, so the plan has to build `cd`
+    // again, and `root` above it. Crediting the removal and the reuse of the
+    // same node at once is what this exclusion prevents.
+    let dying = [
+        u32::try_from(root.index()).unwrap(),
+        u32::try_from(cd.index()).unwrap(),
+    ];
+    assert_eq!(probe(&dying), (2, 2 * AND_WEIGHT));
+
+    // The shared node stays visible even while the private one dies.
+    assert!(!dying.contains(&u32::try_from(ab.index()).unwrap()));
 }
