@@ -4,6 +4,7 @@
 # Summary
 
 - [Architecture](architecture.md)
+- [Industrial synthesis product roadmap](roadmap.md)
 - [Rust API and documentation policy](api.md)
 - [Testing policy](testing.md)
 - [Regional synthesis cutover record](refactoring.md)
