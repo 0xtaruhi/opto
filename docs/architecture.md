@@ -740,13 +740,13 @@ select a second post-map flow. Physical recovery follows legalization and
 timing preparation and preserves any measured closure through the same commit
 gate.
 
-Mapped resynthesis seeds only from a measured dirty cone: the cells this
-closure has already edited, and the retained non-region instances cover never
-costed. A region-owned cell was selected by cover under the same care set and
-the same library, with exact-area recovery already applied, so re-deriving it
-after mapping repeats a decision that has not changed. Sweeping the whole clean
-netlist is not the default; it spends the largest post-map budget on cells whose
-context never moved.
+Mapped resynthesis has one candidate catalog, one effort gate, and one bounded
+pass over the committed topology. It does not classify the search as area or
+timing work. Equivalent library implementations use one stable representative;
+the sizing pass that follows owns drive-strength selection. Candidate generation
+admits a bounded set of structural alternatives, including region-owned cells,
+and the shared transaction objective decides whether design rules, timing,
+power, and area justify each edit.
 
 A register whose reachable value is one constant is removed before that
 resynthesis. The proof substitutes the register's own outputs with their reset
@@ -1194,7 +1194,7 @@ defect.
 | Unobservable mapped logic removed before closure evaluates it | Implemented |
 | Feedback-enable recovery guarded by a value-level equivalence proof | Implemented; reset registers are declined, see Known Architectural Gaps |
 | Clock gating enabled by default | Implemented |
-| Mapped resynthesis scoped to a measured dirty cone instead of the whole netlist | Implemented |
+| One closure-ranked mapped-resynthesis regime without area/timing search modes | Implemented |
 | Constant-register removal proved through a bounded influence cone | Implemented; one batched transaction per round |
 | Weighted outer/inner worker allocation | Implemented |
 | Direct transactional region artifact commit | Implemented |
@@ -1357,25 +1357,11 @@ machine speed.
 
 ## Mapped Resynthesis Rounds
 
-A resynthesis round derives candidates for a dirty frontier, commits the
-non-conflicting ones, and re-derives whatever the commits invalidated. Two facts
-about that loop were being thrown away between rounds.
-
-A candidate that conflicts with a selected one is still derived from a mapped
-generation no commit has reached, so it is carried to the next round and
-scheduled in its frontier position rather than derived again. And a search that
-found nothing depends only on the cells it read, which the invalidation walk
-over-approximates by design; recording that read set keeps a handful of cells
-with an expensive exhaustive search from being asked the same question every
-round. On Ibex SKY130 one cell answered "nothing" in 70 ms, 23 times.
-
-Both are exact: a carried candidate whose cells a commit reached is dropped, and
-a recorded search is repeated as soon as any cell it read is touched. The
-recorded set has to be the whole set, which is more than the window: the cost
-model grows a fanout-free cone backward from the replaced cell, and a driver it
-rejected or a consumer it counted took part in the answer without appearing in
-the window. That growth reports every cell it inspected rather than only the
-cells it kept.
+Mapped resynthesis derives candidates in stable cell order from one committed
+generation. Accepted edits refresh the driver index, and another round runs
+only while at least one edit committed and the shared QoR budget remains. The
+search does not choose an area or timing regime: every proposal crosses the same
+transaction gate, and compatible sizing follows on the resulting topology.
 
 ## The Support Index Is Its Own Key Index
 

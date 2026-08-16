@@ -5,7 +5,7 @@
 
 use super::{
     CELL_INPUT_CAP, CellFunction, CellId, ConnectionSignal, HashMap, HashSet, MappedNetlist, NetId,
-    ODC_DEPTH, PinId, SmallVec, WINDOW_CELL_CAP, WINDOW_INPUT_CAP,
+    PinId, SmallVec, WINDOW_CELL_CAP, WINDOW_INPUT_CAP,
 };
 
 pub(super) struct Window {
@@ -61,135 +61,6 @@ impl DriverIndex {
             self.by_net[net.index()] = output_driver(mapped, functions, net);
         }
     }
-}
-
-/// Adds every MFS root whose bounded Boolean window can observe a structural
-/// edit at `seeds`.
-///
-/// The forward extent comes from the maximum fanin-window cell count. The
-/// reverse extent comes from the observability-care depth. The local halo
-/// mirrors the extra consumer and shared-input roots added by
-/// `wire_replacement_for`, so invalidation and candidate construction cannot
-/// silently drift apart behind an unrelated magic hop count.
-pub(in crate::closure::postmap) fn extend_candidate_invalidation(
-    mapped: &MappedNetlist,
-    functions: &HashMap<String, CellFunction>,
-    drivers: &DriverIndex,
-    boundary: &HashSet<NetId>,
-    seeds: impl IntoIterator<Item = CellId>,
-    dirty: &mut std::collections::HashSet<CellId>,
-) {
-    let seeds = seeds
-        .into_iter()
-        .filter(|&cell| mapped.is_live_cell(cell))
-        .collect::<Vec<_>>();
-    let mut seen_forward = HashSet::new();
-    let mut frontier = seeds.clone();
-    for _ in 0..=WINDOW_CELL_CAP {
-        if frontier.is_empty() {
-            break;
-        }
-        let mut next = Vec::new();
-        for cell in frontier.drain(..) {
-            if !seen_forward.insert(cell) {
-                continue;
-            }
-            dirty.insert(cell);
-            let Some(function) = mapped.cell_type(cell).and_then(|name| functions.get(name)) else {
-                continue;
-            };
-            let input_nets = functional_input_nets(mapped, cell, function);
-            let mut shared_inputs = HashMap::<CellId, usize>::new();
-            for &net in &input_nets {
-                if let Some(driver) = drivers.driver(mapped, net) {
-                    dirty.insert(driver);
-                }
-                let Some(pins) = mapped.pins_on_net(net) else {
-                    continue;
-                };
-                for owner in pins.filter_map(|pin| mapped.pin_owner(pin)) {
-                    if owner == cell
-                        || mapped
-                            .cell_type(owner)
-                            .is_none_or(|name| !functions.contains_key(name))
-                    {
-                        continue;
-                    }
-                    *shared_inputs.entry(owner).or_default() += 1;
-                }
-            }
-            dirty.extend(
-                shared_inputs
-                    .into_iter()
-                    .filter_map(|(cell, count)| (count >= 2).then_some(cell)),
-            );
-            let Some((_, output)) = cell_output_pin(mapped, cell, function) else {
-                continue;
-            };
-            let Some(pins) = mapped.pins_on_net(output) else {
-                continue;
-            };
-            next.extend(pins.filter_map(|pin| {
-                let owner = mapped.pin_owner(pin)?;
-                (owner != cell
-                    && mapped
-                        .cell_type(owner)
-                        .is_some_and(|name| functions.contains_key(name)))
-                .then_some(owner)
-            }));
-        }
-        frontier = next;
-    }
-
-    let mut seen_reverse = HashSet::new();
-    frontier = seeds;
-    for _ in 0..=ODC_DEPTH {
-        if frontier.is_empty() {
-            break;
-        }
-        let mut next = Vec::new();
-        for cell in frontier.drain(..) {
-            if !seen_reverse.insert(cell) {
-                continue;
-            }
-            dirty.insert(cell);
-            let Some(function) = mapped.cell_type(cell).and_then(|name| functions.get(name)) else {
-                continue;
-            };
-            for net in functional_input_nets(mapped, cell, function) {
-                if !boundary.contains(&net)
-                    && let Some(driver) = drivers.driver(mapped, net)
-                {
-                    next.push(driver);
-                }
-            }
-        }
-        frontier = next;
-    }
-}
-
-pub(super) fn functional_input_nets(
-    mapped: &MappedNetlist,
-    cell: CellId,
-    function: &CellFunction,
-) -> SmallVec<[NetId; CELL_INPUT_CAP]> {
-    mapped
-        .connections(cell)
-        .map_or_else(SmallVec::new, |connections| {
-            connections
-                .iter()
-                .filter_map(|connection| {
-                    let name = mapped.pin_name(connection)?;
-                    if !function.inputs.iter().any(|input| input == name) {
-                        return None;
-                    }
-                    match connection.signal {
-                        ConnectionSignal::Net(net) => Some(net),
-                        ConnectionSignal::Constant(_) => None,
-                    }
-                })
-                .collect()
-        })
 }
 
 pub(super) fn sorted_candidate_nets<'a>(

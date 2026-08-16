@@ -26,8 +26,7 @@ pub(crate) struct PostmapCellCatalog {
     buffers: Box<[usize]>,
     pin_swaps: PinSwapsByCell,
     mfs_functions: hashbrown::HashMap<String, super::mfs::CellFunction>,
-    area_resynthesis: super::mfs::ResynthesisCells,
-    timing_resynthesis: super::mfs::ResynthesisCells,
+    mfs_resynthesis: super::mfs::ResynthesisCells,
 }
 
 impl PostmapCellCatalog {
@@ -108,17 +107,13 @@ impl PostmapCellCatalog {
                 .then_with(|| left.name().cmp(right.name()))
         });
         let mfs_functions = super::mfs::cell_functions(&options.target_cells);
-        let area_resynthesis =
-            super::mfs::resynthesis_cells(&mfs_functions, super::mfs::ResynthesisObjective::Area);
-        let timing_resynthesis =
-            super::mfs::resynthesis_cells(&mfs_functions, super::mfs::ResynthesisObjective::Timing);
+        let mfs_resynthesis = super::mfs::resynthesis_cells(&mfs_functions);
         Self {
             replacements: replacements.into_boxed_slice(),
             buffers: buffers.into_boxed_slice(),
             pin_swaps: pin_swaps.into_boxed_slice(),
             mfs_functions,
-            area_resynthesis,
-            timing_resynthesis,
+            mfs_resynthesis,
         }
     }
 
@@ -138,14 +133,8 @@ impl PostmapCellCatalog {
         &self.mfs_functions
     }
 
-    pub(super) fn mfs_resynthesis(
-        &self,
-        objective: super::mfs::ResynthesisObjective,
-    ) -> &super::mfs::ResynthesisCells {
-        match objective {
-            super::mfs::ResynthesisObjective::Area => &self.area_resynthesis,
-            super::mfs::ResynthesisObjective::Timing => &self.timing_resynthesis,
-        }
+    pub(super) fn mfs_resynthesis(&self) -> &super::mfs::ResynthesisCells {
+        &self.mfs_resynthesis
     }
 }
 
