@@ -533,6 +533,7 @@ fn rewrite_pass(
         index_started.elapsed()
     );
     let decide_started = std::time::Instant::now();
+    let structural = opto_ir::logic::StructuralIndex::of(network.storage_network());
     let analysis = DecisionAnalysis {
         network,
         cuts: &cuts,
@@ -544,6 +545,7 @@ fn rewrite_pass(
         recipe_cache: incremental.recipe_cache,
         incremental_metrics: incremental.metrics,
         check_incremental: diagnostics.check_incremental,
+        structural: &structural,
     };
     let decisions = runtime.analyze_indexed_with(
         node_count,
