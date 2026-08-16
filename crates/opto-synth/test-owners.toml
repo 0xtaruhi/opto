@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 406
+expected_tests = 405
 
 [[owners]]
 path = "src/api"
@@ -62,7 +62,7 @@ contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and mat
 [[owners]]
 path = "src/closure"
 owner = "closure"
-tests = 61
+tests = 60
 contract = "MMMC measurement, power objectives, mapped boundaries, and transactional post-map repair."
 
 [[owners]]
@@ -74,7 +74,7 @@ contract = "Durable implementation ownership, publication identity, and source p
 [[focused_contracts]]
 path = "src/closure/postmap/tests.rs"
 owner = "postmap"
-tests = 28
+tests = 27
 contract = "Transactional candidate evaluation, mapped edits, rollback, and deterministic closure ordering."
 
 [[focused_contracts]]

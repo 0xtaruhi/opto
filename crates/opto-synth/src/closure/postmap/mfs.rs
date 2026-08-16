@@ -11,6 +11,7 @@ use smallvec::SmallVec;
 
 const WINDOW_INPUT_CAP: usize = 12;
 const CELL_INPUT_CAP: usize = 6;
+const STRUCTURAL_CELL_AREA_CAP: f64 = 4.0;
 const WINDOW_CELL_CAP: usize = 24;
 
 mod search;
@@ -18,7 +19,7 @@ mod search;
 use search::wire_replacement_for;
 
 mod drivers;
-pub(super) use drivers::{DriverIndex, extend_candidate_invalidation};
+pub(super) use drivers::DriverIndex;
 use drivers::{
     Window, cell_output_pin, collect_window, debug_mfs, evaluate_cell, filled,
     sorted_candidate_nets, word_count,
@@ -51,13 +52,6 @@ pub(super) struct CellFunction {
 pub(super) struct ResynthesisCells {
     inverter: Option<ResynthesisCell>,
     by_input_count: [Vec<ResynthesisCell>; CELL_INPUT_CAP + 1],
-    objective: ResynthesisObjective,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ResynthesisObjective {
-    Area,
-    Timing,
 }
 
 #[derive(Debug)]
@@ -72,34 +66,21 @@ struct ResynthesisCell {
     output: String,
 }
 
-impl ResynthesisCells {
-    fn allows(&self, cell: &ResynthesisCell, current_area: f64) -> bool {
-        match self.objective {
-            ResynthesisObjective::Area => cell.area < current_area,
-            ResynthesisObjective::Timing => {
-                cell.delay.is_finite() && cell.area < current_area * 4.0
-            }
-        }
+impl ResynthesisCell {
+    fn precedes(&self, other: &Self) -> bool {
+        self.area
+            .total_cmp(&other.area)
+            .then_with(|| self.delay.total_cmp(&other.delay))
+            .then_with(|| self.transition.total_cmp(&other.transition))
+            .then_with(|| self.name.cmp(&other.name))
+            .is_lt()
     }
+}
 
-    fn precedes(&self, left: &ResynthesisCell, right: &ResynthesisCell) -> bool {
-        let area = left
-            .area
-            .total_cmp(&right.area)
-            .then_with(|| left.delay.total_cmp(&right.delay))
-            .then_with(|| left.transition.total_cmp(&right.transition));
-        let timing = left
-            .delay
-            .total_cmp(&right.delay)
-            .then_with(|| left.transition.total_cmp(&right.transition))
-            .then_with(|| left.area.total_cmp(&right.area));
-        match self.objective {
-            ResynthesisObjective::Area => area,
-            ResynthesisObjective::Timing => timing,
-        }
-        .then_with(|| left.name.cmp(&right.name))
-        .is_lt()
-    }
+fn candidate_allowed(cell: &ResynthesisCell, current_area: f64) -> bool {
+    // This is a deterministic search bound, not an acceptance objective. The
+    // closure transaction decides whether a larger cell is justified.
+    cell.area < current_area * STRUCTURAL_CELL_AREA_CAP
 }
 
 pub(super) fn cell_functions(
@@ -117,22 +98,20 @@ pub(super) fn cell_functions(
     functions
 }
 
-pub(super) fn resynthesis_cells(
-    functions: &HashMap<String, CellFunction>,
-    objective: ResynthesisObjective,
-) -> ResynthesisCells {
+pub(super) fn resynthesis_cells(functions: &HashMap<String, CellFunction>) -> ResynthesisCells {
     let mut inverter: Option<ResynthesisCell> = None;
     let mut best_by_input = std::array::from_fn::<_, { CELL_INPUT_CAP + 1 }, _>(|_| {
         HashMap::<u64, ResynthesisCell>::new()
     });
     for (name, function) in functions {
-        if function.input_count == 1
-            && function.truth_bits & 0b11 == 0b01
-            && inverter
+        if function.input_count == 1 && function.truth_bits & 0b11 == 0b01 {
+            let candidate = resynthesis_cell(name, function, function.truth_bits & 0b11);
+            if inverter
                 .as_ref()
-                .is_none_or(|current| resynthesis_cell_precedes(objective, function, name, current))
-        {
-            inverter = Some(resynthesis_cell(name, function, function.truth_bits & 0b11));
+                .is_none_or(|current| candidate.precedes(current))
+            {
+                inverter = Some(candidate);
+            }
         }
         if (2..=CELL_INPUT_CAP).contains(&function.input_count) {
             let truth = function.truth_bits & truth_mask(function.input_count);
@@ -140,7 +119,7 @@ pub(super) fn resynthesis_cells(
             let candidate = resynthesis_cell(name, function, truth);
             match entry {
                 hashbrown::hash_map::Entry::Occupied(mut occupied) => {
-                    if resynthesis_cell_precedes(objective, function, name, occupied.get()) {
+                    if candidate.precedes(occupied.get()) {
                         occupied.insert(candidate);
                     }
                 }
@@ -165,7 +144,6 @@ pub(super) fn resynthesis_cells(
     ResynthesisCells {
         inverter,
         by_input_count,
-        objective,
     }
 }
 
@@ -176,30 +154,6 @@ fn truth_mask(input_count: usize) -> u64 {
     } else {
         (1u64 << bits) - 1
     }
-}
-
-fn resynthesis_cell_precedes(
-    objective: ResynthesisObjective,
-    candidate: &CellFunction,
-    candidate_name: &str,
-    current: &ResynthesisCell,
-) -> bool {
-    let area = candidate
-        .area
-        .total_cmp(&current.area)
-        .then_with(|| candidate.delay.total_cmp(&current.delay))
-        .then_with(|| candidate.transition.total_cmp(&current.transition));
-    let timing = candidate
-        .delay
-        .total_cmp(&current.delay)
-        .then_with(|| candidate.transition.total_cmp(&current.transition))
-        .then_with(|| candidate.area.total_cmp(&current.area));
-    match objective {
-        ResynthesisObjective::Area => area,
-        ResynthesisObjective::Timing => timing,
-    }
-    .then_with(|| candidate_name.cmp(&current.name))
-    .is_lt()
 }
 
 fn resynthesis_cell(name: &str, function: &CellFunction, truth: u64) -> ResynthesisCell {

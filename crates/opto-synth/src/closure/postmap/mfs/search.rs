@@ -5,9 +5,9 @@ use super::{
     CELL_INPUT_CAP, CellFunction, CellId, ConnectionRef, ConnectionSignal, DriverReplacement,
     HashMap, HashSet, ImplementationDb, MappedNetlist, NetId, OptimizationContext, PinId,
     PostmapCandidate, ResynthesisCell, ResynthesisCells, RewireReplacement, SmallVec,
-    cell_output_pin, collect_window, debug_mfs, driver_mffc, driver_mffc_reading, filled,
-    observability_care, replace_driver_candidate, rewire_candidate, sorted_candidate_nets,
-    truth_mask,
+    candidate_allowed, cell_output_pin, collect_window, debug_mfs, driver_mffc,
+    driver_mffc_reading, filled, observability_care, replace_driver_candidate, rewire_candidate,
+    sorted_candidate_nets, truth_mask,
 };
 
 const DIRECT_REMAP_NET_CAP: usize = 16;
@@ -124,7 +124,7 @@ impl WireReplacementSearch<'_> {
 
     fn inverter(&self) -> Option<PostmapCandidate> {
         let inverter = self.resynthesis.inverter.as_ref()?;
-        if !self.resynthesis.allows(inverter, self.current_area) {
+        if !candidate_allowed(inverter, self.current_area) {
             return None;
         }
         for &(candidate_net, candidate_bits) in self.nets {
@@ -171,7 +171,7 @@ impl WireReplacementSearch<'_> {
         let viable_depths = std::array::from_fn::<_, { CELL_INPUT_CAP + 1 }, _>(|input_count| {
             self.resynthesis.by_input_count[input_count]
                 .iter()
-                .any(|candidate| self.resynthesis.allows(candidate, self.current_area))
+                .any(|candidate| candidate_allowed(candidate, self.current_area))
         });
         let depth_cap = viable_depths
             .iter()
@@ -204,10 +204,10 @@ impl WireReplacementSearch<'_> {
                 for candidate in &candidates[range] {
                     if candidate.truth & required_one == required_one
                         && candidate.truth & required_zero == 0
-                        && self.resynthesis.allows(candidate, self.current_area)
+                        && candidate_allowed(candidate, self.current_area)
                         && best
                             .as_ref()
-                            .is_none_or(|(chosen, _)| self.resynthesis.precedes(candidate, chosen))
+                            .is_none_or(|(chosen, _)| candidate.precedes(chosen))
                     {
                         best = Some((
                             candidate,

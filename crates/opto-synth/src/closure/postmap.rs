@@ -24,7 +24,6 @@ mod objective;
 mod power;
 mod region;
 mod registers;
-mod resynthesis;
 mod session;
 mod sizing;
 
@@ -238,7 +237,6 @@ fn optimize_timing(
         diagnostics::report_timing_paths(trace, "after_electrical_legalization", &session.timing)?;
     }
     cloning::optimize(&mut session, policy.critical_fanout_cloning)?;
-    resynthesis::optimize(&mut session, catalog, runtime, policy.timing_resynthesis)?;
     sizing::optimize(&mut session, catalog, runtime, &timing_policy)?;
     sizing::evaluate_pin_swaps(&mut session, catalog)?;
     session.report_completion(optimization_started.elapsed());
