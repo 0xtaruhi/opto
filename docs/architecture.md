@@ -1417,6 +1417,12 @@ state equivalence sharing is intentionally absent until arbitrary initial
 state, reset, enable, and clock semantics can be proved rather than inferred
 from locally equal data inputs.
 
+Longer-horizon product sequencing is recorded in the
+[industrial synthesis product roadmap](roadmap.md). That roadmap is
+non-normative and must not be cited as evidence that a capability is
+implemented; this document's conformance matrix remains the current-state
+authority.
+
 ## Qualification Contract
 
 Every QoR or performance change must use repeatable inputs and record:

@@ -256,6 +256,7 @@ developer shell setting.
 | Resource | Purpose |
 |---|---|
 | [Architecture](docs/architecture.md) | Normative boundaries, production workflow, conformance matrix, and qualification contract |
+| [Industrial synthesis product roadmap](docs/roadmap.md) | Ordered product milestones and measurable exit evidence for production-grade synthesis |
 | [Command-surface RFC](docs/rfcs/0010-command-surface.md) | Tcl lifecycle, command naming, collections, properties, and reports |
 | [Qualification guide](qualification/README.md) | Verification tiers, equivalence suites, coverage, and reproduction commands |
 | [QoR methodology](benchmarks/qor/README.md) | Public benchmark policy, baselines, metrics, and dashboard generation |

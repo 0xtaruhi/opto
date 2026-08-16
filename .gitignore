@@ -26,7 +26,6 @@ Thumbs.db
 .env.*
 !.env.example
 /docs/internal/
-/docs/roadmap.md
 /docs/big-refactor-execution-plan.md
 /private/
 /tests/private/
