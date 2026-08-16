@@ -29,6 +29,7 @@ library (demo) {
     }
   }
 }
+
 "#,
     )
     .unwrap();
@@ -59,6 +60,60 @@ library (demo) {
     assert!(qor.contains("Timing paths: 1"), "{qor}");
     assert!(qor.contains("Critical Path Length: 0.200000"), "{qor}");
     assert!(qor.contains("Critical Path Slack: 0.800000"), "{qor}");
+}
+
+#[test]
+fn report_qor_skips_timing_for_unsynthesized_rtl_hierarchy() {
+    let dir = temp_dir("report-qor-rtl-hierarchy");
+    std::fs::write(
+        dir.join("demo.lib"),
+        r#"
+library (demo) {
+  cell (BUF) {
+    area : 1.0;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        cell_rise (delay_template) { values ( "0.20" ); }
+        cell_fall (delay_template) { values ( "0.20" ); }
+      }
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let rtl = dir.join("hierarchy.v");
+    std::fs::write(
+        &rtl,
+        "module child(input a, output y); assign y = a; endmodule\n\
+         module top(input a, output y); child U1(.a(a), .y(y)); endmodule\n",
+    )
+    .unwrap();
+
+    let mut session = Session::new();
+    session.set_lib_search_path(vec![PathBuf::from(dir.display().to_string())]);
+    session.read_libs(&[PathBuf::from("demo.lib")]).unwrap();
+    session
+        .import_verilog(std::slice::from_ref(&rtl), &FrontendOptions::default())
+        .unwrap();
+    session.set_current_design("top").unwrap();
+    let from = session
+        .resolve_timing_endpoints("set_max_delay", &["a".to_string()])
+        .unwrap();
+    let to = session
+        .resolve_timing_endpoints("set_max_delay", &["y".to_string()])
+        .unwrap();
+    session.set_max_delay(1.0, from, to).unwrap();
+
+    let qor = session.report_qor().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+
+    assert!(qor.contains("Timing paths: 0"), "{qor}");
+    assert!(!qor.contains("Critical Path Length:"), "{qor}");
 }
 
 #[test]

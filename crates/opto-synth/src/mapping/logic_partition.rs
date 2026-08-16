@@ -151,10 +151,7 @@ impl RegionLogicSlice {
                     value,
                     required_time: root.required_time,
                     output_load: root.output_load,
-                    requires_combinational_cover: root.requires_combinational_cover
-                        && !module.value(value).is_some_and(|stored| {
-                            matches!(stored.kind, word::ValueKind::Constant(_))
-                        }),
+                    requires_combinational_cover: root.requires_combinational_cover,
                 });
             }
         }

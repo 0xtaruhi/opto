@@ -172,7 +172,7 @@ fn exact_recovery_uses_area_delay_only_for_timing_driven_logic() {
 }
 
 #[test]
-fn required_time_prefers_area_only_after_both_choices_meet_budget() {
+fn required_time_uses_area_delay_after_both_choices_meet_budget() {
     assert_eq!(
         compare_mapping_cost_with_required_time(1.0, cost(4.0, 0.9), cost(1.0, 1.1)),
         std::cmp::Ordering::Less

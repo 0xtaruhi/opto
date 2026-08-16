@@ -389,10 +389,6 @@ impl<B: BitBackend> BitBlaster<'_, B> {
         ty: word::WordType,
         source: &word::SourceSpan,
     ) -> Result<Vec<ScalarBit>, crate::SynthError> {
-        if let Some(alias) = self.publication_contract.aliases.get(&original).copied() {
-            let span = self.value(alias)?;
-            return Ok((0..span.len()).map(|bit| self.bit(span, bit)).collect());
-        }
         let signal = self
             .module
             .add_generated_wire(ty, source.clone())
@@ -455,34 +451,6 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                         )
                         .map_err(crate::SynthError::from)?;
                     bit
-                }
-                super::FrozenPublicationBit::SubstrateValue { value, bit } => {
-                    let span = self.value(value)?;
-                    if bit >= span.len() {
-                        return Err(crate::SynthError::invariant(
-                            "substrate publication source bit exceeds its value",
-                        ));
-                    }
-                    let source_bit = self.bit(span, bit);
-                    let value = self.backend.word_value(source_bit).ok_or_else(|| {
-                        crate::SynthError::invariant(
-                            "substrate publication source has no Word value",
-                        )
-                    })?;
-                    let index = u32::try_from(index).map_err(|_| {
-                        crate::SynthError::capacity("regional publication bit index")
-                    })?;
-                    self.module
-                        .connect(
-                            word::LValue::signal(signal).with_range(word::BitRange {
-                                msb: index,
-                                lsb: index,
-                            }),
-                            value,
-                            source.clone(),
-                        )
-                        .map_err(crate::SynthError::from)?;
-                    source_bit
                 }
             };
             bits.push(bit);

@@ -7,6 +7,24 @@ use opto_formats::{AreaCellKind, AreaLibrary, AreaReportContext};
 use opto_synth::target_cell_is_buffer_or_inverter;
 use opto_timing::ReportTimingOptions;
 
+fn source_is_timing_model_compatible(
+    module: &opto_ir::word::WordModule,
+    library: &opto_library::TimingLibrary,
+) -> bool {
+    module.instances().iter().all(|instance| {
+        let cell_name = module.name_str(instance.module);
+        let mut matches = library.cells.iter().filter(|cell| cell.name() == cell_name);
+        let Some(cell) = matches.next() else {
+            return false;
+        };
+        matches.next().is_none()
+            && instance.connections.iter().all(|connection| {
+                let port = module.name_str(connection.port);
+                cell.pins().any(|pin| pin.name() == port)
+            })
+    })
+}
+
 fn area_report_context(session: &Session) -> Result<AreaReportContext, SessionError> {
     let selection = session.resolution_library_selection();
     if selection.is_empty() {
@@ -101,12 +119,14 @@ impl Session {
     pub fn report_qor(&self) -> Result<String, SessionError> {
         let record = self.current_record()?;
         let context = area_report_context(self)?;
+        let timing_library = self.timing_library()?;
         let timing = if !self.state.timing.has_path_constraints()
-            || self
-                .timing_library()?
+            || timing_library
                 .cells
                 .iter()
                 .all(|cell| cell.pins().all(|pin| pin.timing_arcs().next().is_none()))
+            || (record.synthesized.is_none()
+                && !source_is_timing_model_compatible(record.source.word(), &timing_library))
         {
             None
         } else {

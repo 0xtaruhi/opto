@@ -144,9 +144,6 @@ pub(crate) fn lower_selected_memories(
         match implementations[index] {
             crate::planning::regional::MemoryImplementationCandidate::RegisterBank => {
                 let bank = materialize_storage(module, memory, &writes[index])?;
-                ownership.memories[index]
-                    .state_values
-                    .extend(bank.words.iter().copied());
                 for port in std::mem::take(&mut reads[index]) {
                     materialize_read(module, &bank, &writes[index], port)?;
                 }
@@ -162,7 +159,17 @@ pub(crate) fn lower_selected_memories(
         }
         for operation in first_operation..module.operations().len() {
             let operation = word::OpId::from_index(operation).map_err(crate::SynthError::from)?;
-            ownership.memories[index].operations.push(operation);
+            let stored = module.operation(operation).ok_or_else(|| {
+                crate::SynthError::invariant("lowered memory operation is absent")
+            })?;
+            if matches!(
+                stored.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            ) {
+                ownership.memories[index].state_values.push(stored.result);
+            } else {
+                ownership.memories[index].operations.push(operation);
+            }
         }
     }
     if !module.memories().is_empty()

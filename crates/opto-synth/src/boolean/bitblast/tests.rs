@@ -314,20 +314,25 @@ fn regional_shell_freezes_full_domain_constant_bits() {
 }
 
 #[test]
-fn regional_shell_materializes_substrate_publication_drivers() {
-    let mut module = word::WordModule::new("regional_publication_driver");
-    let input = add_input(&mut module, "a", 1);
-    let input = read_port(&mut module, input);
+fn regional_shell_rejects_a_producer_claim_for_a_full_domain_constant() {
+    let mut module = word::WordModule::new("regional_constant_publication_claim");
+    let input = module
+        .constant(
+            ConstBits::from_bits(vec![BitVal::Zero]).unwrap(),
+            word::WordType::bits(1).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
     let result = module
         .unary(word::UnaryOp::BitNot, input, word::SourceSpan::default())
         .unwrap();
-    let output = add_output(&mut module, "y", 1, result);
+    add_output(&mut module, "y", 1, result);
     let plan = crate::planning::operator::ArchitectureDecisions::for_module(&module).unwrap();
     let mut provenance =
         crate::artifact::provenance::ProvenanceBuilder::new(&module, &plan).unwrap();
     let region = crate::RegionRowId::from_index(0).unwrap();
 
-    let ownership = bitblast_module_with_regions(
+    let error = bitblast_module_with_regions(
         &mut module,
         &plan,
         &mut provenance,
@@ -336,52 +341,49 @@ fn regional_shell_materializes_substrate_publication_drivers() {
         &[RegionalPublicationBit {
             target: result,
             bit: 0,
-            owner: RegionalPublicationOwner::SubstrateConstant(BitVal::Zero),
+            producer: region,
         }],
         GlobalBitblastScope::RegionalShell,
     )
-    .unwrap();
+    .unwrap_err();
 
-    let [published] = ownership.lowered_bits(result).unwrap() else {
-        panic!("scalar publication must have one lowered bit");
-    };
-    let word::ValueKind::Constant(bits) = &module.value(*published).unwrap().kind else {
-        panic!("substrate-owned publication did not return its constant owner");
-    };
-    assert_eq!(bits.bit_lsb(0), Some(BitVal::Zero));
-    assert!(module.connects().iter().any(|connect| {
-        connect.target.signal != output
-            && module.value(connect.value).is_some_and(|stored| {
-                matches!(
-                    &stored.kind,
-                    word::ValueKind::Constant(bits) if bits.bit_lsb(0) == Some(BitVal::Zero)
-                )
-            })
-    }));
+    assert!(error.to_string().contains("claims full-domain constant"));
 }
 
 #[test]
-fn publication_owner_join_preserves_the_authoritative_producer() {
-    let value = word::ValueId::from_index(0).unwrap();
-    let fallback = RegionalPublicationOwner::SubstrateValue { value, bit: 0 };
+fn regional_shell_rejects_a_claim_from_the_wrong_producer() {
+    let mut module = word::WordModule::new("regional_wrong_producer");
+    let input = add_input(&mut module, "a", 1);
+    let input = read_port(&mut module, input);
+    let result = module
+        .unary(word::UnaryOp::BitNot, input, word::SourceSpan::default())
+        .unwrap();
+    add_output(&mut module, "y", 1, result);
+    let plan = crate::planning::operator::ArchitectureDecisions::for_module(&module).unwrap();
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::new(&module, &plan).unwrap();
+    let owner = crate::RegionRowId::from_index(0).unwrap();
+    let claimant = crate::RegionRowId::from_index(1).unwrap();
 
-    assert_eq!(
-        RegionalPublicationOwner::RegionArtifact.merge(fallback),
-        Some(RegionalPublicationOwner::RegionArtifact)
-    );
-    assert_eq!(
-        fallback.merge(RegionalPublicationOwner::SequentialArtifact),
-        Some(RegionalPublicationOwner::SequentialArtifact)
-    );
-    assert_eq!(
-        RegionalPublicationOwner::RegionArtifact
-            .merge(RegionalPublicationOwner::SequentialArtifact),
-        None
-    );
-    assert_eq!(
-        RegionalPublicationOwner::SubstrateConstant(BitVal::Zero)
-            .merge(RegionalPublicationOwner::SubstrateConstant(BitVal::One)),
-        None
+    let error = bitblast_module_with_regions(
+        &mut module,
+        &plan,
+        &mut provenance,
+        &[Some(owner)],
+        &[],
+        &[RegionalPublicationBit {
+            target: result,
+            bit: 0,
+            producer: claimant,
+        }],
+        GlobalBitblastScope::RegionalShell,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("but the source operation belongs to")
     );
 }
 

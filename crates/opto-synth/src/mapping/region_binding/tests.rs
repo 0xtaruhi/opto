@@ -18,17 +18,13 @@ fn epoch_snapshot_shares_immutable_binding_arenas() {
 }
 
 #[test]
-fn memory_logic_ownership_separates_cover_inputs_from_outputs() {
+fn memory_logic_ownership_is_always_a_cover_output() {
     let combinational = word::ValueId::from_index(0).unwrap();
-    let sequential = word::ValueId::from_index(1).unwrap();
     let memory = word::MemoryId::from_index(0).unwrap();
-    let mut sources = BindingMap::new();
     let mut outputs = BindingMap::new();
 
     bind_owned_memory_logic_bit(
-        &mut sources,
         &mut outputs,
-        RegionalMemoryLogicKind::Combinational,
         combinational,
         RegionPlanValueBinding::MemoryLogicBit {
             memory,
@@ -36,22 +32,8 @@ fn memory_logic_ownership_separates_cover_inputs_from_outputs() {
             bit: 0,
         },
     );
-    bind_owned_memory_logic_bit(
-        &mut sources,
-        &mut outputs,
-        RegionalMemoryLogicKind::SequentialState,
-        sequential,
-        RegionPlanValueBinding::MemoryLogicBit {
-            memory,
-            ordinal: 1,
-            bit: 0,
-        },
-    );
 
-    assert!(!sources.contains_key(&combinational));
     assert!(outputs.contains_key(&combinational));
-    assert!(sources.contains_key(&sequential));
-    assert!(!outputs.contains_key(&sequential));
 }
 
 #[test]

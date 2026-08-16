@@ -179,9 +179,8 @@ fn cover_logic_network_with_recovery(
         ));
     }
     {
-        let mut recovery_iteration = 0usize;
-        loop {
-            recovery_iteration += 1;
+        const RECOVERY_ROUND_LIMIT: usize = 8;
+        for recovery_iteration in 1..=RECOVERY_ROUND_LIMIT {
             let before = planner.selected_area();
             let exact_started = std::time::Instant::now();
             let exact_changes = planner.exact_pass(runtime)?;
@@ -207,8 +206,15 @@ fn cover_logic_network_with_recovery(
                  exact={exact_elapsed:?}/{exact_changes} \
                  joint={joint_elapsed:?}/{joint_changes}"
             );
-            if after >= before {
+            if exact_changes == 0 && joint_changes == 0 {
                 break;
+            }
+            if recovery_iteration == RECOVERY_ROUND_LIMIT {
+                crate::api::diagnostics::trace!(
+                    trace,
+                    "cover.recovery_limit",
+                    "rounds={RECOVERY_ROUND_LIMIT}"
+                );
             }
         }
     }
@@ -416,17 +422,16 @@ struct ExactChoice {
 
 impl ExactChoice {
     fn prefers_over(&self, current: &Self, timing_driven: bool) -> bool {
-        let objective = if timing_driven {
-            (self.area * self.arrival).total_cmp(&(current.area * current.arrival))
-        } else {
-            self.area.total_cmp(&current.area)
-        };
-        objective
-            .then_with(|| self.area.total_cmp(&current.area))
-            .then_with(|| self.arrival.total_cmp(&current.arrival))
-            .then_with(|| self.truth.cmp(&current.truth))
-            .then_with(|| self.order.cmp(&current.order))
-            .is_lt()
+        crate::planning::mapping_policy::compare_area_arrival_objective(
+            timing_driven,
+            self.area,
+            self.arrival,
+            current.area,
+            current.arrival,
+        )
+        .then_with(|| self.truth.cmp(&current.truth))
+        .then_with(|| self.order.cmp(&current.order))
+        .is_lt()
     }
 }
 

@@ -101,8 +101,26 @@ pub(crate) fn compare_cell_cost(left: CellCost, right: CellCost) -> Ordering {
     )
 }
 
-/// Constrained choices first become feasible, recover area once both meet the
-/// required time, and minimize delay only while both still violate it.
+/// Compares the area-delay objective shared by constrained mapping passes.
+pub(crate) fn compare_area_arrival_objective(
+    timing_driven: bool,
+    candidate_area: f64,
+    candidate_arrival: f64,
+    current_area: f64,
+    current_arrival: f64,
+) -> Ordering {
+    let objective = if timing_driven {
+        (candidate_area * candidate_arrival).total_cmp(&(current_area * current_arrival))
+    } else {
+        candidate_area.total_cmp(&current_area)
+    };
+    objective
+        .then_with(|| candidate_area.total_cmp(&current_area))
+        .then_with(|| candidate_arrival.total_cmp(&current_arrival))
+}
+
+/// Constrained choices first become feasible, optimize area-delay once both
+/// meet the required time, and minimize delay while both still violate it.
 pub(crate) fn compare_mapping_cost_with_required_time(
     required: f64,
     candidate: MappingCost,
@@ -117,7 +135,26 @@ pub(crate) fn compare_mapping_cost_with_required_time(
     ) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        (true, true) => compare_mapping_cost(candidate, current),
+        (true, true) => compare_area_arrival_objective(
+            true,
+            candidate.area,
+            candidate.electrical_delay,
+            current.area,
+            current.electrical_delay,
+        )
+        .then_with(|| {
+            candidate
+                .electrical_transition
+                .total_cmp(&current.electrical_transition)
+        })
+        .then_with(|| candidate.delay.total_cmp(&current.delay))
+        .then_with(|| candidate.transition.total_cmp(&current.transition))
+        .then_with(|| candidate.depth.cmp(&current.depth))
+        .then_with(|| {
+            candidate
+                .input_capacitance
+                .total_cmp(&current.input_capacitance)
+        }),
         (false, false) => compare_violating_cost(candidate, current),
     }
 }
@@ -136,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn timing_closure_recovers_area_only_after_the_budget_is_met() {
+    fn timing_closure_uses_area_delay_after_the_budget_is_met() {
         let small_late = cost(1.0, 1.1);
         let large_met = cost(4.0, 0.9);
         assert!(compare_mapping_cost_with_required_time(1.0, large_met, small_late).is_lt());
@@ -144,6 +181,17 @@ mod tests {
         let small_met = cost(1.0, 1.5);
         let large_met = cost(4.0, 1.0);
         assert!(compare_mapping_cost_with_required_time(2.0, small_met, large_met).is_lt());
+
+        let smaller_but_worse_product = cost(9.0, 1.2);
+        let larger_but_better_product = cost(10.0, 1.0);
+        assert!(
+            compare_mapping_cost_with_required_time(
+                2.0,
+                larger_but_better_product,
+                smaller_but_worse_product,
+            )
+            .is_lt()
+        );
     }
 
     #[test]

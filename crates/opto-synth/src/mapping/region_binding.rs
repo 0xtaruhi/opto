@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::planning::regional::{
-    RegionalMemoryLogicBinding, RegionalMemoryLogicKind, RegionalMemoryStateBinding,
-};
+use crate::planning::regional::{RegionalMemoryLogicBinding, RegionalMemoryStateBinding};
 use opto_ir::word;
 use std::sync::Arc;
 
@@ -359,24 +357,13 @@ pub(crate) struct CandidateBindingDomain<'a> {
 type BindingMap = std::collections::BTreeMap<word::ValueId, Vec<RegionPlanValueBinding>>;
 
 fn bind_owned_memory_logic_bit(
-    sources: &mut BindingMap,
     outputs: &mut BindingMap,
-    kind: RegionalMemoryLogicKind,
     lowered: word::ValueId,
     binding: RegionPlanValueBinding,
 ) {
-    match kind {
-        RegionalMemoryLogicKind::Combinational => {
-            // Region-owned combinational lowering is an output identity only.
-            // Its complete fan-in must remain covered.
-            outputs.entry(lowered).or_default().push(binding);
-        }
-        RegionalMemoryLogicKind::SequentialState => {
-            // A sequential result is published by the state artifact and
-            // enters, but is never implemented by, the cover.
-            sources.entry(lowered).or_default().push(binding);
-        }
-    }
+    // State results have a distinct MemoryStateBit identity and never enter
+    // this collection. Every memory-logic row is therefore a cover output.
+    outputs.entry(lowered).or_default().push(binding);
 }
 
 fn bind_root_outputs(
@@ -503,13 +490,7 @@ pub(crate) fn build_candidate_binding<'a>(
                 ordinal: memory_logic.ordinal,
                 bit,
             };
-            bind_owned_memory_logic_bit(
-                &mut local_to_sources,
-                &mut local_to_outputs,
-                memory_logic.kind,
-                lowered,
-                binding,
-            );
+            bind_owned_memory_logic_bit(&mut local_to_outputs, lowered, binding);
         }
     }
     canonicalize_bindings(local_module, &mut local_to_sources)?;

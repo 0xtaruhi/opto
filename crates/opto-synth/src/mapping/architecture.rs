@@ -653,12 +653,10 @@ impl RegionArchitectureMaterializer<'_, '_> {
             },
         )?;
         let publication = finalize_regional_publication(
-            self.request.source,
             &private.module,
-            &private.lowering.ownership,
-            &private.source_to_local,
             slice.roots(),
             &pending_publication,
+            region.row(),
         )?;
         slice.project_sequential_timing(&sequential_timing);
         Ok(PreparedRegionCover {
@@ -953,6 +951,7 @@ fn expand_mapping_root_pairs(
 ) -> Result<ExpandedMappingRoots, SynthError> {
     let mut expanded = Vec::new();
     let mut publication = Vec::new();
+    let mut facts = word::KnownBitsAnalysis::new(source);
     for (root, local) in roots {
         let source_width = source
             .value(root.value)
@@ -972,7 +971,7 @@ fn expand_mapping_root_pairs(
         for (bit, local) in local_bits.into_iter().enumerate() {
             let bit = u32::try_from(bit)
                 .map_err(|_| SynthError::capacity("regional publication bit index"))?;
-            let requires_artifact = semantics.bit_requires_artifact(root.value, bit)?;
+            let mut requires_artifact = semantics.bit_requires_artifact(root.value, bit)?;
             if let super::roots::CanonicalPublicationBit::Value {
                 value: target,
                 bit: target_bit,
@@ -981,11 +980,15 @@ fn expand_mapping_root_pairs(
                     .value(target)
                     .is_some_and(|stored| matches!(stored.kind, word::ValueKind::Operation(_)))
             {
-                publication.push(PendingRegionalPublicationBit {
-                    target,
-                    bit: target_bit,
-                    local,
-                });
+                if facts.bit(source, target, target_bit) != word::KnownBit::Unknown {
+                    requires_artifact = false;
+                } else if requires_artifact {
+                    publication.push(PendingRegionalPublicationBit {
+                        target,
+                        bit: target_bit,
+                        local,
+                    });
+                }
             }
             expanded.push((
                 MappingRoot {
@@ -1003,12 +1006,10 @@ fn expand_mapping_root_pairs(
 }
 
 fn finalize_regional_publication(
-    source: &word::WordModule,
     local_module: &word::WordModule,
-    ownership: &LoweredRegionOwnership,
-    source_to_local: &BTreeMap<word::ValueId, word::ValueId>,
     roots: &[MappingRoot],
     pending: &[PendingRegionalPublicationBit],
+    producer: RegionRowId,
 ) -> Result<Box<[crate::boolean::bitblast::RegionalPublicationBit]>, SynthError> {
     let semantics = super::roots::FullDomainRootSemantics::new(local_module)?;
     let mut cover_owners = BTreeMap::new();
@@ -1022,147 +1023,21 @@ fn finalize_regional_publication(
     let mut publication = Vec::with_capacity(pending.len());
     for entry in pending {
         let local = semantics.canonical_root(entry.local)?;
-        // Candidate construction deliberately removes roots that collapse to
-        // immutable subject inputs. Absence therefore transfers publication
-        // to the substrate classifier; that classifier still fails closed if
-        // no constant, state, port, or other immutable source owns the bit.
-        let requires_artifact = cover_owners.get(&local).copied().unwrap_or(false);
-        let owner = if requires_artifact {
-            crate::boolean::bitblast::RegionalPublicationOwner::RegionArtifact
-        } else {
-            classify_substrate_publication(
-                source,
-                local_module,
-                ownership,
-                source_to_local,
-                entry.target,
-                entry.bit,
-                entry.local,
-            )?
-        };
+        if !cover_owners.get(&local).copied().unwrap_or(false) {
+            return Err(SynthError::invariant(format!(
+                "full-domain regional publication {:?}[{}] lost its combinational cover root",
+                entry.target, entry.bit,
+            )));
+        }
         publication.push(crate::boolean::bitblast::RegionalPublicationBit {
             target: entry.target,
             bit: entry.bit,
-            owner,
+            producer,
         });
     }
     publication.sort_unstable_by_key(|entry| (entry.target, entry.bit));
     publication.dedup();
     Ok(publication.into_boxed_slice())
-}
-
-fn classify_substrate_publication(
-    source: &word::WordModule,
-    local_module: &word::WordModule,
-    ownership: &LoweredRegionOwnership,
-    source_to_local: &BTreeMap<word::ValueId, word::ValueId>,
-    target: word::ValueId,
-    target_bit: u32,
-    local: word::ValueId,
-) -> Result<crate::boolean::bitblast::RegionalPublicationOwner, SynthError> {
-    if source
-        .value(target)
-        .and_then(|value| match value.kind {
-            word::ValueKind::Operation(operation) => source.operation(operation),
-            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
-        })
-        .is_some_and(|operation| {
-            matches!(
-                operation.kind,
-                word::OpKind::Register(_) | word::OpKind::Latch(_)
-            )
-        })
-    {
-        return Ok(crate::boolean::bitblast::RegionalPublicationOwner::SequentialArtifact);
-    }
-    let local_semantics = super::roots::FullDomainRootSemantics::new(local_module)?;
-    let local = local_semantics.canonical_root(local)?;
-    let stored = local_module.value(local).ok_or_else(|| {
-        SynthError::invariant("regional substrate publication references an unknown local value")
-    })?;
-    if let word::ValueKind::Constant(bits) = &stored.kind {
-        let bit = bits.bit_lsb(0).ok_or_else(|| {
-            SynthError::invariant("regional substrate publication constant is not scalar")
-        })?;
-        return crate::boolean::resolve_publication_bit(bit, local_module.name(), &stored.source)
-            .map(crate::boolean::bitblast::RegionalPublicationOwner::SubstrateConstant);
-    }
-
-    let mut candidates = Vec::new();
-    for (&source_value, &local_value) in source_to_local {
-        let source_width = source
-            .value(source_value)
-            .ok_or_else(|| {
-                SynthError::invariant("regional publication source map contains an unknown value")
-            })?
-            .ty
-            .width();
-        let local_bits = ownership
-            .lowered_bits(local_value)
-            .map_or_else(|| vec![local_value], <[word::ValueId]>::to_vec);
-        if local_bits.len() != source_width as usize {
-            continue;
-        }
-        for (bit, &candidate) in local_bits.iter().enumerate() {
-            let candidate = local_semantics.canonical_root(candidate)?;
-            if candidate != local {
-                continue;
-            }
-            let bit = u32::try_from(bit)
-                .map_err(|_| SynthError::capacity("regional publication source bit index"))?;
-            if source_value == target && bit == target_bit {
-                continue;
-            }
-            let rank = match source.value(source_value).map(|value| &value.kind) {
-                Some(word::ValueKind::Signal(reference)) => source
-                    .signal(reference.signal)
-                    .and_then(|signal| match signal.kind {
-                        word::SignalKind::Port(port) => source.port(port),
-                        word::SignalKind::Wire
-                        | word::SignalKind::Register
-                        | word::SignalKind::ProcessLocal => None,
-                    })
-                    .map_or(2, |port| {
-                        if matches!(
-                            port.direction,
-                            word::PortDirection::Input | word::PortDirection::Inout
-                        ) {
-                            0
-                        } else {
-                            2
-                        }
-                    }),
-                Some(word::ValueKind::Operation(operation)) => {
-                    source.operation(*operation).map_or(3, |operation| {
-                        if matches!(
-                            operation.kind,
-                            word::OpKind::Register(_) | word::OpKind::Latch(_)
-                        ) {
-                            1
-                        } else {
-                            3
-                        }
-                    })
-                }
-                Some(word::ValueKind::Constant(_)) | None => 4,
-            };
-            candidates.push((rank, source_value, bit));
-        }
-    }
-    candidates.sort_unstable();
-    let (_, value, bit) = candidates.into_iter().next().ok_or_else(|| {
-        let target_kind = source.value(target).and_then(|value| match value.kind {
-            word::ValueKind::Operation(operation) => {
-                source.operation(operation).map(|operation| &operation.kind)
-            }
-            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
-        });
-        SynthError::invariant(format!(
-            "substrate-owned regional publication {target:?}[{target_bit}] ({target_kind:?}) resolves to local {local:?} ({:?}) without an immutable source",
-            local_module.value(local).map(|value| &value.kind),
-        ))
-    })?;
-    Ok(crate::boolean::bitblast::RegionalPublicationOwner::SubstrateValue { value, bit })
 }
 
 fn target_output_artifact_keys(
@@ -1252,6 +1127,28 @@ pub(crate) fn extend_operation_regions_for_memories(
         if slot.replace(owner).is_some() {
             return Err(SynthError::invariant(
                 "lowered memory operation already has a synthesis-region owner",
+            ));
+        }
+    }
+    for (value, memory) in memory_ownership.state_values() {
+        let operation = match module.value(value).map(|stored| &stored.kind) {
+            Some(word::ValueKind::Operation(operation)) => *operation,
+            Some(word::ValueKind::Signal(_) | word::ValueKind::Constant(_)) | None => {
+                return Err(SynthError::invariant(
+                    "lowered memory state has no generating operation",
+                ));
+            }
+        };
+        let owner = memory_regions
+            .get(memory.index())
+            .copied()
+            .ok_or_else(|| SynthError::invariant("lowered memory has no synthesis-region owner"))?;
+        let slot = owners.get_mut(operation.index()).ok_or_else(|| {
+            SynthError::invariant("lowered memory state operation is outside the Word arena")
+        })?;
+        if slot.replace(owner).is_some() {
+            return Err(SynthError::invariant(
+                "lowered memory state already has a synthesis-region owner",
             ));
         }
     }

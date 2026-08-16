@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 413
+expected_tests = 414
 
 [[owners]]
 path = "src/api"
@@ -14,7 +14,7 @@ contract = "Library-facing request validation, reference contracts, and structur
 [[owners]]
 path = "src/engine"
 owner = "engine"
-tests = 9
+tests = 10
 contract = "Stage ordering, immutable states, publication, determinism, and report boundaries."
 
 [[owners]]

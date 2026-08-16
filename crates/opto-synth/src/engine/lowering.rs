@@ -53,36 +53,12 @@ pub(super) fn lower_logic(
     for prepared in &mut prepared_regions {
         prepared.binding.resolve_sequential_sources(&source)?;
     }
-    let mut publication_by_bit = std::collections::BTreeMap::<
-        (opto_ir::word::ValueId, u32),
-        crate::boolean::bitblast::RegionalPublicationOwner,
-    >::new();
-    for entry in prepared_regions
-        .iter()
-        .flat_map(|prepared| prepared.publication.iter().copied())
-    {
-        if let Some(current) = publication_by_bit.get_mut(&(entry.target, entry.bit)) {
-            *current = current.merge(entry.owner).ok_or_else(|| {
-                let target_kind = source.value(entry.target).map(|stored| &stored.kind);
-                crate::SynthError::invariant(format!(
-                    "regional publication {:?}[{}] ({target_kind:?}) has incompatible owners {:?} and {:?}",
-                    entry.target, entry.bit, *current, entry.owner,
-                ))
-            })?;
-        } else {
-            publication_by_bit.insert((entry.target, entry.bit), entry.owner);
-        }
-    }
-    let regional_publication = publication_by_bit
-        .into_iter()
-        .map(
-            |((target, bit), owner)| crate::boolean::bitblast::RegionalPublicationBit {
-                target,
-                bit,
-                owner,
-            },
-        )
-        .collect::<Vec<_>>();
+    let regional_publication = aggregate_regional_publication(
+        &source,
+        prepared_regions
+            .iter()
+            .flat_map(|prepared| prepared.publication.iter().copied()),
+    )?;
     let memory_ownership = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.selected_memory_lowering".to_string()
@@ -185,4 +161,61 @@ pub(super) fn lower_logic(
         provenance,
         operator_manifest,
     })
+}
+
+fn aggregate_regional_publication(
+    source: &opto_ir::word::WordModule,
+    entries: impl IntoIterator<Item = crate::boolean::bitblast::RegionalPublicationBit>,
+) -> Result<Vec<crate::boolean::bitblast::RegionalPublicationBit>, crate::SynthError> {
+    let mut publication_by_bit =
+        std::collections::BTreeMap::<(opto_ir::word::ValueId, u32), crate::RegionRowId>::new();
+    for entry in entries {
+        if let Some(current) = publication_by_bit.get(&(entry.target, entry.bit)).copied() {
+            if current != entry.producer {
+                let target_kind = source.value(entry.target).map(|stored| &stored.kind);
+                return Err(crate::SynthError::invariant(format!(
+                    "regional publication {:?}[{}] ({target_kind:?}) has distinct producers {:?} and {:?}",
+                    entry.target, entry.bit, current, entry.producer,
+                )));
+            }
+        } else {
+            publication_by_bit.insert((entry.target, entry.bit), entry.producer);
+        }
+    }
+    Ok(publication_by_bit
+        .into_iter()
+        .map(
+            |((target, bit), producer)| crate::boolean::bitblast::RegionalPublicationBit {
+                target,
+                bit,
+                producer,
+            },
+        )
+        .collect())
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn publication_aggregation_is_order_independent_and_rejects_distinct_producers() {
+        let source = opto_ir::word::WordModule::new("publication_test");
+        let target = opto_ir::word::ValueId::from_index(0).unwrap();
+        let first = crate::RegionRowId::from_index(0).unwrap();
+        let second = crate::RegionRowId::from_index(1).unwrap();
+        let claim = |producer| crate::boolean::bitblast::RegionalPublicationBit {
+            target,
+            bit: 0,
+            producer,
+        };
+
+        let duplicate =
+            aggregate_regional_publication(&source, [claim(first), claim(first)]).unwrap();
+        assert_eq!(duplicate, [claim(first)]);
+        for claims in [[claim(first), claim(second)], [claim(second), claim(first)]] {
+            let error = aggregate_regional_publication(&source, claims).unwrap_err();
+            assert!(error.to_string().contains("has distinct producers"));
+        }
+    }
 }
