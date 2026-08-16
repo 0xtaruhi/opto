@@ -149,8 +149,49 @@ fn cost(area: f64, delay: f64) -> MappingCost {
     }
 }
 
+fn exact_choice(area: f64, arrival: f64) -> ExactChoice {
+    ExactChoice {
+        choice: SlotChoice::Constant(false),
+        area,
+        arrival,
+        truth: TruthTable {
+            input_count: 0,
+            bits: 0,
+        },
+        order: (0, 0, 0),
+    }
+}
+
 #[test]
-fn required_time_prefers_area_only_after_both_choices_meet_budget() {
+fn exact_recovery_uses_area_delay_only_for_timing_driven_logic() {
+    let smaller_slower = exact_choice(9.0, 1.2);
+    let larger_faster = exact_choice(10.0, 1.0);
+
+    assert!(smaller_slower.prefers_over(&larger_faster, false));
+    assert!(larger_faster.prefers_over(&smaller_slower, true));
+}
+
+#[test]
+fn recovery_limit_rejects_a_changing_final_round() {
+    assert!(!recovery_converged(RECOVERY_ROUND_LIMIT - 1, 1, 0).unwrap());
+    assert!(recovery_converged(RECOVERY_ROUND_LIMIT, 0, 0).unwrap());
+    assert!(
+        recovery_converged(RECOVERY_ROUND_LIMIT, 0, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("did not converge")
+    );
+}
+
+#[test]
+fn joint_recovery_uses_the_shared_area_arrival_objective() {
+    assert!(!joint_replacement_is_preferred(false, 12.0, 0.8, 10.0, 1.2,));
+    assert!(joint_replacement_is_preferred(true, 12.0, 0.8, 10.0, 1.2,));
+    assert!(joint_replacement_is_preferred(false, 10.0, 0.8, 10.0, 1.2,));
+}
+
+#[test]
+fn required_time_uses_area_delay_after_both_choices_meet_budget() {
     assert_eq!(
         compare_mapping_cost_with_required_time(1.0, cost(4.0, 0.9), cost(1.0, 1.1)),
         std::cmp::Ordering::Less

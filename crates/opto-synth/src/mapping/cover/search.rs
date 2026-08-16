@@ -12,6 +12,7 @@ use hashbrown::HashMap;
 use opto_runtime::ExecutionContext;
 
 const DONT_CARE_FILL_CAP: u32 = 4;
+const RECOVERY_ROUND_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LibraryCoverSource {
@@ -179,9 +180,7 @@ fn cover_logic_network_with_recovery(
         ));
     }
     {
-        let mut recovery_iteration = 0usize;
-        loop {
-            recovery_iteration += 1;
+        for recovery_iteration in 1..=RECOVERY_ROUND_LIMIT {
             let before = planner.selected_area();
             let exact_started = std::time::Instant::now();
             let exact_changes = planner.exact_pass(runtime)?;
@@ -207,8 +206,17 @@ fn cover_logic_network_with_recovery(
                  exact={exact_elapsed:?}/{exact_changes} \
                  joint={joint_elapsed:?}/{joint_changes}"
             );
-            if after >= before {
-                break;
+            match recovery_converged(recovery_iteration, exact_changes, joint_changes) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    crate::api::diagnostics::trace!(
+                        trace,
+                        "cover.recovery_limit",
+                        "rounds={RECOVERY_ROUND_LIMIT}"
+                    );
+                    return Err(error);
+                }
             }
         }
     }
@@ -236,6 +244,22 @@ fn cover_logic_network_with_recovery(
         );
     }
     Ok(cover)
+}
+
+fn recovery_converged(
+    iteration: usize,
+    exact_changes: usize,
+    joint_changes: usize,
+) -> Result<bool, crate::SynthError> {
+    if exact_changes == 0 && joint_changes == 0 {
+        return Ok(true);
+    }
+    if iteration == RECOVERY_ROUND_LIMIT {
+        return Err(crate::SynthError::invariant(format!(
+            "cover recovery did not converge within {RECOVERY_ROUND_LIMIT} rounds"
+        )));
+    }
+    Ok(false)
 }
 
 fn slot(node: LogicNodeId) -> usize {
@@ -409,18 +433,41 @@ struct FlowChoice {
 struct ExactChoice {
     choice: SlotChoice,
     area: f64,
+    arrival: f64,
     truth: TruthTable,
     order: (u8, u8, u32),
 }
 
 impl ExactChoice {
-    fn prefers_over(&self, current: &Self) -> bool {
-        self.area
-            .total_cmp(&current.area)
-            .then_with(|| self.truth.cmp(&current.truth))
-            .then_with(|| self.order.cmp(&current.order))
-            .is_lt()
+    fn prefers_over(&self, current: &Self, timing_driven: bool) -> bool {
+        crate::planning::mapping_policy::compare_area_arrival_objective(
+            timing_driven,
+            self.area,
+            self.arrival,
+            current.area,
+            current.arrival,
+        )
+        .then_with(|| self.truth.cmp(&current.truth))
+        .then_with(|| self.order.cmp(&current.order))
+        .is_lt()
     }
+}
+
+fn joint_replacement_is_preferred(
+    timing_driven: bool,
+    candidate_area: f64,
+    candidate_arrival: f64,
+    current_area: f64,
+    current_arrival: f64,
+) -> bool {
+    crate::planning::mapping_policy::compare_area_arrival_objective(
+        timing_driven,
+        candidate_area,
+        candidate_arrival,
+        current_area,
+        current_arrival,
+    )
+    .is_lt()
 }
 
 #[cfg(test)]

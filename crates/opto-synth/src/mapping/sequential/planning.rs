@@ -467,15 +467,11 @@ pub(crate) fn lower_controls(
     ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let mut controlled = Vec::new();
-    let observability = crate::word::uses::netlist_observability(module)?;
     for (index, operation) in module.operations().iter().enumerate() {
         let word::OpKind::Register(register) = &operation.kind else {
             continue;
         };
         if register.enable.is_none() && register.resets.is_empty() {
-            continue;
-        }
-        if !observability.observes_value(operation.result)? {
             continue;
         }
         let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
@@ -956,6 +952,55 @@ mod tests {
                 word::SourceSpan::default(),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn normalizes_controlled_registers_independently_of_current_observability() {
+        let mut module = word::WordModule::new("unobserved_controlled_register");
+        let clock = input(&mut module, "clock");
+        let reset = input(&mut module, "reset");
+        let data = input(&mut module, "data");
+        let zero = module
+            .constant(
+                ConstBits::from_bits(vec![BitVal::Zero]).unwrap(),
+                word::WordType::bits(1).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let result = module
+            .register(
+                word::RegisterOp {
+                    name: None,
+                    d: data,
+                    clock,
+                    edge: word::Edge::Pos,
+                    enable: None,
+                    resets: vec![word::Reset {
+                        kind: word::ResetKind::Sync,
+                        value: reset,
+                        active_high: true,
+                        reset_value: zero,
+                    }],
+                },
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let mut ownership = crate::regional::StructuralOwnershipProvenance::global(&module);
+
+        lower_controls(&mut module, &mut ownership).unwrap();
+
+        let word::ValueKind::Operation(operation) = module.value(result).unwrap().kind else {
+            panic!("register result lost its operation identity");
+        };
+        let word::OpKind::Register(register) = &module.operation(operation).unwrap().kind else {
+            panic!("controlled operation is no longer a register");
+        };
+        assert!(register.resets.is_empty());
+        assert!(matches!(
+            module.value(register.d).unwrap().kind,
+            word::ValueKind::Operation(operation)
+                if matches!(module.operation(operation).unwrap().kind, word::OpKind::Mux { .. })
+        ));
     }
 
     #[test]

@@ -389,10 +389,6 @@ impl<B: BitBackend> BitBlaster<'_, B> {
         ty: word::WordType,
         source: &word::SourceSpan,
     ) -> Result<Vec<ScalarBit>, crate::SynthError> {
-        if let Some(alias) = self.frozen_semantics.aliases.get(&original).copied() {
-            let span = self.value(alias)?;
-            return Ok((0..span.len()).map(|bit| self.bit(span, bit)).collect());
-        }
         let signal = self
             .module
             .add_generated_wire(ty, source.clone())
@@ -410,18 +406,52 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                 ));
             }
         };
-        let frozen = self.frozen_semantics.constants.get(&original).cloned();
+        let publication = self
+            .publication_contract
+            .bits
+            .get(&original)
+            .cloned()
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "regional shell value has no frozen publication contract",
+                )
+            })?;
         let endpoint_bits = self.signal_bits(endpoint, reference, source)?;
+        if publication.len() != endpoint_bits.len() {
+            return Err(crate::SynthError::invariant(
+                "regional shell publication width changed after it was frozen",
+            ));
+        }
         let mut bits = Vec::with_capacity(endpoint_bits.len());
-        for (index, endpoint) in endpoint_bits.into_iter().enumerate() {
-            let bit = match frozen
-                .as_deref()
-                .and_then(|bits| bits.get(index))
-                .copied()
-                .flatten()
-            {
-                Some(bit) => self.constant(bit, ty.state(), source)?,
-                None => endpoint,
+        for (index, (endpoint, owner)) in endpoint_bits
+            .into_iter()
+            .zip(publication.iter().copied())
+            .enumerate()
+        {
+            let bit = match owner {
+                super::FrozenPublicationBit::RegionArtifact => endpoint,
+                super::FrozenPublicationBit::SubstrateConstant(value) => {
+                    let bit = self.constant(value, ty.state(), source)?;
+                    let value = self.backend.word_value(bit).ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "substrate publication constant has no Word value",
+                        )
+                    })?;
+                    let index = u32::try_from(index).map_err(|_| {
+                        crate::SynthError::capacity("regional publication bit index")
+                    })?;
+                    self.module
+                        .connect(
+                            word::LValue::signal(signal).with_range(word::BitRange {
+                                msb: index,
+                                lsb: index,
+                            }),
+                            value,
+                            source.clone(),
+                        )
+                        .map_err(crate::SynthError::from)?;
+                    bit
+                }
             };
             bits.push(bit);
         }

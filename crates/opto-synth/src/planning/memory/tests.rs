@@ -81,6 +81,13 @@ fn out_of_range_read_selects_unknown_instead_of_word_zero() {
         .operations()
         .filter_map(|(operation, owner)| (owner == memory).then_some(operation))
         .collect::<Vec<_>>();
+    assert!(!operations.is_empty());
+    assert!(operations.iter().all(|&operation| {
+        !matches!(
+            module.operation(operation).unwrap().kind,
+            word::OpKind::Register(_) | word::OpKind::Latch(_)
+        )
+    }));
     for (ordinal, &operation) in operations.iter().enumerate() {
         assert_eq!(
             ownership.operation(memory, u32::try_from(ordinal).unwrap()),
@@ -95,6 +102,15 @@ fn out_of_range_read_selects_unknown_instead_of_word_zero() {
         .state_values()
         .filter_map(|(value, owner)| (owner == memory).then_some(value))
         .collect::<Vec<_>>();
+    assert!(states.iter().all(|&value| {
+        let word::ValueKind::Operation(operation) = module.value(value).unwrap().kind else {
+            return false;
+        };
+        matches!(
+            module.operation(operation).unwrap().kind,
+            word::OpKind::Register(_) | word::OpKind::Latch(_)
+        )
+    }));
     for (ordinal, &value) in states.iter().enumerate() {
         assert_eq!(
             ownership.state_value(memory, u32::try_from(ordinal).unwrap()),

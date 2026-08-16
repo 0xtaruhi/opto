@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 406
+expected_tests = 418
 
 [[owners]]
 path = "src/api"
@@ -14,7 +14,7 @@ contract = "Library-facing request validation, reference contracts, and structur
 [[owners]]
 path = "src/engine"
 owner = "engine"
-tests = 9
+tests = 10
 contract = "Stage ordering, immutable states, publication, determinism, and report boundaries."
 
 [[owners]]
@@ -38,7 +38,7 @@ contract = "Region-owned Word optimization, recognition, resource choice, and ar
 [[owners]]
 path = "src/boolean"
 owner = "boolean"
-tests = 100
+tests = 104
 contract = "Bit lowering, canonical Boolean subject construction, rewriting, and graph analysis."
 
 [[owners]]
@@ -56,7 +56,7 @@ contract = "Fingerprints, recipe caches, source metrics, snapshots, and portable
 [[owners]]
 path = "src/mapping"
 owner = "mapping"
-tests = 86
+tests = 93
 contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and materialization."
 
 [[owners]]
@@ -86,5 +86,5 @@ contract = "Partition atoms, stable region and boundary identities, and determin
 [[focused_contracts]]
 path = "src/mapping/cover/search/tests.rs"
 owner = "mapping-cover"
-tests = 17
+tests = 20
 contract = "Library matching, candidate cost, observability care, and deterministic joint cover selection."

@@ -38,7 +38,6 @@ pub(crate) use materialize::build_test_substrate;
 pub(crate) use region_binding::{
     CandidateBindingDomain, RegionPlanBinding, build_candidate_binding,
 };
-pub(crate) use roots::FullDomainRootSemantics;
 use sequential::SequentialCellCatalog;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

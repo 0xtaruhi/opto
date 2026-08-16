@@ -151,10 +151,7 @@ impl RegionLogicSlice {
                     value,
                     required_time: root.required_time,
                     output_load: root.output_load,
-                    requires_combinational_cover: root.requires_combinational_cover
-                        && !module.value(value).is_some_and(|stored| {
-                            matches!(stored.kind, word::ValueKind::Constant(_))
-                        }),
+                    requires_combinational_cover: root.requires_combinational_cover,
                 });
             }
         }
@@ -186,12 +183,7 @@ impl RegionLogicSlice {
             })
             .flat_map(|(_, bits)| bits.iter().copied())
             .collect::<BTreeSet<_>>();
-        // A root that is also an input normally contributes no logic. Keep it
-        // when it names an output boundary, however: the portable cover must
-        // record that pass-through so mapped-netlist construction connects the
-        // observable output to its input instead of silently dropping it.
-        topology_roots
-            .retain(|root| !inputs.contains(&root.value) || output_bits.contains(&root.value));
+        topology_roots.retain(|root| retain_topology_root(root, &inputs, &output_bits));
         Self::from_resolved(&inputs, topology_roots, &resolved, |value| {
             let stored = module.value(value).ok_or_else(|| {
                 crate::SynthError::invariant(
@@ -384,6 +376,19 @@ impl RegionLogicSlice {
     }
 }
 
+fn retain_topology_root(
+    root: &MappingRoot,
+    inputs: &BTreeSet<word::ValueId>,
+    output_bits: &BTreeSet<word::ValueId>,
+) -> bool {
+    // An ordinary input root contributes no logic. Output pass-throughs must
+    // remain explicit, and a frozen combinational obligation remains a cover
+    // root even when region-local canonicalization collapses it to an input.
+    !inputs.contains(&root.value)
+        || output_bits.contains(&root.value)
+        || root.requires_combinational_cover
+}
+
 fn merge_max_timing(
     rows: &mut Box<[(word::ValueId, f64)]>,
     additions: impl IntoIterator<Item = (word::ValueId, f64)>,
@@ -471,4 +476,51 @@ fn reject_duplicate_binding_keys<T>(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_cover_root_survives_local_input_canonicalization() {
+        let mut module = word::WordModule::new("required_input_root");
+        let port = module
+            .add_port(
+                "a",
+                word::PortDirection::Input,
+                word::WordType::bits(1).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let value = module
+            .read_signal(
+                module.port(port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let inputs = BTreeSet::from([value]);
+        let outputs = BTreeSet::new();
+
+        assert!(retain_topology_root(
+            &MappingRoot {
+                value,
+                required_time: None,
+                output_load: None,
+                requires_combinational_cover: true,
+            },
+            &inputs,
+            &outputs,
+        ));
+        assert!(!retain_topology_root(
+            &MappingRoot {
+                value,
+                required_time: None,
+                output_load: None,
+                requires_combinational_cover: false,
+            },
+            &inputs,
+            &outputs,
+        ));
+    }
 }

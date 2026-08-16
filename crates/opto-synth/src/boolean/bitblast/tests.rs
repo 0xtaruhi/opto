@@ -116,7 +116,7 @@ fn regional_boolean_lowering_builds_axm_without_scalar_boolean_word_ops() {
             owner,
             boundary_inputs: &[a, b],
             roots: &[shifted],
-            binding_values: &[a, b, result, scalar_cast, shifted],
+            tracked_values: &[a, b, result, scalar_cast, shifted],
         },
     )
     .unwrap();
@@ -249,6 +249,7 @@ fn regional_shell_cuts_owned_combinational_cones_without_rewriting_source_values
         &mut provenance,
         &[Some(region)],
         &[],
+        &[],
         GlobalBitblastScope::RegionalShell,
     )
     .unwrap();
@@ -297,6 +298,7 @@ fn regional_shell_freezes_full_domain_constant_bits() {
         &mut provenance,
         &owners,
         &[],
+        &[],
         GlobalBitblastScope::RegionalShell,
     )
     .unwrap();
@@ -308,6 +310,188 @@ fn regional_shell_freezes_full_domain_constant_bits() {
             panic!("proven upper result bit is not frozen as a constant");
         };
         assert_eq!(value.bit_lsb(0), Some(BitVal::Zero));
+    }
+}
+
+#[test]
+fn regional_shell_rejects_a_producer_claim_for_a_full_domain_constant() {
+    let mut module = word::WordModule::new("regional_constant_publication_claim");
+    let input = module
+        .constant(
+            ConstBits::from_bits(vec![BitVal::Zero]).unwrap(),
+            word::WordType::bits(1).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let result = module
+        .unary(word::UnaryOp::BitNot, input, word::SourceSpan::default())
+        .unwrap();
+    add_output(&mut module, "y", 1, result);
+    let plan = crate::planning::operator::ArchitectureDecisions::for_module(&module).unwrap();
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::new(&module, &plan).unwrap();
+    let region = crate::RegionRowId::from_index(0).unwrap();
+
+    let error = bitblast_module_with_regions(
+        &mut module,
+        &plan,
+        &mut provenance,
+        &[Some(region)],
+        &[],
+        &[RegionalPublicationBit {
+            target: result,
+            bit: 0,
+            producer: region,
+        }],
+        GlobalBitblastScope::RegionalShell,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("claims full-domain constant"));
+}
+
+#[test]
+fn regional_shell_freezes_constants_reached_through_connects() {
+    let mut module = word::WordModule::new("regional_connected_constant");
+    let bit = word::WordType::bits(1).unwrap();
+    let zero = module
+        .constant(
+            ConstBits::from_bits(vec![BitVal::Zero]).unwrap(),
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let wire = module
+        .add_wire("constant_wire", bit, word::SourceSpan::default())
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(wire),
+            zero,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let wire = module
+        .read_signal(wire, word::SourceSpan::default())
+        .unwrap();
+    let result = module
+        .unary(word::UnaryOp::BitNot, wire, word::SourceSpan::default())
+        .unwrap();
+    add_output(&mut module, "y", 1, result);
+    let plan = crate::planning::operator::ArchitectureDecisions::for_module(&module).unwrap();
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::new(&module, &plan).unwrap();
+    let region = crate::RegionRowId::from_index(0).unwrap();
+
+    let error = bitblast_module_with_regions(
+        &mut module,
+        &plan,
+        &mut provenance,
+        &[Some(region)],
+        &[],
+        &[RegionalPublicationBit {
+            target: result,
+            bit: 0,
+            producer: region,
+        }],
+        GlobalBitblastScope::RegionalShell,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("claims full-domain constant"));
+}
+
+#[test]
+fn regional_shell_rejects_a_claim_from_the_wrong_producer() {
+    let mut module = word::WordModule::new("regional_wrong_producer");
+    let input = add_input(&mut module, "a", 1);
+    let input = read_port(&mut module, input);
+    let result = module
+        .unary(word::UnaryOp::BitNot, input, word::SourceSpan::default())
+        .unwrap();
+    add_output(&mut module, "y", 1, result);
+    let plan = crate::planning::operator::ArchitectureDecisions::for_module(&module).unwrap();
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::new(&module, &plan).unwrap();
+    let owner = crate::RegionRowId::from_index(0).unwrap();
+    let claimant = crate::RegionRowId::from_index(1).unwrap();
+
+    let error = bitblast_module_with_regions(
+        &mut module,
+        &plan,
+        &mut provenance,
+        &[Some(owner)],
+        &[],
+        &[RegionalPublicationBit {
+            target: result,
+            bit: 0,
+            producer: claimant,
+        }],
+        GlobalBitblastScope::RegionalShell,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("but the source operation belongs to")
+    );
+}
+
+#[test]
+fn bit_splitting_publishes_deterministic_async_reset_values() {
+    let mut module = word::WordModule::new("deterministic_async_reset");
+    let data_port = add_input(&mut module, "d", 2);
+    let clock_port = add_input(&mut module, "clock", 1);
+    let reset_port = add_input(&mut module, "reset", 1);
+    let data = read_port(&mut module, data_port);
+    let clock = read_port(&mut module, clock_port);
+    let reset = read_port(&mut module, reset_port);
+    let reset_value = module
+        .constant(
+            ConstBits::from_bits(vec![BitVal::X, BitVal::X]).unwrap(),
+            word::WordType::new(2, false, word::LogicStateKind::FourState).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let result = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: data,
+                clock,
+                edge: word::Edge::Pos,
+                enable: None,
+                resets: vec![word::Reset {
+                    kind: word::ResetKind::Async,
+                    value: reset,
+                    active_high: true,
+                    reset_value,
+                }],
+            },
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    add_output(&mut module, "q", 2, result);
+
+    bitblast_area(&mut module).unwrap();
+
+    let reset_values = module.operations().iter().filter_map(|operation| {
+        let word::OpKind::Register(register) = &operation.kind else {
+            return None;
+        };
+        if module.value(operation.result).unwrap().ty.width() != 1 {
+            return None;
+        }
+        register.resets.first().map(|reset| reset.reset_value)
+    });
+    let reset_values = reset_values.collect::<Vec<_>>();
+    assert_eq!(reset_values.len(), 2);
+    for reset_value in reset_values {
+        let word::ValueKind::Constant(bits) = &module.value(reset_value).unwrap().kind else {
+            panic!("split reset value is not constant");
+        };
+        assert_eq!(bits.bit_lsb(0), Some(BitVal::Zero));
     }
 }
 

@@ -13,8 +13,8 @@ use crate::boolean::logic::RegionLogicOptions;
 use crate::mapping::{CandidateBindingDomain, RegionPlanBinding, TargetMappingContext};
 use crate::planning::operator::ArchitectureDecisions;
 use crate::planning::regional::{
-    MemoryImplementationCandidate, RegionalMemoryValueBinding, RegionalWordCone,
-    RegionalWordConeRequest,
+    MemoryImplementationCandidate, RegionalMemoryLogicBinding, RegionalMemoryStateBinding,
+    RegionalWordCone, RegionalWordConeRequest,
 };
 use crate::regional::RegionContractSet;
 use crate::{
@@ -56,6 +56,7 @@ pub(crate) struct RegionalArchitectureMapping {
     pub(crate) binding: RegionPlanBinding,
     pub(crate) architecture: PrivateArchitecturePublication,
     pub(crate) operators: DurableOperatorArena,
+    pub(crate) publication: Box<[crate::boolean::bitblast::RegionalPublicationBit]>,
 }
 
 struct LoweredPrivateRegion {
@@ -63,25 +64,48 @@ struct LoweredPrivateRegion {
     source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
     operation_sources: Vec<Option<word::OpId>>,
-    memory_values: Vec<RegionalMemoryValueBinding>,
+    owned_memory_logic: Vec<RegionalMemoryLogicBinding>,
+    memory_states: Vec<RegionalMemoryStateBinding>,
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
     architecture: PrivateArchitecturePublication,
     operators: DurableOperatorArena,
     lowering: LocalRegionBooleanLowering,
 }
 
+#[derive(Clone, Copy)]
+struct PendingRegionalPublicationBit {
+    target: word::ValueId,
+    bit: u32,
+    local: word::ValueId,
+}
+
+struct ExpandedMappingRoots {
+    pairs: Vec<(MappingRoot, word::ValueId)>,
+    publication: Box<[PendingRegionalPublicationBit]>,
+}
+
+struct PreparedRegionCover {
+    slice: super::logic_partition::RegionLogicSlice,
+    decision_key: [u8; 32],
+    publication: Box<[crate::boolean::bitblast::RegionalPublicationBit]>,
+}
+
 fn remap_private_values(
     changes: &crate::planning::dataflow::DataflowChanges,
     source_to_local: &mut std::collections::BTreeMap<word::ValueId, word::ValueId>,
     boundary_bindings: &mut [(word::ValueId, word::ValueId)],
-    memory_values: &mut [RegionalMemoryValueBinding],
+    owned_memory_logic: &mut [RegionalMemoryLogicBinding],
+    memory_states: &mut [RegionalMemoryStateBinding],
 ) {
     let representatives = changes.representatives();
     source_to_local
         .values_mut()
         .chain(boundary_bindings.iter_mut().map(|(_, local)| local))
         .for_each(|local| *local = representatives[local.index()]);
-    for binding in memory_values {
+    for binding in owned_memory_logic {
+        binding.local = representatives[binding.local.index()];
+    }
+    for binding in memory_states {
         binding.local = representatives[binding.local.index()];
     }
 }
@@ -383,14 +407,18 @@ impl RegionArchitectureMaterializer<'_, '_> {
         runtime: &ExecutionContext,
     ) -> Result<RegionalArchitectureMapping, SynthError> {
         let (private, root_pairs) = self.lower_private_region(memory_implementations, region)?;
-        let (slice, decision_key) =
-            self.prepare_region_cover(&private, root_pairs, memory_implementations, region)?;
+        let PreparedRegionCover {
+            slice,
+            decision_key,
+            publication,
+        } = self.prepare_region_cover(&private, root_pairs, memory_implementations, region)?;
         let LoweredPrivateRegion {
             module,
             source_to_local,
             boundary_bindings,
             operation_sources,
-            memory_values,
+            owned_memory_logic,
+            memory_states,
             root_bindings,
             architecture,
             operators,
@@ -435,7 +463,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
                         local_module: &module,
                         source_to_local: &source_to_local,
                         boundary_bindings: &boundary_bindings,
-                        memory_values: &memory_values,
+                        owned_memory_logic: &owned_memory_logic,
+                        memory_states: &memory_states,
                         operation_sources: &operation_sources,
                         root_bindings: &root_bindings,
                         ownership: &ownership,
@@ -471,6 +500,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             binding,
             architecture,
             operators,
+            publication,
         })
     }
 
@@ -485,14 +515,16 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 source_to_local,
                 boundary_bindings,
                 operation_sources,
-                memory_values,
+                owned_memory_logic,
+                memory_states,
                 root_bindings,
             },
             boundary_inputs,
             root_pairs,
         ) = self.prepare_private_word(memory_implementations, region)?;
         let operation_sources = operation_sources.into_vec();
-        let memory_values = memory_values.into_vec();
+        let owned_memory_logic = owned_memory_logic.into_vec();
+        let memory_states = memory_states.into_vec();
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
         let mut local_decisions =
             ArchitectureDecisions::for_private_region(&module, implementation_providers().into())?;
@@ -511,15 +543,16 @@ impl RegionArchitectureMaterializer<'_, '_> {
             .iter()
             .map(|(_, local)| *local)
             .collect::<Vec<_>>();
-        let mut binding_values = boundary_inputs
+        let mut tracked_values = boundary_inputs
             .iter()
             .chain(&local_root_values)
             .chain(boundary_bindings.iter().map(|(_, local)| local))
-            .chain(memory_values.iter().map(|binding| &binding.local))
+            .chain(owned_memory_logic.iter().map(|binding| &binding.local))
+            .chain(memory_states.iter().map(|binding| &binding.local))
             .copied()
             .collect::<Vec<_>>();
-        binding_values.sort_unstable();
-        binding_values.dedup();
+        tracked_values.sort_unstable();
+        tracked_values.dedup();
         let profiling = self.request.mapping_context.config.diagnostics.timing;
         let row = region.row().raw();
         let lowering = {
@@ -535,7 +568,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                     owner: region.row(),
                     boundary_inputs: &boundary_inputs,
                     roots: &local_root_values,
-                    binding_values: &binding_values,
+                    tracked_values: &tracked_values,
                 },
             )
         }?;
@@ -545,7 +578,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 source_to_local,
                 boundary_bindings,
                 operation_sources,
-                memory_values,
+                owned_memory_logic,
+                memory_states,
                 root_bindings,
                 architecture,
                 operators,
@@ -561,8 +595,11 @@ impl RegionArchitectureMaterializer<'_, '_> {
         root_pairs: Vec<(MappingRoot, word::ValueId)>,
         memory_implementations: &[MemoryImplementationCandidate],
         region: SynthesisRegion,
-    ) -> Result<(super::logic_partition::RegionLogicSlice, [u8; 32]), SynthError> {
-        let mut root_pairs = expand_mapping_root_pairs(
+    ) -> Result<PreparedRegionCover, SynthError> {
+        let ExpandedMappingRoots {
+            pairs: mut root_pairs,
+            publication: pending_publication,
+        } = expand_mapping_root_pairs(
             self.request.source,
             self.semantics,
             &private.lowering.ownership,
@@ -615,8 +652,18 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 roots: &root_pairs,
             },
         )?;
+        let publication = finalize_regional_publication(
+            &private.module,
+            slice.roots(),
+            &pending_publication,
+            region.row(),
+        )?;
         slice.project_sequential_timing(&sequential_timing);
-        Ok((slice, decision_key))
+        Ok(PreparedRegionCover {
+            slice,
+            decision_key,
+            publication,
+        })
     }
 
     #[expect(
@@ -698,7 +745,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
             mut source_to_local,
             mut boundary_bindings,
             operation_sources,
-            mut memory_values,
+            mut owned_memory_logic,
+            mut memory_states,
             root_bindings,
         } = cone;
         let mut operation_sources = operation_sources.into_vec();
@@ -712,7 +760,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
             &local_changes,
             &mut source_to_local,
             &mut boundary_bindings,
-            &mut memory_values,
+            &mut owned_memory_logic,
+            &mut memory_states,
         );
         if crate::planning::operator::share_muxed_arithmetic(&mut module)? != 0 {
             let local_changes =
@@ -721,7 +770,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 &local_changes,
                 &mut source_to_local,
                 &mut boundary_bindings,
-                &mut memory_values,
+                &mut owned_memory_logic,
+                &mut memory_states,
             );
         }
         operation_sources.resize(module.operations().len(), None);
@@ -760,7 +810,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 source_to_local,
                 boundary_bindings,
                 operation_sources: operation_sources.into_boxed_slice(),
-                memory_values,
+                owned_memory_logic,
+                memory_states,
                 root_bindings,
             },
             local_boundary_inputs,
@@ -897,8 +948,10 @@ fn expand_mapping_root_pairs(
     semantics: &super::roots::FullDomainRootSemantics<'_>,
     ownership: &LoweredRegionOwnership,
     roots: Vec<(MappingRoot, word::ValueId)>,
-) -> Result<Vec<(MappingRoot, word::ValueId)>, SynthError> {
+) -> Result<ExpandedMappingRoots, SynthError> {
     let mut expanded = Vec::new();
+    let mut publication = Vec::new();
+    let mut facts = word::KnownBitsAnalysis::new(source);
     for (root, local) in roots {
         let source_width = source
             .value(root.value)
@@ -918,17 +971,73 @@ fn expand_mapping_root_pairs(
         for (bit, local) in local_bits.into_iter().enumerate() {
             let bit = u32::try_from(bit)
                 .map_err(|_| SynthError::capacity("regional publication bit index"))?;
+            let mut requires_artifact = semantics.bit_requires_artifact(root.value, bit)?;
+            if let super::roots::CanonicalPublicationBit::Value {
+                value: target,
+                bit: target_bit,
+            } = semantics.canonical_publication_bit(root.value, bit)?
+                && source
+                    .value(target)
+                    .is_some_and(|stored| matches!(stored.kind, word::ValueKind::Operation(_)))
+            {
+                if facts.bit(source, target, target_bit) != word::KnownBit::Unknown {
+                    requires_artifact = false;
+                } else if requires_artifact {
+                    publication.push(PendingRegionalPublicationBit {
+                        target,
+                        bit: target_bit,
+                        local,
+                    });
+                }
+            }
             expanded.push((
                 MappingRoot {
-                    requires_combinational_cover: semantics
-                        .bit_requires_artifact(root.value, bit)?,
+                    requires_combinational_cover: requires_artifact,
                     ..root
                 },
                 local,
             ));
         }
     }
-    Ok(expanded)
+    Ok(ExpandedMappingRoots {
+        pairs: expanded,
+        publication: publication.into_boxed_slice(),
+    })
+}
+
+fn finalize_regional_publication(
+    local_module: &word::WordModule,
+    roots: &[MappingRoot],
+    pending: &[PendingRegionalPublicationBit],
+    producer: RegionRowId,
+) -> Result<Box<[crate::boolean::bitblast::RegionalPublicationBit]>, SynthError> {
+    let semantics = super::roots::FullDomainRootSemantics::new(local_module)?;
+    let mut cover_owners = BTreeMap::new();
+    for root in roots {
+        let local = semantics.canonical_root(root.value)?;
+        cover_owners
+            .entry(local)
+            .and_modify(|required| *required |= root.requires_combinational_cover)
+            .or_insert(root.requires_combinational_cover);
+    }
+    let mut publication = Vec::with_capacity(pending.len());
+    for entry in pending {
+        let local = semantics.canonical_root(entry.local)?;
+        if !cover_owners.get(&local).copied().unwrap_or(false) {
+            return Err(SynthError::invariant(format!(
+                "full-domain regional publication {:?}[{}] lost its combinational cover root",
+                entry.target, entry.bit,
+            )));
+        }
+        publication.push(crate::boolean::bitblast::RegionalPublicationBit {
+            target: entry.target,
+            bit: entry.bit,
+            producer,
+        });
+    }
+    publication.sort_unstable_by_key(|entry| (entry.target, entry.bit));
+    publication.dedup();
+    Ok(publication.into_boxed_slice())
 }
 
 fn target_output_artifact_keys(
@@ -1021,5 +1130,72 @@ pub(crate) fn extend_operation_regions_for_memories(
             ));
         }
     }
+    for (value, memory) in memory_ownership.state_values() {
+        let operation = match module.value(value).map(|stored| &stored.kind) {
+            Some(word::ValueKind::Operation(operation)) => *operation,
+            Some(word::ValueKind::Signal(_) | word::ValueKind::Constant(_)) | None => {
+                return Err(SynthError::invariant(
+                    "lowered memory state has no generating operation",
+                ));
+            }
+        };
+        let owner = memory_regions
+            .get(memory.index())
+            .copied()
+            .ok_or_else(|| SynthError::invariant("lowered memory has no synthesis-region owner"))?;
+        let slot = owners.get_mut(operation.index()).ok_or_else(|| {
+            SynthError::invariant("lowered memory state operation is outside the Word arena")
+        })?;
+        if slot.replace(owner).is_some() {
+            return Err(SynthError::invariant(
+                "lowered memory state already has a synthesis-region owner",
+            ));
+        }
+    }
     Ok(owners)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_roots_do_not_enter_the_operation_publication_contract() {
+        let mut module = word::WordModule::new("signal_publication");
+        let port = module
+            .add_port(
+                "a",
+                word::PortDirection::Input,
+                word::WordType::bits(1).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let value = module
+            .read_signal(
+                module.port(port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let semantics = super::super::roots::FullDomainRootSemantics::new(&module).unwrap();
+        let ownership = LoweredRegionOwnership::new(module.values().len());
+
+        let expanded = expand_mapping_root_pairs(
+            &module,
+            &semantics,
+            &ownership,
+            vec![(
+                MappingRoot {
+                    value,
+                    required_time: None,
+                    output_load: None,
+                    requires_combinational_cover: false,
+                },
+                value,
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(expanded.pairs.len(), 1);
+        assert!(expanded.publication.is_empty());
+    }
 }

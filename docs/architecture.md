@@ -583,6 +583,16 @@ outputs are owner write obligations. If an implementation output resolves to
 the same substrate class as one of its inputs, publication keeps the required
 cell on an artifact-local net and does not write that imported class. This is a
 write-permission rule, not an alias-conflict repair heuristic.
+Every per-bit regional write obligation carries its exact `RegionRowId`.
+Coordinator aggregation is a set operation over `(source value, bit, region)`:
+duplicate claims from the same region are idempotent, while claims from
+different regions fail independently of discovery order. Regional claims only
+validate the full-domain contract; they can never replace its constant or
+connectivity proof.
+Memory lowering applies the same single-owner rule before regional binding:
+every generated register or latch result receives one `MemoryStateBit`
+identity, while only non-state operations enter the independently ordinalled
+`MemoryLogicBit` sequence. A state value never competes with a logic binding.
 
 ### 6. Allocate Workers Without Oversubscription
 
@@ -788,6 +798,11 @@ unconstrained-path status. Interconnect steps retain fanout, load, resistance,
 wire delay, annotated parasitic delay, and derate, so a QoR failure can be
 assigned to a cell arc, wire model, or boundary model before optimization is
 changed. Unsupported report modes fail explicitly instead of changing meaning.
+Before synthesis, `report_qor` runs timing only for a structurally pre-mapped
+source with no remaining RTL operations, whose instance types resolve uniquely
+to selected library cells, and whose named connections resolve to cell pins.
+Ordinary RTL hierarchy remains an area-only report until synthesis publishes a
+timing-compatible artifact.
 
 ## Canonical Representations
 
