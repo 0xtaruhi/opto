@@ -12,6 +12,7 @@ use hashbrown::HashMap;
 use opto_runtime::ExecutionContext;
 
 const DONT_CARE_FILL_CAP: u32 = 4;
+const RECOVERY_ROUND_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LibraryCoverSource {
@@ -179,7 +180,6 @@ fn cover_logic_network_with_recovery(
         ));
     }
     {
-        const RECOVERY_ROUND_LIMIT: usize = 8;
         for recovery_iteration in 1..=RECOVERY_ROUND_LIMIT {
             let before = planner.selected_area();
             let exact_started = std::time::Instant::now();
@@ -206,15 +206,17 @@ fn cover_logic_network_with_recovery(
                  exact={exact_elapsed:?}/{exact_changes} \
                  joint={joint_elapsed:?}/{joint_changes}"
             );
-            if exact_changes == 0 && joint_changes == 0 {
-                break;
-            }
-            if recovery_iteration == RECOVERY_ROUND_LIMIT {
-                crate::api::diagnostics::trace!(
-                    trace,
-                    "cover.recovery_limit",
-                    "rounds={RECOVERY_ROUND_LIMIT}"
-                );
+            match recovery_converged(recovery_iteration, exact_changes, joint_changes) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    crate::api::diagnostics::trace!(
+                        trace,
+                        "cover.recovery_limit",
+                        "rounds={RECOVERY_ROUND_LIMIT}"
+                    );
+                    return Err(error);
+                }
             }
         }
     }
@@ -242,6 +244,22 @@ fn cover_logic_network_with_recovery(
         );
     }
     Ok(cover)
+}
+
+fn recovery_converged(
+    iteration: usize,
+    exact_changes: usize,
+    joint_changes: usize,
+) -> Result<bool, crate::SynthError> {
+    if exact_changes == 0 && joint_changes == 0 {
+        return Ok(true);
+    }
+    if iteration == RECOVERY_ROUND_LIMIT {
+        return Err(crate::SynthError::invariant(format!(
+            "cover recovery did not converge within {RECOVERY_ROUND_LIMIT} rounds"
+        )));
+    }
+    Ok(false)
 }
 
 fn slot(node: LogicNodeId) -> usize {
@@ -433,6 +451,23 @@ impl ExactChoice {
         .then_with(|| self.order.cmp(&current.order))
         .is_lt()
     }
+}
+
+fn joint_replacement_is_preferred(
+    timing_driven: bool,
+    candidate_area: f64,
+    candidate_arrival: f64,
+    current_area: f64,
+    current_arrival: f64,
+) -> bool {
+    crate::planning::mapping_policy::compare_area_arrival_objective(
+        timing_driven,
+        candidate_area,
+        candidate_arrival,
+        current_area,
+        current_arrival,
+    )
+    .is_lt()
 }
 
 #[cfg(test)]

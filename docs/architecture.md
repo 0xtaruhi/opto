@@ -799,9 +799,10 @@ wire delay, annotated parasitic delay, and derate, so a QoR failure can be
 assigned to a cell arc, wire model, or boundary model before optimization is
 changed. Unsupported report modes fail explicitly instead of changing meaning.
 Before synthesis, `report_qor` runs timing only for a structurally pre-mapped
-source whose instance types resolve uniquely to selected library cells and
-whose named connections resolve to cell pins. Ordinary RTL hierarchy remains
-an area-only report until synthesis publishes a timing-compatible artifact.
+source with no remaining RTL operations, whose instance types resolve uniquely
+to selected library cells, and whose named connections resolve to cell pins.
+Ordinary RTL hierarchy remains an area-only report until synthesis publishes a
+timing-compatible artifact.
 
 ## Canonical Representations
 

@@ -172,6 +172,25 @@ fn exact_recovery_uses_area_delay_only_for_timing_driven_logic() {
 }
 
 #[test]
+fn recovery_limit_rejects_a_changing_final_round() {
+    assert!(!recovery_converged(RECOVERY_ROUND_LIMIT - 1, 1, 0).unwrap());
+    assert!(recovery_converged(RECOVERY_ROUND_LIMIT, 0, 0).unwrap());
+    assert!(
+        recovery_converged(RECOVERY_ROUND_LIMIT, 0, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("did not converge")
+    );
+}
+
+#[test]
+fn joint_recovery_uses_the_shared_area_arrival_objective() {
+    assert!(!joint_replacement_is_preferred(false, 12.0, 0.8, 10.0, 1.2,));
+    assert!(joint_replacement_is_preferred(true, 12.0, 0.8, 10.0, 1.2,));
+    assert!(joint_replacement_is_preferred(false, 10.0, 0.8, 10.0, 1.2,));
+}
+
+#[test]
 fn required_time_uses_area_delay_after_both_choices_meet_budget() {
     assert_eq!(
         compare_mapping_cost_with_required_time(1.0, cost(4.0, 0.9), cost(1.0, 1.1)),

@@ -38,20 +38,13 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             .collect::<Result<Vec<_>, _>>()?;
         let mut bits = Vec::with_capacity(data.len() as usize);
         for index in 0..data.len() {
-            let mut resets = Vec::with_capacity(register.resets.len());
-            for ((reset, &value), values) in register
-                .resets
-                .iter()
-                .zip(&reset_controls)
-                .zip(&reset_values)
-            {
-                resets.push(word::Reset {
-                    kind: reset.kind,
-                    value,
-                    active_high: reset.active_high,
-                    reset_value: self.published_reset_value(self.bit(*values, index), source)?,
-                });
-            }
+            let resets = self.scalar_resets(
+                &register.resets,
+                &reset_controls,
+                &reset_values,
+                index,
+                source,
+            )?;
             let value = self
                 .module
                 .register(
@@ -105,17 +98,8 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             .collect::<Result<Vec<_>, _>>()?;
         let mut bits = Vec::with_capacity(data.len() as usize);
         for index in 0..data.len() {
-            let mut resets = Vec::with_capacity(latch.resets.len());
-            for ((reset, &value), values) in
-                latch.resets.iter().zip(&reset_controls).zip(&reset_values)
-            {
-                resets.push(word::Reset {
-                    kind: reset.kind,
-                    value,
-                    active_high: reset.active_high,
-                    reset_value: self.published_reset_value(self.bit(*values, index), source)?,
-                });
-            }
+            let resets =
+                self.scalar_resets(&latch.resets, &reset_controls, &reset_values, index, source)?;
             let value = self
                 .module
                 .latch(
@@ -134,6 +118,34 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             bits.push(self.backend.import_word(self.module, value));
         }
         Ok(bits)
+    }
+
+    fn scalar_resets(
+        &mut self,
+        resets: &[word::Reset],
+        controls: &[word::ValueId],
+        values: &[super::BitSpan],
+        index: u32,
+        source: &word::SourceSpan,
+    ) -> Result<Vec<word::Reset>, crate::SynthError> {
+        if resets.len() != controls.len() || resets.len() != values.len() {
+            return Err(crate::SynthError::invariant(
+                "scalar reset inputs do not preserve sequential reset identity",
+            ));
+        }
+        resets
+            .iter()
+            .zip(controls)
+            .zip(values)
+            .map(|((reset, &value), values)| {
+                Ok(word::Reset {
+                    kind: reset.kind,
+                    value,
+                    active_high: reset.active_high,
+                    reset_value: self.published_reset_value(self.bit(*values, index), source)?,
+                })
+            })
+            .collect()
     }
 
     fn published_reset_value(

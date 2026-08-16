@@ -229,8 +229,6 @@ pub(crate) fn bitblast_module_with_regions(
             "logic lowering received unmaterialized memory resources",
         ));
     }
-    let connects = module.take_connects();
-    let instance_connections = crate::word::instances::snapshot(module);
     if !operation_regions.is_empty() && operation_regions.len() != module.operations().len() {
         return Err(crate::SynthError::invariant(
             "source operation ownership does not cover the lowering module",
@@ -238,6 +236,8 @@ pub(crate) fn bitblast_module_with_regions(
     }
     let publication_contract =
         freeze_publication_contract(module, operation_regions, regional_publication, scope)?;
+    let connects = module.take_connects();
+    let instance_connections = crate::word::instances::snapshot(module);
     let mut blaster = BitBlaster::<WordBackend>::new(
         module,
         BitBlasterRequest {
@@ -512,6 +512,8 @@ fn freeze_publication_contract(
         }
         let operation = match stored.kind {
             word::ValueKind::Operation(operation) => operation,
+            // Only operation results enter the shell publication contract;
+            // root analysis never emits a signal or constant target.
             word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => continue,
         };
         let owner = operation_regions
@@ -536,7 +538,15 @@ fn freeze_publication_contract(
                 module.operation(operation).map(|operation| &operation.kind),
             ))
         })?;
-        if contract[publication.bit as usize] != FrozenPublicationBit::RegionArtifact {
+        let frozen = contract
+            .get(publication.bit as usize)
+            .copied()
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "regional publication bit exceeds its frozen shell contract",
+                )
+            })?;
+        if frozen != FrozenPublicationBit::RegionArtifact {
             return Err(crate::SynthError::invariant(format!(
                 "regional producer {:?} claims full-domain constant publication {:?}[{}]",
                 publication.producer, publication.target, publication.bit,

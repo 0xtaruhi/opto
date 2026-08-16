@@ -11,18 +11,19 @@ fn source_is_timing_model_compatible(
     module: &opto_ir::word::WordModule,
     library: &opto_library::TimingLibrary,
 ) -> bool {
-    module.instances().iter().all(|instance| {
-        let cell_name = module.name_str(instance.module);
-        let mut matches = library.cells.iter().filter(|cell| cell.name() == cell_name);
-        let Some(cell) = matches.next() else {
-            return false;
-        };
-        matches.next().is_none()
-            && instance.connections.iter().all(|connection| {
-                let port = module.name_str(connection.port);
-                cell.pins().any(|pin| pin.name() == port)
-            })
-    })
+    module.operations().is_empty()
+        && module.instances().iter().all(|instance| {
+            let cell_name = module.name_str(instance.module);
+            let mut matches = library.cells.iter().filter(|cell| cell.name() == cell_name);
+            let Some(cell) = matches.next() else {
+                return false;
+            };
+            matches.next().is_none()
+                && instance.connections.iter().all(|connection| {
+                    let port = module.name_str(connection.port);
+                    cell.pins().any(|pin| pin.name() == port)
+                })
+        })
 }
 
 fn area_report_context(session: &Session) -> Result<AreaReportContext, SessionError> {
@@ -252,5 +253,41 @@ impl Session {
         })
         .collect::<Result<Vec<_>, _>>()?;
         Ok(opto_formats::report_resources(&reports).render_plain())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaf_rtl_operations_are_not_timing_model_compatible() {
+        let mut module = opto_ir::word::WordModule::new("leaf_rtl");
+        let port = module
+            .add_port(
+                "a",
+                opto_ir::word::PortDirection::Input,
+                opto_ir::word::WordType::bits(1).unwrap(),
+                opto_ir::word::SourceSpan::default(),
+            )
+            .unwrap();
+        let input = module
+            .read_signal(
+                module.port(port).unwrap().signal,
+                opto_ir::word::SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .unary(
+                opto_ir::word::UnaryOp::BitNot,
+                input,
+                opto_ir::word::SourceSpan::default(),
+            )
+            .unwrap();
+
+        assert!(!source_is_timing_model_compatible(
+            &module,
+            &opto_library::TimingLibrary::default(),
+        ));
     }
 }

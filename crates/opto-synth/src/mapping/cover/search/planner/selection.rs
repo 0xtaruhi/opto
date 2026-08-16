@@ -387,9 +387,6 @@ impl CoverPlanner<'_> {
                 let Some(gain) = self.joint_gain(joint_id, &mut stack)? else {
                     continue;
                 };
-                if gain <= 0.0 {
-                    continue;
-                }
                 if best.is_none_or(|(best_id, best_gain)| {
                     gain.total_cmp(&best_gain)
                         .then_with(|| best_id.cmp(&joint_id))
@@ -433,6 +430,8 @@ impl CoverPlanner<'_> {
             {
                 continue;
             }
+            let (timing_driven, current_arrival) =
+                self.joint_current_arrival(first, first_current, second, second_current)?;
             let freed = self.choice_cell_area(first, first_current)
                 + self.choice_cell_area(second, second_current)
                 + self
@@ -456,14 +455,21 @@ impl CoverPlanner<'_> {
                 &mut stack,
                 None,
             )?;
+            let take = super::super::joint_replacement_is_preferred(
+                timing_driven,
+                added,
+                joint_arrival,
+                freed,
+                current_arrival,
+            );
             crate::api::diagnostics::trace!(
                 crate::api::diagnostics::SynthTrace::new(self.catalog.diagnostics().joint_cells),
                 "cover.joint_pass",
                 "joint={joint_id} cut_len={} freed={freed:.3} added={added:.3} take={}",
                 self.joints[joint_id as usize].cut.len(),
-                added.total_cmp(&freed).is_lt()
+                take
             );
-            if added.total_cmp(&freed).is_lt() {
+            if take {
                 changes += 1;
             } else {
                 self.change_choices_references(
@@ -522,6 +528,8 @@ impl CoverPlanner<'_> {
         {
             return Ok(None);
         }
+        let (timing_driven, current_arrival) =
+            self.joint_current_arrival(first, first_current, second, second_current)?;
         let freed = self.choice_cell_area(first, first_current)
             + self.choice_cell_area(second, second_current)
             + self.change_choices_references(
@@ -552,7 +560,63 @@ impl CoverPlanner<'_> {
             stack,
             None,
         )?;
-        Ok(Some(freed - added))
+        Ok(super::super::joint_replacement_is_preferred(
+            timing_driven,
+            added,
+            joint_arrival,
+            freed,
+            current_arrival,
+        )
+        .then_some(freed - added))
+    }
+
+    fn joint_current_arrival(
+        &self,
+        first: usize,
+        first_choice: SlotChoice,
+        second: usize,
+        second_choice: SlotChoice,
+    ) -> Result<(bool, f64), crate::SynthError> {
+        let mut timing_driven = false;
+        let mut arrival = 0.0f64;
+        for (slot, choice) in [(first, first_choice), (second, second_choice)] {
+            timing_driven |= self.required_arrivals[slot].is_finite();
+            arrival = arrival.max(self.selected_choice_arrival(slot, choice)?);
+        }
+        Ok((timing_driven, arrival))
+    }
+
+    fn selected_choice_arrival(
+        &self,
+        slot_id: usize,
+        choice: SlotChoice,
+    ) -> Result<f64, crate::SynthError> {
+        match choice {
+            SlotChoice::Cell(candidate) => {
+                let candidate = self.candidates[slot_id]
+                    .get(candidate as usize)
+                    .copied()
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "selected recovery candidate is outside its slot",
+                        )
+                    })?;
+                Ok(self.candidate_arrival_estimate(slot_id, candidate))
+            }
+            SlotChoice::Inverter => {
+                let inverter = self.inverter.ok_or_else(|| {
+                    crate::SynthError::invariant("selected inverter has no library binding")
+                })?;
+                Ok(self.flows[opposite(slot_id)].electrical_delay
+                    + self.inverter_electrical_cost(slot_id, inverter).delay)
+            }
+            SlotChoice::JointOutput(joint_id) => Ok(self.joint_arrival_estimate(joint_id)),
+            SlotChoice::Constant(_) | SlotChoice::Boundary(_) | SlotChoice::JointCell(_) => {
+                Err(crate::SynthError::invariant(
+                    "joint recovery compared a non-rewritable selected choice",
+                ))
+            }
+        }
     }
 
     fn joint_arrival_estimate(&self, joint_id: u32) -> f64 {
