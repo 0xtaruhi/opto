@@ -69,6 +69,23 @@ using namespace slang::syntax;
 
 namespace opto::slang_lower {
 
+// Carries policy failures across the native materialization boundary without
+// making rendered exception text part of the Rust diagnostic contract.
+class LoweringFailure final : public std::runtime_error {
+public:
+    LoweringFailure(
+        OptoSlangLoweringFailureCategory category,
+        uint16_t code,
+        slang::SourceLocation location,
+        std::string message)
+        : std::runtime_error(std::move(message)), category(category), code(code),
+          location(location) {}
+
+    OptoSlangLoweringFailureCategory category;
+    uint16_t code;
+    slang::SourceLocation location;
+};
+
 template <typename Cleanup> class ScopeExit {
 public:
     explicit ScopeExit(Cleanup cleanup) : cleanup(std::move(cleanup)) {}
@@ -173,18 +190,12 @@ struct ModuleLoweringContext {
         interface_port_names;
     const std::unordered_map<const InstanceBodySymbol*, std::string>& body_names;
     std::unordered_map<const ValueSymbol*, ConstantValue> procedural_constants;
-    std::unordered_set<const VariableSymbol*> procedural_loop_variables;
     std::unordered_map<const ValueSymbol*, OptoSlangExpr*> function_values;
     std::unordered_map<const ValueSymbol*, OptoSlangExpr*> function_lvalues;
     std::vector<const VariableSymbol*> function_returns;
     std::vector<FunctionReturnControl> function_return_controls;
     std::vector<LoopControl> loop_controls;
     std::vector<DisableControl> disable_controls;
-    const std::unordered_set<const VariableSymbol*>* loop_live_after = nullptr;
-    bool loop_liveness_indexed = false;
-    std::unordered_map<const VariableSymbol*, size_t> loop_read_only_process_counts;
-    std::unordered_set<const VariableSymbol*> loop_external_references;
-    std::unordered_set<const VariableSymbol*> procedure_loop_local_bindings;
     uint32_t cyclic_loop_depth = 0;
     std::vector<OptoSlangExpr*> lvalue_references;
     CfgFragment* active_expression_prelude = nullptr;

@@ -45,8 +45,6 @@ CfgFragment lower_subroutine_call_statement(
 
 bool statement_assigns_value(const Statement& statement, const ValueSymbol& value);
 
-const VariableSymbol* whole_variable_update_target(const Expression& expression);
-
 const ValueSymbol* expression_root_value(const Expression& expression);
 
 std::string allocate_function_value_name(
@@ -1775,570 +1773,6 @@ std::vector<const VariableSymbol*> procedural_for_variables(const ForLoopStateme
     return variables;
 }
 
-bool is_active_procedural_local(
-    const ModuleLoweringContext& design, const VariableSymbol& variable) {
-    if (variable.lifetime != VariableLifetime::Automatic) {
-        return false;
-    }
-    auto* scope = variable.getParentScope();
-    bool found_statement_block = false;
-    while (scope) {
-        const auto& parent = scope->asSymbol();
-        if (&parent == &design.body) {
-            return found_statement_block;
-        }
-        if (!design.function_stack.empty() &&
-            &parent == design.function_stack.back()) {
-            return found_statement_block;
-        }
-        found_statement_block |= parent.kind == SymbolKind::StatementBlock;
-        scope = parent.getParentScope();
-    }
-    return false;
-}
-
-bool statement_establishes_known_integral_value(
-    ModuleLoweringContext& design,
-    const Statement& statement,
-    const ValueSymbol& value) {
-    if (statement.kind == StatementKind::Invalid) {
-        const auto* child = statement.as<InvalidStatement>().child;
-        return child && statement_establishes_known_integral_value(
-                            design, *child, value);
-    }
-    if (statement.kind == StatementKind::VariableDeclaration) {
-        const auto& declaration = statement.as<VariableDeclStatement>().symbol;
-        if (&declaration != &value) {
-            return false;
-        }
-        const auto* initializer = declaration.getInitializer();
-        if (!initializer) {
-            return false;
-        }
-        auto constant = evaluate_lowering_constant(design, *initializer);
-        return constant && constant.isInteger() &&
-               !constant.integer().hasUnknown();
-    }
-    if (statement.kind != StatementKind::ExpressionStatement) {
-        return false;
-    }
-    const auto& expression = statement.as<ExpressionStatement>().expr;
-    if (expression.kind != ExpressionKind::Assignment) {
-        return false;
-    }
-    const auto& assignment = expression.as<AssignmentExpression>();
-    if (!assignment.isBlocking() ||
-        expression_root_value(assignment.left()) != &value) {
-        return false;
-    }
-    auto constant = evaluate_lowering_constant(design, assignment.right());
-    return constant && constant.isInteger() && !constant.integer().hasUnknown();
-}
-
-std::optional<bool> preceding_value_write_is_known_integral(
-    ModuleLoweringContext& design,
-    std::span<const Statement* const> statements,
-    const ValueSymbol& value) {
-    for (auto iterator = statements.rbegin(); iterator != statements.rend(); ++iterator) {
-        const auto* statement = *iterator;
-        if (!statement) {
-            continue;
-        }
-        const bool declares_value =
-            statement->kind == StatementKind::VariableDeclaration &&
-            &statement->as<VariableDeclStatement>().symbol == &value;
-        if (declares_value || statement_assigns_value(*statement, value)) {
-            return statement_establishes_known_integral_value(
-                design, *statement, value);
-        }
-    }
-    return std::nullopt;
-}
-
-bool is_static_loop_state_candidate(
-    ModuleLoweringContext& design,
-    const VariableSymbol& variable,
-    std::span<const Statement* const> preceding_statements) {
-    if (design.procedural_loop_variables.contains(&variable)) {
-        return true;
-    }
-    if (auto preceding = preceding_value_write_is_known_integral(
-            design, preceding_statements, variable)) {
-        return *preceding;
-    }
-    return is_active_procedural_local(design, variable);
-}
-
-std::vector<const VariableSymbol*> static_condition_variables(
-    ModuleLoweringContext& design,
-    const Expression& condition,
-    std::span<const Statement* const> preceding_statements = {}) {
-    std::vector<const VariableSymbol*> variables;
-    auto visitor = makeVisitor([&](auto& self, const NamedValueExpression& expression) {
-        const auto& symbol = expression.symbol;
-        if (VariableSymbol::isKind(symbol.kind)) {
-            const auto& variable = symbol.as<VariableSymbol>();
-            if (is_static_loop_state_candidate(
-                    design, variable, preceding_statements) &&
-                std::ranges::find(variables, &variable) == variables.end()) {
-                variables.push_back(&variable);
-            }
-        }
-        self.visitDefault(expression);
-    });
-    condition.visit(visitor);
-    return variables;
-}
-
-bool expression_references_variable(
-    const Expression& expression, const VariableSymbol& variable) {
-    bool referenced = false;
-    auto visitor = makeVisitor([&](auto& self, const NamedValueExpression& named) {
-        referenced |= &named.symbol == &variable;
-        if (!referenced) {
-            self.visitDefault(named);
-        }
-    });
-    expression.visit(visitor);
-    return referenced;
-}
-
-bool break_condition_references_variable(
-    const Statement& statement, const VariableSymbol& variable) {
-    switch (statement.kind) {
-    case StatementKind::Invalid:
-        if (const auto* child = statement.as<InvalidStatement>().child) {
-            return break_condition_references_variable(*child, variable);
-        }
-        return false;
-    case StatementKind::Block:
-        return break_condition_references_variable(
-            statement.as<BlockStatement>().body, variable);
-    case StatementKind::List:
-        return std::ranges::any_of(
-            statement.as<StatementList>().list, [&](const Statement* child) {
-                return child && break_condition_references_variable(*child, variable);
-            });
-    case StatementKind::Conditional: {
-        const auto& conditional = statement.as<ConditionalStatement>();
-        const bool guarded_break =
-            statement_contains_break(conditional.ifTrue) ||
-            (conditional.ifFalse && statement_contains_break(*conditional.ifFalse));
-        if (guarded_break &&
-            std::ranges::any_of(conditional.conditions, [&](const auto& condition) {
-                return expression_references_variable(*condition.expr, variable);
-            })) {
-            return true;
-        }
-        return break_condition_references_variable(conditional.ifTrue, variable) ||
-               (conditional.ifFalse &&
-                break_condition_references_variable(*conditional.ifFalse, variable));
-    }
-    case StatementKind::Case: {
-        const auto& case_statement = statement.as<CaseStatement>();
-        const bool guarded_break = std::ranges::any_of(
-                                       case_statement.items,
-                                       [](const auto& item) {
-                                           return item.stmt &&
-                                                  statement_contains_break(*item.stmt);
-                                       }) ||
-                                   (case_statement.defaultCase &&
-                                    statement_contains_break(*case_statement.defaultCase));
-        if (guarded_break &&
-            expression_references_variable(case_statement.expr, variable)) {
-            return true;
-        }
-        return std::ranges::any_of(
-                   case_statement.items,
-                   [&](const auto& item) {
-                       return item.stmt &&
-                              break_condition_references_variable(*item.stmt, variable);
-                   }) ||
-               (case_statement.defaultCase &&
-                break_condition_references_variable(
-                    *case_statement.defaultCase, variable));
-    }
-    case StatementKind::PatternCase: {
-        const auto& case_statement = statement.as<PatternCaseStatement>();
-        const bool guarded_break = std::ranges::any_of(
-                                       case_statement.items,
-                                       [](const auto& item) {
-                                           return statement_contains_break(*item.stmt);
-                                       }) ||
-                                   (case_statement.defaultCase &&
-                                    statement_contains_break(*case_statement.defaultCase));
-        if (guarded_break &&
-            expression_references_variable(case_statement.expr, variable)) {
-            return true;
-        }
-        return std::ranges::any_of(
-                   case_statement.items,
-                   [&](const auto& item) {
-                       return break_condition_references_variable(*item.stmt, variable);
-                   }) ||
-               (case_statement.defaultCase &&
-                break_condition_references_variable(
-                    *case_statement.defaultCase, variable));
-    }
-    case StatementKind::ForLoop:
-    case StatementKind::RepeatLoop:
-    case StatementKind::ForeachLoop:
-    case StatementKind::WhileLoop:
-    case StatementKind::DoWhileLoop:
-    case StatementKind::ForeverLoop:
-        return false;
-    default:
-        return false;
-    }
-}
-
-void append_unique_variables(
-    std::vector<const VariableSymbol*>& destination,
-    std::span<const VariableSymbol* const> source) {
-    for (const auto* variable : source) {
-        if (variable && std::ranges::find(destination, variable) == destination.end()) {
-            destination.push_back(variable);
-        }
-    }
-}
-
-void collect_forever_break_variables(
-    ModuleLoweringContext& design,
-    const Statement& statement,
-    std::span<const Statement* const> preceding_statements,
-    std::vector<const VariableSymbol*>& variables) {
-    switch (statement.kind) {
-    case StatementKind::Invalid:
-        if (const auto* child = statement.as<InvalidStatement>().child) {
-            collect_forever_break_variables(
-                design, *child, preceding_statements, variables);
-        }
-        return;
-    case StatementKind::Block:
-        collect_forever_break_variables(
-            design,
-            statement.as<BlockStatement>().body,
-            preceding_statements,
-            variables);
-        return;
-    case StatementKind::List:
-        for (const auto* child : statement.as<StatementList>().list) {
-            if (child) {
-                collect_forever_break_variables(
-                    design, *child, preceding_statements, variables);
-            }
-        }
-        return;
-    case StatementKind::Conditional: {
-        const auto& conditional = statement.as<ConditionalStatement>();
-        if (statement_contains_break(conditional.ifTrue) ||
-            (conditional.ifFalse && statement_contains_break(*conditional.ifFalse))) {
-            for (const auto& condition : conditional.conditions) {
-                auto condition_variables =
-                    static_condition_variables(
-                        design,
-                        *condition.expr,
-                        preceding_statements);
-                append_unique_variables(variables, condition_variables);
-            }
-        }
-        collect_forever_break_variables(
-            design,
-            conditional.ifTrue,
-            preceding_statements,
-            variables);
-        if (conditional.ifFalse) {
-            collect_forever_break_variables(
-                design,
-                *conditional.ifFalse,
-                preceding_statements,
-                variables);
-        }
-        return;
-    }
-    case StatementKind::Case: {
-        const auto& case_statement = statement.as<CaseStatement>();
-        const bool contains_break = std::ranges::any_of(
-                                        case_statement.items,
-                                        [](const auto& item) {
-                                            return item.stmt &&
-                                                   statement_contains_break(*item.stmt);
-                                        }) ||
-                                    (case_statement.defaultCase &&
-                                     statement_contains_break(*case_statement.defaultCase));
-        if (contains_break) {
-            auto selector_variables =
-                static_condition_variables(
-                    design,
-                    case_statement.expr,
-                    preceding_statements);
-            append_unique_variables(variables, selector_variables);
-        }
-        for (const auto& item : case_statement.items) {
-            if (item.stmt) {
-                collect_forever_break_variables(
-                    design,
-                    *item.stmt,
-                    preceding_statements,
-                    variables);
-            }
-        }
-        if (case_statement.defaultCase) {
-            collect_forever_break_variables(
-                design,
-                *case_statement.defaultCase,
-                preceding_statements,
-                variables);
-        }
-        return;
-    }
-    case StatementKind::PatternCase: {
-        const auto& case_statement = statement.as<PatternCaseStatement>();
-        const bool contains_break = std::ranges::any_of(
-                                        case_statement.items,
-                                        [](const auto& item) {
-                                            return statement_contains_break(*item.stmt);
-                                        }) ||
-                                    (case_statement.defaultCase &&
-                                     statement_contains_break(*case_statement.defaultCase));
-        if (contains_break) {
-            auto selector_variables =
-                static_condition_variables(
-                    design,
-                    case_statement.expr,
-                    preceding_statements);
-            append_unique_variables(variables, selector_variables);
-        }
-        for (const auto& item : case_statement.items) {
-            collect_forever_break_variables(
-                design,
-                *item.stmt,
-                preceding_statements,
-                variables);
-        }
-        if (case_statement.defaultCase) {
-            collect_forever_break_variables(
-                design,
-                *case_statement.defaultCase,
-                preceding_statements,
-                variables);
-        }
-        return;
-    }
-    // Breaks in nested loops complete only that nested activation.
-    case StatementKind::ForLoop:
-    case StatementKind::RepeatLoop:
-    case StatementKind::ForeachLoop:
-    case StatementKind::WhileLoop:
-    case StatementKind::DoWhileLoop:
-    case StatementKind::ForeverLoop:
-        return;
-    default:
-        return;
-    }
-}
-
-std::vector<const VariableSymbol*> static_forever_break_variables(
-    ModuleLoweringContext& design,
-    const Statement& body,
-    std::span<const Statement* const> preceding_statements = {}) {
-    std::vector<const VariableSymbol*> variables;
-    collect_forever_break_variables(
-        design, body, preceding_statements, variables);
-    return variables;
-}
-
-std::vector<const VariableSymbol*> static_for_variables(
-    ModuleLoweringContext& design,
-    const ForLoopStatement& loop,
-    std::span<const Statement* const> preceding_statements = {}) {
-    // Validate expression-form initializers even though only values that can
-    // affect termination belong to the compile-time induction state.
-    auto initializer_variables = procedural_for_variables(loop);
-    std::vector<const VariableSymbol*> variables{
-        loop.loopVars.begin(), loop.loopVars.end()};
-    if (loop.stopExpr) {
-        auto condition_variables = static_condition_variables(
-            design, *loop.stopExpr, preceding_statements);
-        append_unique_variables(variables, condition_variables);
-    }
-    if (statement_contains_break(loop.body)) {
-        auto break_variables = static_forever_break_variables(
-            design, loop.body, preceding_statements);
-        append_unique_variables(variables, break_variables);
-    }
-    for (auto* step : loop.steps) {
-        const auto* variable = step ? whole_variable_update_target(*step) : nullptr;
-        if (variable &&
-            (is_static_loop_state_candidate(
-                 design, *variable, preceding_statements) ||
-             std::ranges::find(initializer_variables, variable) !=
-                 initializer_variables.end()) &&
-            ((loop.stopExpr &&
-              expression_references_variable(*loop.stopExpr, *variable)) ||
-             break_condition_references_variable(loop.body, *variable)) &&
-            std::ranges::find(variables, variable) == variables.end()) {
-            variables.push_back(variable);
-        }
-    }
-    for (auto* variable : initializer_variables) {
-        if ((loop.stopExpr && expression_references_variable(*loop.stopExpr, *variable)) ||
-            break_condition_references_variable(loop.body, *variable)) {
-            if (std::ranges::find(variables, variable) == variables.end()) {
-                variables.push_back(variable);
-            }
-        }
-    }
-    return variables;
-}
-
-void collect_nested_loop_variables(
-    ModuleLoweringContext& design,
-    const Statement& statement,
-    std::span<const Statement* const> preceding_statements,
-    std::vector<const VariableSymbol*>& variables) {
-    auto append = [&](std::span<const VariableSymbol* const> found) {
-        for (const auto* variable : found) {
-            if (variable && preceding_value_write_is_known_integral(
-                                design, preceding_statements, *variable) == true) {
-                append_unique_variables(
-                    variables, std::span<const VariableSymbol* const>(&variable, 1));
-            }
-        }
-    };
-    switch (statement.kind) {
-    case StatementKind::Invalid:
-        if (const auto* child = statement.as<InvalidStatement>().child) {
-            collect_nested_loop_variables(
-                design, *child, preceding_statements, variables);
-        }
-        return;
-    case StatementKind::Block:
-        collect_nested_loop_variables(
-            design,
-            statement.as<BlockStatement>().body,
-            preceding_statements,
-            variables);
-        return;
-    case StatementKind::List: {
-        const auto children = statement.as<StatementList>().list;
-        for (size_t index = 0; index < children.size(); ++index) {
-            if (children[index]) {
-                collect_nested_loop_variables(
-                    design,
-                    *children[index],
-                    children.subspan(0, index),
-                    variables);
-            }
-        }
-        return;
-    }
-    case StatementKind::Conditional: {
-        const auto& conditional = statement.as<ConditionalStatement>();
-        collect_nested_loop_variables(
-            design, conditional.ifTrue, preceding_statements, variables);
-        if (conditional.ifFalse) {
-            collect_nested_loop_variables(
-                design, *conditional.ifFalse, preceding_statements, variables);
-        }
-        return;
-    }
-    case StatementKind::Case: {
-        const auto& case_statement = statement.as<CaseStatement>();
-        for (const auto& item : case_statement.items) {
-            if (item.stmt) {
-                collect_nested_loop_variables(
-                    design, *item.stmt, preceding_statements, variables);
-            }
-        }
-        if (case_statement.defaultCase) {
-            collect_nested_loop_variables(
-                design,
-                *case_statement.defaultCase,
-                preceding_statements,
-                variables);
-        }
-        return;
-    }
-    case StatementKind::PatternCase: {
-        const auto& case_statement = statement.as<PatternCaseStatement>();
-        for (const auto& item : case_statement.items) {
-            collect_nested_loop_variables(
-                design, *item.stmt, preceding_statements, variables);
-        }
-        if (case_statement.defaultCase) {
-            collect_nested_loop_variables(
-                design,
-                *case_statement.defaultCase,
-                preceding_statements,
-                variables);
-        }
-        return;
-    }
-    case StatementKind::ForLoop: {
-        const auto& loop = statement.as<ForLoopStatement>();
-        auto found = static_for_variables(design, loop, preceding_statements);
-        found.erase(
-            std::remove_if(
-                found.begin(),
-                found.end(),
-                [&](const VariableSymbol* variable) {
-                    return std::ranges::find(loop.loopVars, variable) !=
-                           loop.loopVars.end();
-                }),
-            found.end());
-        append(found);
-        collect_nested_loop_variables(design, loop.body, {}, variables);
-        return;
-    }
-    case StatementKind::WhileLoop: {
-        const auto& loop = statement.as<WhileLoopStatement>();
-        append(static_condition_variables(
-            design, loop.cond, preceding_statements));
-        collect_nested_loop_variables(design, loop.body, {}, variables);
-        return;
-    }
-    case StatementKind::DoWhileLoop: {
-        const auto& loop = statement.as<DoWhileLoopStatement>();
-        append(static_condition_variables(
-            design, loop.cond, preceding_statements));
-        collect_nested_loop_variables(design, loop.body, {}, variables);
-        return;
-    }
-    case StatementKind::ForeverLoop: {
-        const auto& loop = statement.as<ForeverLoopStatement>();
-        append(static_forever_break_variables(
-            design, loop.body, preceding_statements));
-        collect_nested_loop_variables(design, loop.body, {}, variables);
-        return;
-    }
-    case StatementKind::RepeatLoop:
-        collect_nested_loop_variables(
-            design,
-            statement.as<RepeatLoopStatement>().body,
-            {},
-            variables);
-        return;
-    case StatementKind::ForeachLoop:
-        collect_nested_loop_variables(
-            design,
-            statement.as<ForeachLoopStatement>().body,
-            {},
-            variables);
-        return;
-    default:
-        return;
-    }
-}
-
-std::vector<const VariableSymbol*> nested_loop_variables(
-    ModuleLoweringContext& design,
-    const Statement& body) {
-    std::vector<const VariableSymbol*> variables;
-    collect_nested_loop_variables(design, body, {}, variables);
-    return variables;
-}
-
 const Expression* statement_anchor_expression(const Statement& statement) {
     switch (statement.kind) {
     case StatementKind::Invalid:
@@ -2433,59 +1867,6 @@ bool statement_guarantees_expression_free_break(const Statement& statement) {
         return true;
     default:
         return false;
-    }
-}
-
-void collect_static_loop_variables(
-    ModuleLoweringContext& design,
-    const Statement& statement,
-    std::span<const Statement* const> preceding_statements,
-    std::vector<const VariableSymbol*>& variables) {
-    auto append = [&](const VariableSymbol* variable) {
-        if (variable && std::ranges::find(variables, variable) == variables.end()) {
-            variables.push_back(variable);
-        }
-    };
-    // Registration is owned by the statement list that directly contains the
-    // loop. Nested blocks register their own locals when lowered; descending
-    // through runtime branches here would leak one branch's compile-time
-    // induction value into its sibling or successor.
-    switch (statement.kind) {
-    case StatementKind::ForLoop: {
-        const auto& loop = statement.as<ForLoopStatement>();
-        for (auto* variable :
-             static_for_variables(design, loop, preceding_statements)) {
-            append(variable);
-        }
-        break;
-    }
-    case StatementKind::WhileLoop: {
-        const auto& loop = statement.as<WhileLoopStatement>();
-        for (auto* variable : static_condition_variables(
-                 design, loop.cond, preceding_statements)) {
-            append(variable);
-        }
-        break;
-    }
-    case StatementKind::DoWhileLoop: {
-        const auto& loop = statement.as<DoWhileLoopStatement>();
-        for (auto* variable : static_condition_variables(
-                 design, loop.cond, preceding_statements)) {
-            append(variable);
-        }
-        break;
-    }
-    case StatementKind::ForeverLoop:
-        for (auto* variable :
-             static_forever_break_variables(
-                 design,
-                 statement.as<ForeverLoopStatement>().body,
-                 preceding_statements)) {
-            append(variable);
-        }
-        break;
-    default:
-        break;
     }
 }
 
@@ -2671,118 +2052,11 @@ CfgFragment lower_statement_list(
     ModuleLoweringContext& design,
     std::span<const Statement* const> statements,
     OptoSlangProcedureKind procedure_kind) {
-    struct LoopVariableRange {
-        const VariableSymbol* variable;
-        size_t activation_index;
-        size_t deactivation_index;
-        bool owns_registration = false;
-    };
-    std::vector<std::unordered_set<const VariableSymbol*>> referenced(statements.size());
-    std::unordered_map<const VariableSymbol*, size_t> remaining_references;
-    std::unordered_set<const VariableSymbol*> live_after;
-    if (design.loop_live_after) {
-        live_after = *design.loop_live_after;
-    }
-    for (size_t index = 0; index < statements.size(); ++index) {
-        if (!statements[index]) {
-            continue;
-        }
-        auto visitor = makeVisitor(
-            [&](auto& self, const NamedValueExpression& expression) {
-                if (VariableSymbol::isKind(expression.symbol.kind)) {
-                    referenced[index].insert(
-                        &expression.symbol.as<VariableSymbol>());
-                }
-                self.visitDefault(expression);
-            });
-        statements[index]->visit(visitor);
-        for (auto* variable : referenced[index]) {
-            ++remaining_references[variable];
-            live_after.insert(variable);
-        }
-    }
-    std::vector<LoopVariableRange> loop_variable_ranges;
-    for (size_t index = 0; index < statements.size(); ++index) {
-        const auto* child = statements[index];
-        if (child) {
-            std::vector<const VariableSymbol*> child_variables;
-            collect_static_loop_variables(
-                design,
-                *child,
-                statements.first(index),
-                child_variables);
-            for (const auto* variable : child_variables) {
-                size_t activation_index = index;
-                for (size_t prior = index; prior-- > 0;) {
-                    if (statements[prior] &&
-                        statement_establishes_known_integral_value(
-                            design, *statements[prior], *variable)) {
-                        activation_index = prior;
-                        break;
-                    }
-                }
-                auto found = std::ranges::find_if(
-                    loop_variable_ranges.rbegin(),
-                    loop_variable_ranges.rend(),
-                    [&](const LoopVariableRange& range) {
-                        return range.variable == variable;
-                    });
-                if (found == loop_variable_ranges.rend() ||
-                    activation_index > found->deactivation_index + 1) {
-                    loop_variable_ranges.push_back(
-                        {variable, activation_index, index});
-                } else {
-                    found->activation_index =
-                        std::min(found->activation_index, activation_index);
-                    found->deactivation_index = index;
-                }
-            }
-        }
-    }
-    std::vector<const VariableSymbol*> owned_loop_variables;
     CfgFragment lowered;
     bool prior_return = false;
     std::unordered_set<const Symbol*> prior_disable_targets;
-    ScopeExit unregister_loop_variables([&] {
-        for (const auto& range : loop_variable_ranges) {
-            if (range.owns_registration) {
-                design.procedural_loop_variables.erase(range.variable);
-            }
-        }
-        for (auto* variable : owned_loop_variables) {
-            design.procedural_loop_variables.erase(variable);
-            design.procedural_constants.erase(variable);
-        }
-    });
-    for (size_t index = 0; index < statements.size(); ++index) {
-        for (auto& range : loop_variable_ranges) {
-            if (range.activation_index == index) {
-                range.owns_registration =
-                    design.procedural_loop_variables.insert(range.variable).second;
-                if (range.owns_registration &&
-                    std::ranges::find(owned_loop_variables, range.variable) ==
-                        owned_loop_variables.end()) {
-                    owned_loop_variables.push_back(range.variable);
-                }
-            }
-        }
-        const auto* child = statements[index];
+    for (const auto* child : statements) {
         if (child) {
-            for (auto* variable : referenced[index]) {
-                auto found = remaining_references.find(variable);
-                if (found == remaining_references.end() || found->second == 0) {
-                    throw std::logic_error("procedural liveness reference count underflow");
-                }
-                if (--found->second == 0 &&
-                    (!design.loop_live_after ||
-                     !design.loop_live_after->contains(variable))) {
-                    live_after.erase(variable);
-                }
-            }
-            ScopedValue active_live_after(
-                design.loop_live_after,
-                static_cast<const std::unordered_set<const VariableSymbol*>*>(
-                    &live_after));
             auto child_lowered = lower_statement(builder, design, *child, procedure_kind);
             const auto source = source_span(design, *child);
             child_lowered = guard_undisabled_statements(
@@ -2803,170 +2077,8 @@ CfgFragment lower_statement_list(
                 break;
             }
         }
-        for (auto& range : loop_variable_ranges) {
-            if (range.deactivation_index == index && range.owns_registration) {
-                design.procedural_loop_variables.erase(range.variable);
-                range.owns_registration = false;
-            }
-        }
     }
     return lowered;
-}
-
-OptoSlangEffectData lower_loop_variable_assignment(
-    ModuleLoweringContext& design,
-    const VariableSymbol& variable,
-    const ConstantValue& value,
-    const Expression& source) {
-    if (!value.isInteger()) {
-        throw std::runtime_error("procedural loop variable is not integral");
-    }
-    if (!design.value_names.contains(&variable)) {
-        if (design.function_stack.empty()) {
-            throw std::runtime_error(
-                "materialized procedural loop variable '" +
-                copy_string(variable.name) + "' has no registered signal");
-        }
-        auto name = allocate_function_value_name(
-            design, *design.function_stack.back(), variable.name);
-        name = add_internal_net(
-            design,
-            std::move(name),
-            checked_width(lowered_type_width(variable.getType()), variable.name),
-            variable.getType().isSigned(),
-            design.active_procedure_builder != nullptr);
-        design.value_names.insert_or_assign(&variable, std::move(name));
-    }
-    OptoSlangExpr lhs;
-    lhs.kind = OPTO_SLANG_EXPR_SIGNAL;
-    lhs.signal_name = intern_string(design, registered_value_name(design, variable));
-    OptoSlangExpr rhs;
-    rhs.kind = OPTO_SLANG_EXPR_CONSTANT;
-    const auto width = checked_width(lowered_type_width(variable.getType()), variable.name);
-    auto bits = value.integer().resize(width);
-    bits.setSigned(variable.getType().isSigned());
-    rhs.constant_has_width = true;
-    rhs.constant_width = checked_width(bits.getBitWidth(), variable.name);
-    rhs.constant_bits = exact_binary_string(bits);
-    const auto* lowered_lhs = make_expr(design, std::move(lhs), source);
-    auto* lowered_rhs = make_expr(design, std::move(rhs), source);
-    lowered_rhs->constant_signed = variable.getType().isSigned();
-    return {lowered_lhs, lowered_rhs, true, source_span(design, source)};
-}
-
-const VariableSymbol* whole_variable_update_target(const Expression& expression) {
-    const Expression* target = nullptr;
-    if (expression.kind == ExpressionKind::Assignment) {
-        const auto& assignment = expression.as<AssignmentExpression>();
-        target = &assignment.left();
-    } else if (expression.kind == ExpressionKind::UnaryOp) {
-        const auto& unary = expression.as<UnaryExpression>();
-        const bool updates =
-            unary.op == UnaryOperator::Preincrement ||
-            unary.op == UnaryOperator::Postincrement ||
-            unary.op == UnaryOperator::Predecrement ||
-            unary.op == UnaryOperator::Postdecrement;
-        if (!updates) {
-            return nullptr;
-        }
-        target = &unary.operand();
-    }
-    if (!target || target->kind != ExpressionKind::NamedValue) {
-        return nullptr;
-    }
-    const auto& symbol = target->as<NamedValueExpression>().symbol;
-    if (!VariableSymbol::isKind(symbol.kind)) {
-        return nullptr;
-    }
-    return &symbol.as<VariableSymbol>();
-}
-
-const VariableSymbol* procedural_expression_update_target(
-    const Expression& expression) {
-    const Expression* target = nullptr;
-    if (expression.kind == ExpressionKind::Assignment) {
-        target = &expression.as<AssignmentExpression>().left();
-    } else if (expression.kind == ExpressionKind::UnaryOp) {
-        const auto& unary = expression.as<UnaryExpression>();
-        const bool updates =
-            unary.op == UnaryOperator::Preincrement ||
-            unary.op == UnaryOperator::Postincrement ||
-            unary.op == UnaryOperator::Predecrement ||
-            unary.op == UnaryOperator::Postdecrement;
-        if (updates) {
-            target = &unary.operand();
-        }
-    }
-    if (!target) {
-        return nullptr;
-    }
-    const auto* root = expression_root_value(*target);
-    if (!root || !VariableSymbol::isKind(root->kind)) {
-        return nullptr;
-    }
-    return &root->as<VariableSymbol>();
-}
-
-void publish_static_loop_value(
-    ModuleLoweringContext& design,
-    const VariableSymbol& variable,
-    const ConstantValue& value) {
-    design.procedural_constants.insert_or_assign(&variable, value);
-}
-
-std::optional<CfgFragment> lower_static_loop_variable_update(
-    ModuleLoweringContext& design,
-    const Expression& expression) {
-    if (design.cyclic_loop_depth != 0) {
-        return std::nullopt;
-    }
-    const auto* variable = whole_variable_update_target(expression);
-    if (!variable || !design.procedural_loop_variables.contains(variable)) {
-        return std::nullopt;
-    }
-    if (design.procedure_loop_local_bindings.contains(variable)) {
-        // The Rust-owned cyclic graph must observe every transition of an
-        // activation local, including exact initialization before the first
-        // loop. The legacy static-state shortcut has no effect to publish and
-        // is therefore only valid outside that owned-local lifetime.
-        return std::nullopt;
-    }
-    if (expression.kind == ExpressionKind::Assignment &&
-        !expression.as<AssignmentExpression>().isBlocking()) {
-        throw std::runtime_error(
-            "procedural loop induction variable '" + copy_string(variable->name) +
-            "' requires blocking assignment at " + expression_location(design, expression));
-    }
-    auto evaluate = [&](EvalContext& context) -> CfgFragment {
-        if (!context.findLocal(variable)) {
-            auto found = design.procedural_constants.find(variable);
-            context.createLocal(
-                variable,
-                found == design.procedural_constants.end()
-                    ? variable->getType().getDefaultValue()
-                    : found->second);
-        }
-        if (!expression.eval(context)) {
-            throw std::runtime_error(
-                "procedural loop induction update for '" + copy_string(variable->name) +
-                "' is not statically evaluable at " +
-                expression_location(design, expression));
-        }
-        auto* value = context.findLocal(variable);
-        if (!value || !value->isInteger() || value->integer().hasUnknown()) {
-            throw std::runtime_error(
-                "procedural loop induction variable '" + copy_string(variable->name) +
-                "' does not have a known integral value after its update at " +
-                expression_location(design, expression));
-        }
-        publish_static_loop_value(design, *variable, *value);
-        return {};
-    };
-    EvalContext context(*variable);
-    for (const auto& [symbol, value] : design.procedural_constants) {
-        context.createLocal(symbol, value);
-    }
-    return evaluate(context);
 }
 
 CfgFragment lower_procedural_expression_statement(
@@ -2979,15 +2091,7 @@ CfgFragment lower_procedural_expression_statement(
     ScopedValue active_builder(design.active_procedure_builder, &builder);
 
     CfgFragment body;
-    CfgFragment state_materialization;
-    const auto* update_target =
-        procedural_expression_update_target(expression);
-    bool lowered_as_static_update = false;
-    if (auto static_update =
-            lower_static_loop_variable_update(design, expression)) {
-        body = std::move(*static_update);
-        lowered_as_static_update = true;
-    } else if (expression.kind == ExpressionKind::Call &&
+    if (expression.kind == ExpressionKind::Call &&
                !expression.as<CallExpression>().isSystemCall()) {
         body = lower_subroutine_call_statement(
             builder, design, expression.as<CallExpression>(), procedure_kind);
@@ -3035,27 +2139,9 @@ CfgFragment lower_procedural_expression_statement(
         body = lower_assignment_statement(
             builder, design, expression.as<AssignmentExpression>(), procedure_kind);
     }
-    if (update_target && !lowered_as_static_update) {
-        auto constant = design.procedural_constants.find(update_target);
-        const bool partial_assignment =
-            expression.kind == ExpressionKind::Assignment &&
-            expression.as<AssignmentExpression>().left().kind !=
-                ExpressionKind::NamedValue;
-        if (partial_assignment && constant != design.procedural_constants.end()) {
-            const auto source = source_span(design, expression);
-            state_materialization = builder.effects(
-                {lower_loop_variable_assignment(
-                    design, *update_target, constant->second, expression)},
-                source);
-        }
-        design.procedural_constants.erase(update_target);
-    }
     return builder.sequence(
-        std::move(state_materialization),
-        builder.sequence(
-            std::move(prelude),
-            std::move(body),
-            source_span(design, expression)),
+        std::move(prelude),
+        std::move(body),
         source_span(design, expression));
 }
 
@@ -3078,45 +2164,9 @@ OptoSlangExpr* make_loop_local(
     return make_expr(design, std::move(value), anchor);
 }
 
-OptoSlangExpr* make_loop_constant(
-    ModuleLoweringContext& design,
-    const VariableSymbol& variable,
-    const ConstantValue& value,
-    const Expression& anchor) {
-    if (!value.isInteger() || value.integer().hasUnknown()) {
-        throw std::runtime_error(
-            "procedural loop variable '" + copy_string(variable.name) +
-            "' does not have an exact integral entry value at " +
-            expression_location(design, anchor));
-    }
-    const auto width = checked_width(lowered_type_width(variable.getType()), variable.name);
-    auto bits = value.integer().resize(width);
-    bits.setSigned(variable.getType().isSigned());
-    OptoSlangExpr constant;
-    constant.kind = OPTO_SLANG_EXPR_CONSTANT;
-    constant.constant_has_width = true;
-    constant.constant_width = width;
-    constant.constant_signed = variable.getType().isSigned();
-    constant.constant_bits = exact_binary_string(bits);
-    auto* lowered = make_expr(design, std::move(constant), anchor);
-    lowered->constant_signed = variable.getType().isSigned();
-    return lowered;
-}
-
-OptoSlangExpr* make_registered_value(
-    ModuleLoweringContext& design,
-    const ValueSymbol& symbol,
-    const Expression& anchor) {
-    OptoSlangExpr value;
-    value.kind = OPTO_SLANG_EXPR_SIGNAL;
-    value.signal_name = intern_string(design, registered_value_name(design, symbol));
-    return make_expr(design, std::move(value), anchor);
-}
-
-// Binds source-language induction variables to activation-scoped locals while
-// a cyclic graph is built. The owning procedure controls the visible-value
-// copy-in/copy-out lifetime; nested loop builders reuse that binding instead of
-// creating iteration- or region-scoped shadow state.
+// Loop-declared variables have lexical identities that do not correspond to
+// module storage. The source adapter maps only those declarations to locals;
+// Rust owns recurrence promotion for persistent signal-backed variables.
 class CyclicLoopLocals {
 public:
     CyclicLoopLocals(ModuleLoweringContext& design, const Expression& anchor)
@@ -3124,64 +2174,12 @@ public:
           value_bindings_(design.function_values),
           lvalue_bindings_(design.function_lvalues) {}
 
-    const OptoSlangExpr* bind(
-        const VariableSymbol& variable,
-        bool initialize_from_visible_value,
-        bool copy_back) {
-        if (design_.procedure_loop_local_bindings.contains(&variable)) {
-            auto found = design_.function_lvalues.find(&variable);
-            if (found == design_.function_lvalues.end()) {
-                throw std::logic_error(
-                    "procedure loop-local binding has no writable value");
-            }
-            // The declaration initializer has already been emitted into this
-            // activation local. Once a loop can update it, expression lowering
-            // must read the local rather than the declaration-time constant.
-            design_.procedural_constants.erase(&variable);
-            return found->second;
-        }
+    const OptoSlangExpr* bind(const VariableSymbol& variable) {
         if (auto found = locals_.find(&variable); found != locals_.end()) {
             return found->second;
         }
         value_bindings_.track(&variable);
         lvalue_bindings_.track(&variable);
-
-        const OptoSlangExpr* visible_value = nullptr;
-        if (initialize_from_visible_value) {
-            if (auto found = design_.function_values.find(&variable);
-                found != design_.function_values.end()) {
-                visible_value = found->second;
-            } else if (auto found = design_.procedural_constants.find(&variable);
-                       found != design_.procedural_constants.end() &&
-                       found->second.isInteger() &&
-                       !found->second.integer().hasUnknown()) {
-                visible_value = make_loop_constant(
-                    design_, variable, found->second, anchor_);
-            } else if (has_registered_value(design_, variable)) {
-                visible_value = make_registered_value(design_, variable, anchor_);
-            } else {
-                throw std::runtime_error(
-                    "procedural loop induction variable '" +
-                    copy_string(variable.name) +
-                    "' has no visible entry value at " +
-                    expression_location(design_, anchor_));
-            }
-        }
-
-        const OptoSlangExpr* visible_lvalue = nullptr;
-        if (copy_back) {
-            visible_lvalue = find_function_lvalue(design_, variable);
-            if (!visible_lvalue && has_registered_value(design_, variable)) {
-                visible_lvalue = make_registered_value(design_, variable, anchor_);
-            }
-            if (!visible_lvalue) {
-                throw std::runtime_error(
-                    "procedural loop induction variable '" +
-                    copy_string(variable.name) +
-                    "' has no visible assignment target at " +
-                    expression_location(design_, anchor_));
-            }
-        }
 
         auto* local = make_loop_local(
             design_,
@@ -3193,22 +2191,7 @@ public:
         design_.function_lvalues.insert_or_assign(&variable, local);
         design_.procedural_constants.erase(&variable);
         locals_.insert_or_assign(&variable, local);
-        const auto source = source_span(design_, anchor_);
-        if (visible_value) {
-            initializers_.push_back({local, visible_value, true, source});
-        }
-        if (visible_lvalue) {
-            copybacks_.push_back({visible_lvalue, local, true, source});
-        }
         return local;
-    }
-
-    CfgFragment initialize(ProcedureBuilder& builder) {
-        return builder.effects(std::move(initializers_), source_span(design_, anchor_));
-    }
-
-    CfgFragment copy_back(ProcedureBuilder& builder) {
-        return builder.effects(std::move(copybacks_), source_span(design_, anchor_));
     }
 
 private:
@@ -3217,15 +2200,7 @@ private:
     ScopedSymbolMapBindings<OptoSlangExpr*> value_bindings_;
     ScopedSymbolMapBindings<OptoSlangExpr*> lvalue_bindings_;
     std::unordered_map<const VariableSymbol*, const OptoSlangExpr*> locals_;
-    std::vector<OptoSlangEffectData> initializers_;
-    std::vector<OptoSlangEffectData> copybacks_;
 };
-
-bool loop_value_is_live_after(
-    const ModuleLoweringContext& design,
-    const VariableSymbol& variable) {
-    return !design.loop_live_after || design.loop_live_after->contains(&variable);
-}
 
 struct LoweredLoopCondition {
     CfgFragment prelude;
@@ -3419,21 +2394,16 @@ CfgFragment lower_for_loop_cyclic(
     }
 
     CyclicLoopLocals locals(design, *anchor);
-    const auto variables = static_for_variables(design, loop);
-    for (auto* variable : variables) {
-        const bool declared = std::ranges::find(loop.loopVars, variable) != loop.loopVars.end();
-        locals.bind(
-            *variable,
-            !declared,
-            !declared && loop_value_is_live_after(design, *variable));
-    }
-    for (auto* variable : nested_loop_variables(design, loop.body)) {
-        locals.bind(*variable, false, false);
+    for (auto* variable : loop.loopVars) {
+        if (!has_registered_value(design, *variable) &&
+            !design.function_values.contains(variable)) {
+            locals.bind(*variable);
+        }
     }
     CyclicLoopGraph graph(
         builder, design, loop, loop.body, *anchor, OPTO_SLANG_LOOP_PRE_TEST);
     const auto source = source_span(design, loop);
-    auto initialization = locals.initialize(builder);
+    CfgFragment initialization;
     for (auto* variable : loop.loopVars) {
         const auto* initializer = variable->getInitializer();
         if (!initializer) {
@@ -3442,10 +2412,18 @@ CfgFragment lower_for_loop_cyclic(
                 statement_location(design, loop));
         }
         const auto assignment_source = source_span(design, *initializer);
+        const auto* lvalue = find_function_lvalue(design, *variable);
+        if (!lvalue) {
+            OptoSlangExpr registered;
+            registered.kind = OPTO_SLANG_EXPR_SIGNAL;
+            registered.signal_name =
+                intern_string(design, registered_value_name(design, *variable));
+            lvalue = make_expr(design, std::move(registered), *initializer);
+        }
         initialization = builder.sequence(
             std::move(initialization),
             builder.effects(
-                {{design.function_lvalues.at(variable),
+                {{lvalue,
                   cast_to_type(
                       design,
                       lower_expr(design, *initializer),
@@ -3483,10 +2461,7 @@ CfgFragment lower_for_loop_cyclic(
             source_span(design, *step));
     }
     auto cyclic = graph.finish(std::move(body), std::move(steps), std::move(condition));
-    return builder.sequence(
-        builder.sequence(std::move(initialization), std::move(cyclic), source),
-        locals.copy_back(builder),
-        source);
+    return builder.sequence(std::move(initialization), std::move(cyclic), source);
 }
 
 CfgFragment lower_repeat_loop_cyclic(
@@ -3500,10 +2475,6 @@ CfgFragment lower_repeat_loop_cyclic(
             expression_location(design, loop.count));
     }
     const auto source = source_span(design, loop);
-    CyclicLoopLocals locals(design, loop.count);
-    for (auto* variable : nested_loop_variables(design, loop.body)) {
-        locals.bind(*variable, false, false);
-    }
     const auto exact_count = evaluate_lowering_constant(design, loop.count);
     const bool has_exact_count = exact_count && exact_count.isInteger() &&
                                  !exact_count.integer().hasUnknown();
@@ -3512,7 +2483,7 @@ CfgFragment lower_repeat_loop_cyclic(
     bool count_signed = loop.count.type->isSigned();
     uint32_t maximum_count = 0;
     const OptoSlangExpr* count_value = nullptr;
-    auto initialization = locals.initialize(builder);
+    CfgFragment initialization;
 
     if (has_exact_count) {
         const auto count = exact_count.integer().as<uint64_t>();
@@ -3563,8 +2534,7 @@ CfgFragment lower_repeat_loop_cyclic(
         count_value = snapshot;
     }
     if (maximum_count == 0) {
-        return builder.sequence(
-            std::move(initialization), locals.copy_back(builder), source);
+        return initialization;
     }
 
     auto* counter = make_loop_local(
@@ -3604,10 +2574,7 @@ CfgFragment lower_repeat_loop_cyclic(
     auto body = lower_statement(builder, design, loop.body, procedure_kind);
     auto latch = builder.effects({{counter, increment, true, source}}, source);
     auto cyclic = graph.finish(std::move(body), std::move(latch), std::move(condition));
-    return builder.sequence(
-        builder.sequence(std::move(initialization), std::move(cyclic), source),
-        locals.copy_back(builder),
-        source);
+    return builder.sequence(std::move(initialization), std::move(cyclic), source);
 }
 
 CfgFragment lower_foreach_loop_cyclic(
@@ -3666,17 +2633,11 @@ CfgFragment lower_foreach_loop_cyclic(
     auto* limit = make_unsigned_constant_expr(design, count, width, loop.arrayRef);
     CyclicLoopLocals locals(design, loop.arrayRef);
     for (const auto& dimension : dimensions) {
-        locals.bind(*dimension.variable, false, false);
-    }
-    for (auto* variable : nested_loop_variables(design, loop.body)) {
-        locals.bind(*variable, false, false);
+        locals.bind(*dimension.variable);
     }
     CyclicLoopGraph graph(
         builder, design, loop, loop.body, loop.arrayRef, OPTO_SLANG_LOOP_PRE_TEST);
-    auto initialization = builder.sequence(
-        locals.initialize(builder),
-        builder.effects({{counter, zero, true, source}}, source),
-        source);
+    auto initialization = builder.effects({{counter, zero, true, source}}, source);
     CfgFragment indices;
     for (const auto& dimension : dimensions) {
         const OptoSlangExpr* offset = make_unsigned_cast_expr(
@@ -3735,10 +2696,7 @@ CfgFragment lower_foreach_loop_cyclic(
           source}},
         source);
     auto cyclic = graph.finish(std::move(body), std::move(latch), std::move(condition));
-    return builder.sequence(
-        builder.sequence(std::move(initialization), std::move(cyclic), source),
-        locals.copy_back(builder),
-        source);
+    return builder.sequence(std::move(initialization), std::move(cyclic), source);
 }
 
 CfgFragment lower_condition_loop_cyclic(
@@ -3749,14 +2707,6 @@ CfgFragment lower_condition_loop_cyclic(
     const Statement& body_statement,
     bool condition_precedes_body,
     OptoSlangProcedureKind procedure_kind) {
-    CyclicLoopLocals locals(design, condition_expression);
-    for (auto* variable : static_condition_variables(design, condition_expression)) {
-        locals.bind(
-            *variable, true, loop_value_is_live_after(design, *variable));
-    }
-    for (auto* variable : nested_loop_variables(design, body_statement)) {
-        locals.bind(*variable, false, false);
-    }
     CyclicLoopGraph graph(
         builder,
         design,
@@ -3765,15 +2715,10 @@ CfgFragment lower_condition_loop_cyclic(
         condition_expression,
         condition_precedes_body ? OPTO_SLANG_LOOP_PRE_TEST
                                 : OPTO_SLANG_LOOP_POST_TEST);
-    auto initialization = locals.initialize(builder);
     auto condition = lower_loop_condition(builder, design, condition_expression);
     auto body = lower_statement(builder, design, body_statement, procedure_kind);
     auto cyclic = graph.finish(std::move(body), {}, std::move(condition));
-    const auto source = source_span(design, loop);
-    return builder.sequence(
-        builder.sequence(std::move(initialization), std::move(cyclic), source),
-        locals.copy_back(builder),
-        source);
+    return cyclic;
 }
 
 CfgFragment lower_forever_loop_cyclic(
@@ -3796,24 +2741,11 @@ CfgFragment lower_forever_loop_cyclic(
             "procedural forever loop cannot anchor activation state at " +
             statement_location(design, loop));
     }
-    CyclicLoopLocals locals(design, *anchor);
-    for (auto* variable : static_forever_break_variables(design, loop.body)) {
-        locals.bind(
-            *variable, true, loop_value_is_live_after(design, *variable));
-    }
-    for (auto* variable : nested_loop_variables(design, loop.body)) {
-        locals.bind(*variable, false, false);
-    }
     CyclicLoopGraph graph(
         builder, design, loop, loop.body, *anchor, OPTO_SLANG_LOOP_UNCONDITIONAL);
-    auto initialization = locals.initialize(builder);
     auto body = lower_statement(builder, design, loop.body, procedure_kind);
     auto cyclic = graph.finish(std::move(body), {});
-    const auto source = source_span(design, loop);
-    return builder.sequence(
-        builder.sequence(std::move(initialization), std::move(cyclic), source),
-        locals.copy_back(builder),
-        source);
+    return cyclic;
 }
 
 CfgFragment lower_statement_impl(
@@ -3840,44 +2772,14 @@ CfgFragment lower_statement_impl(
     case StatementKind::VariableDeclaration: {
         const auto& symbol = stmt.as<VariableDeclStatement>().symbol;
         if (symbol.getInitializer() && symbol.lifetime != VariableLifetime::Automatic) {
-            throw std::runtime_error(
+            throw LoweringFailure(
+                OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE,
+                1,
+                stmt.sourceRange.start(),
                 "static procedural declaration initialization for '" +
                 copy_string(symbol.name) +
                 "' is time-zero state and is outside the explicit-reset synthesis profile at " +
                 statement_location(design, stmt));
-        }
-        if (design.procedural_loop_variables.contains(&symbol)) {
-            ConstantValue value = symbol.getType().getDefaultValue();
-            if (auto* initializer = symbol.getInitializer()) {
-                value = evaluate_lowering_constant(design, *initializer);
-                const bool exact =
-                    value && value.isInteger() && !value.integer().hasUnknown();
-                if (!exact) {
-                    design.procedural_constants.erase(&symbol);
-                } else {
-                    design.procedural_constants.insert_or_assign(
-                        &symbol, std::move(value));
-                }
-                if (design.procedure_loop_local_bindings.contains(&symbol)) {
-                    const auto source = source_span(design, stmt);
-                    return builder.effects(
-                        {{design.function_lvalues.at(&symbol),
-                          cast_to_type(
-                              design,
-                              lower_expr(design, *initializer),
-                              symbol.getType(),
-                              *initializer),
-                          true,
-                          source}},
-                        source);
-                }
-                if (exact) {
-                    return {};
-                }
-            } else if (value.isInteger() && !value.integer().hasUnknown()) {
-                design.procedural_constants.insert_or_assign(&symbol, std::move(value));
-                return {};
-            }
         }
         if (auto* initializer = symbol.getInitializer()) {
             OptoSlangExpr lhs;
@@ -4205,149 +3107,6 @@ bool is_edge_sensitivity(const TimingControl& timing) {
     return event.edge == EdgeKind::PosEdge || event.edge == EdgeKind::NegEdge;
 }
 
-template<typename Node>
-void collect_variable_references(
-    const Node& node,
-    std::unordered_set<const VariableSymbol*>& referenced) {
-    auto visitor = makeVisitor(
-        [&](auto& self, const NamedValueExpression& expression) {
-            if (VariableSymbol::isKind(expression.symbol.kind)) {
-                referenced.insert(&expression.symbol.as<VariableSymbol>());
-            }
-            self.visitDefault(expression);
-        });
-    node.visit(visitor);
-}
-
-template<typename Node>
-void count_variable_references(
-    const Node& node,
-    std::unordered_map<const VariableSymbol*, size_t>& references) {
-    auto visitor = makeVisitor(
-        [&](auto& self, const NamedValueExpression& expression) {
-            if (VariableSymbol::isKind(expression.symbol.kind)) {
-                ++references[&expression.symbol.as<VariableSymbol>()];
-            }
-            self.visitDefault(expression);
-        });
-    node.visit(visitor);
-}
-
-template<typename Node>
-std::unordered_set<const VariableSymbol*> assigned_variables(const Node& node) {
-    std::unordered_set<const VariableSymbol*> assigned;
-    auto visitor = makeVisitor(
-        [&](auto& self, const AssignmentExpression& assignment) {
-            if (const auto* target = expression_root_value(assignment.left());
-                target && VariableSymbol::isKind(target->kind)) {
-                assigned.insert(&target->as<VariableSymbol>());
-            }
-            self.visitDefault(assignment);
-        });
-    node.visit(visitor);
-    return assigned;
-}
-
-std::unordered_set<const VariableSymbol*> externally_live_process_variables(
-    ModuleLoweringContext& design,
-    const ProceduralBlockSymbol& current_process) {
-    if (!design.loop_liveness_indexed) {
-        ModuleMembers members;
-        collect_elaborated_members(design.body, design.body, members);
-        for (auto* process : members.processes) {
-            std::unordered_map<const VariableSymbol*, size_t> references;
-            count_variable_references(process->getBody(), references);
-            const auto assigned = assigned_variables(process->getBody());
-            for (const auto& [variable, count] : references) {
-                if (count != 0 && !assigned.contains(variable)) {
-                    ++design.loop_read_only_process_counts[variable];
-                }
-            }
-        }
-        for (auto* assign : members.assigns) {
-            collect_variable_references(
-                assign->getAssignment(), design.loop_external_references);
-        }
-        for (auto* variable : members.variables) {
-            if (auto* initializer = variable->getInitializer()) {
-                collect_variable_references(
-                    *initializer, design.loop_external_references);
-            }
-        }
-        for (auto* child : members.instances) {
-            for (auto* connection : child->getPortConnections()) {
-                if (connection) {
-                    if (auto* expression = connection->getExpression()) {
-                        collect_variable_references(
-                            *expression, design.loop_external_references);
-                    }
-                }
-            }
-        }
-        for (auto* port_symbol : design.body.getPortList()) {
-            if (!port_symbol || port_symbol->kind != SymbolKind::Port) {
-                continue;
-            }
-            const auto& port = port_symbol->as<PortSymbol>();
-            if (port.direction != ArgumentDirection::In && port.internalSymbol &&
-                VariableSymbol::isKind(port.internalSymbol->kind)) {
-                design.loop_external_references.insert(
-                    &port.internalSymbol->as<VariableSymbol>());
-            }
-        }
-        design.loop_liveness_indexed = true;
-    }
-
-    auto referenced = design.loop_external_references;
-    std::unordered_map<const VariableSymbol*, size_t> local_references;
-    count_variable_references(current_process.getBody(), local_references);
-    const auto local_assignments = assigned_variables(current_process.getBody());
-    for (const auto& [variable, total] : design.loop_read_only_process_counts) {
-        const bool current_is_read_only = local_references.contains(variable) &&
-                                          !local_assignments.contains(variable);
-        if (total > static_cast<size_t>(current_is_read_only)) {
-            referenced.insert(variable);
-        }
-    }
-    return referenced;
-}
-
-void collect_declared_loop_variables(
-    const Statement& statement,
-    std::vector<const VariableSymbol*>& variables) {
-    auto append = [&](const VariableSymbol* variable) {
-        if (variable && std::ranges::find(variables, variable) == variables.end()) {
-            variables.push_back(variable);
-        }
-    };
-    auto visitor = makeVisitor(
-        [&](auto& self, const ForLoopStatement& loop) {
-            for (auto* variable : loop.loopVars) {
-                append(variable);
-            }
-            for (auto* initializer : loop.initializers) {
-                if (!initializer || initializer->kind != ExpressionKind::Assignment) {
-                    continue;
-                }
-                const auto* target = expression_root_value(
-                    initializer->as<AssignmentExpression>().left());
-                if (target && VariableSymbol::isKind(target->kind)) {
-                    append(&target->as<VariableSymbol>());
-                }
-            }
-            self.visitDefault(loop);
-        });
-    statement.visit(visitor);
-}
-
-std::vector<const VariableSymbol*> procedure_loop_variables(
-    ModuleLoweringContext& design,
-    const Statement& statement) {
-    auto variables = nested_loop_variables(design, statement);
-    collect_declared_loop_variables(statement, variables);
-    return variables;
-}
-
 OptoSlangProcedureData lower_procedure(
     ModuleLoweringContext& design,
     const InstanceBodySymbol& body,
@@ -4424,51 +3183,7 @@ OptoSlangProcedureData lower_procedure(
             "multiple iff-qualified events require event-identity lowering");
     }
 
-    auto loop_live_after = externally_live_process_variables(design, process);
-    for (auto* expression : event_expressions) {
-        if (expression) {
-            collect_variable_references(*expression, loop_live_after);
-        }
-    }
-    for (auto* qualifier : event_qualifiers) {
-        if (qualifier) {
-            collect_variable_references(*qualifier, loop_live_after);
-        }
-    }
-    ScopedValue active_loop_liveness(
-        design.loop_live_after,
-        static_cast<const std::unordered_set<const VariableSymbol*>*>(&loop_live_after));
-    const auto* loop_anchor = statement_anchor_expression(*statement);
-    std::optional<CyclicLoopLocals> procedure_locals;
-    CfgFragment procedure_initialization;
-    if (loop_anchor) {
-        auto variables = procedure_loop_variables(design, *statement);
-        if (!variables.empty()) {
-            procedure_locals.emplace(design, *loop_anchor);
-            for (auto* variable : variables) {
-                const bool local = is_active_procedural_local(design, *variable);
-                procedure_locals->bind(
-                    *variable,
-                    !local && has_registered_value(design, *variable),
-                    !local && loop_live_after.contains(variable));
-                design.procedure_loop_local_bindings.insert(variable);
-            }
-            procedure_initialization = procedure_locals->initialize(builder);
-        }
-    }
-    ScopeExit clear_procedure_loop_locals([&] {
-        design.procedure_loop_local_bindings.clear();
-    });
     auto lowered = lower_statement(builder, design, *statement, kind);
-    if (procedure_locals) {
-        lowered = builder.sequence(
-            std::move(procedure_initialization),
-            builder.sequence(
-                std::move(lowered),
-                procedure_locals->copy_back(builder),
-                source),
-            source);
-    }
     if (qualified_event_count != 0 && !lowered.empty()) {
         CfgFragment prelude;
         const OptoSlangExpr* condition = nullptr;
@@ -4541,79 +3256,6 @@ void collect_function_locals(const Scope& scope, std::vector<const VariableSymbo
         } else if (member.kind == SymbolKind::StatementBlock) {
             collect_function_locals(member.as<StatementBlockSymbol>(), locals);
         }
-    }
-}
-
-void collect_function_loop_variables(
-    const Statement& statement, std::unordered_set<const VariableSymbol*>& variables) {
-    switch (statement.kind) {
-    case StatementKind::Block:
-        collect_function_loop_variables(statement.as<BlockStatement>().body, variables);
-        break;
-    case StatementKind::List:
-        for (auto* child : statement.as<StatementList>().list) {
-            if (child) {
-                collect_function_loop_variables(*child, variables);
-            }
-        }
-        break;
-    case StatementKind::Conditional: {
-        const auto& conditional = statement.as<ConditionalStatement>();
-        collect_function_loop_variables(conditional.ifTrue, variables);
-        if (conditional.ifFalse) {
-            collect_function_loop_variables(*conditional.ifFalse, variables);
-        }
-        break;
-    }
-    case StatementKind::PatternCase: {
-        const auto& case_statement = statement.as<PatternCaseStatement>();
-        for (const auto& item : case_statement.items) {
-            collect_function_loop_variables(*item.stmt, variables);
-        }
-        if (case_statement.defaultCase) {
-            collect_function_loop_variables(*case_statement.defaultCase, variables);
-        }
-        break;
-    }
-    case StatementKind::Case: {
-        const auto& case_statement = statement.as<CaseStatement>();
-        for (const auto& item : case_statement.items) {
-            if (item.stmt) {
-                collect_function_loop_variables(*item.stmt, variables);
-            }
-        }
-        if (case_statement.defaultCase) {
-            collect_function_loop_variables(*case_statement.defaultCase, variables);
-        }
-        break;
-    }
-    case StatementKind::ForLoop: {
-        const auto& loop = statement.as<ForLoopStatement>();
-        for (auto* variable : loop.loopVars) {
-            if (variable) {
-                variables.insert(variable);
-            }
-        }
-        collect_function_loop_variables(loop.body, variables);
-        break;
-    }
-    case StatementKind::RepeatLoop:
-        collect_function_loop_variables(statement.as<RepeatLoopStatement>().body, variables);
-        break;
-    case StatementKind::ForeachLoop:
-        collect_function_loop_variables(statement.as<ForeachLoopStatement>().body, variables);
-        break;
-    case StatementKind::WhileLoop:
-        collect_function_loop_variables(statement.as<WhileLoopStatement>().body, variables);
-        break;
-    case StatementKind::DoWhileLoop:
-        collect_function_loop_variables(statement.as<DoWhileLoopStatement>().body, variables);
-        break;
-    case StatementKind::ForeverLoop:
-        collect_function_loop_variables(statement.as<ForeverLoopStatement>().body, variables);
-        break;
-    default:
-        break;
     }
 }
 
@@ -4817,8 +3459,6 @@ OptoSlangExpr* lower_function_call(ModuleLoweringContext& design, const CallExpr
     }
     std::vector<const VariableSymbol*> locals;
     collect_function_locals(function, locals);
-    std::unordered_set<const VariableSymbol*> loop_variables;
-    collect_function_loop_variables(function.getBody(), loop_variables);
     ScopedSymbolMapBindings function_value_bindings(design.function_values);
     ScopedSymbolMapBindings function_lvalue_bindings(design.function_lvalues);
     ScopedSymbolMapBindings constant_bindings(design.procedural_constants);
@@ -4836,11 +3476,6 @@ OptoSlangExpr* lower_function_call(ModuleLoweringContext& design, const CallExpr
         function_value_bindings.track(local);
         constant_bindings.track(local);
         name_bindings.track(local);
-    }
-    for (auto* variable : loop_variables) {
-        function_value_bindings.track(variable);
-        constant_bindings.track(variable);
-        name_bindings.track(variable);
     }
     design.function_stack.push_back(&function);
 
@@ -4935,8 +3570,7 @@ OptoSlangExpr* lower_function_call(ModuleLoweringContext& design, const CallExpr
     installed_names.push_back(return_variable);
 
     for (auto* local : locals) {
-        if (local == return_variable || std::ranges::find(arguments, local) != arguments.end() ||
-            loop_variables.contains(local)) {
+        if (local == return_variable || std::ranges::find(arguments, local) != arguments.end()) {
             continue;
         }
         auto name = allocate_function_value_name(design, function, local->name);
@@ -5067,8 +3701,6 @@ CfgFragment lower_subroutine_call_statement(
     const auto source = source_span(design, call);
     std::vector<const VariableSymbol*> locals;
     collect_function_locals(function, locals);
-    std::unordered_set<const VariableSymbol*> loop_variables;
-    collect_function_loop_variables(function.getBody(), loop_variables);
     ScopedSymbolMapBindings function_value_bindings(design.function_values);
     ScopedSymbolMapBindings function_lvalue_bindings(design.function_lvalues);
     ScopedSymbolMapBindings constant_bindings(design.procedural_constants);
@@ -5083,11 +3715,6 @@ CfgFragment lower_subroutine_call_statement(
         function_value_bindings.track(local);
         constant_bindings.track(local);
         name_bindings.track(local);
-    }
-    for (auto* variable : loop_variables) {
-        function_value_bindings.track(variable);
-        constant_bindings.track(variable);
-        name_bindings.track(variable);
     }
     design.function_stack.push_back(&function);
 
@@ -5192,8 +3819,7 @@ CfgFragment lower_subroutine_call_statement(
     }
 
     for (auto* local : locals) {
-        if (std::ranges::find(arguments, local) != arguments.end() ||
-            loop_variables.contains(local)) {
+        if (std::ranges::find(arguments, local) != arguments.end()) {
             continue;
         }
         auto name = allocate_function_value_name(design, function, local->name);

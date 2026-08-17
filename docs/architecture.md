@@ -300,8 +300,10 @@ Slang procedural tree
   -> owned transient Proc graph
        (procedural expressions + activation locals + ordinary CFG backedges)
   -> structural validation and LoopRegion validation
+  -> CFG loop-state promotion and live-out placement
   -> deterministic boundedness proof certificate
   -> certified loop elimination
+  -> path-sensitive exact-local specialization and dead-local-effect removal
   -> activation-local publication as typed process-local signals
   -> sealed acyclic ProcModule
   -> CFG canonicalization
@@ -345,6 +347,22 @@ removes the declared latch-to-header edge and requires the remaining natural
 region to be acyclic; identical states reaching a CFG join are therefore
 merged without being confused with an undeclared internal cycle.
 
+Persistent signal-backed variables enter the transient graph without an AST-
+side induction-variable classification. Before proof, Rust intersects blocking
+signal writes with signal reads in each top-level natural region, promotes the
+resulting recurrence state to `ProcLocalId`, and rewrites nested regions to use
+the same local. Copy-in values come from unique CFG reaching definitions when
+available, otherwise from the visible signal value. Copy-back is emitted only
+for state observed outside the natural region or through a structural module
+root. This pass owns recurrence discovery, entry-value flow, and live-out
+policy; the Slang adapter retains only lexical local allocation for `for`
+declarations and `foreach` indices.
+
+When distinct procedures use the same otherwise unobserved module-scope
+variable solely as classic loop induction state, each procedure receives an
+independent activation local. Reads after that procedure's loop retain its
+local final value, while no persistent multi-driver copy-back is created.
+
 Transient procedures own explicit block-ID lists rather than the final IR's
 contiguous block ranges. Loop elimination can therefore retain iteration zero,
 append only additional natural-loop copies, and update only the affected
@@ -352,6 +370,17 @@ procedure and loop-region table. Unrelated procedures and block IDs remain
 stable. The complete graph is validated once when the combined loop pipeline
 finishes; an independently exposed proof operation remains read-only and
 cannot trigger a whole-module clone.
+
+After the final backedge is removed, a bounded exact-state traversal
+specializes local-dependent expressions separately at each reachable CFG
+occurrence. Static loop addresses and conditions therefore become constants
+without folding a runtime-dependent branch. Local assignments with no
+remaining reachable read are removed before process-local publication;
+exact-infeasible clones do not keep otherwise dead activation state alive.
+Final publication materializes only the expression closure referenced by
+exact-reachable blocks. This is required for memory reads: an unreachable
+owned read must not create a physical read port merely because its old
+expression remains in the transient arena after specialization.
 
 The Slang adapter publishes every nontrivial `for`, `repeat`, `foreach`,
 `while`, `do-while`, and `forever` loop through this transient cyclic path.
@@ -393,10 +422,11 @@ capability gaps. Neither category depends on host memory, time, or scheduling.
 `for` may omit initializer, condition, or step clauses. Initializers and steps
 remain ordered procedural effects, and `continue` reaches the step path.
 Conditionless `for` and `forever` require an exit that the same graph analysis
-can prove. Classic module-scope induction variables are represented by fresh
-activation locals after a preceding known initializer. Copy-back occurs only
-when the value is live later in the process, in another process or continuous
-expression, at an instance connection, or through an output/inout port.
+can prove. Classic module-scope induction variables are promoted to fresh
+activation locals from their CFG reaching definitions. Copy-back occurs only
+when the value is live later in the process, in another non-peer process or
+continuous expression, at an instance connection, or through an output/inout
+port. Independent classic induction peers use the isolation rule above.
 Nested loops explicitly bind outer induction state so inner updates participate
 in the outer proof.
 

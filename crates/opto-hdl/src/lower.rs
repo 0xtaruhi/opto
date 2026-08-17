@@ -147,6 +147,7 @@ impl ModuleLowerer {
     fn finish(mut self) -> Result<RtlModule, HdlError> {
         let procedures = std::mem::take(&mut self.procedures)
             .seal()?
+            .promote_loop_signal_state(&self.module)?
             .prove_and_eliminate_loops(&self.module, LoopAnalysisLimits::default())?
             .materialize_locals(&mut self.module)?
             .materialize_acyclic(&mut self.module)?;

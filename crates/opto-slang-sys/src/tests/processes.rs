@@ -556,12 +556,23 @@ fn native_compile_rejects_static_procedural_declaration_initialization() {
     )
     .expect_err("a static declaration initializer is time-zero state");
 
-    assert!(
-        error
-            .to_string()
-            .contains("static procedural declaration initialization for 'temporary'"),
-        "{error}"
+    let SlangError::LoweringFailed(failure) = error else {
+        panic!("expected a structured module-lowering failure, got {error}");
+    };
+    assert_eq!(
+        failure.category,
+        SlangLoweringFailureCategory::UnsupportedProfile
     );
+    assert_eq!(failure.stable_code(), "OPT-HDL-LP-0001");
+    assert!(
+        failure
+            .message
+            .contains("static procedural declaration initialization for 'temporary'")
+    );
+    let location = failure.location.expect("rejecting declaration has a span");
+    assert_eq!(location.path, source.path);
+    assert_eq!(location.line, 1);
+    assert!(location.column > 0);
 }
 
 #[test]
@@ -989,8 +1000,8 @@ fn native_compile_preserves_runtime_for_initializer_effects() {
                 })
             })
             .count(),
-        3,
-        "the runtime initializer, source body, and live static-local copy-back are each emitted once"
+        2,
+        "the native adapter emits the runtime initializer and source body once; Rust owns copy-back"
     );
     assert_cyclic_region_count(module.procedures().next().unwrap(), 1);
 }
@@ -1550,16 +1561,9 @@ fn native_compile_expands_module_scope_loop_state() {
                 .any(|effect| effect.lhs().is_ok_and(|lhs| is_signal(lhs, "count")))
         );
         assert!(effects.iter().any(|effect| {
-            matches!(
-                (
-                    effect.lhs().and_then(SlangExpression::kind),
-                    effect.rhs().and_then(SlangExpression::kind),
-                ),
-                (
-                    Ok(SlangExpressionKind::Signal(signal)),
-                    Ok(SlangExpressionKind::Constant(_)),
-                ) if signal.name.starts_with("__opto_loop_")
-            )
+            effect.lhs().is_ok_and(|lhs| {
+                matches!(lhs.kind(), Ok(SlangExpressionKind::Signal(signal)) if signal.name == "i" || signal.name == "remaining")
+            })
         }));
     }
 }
@@ -1577,19 +1581,10 @@ fn native_compile_isolates_shared_module_loop_variables_per_procedure() {
     for procedure in procedures {
         let effects = procedure_effects(procedure);
         assert!(
-            !effects
+            effects
                 .iter()
                 .any(|effect| effect.lhs().is_ok_and(|lhs| is_signal(lhs, "k")))
         );
-        assert!(effects.iter().any(|effect| {
-            effect.lhs().is_ok_and(|lhs| {
-                matches!(
-                    lhs.kind(),
-                    Ok(SlangExpressionKind::Signal(signal))
-                        if signal.name.starts_with("__opto_loop_")
-                )
-            })
-        }));
     }
 }
 

@@ -26,6 +26,7 @@ use std::num::NonZeroU32;
 mod exact;
 mod locals;
 mod loops;
+mod promotion;
 
 pub use loops::{LoopAnalysisLimits, LoopBoundednessAnalysis, LoopProof, LoopProofMethod};
 
@@ -212,6 +213,63 @@ impl ProcExprKind {
                 visit(*value);
                 visit(*offset);
                 visit(*replacement);
+            }
+        }
+    }
+
+    fn for_each_operand_mut(&mut self, mut visit: impl FnMut(&mut ProcExprId)) {
+        match self {
+            Self::ModuleValue(_) | Self::Constant(_) | Self::LocalRead(_) => {}
+            Self::MemoryRead {
+                address, select, ..
+            } => {
+                visit(address);
+                if let TransientTargetSelect::Dynamic { offset, .. } = select {
+                    visit(offset);
+                }
+            }
+            Self::Unary { arg, .. } => visit(arg),
+            Self::Binary { left, right, .. } => {
+                visit(left);
+                visit(right);
+            }
+            Self::Mux {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                visit(condition);
+                visit(then_value);
+                visit(else_value);
+            }
+            Self::TriState { data, enable, .. } => {
+                visit(data);
+                visit(enable);
+            }
+            Self::Concat(parts) => {
+                for part in parts {
+                    visit(part);
+                }
+            }
+            Self::Extract { value, .. } | Self::Cast { value, .. } => visit(value),
+            Self::DynamicExtract { value, offset, .. } => {
+                visit(value);
+                visit(offset);
+            }
+            Self::Insert {
+                value, replacement, ..
+            } => {
+                visit(value);
+                visit(replacement);
+            }
+            Self::DynamicInsert {
+                value,
+                offset,
+                replacement,
+            } => {
+                visit(value);
+                visit(offset);
+                visit(replacement);
             }
         }
     }
@@ -1568,9 +1626,12 @@ impl TransientProcModule {
 
     /// Materializes an acyclic graph with published locals into final procedural IR.
     ///
-    /// Owned expressions are appended to `word` transactionally. A graph with
-    /// a residual backedge or automatic-local dependency must first pass loop
-    /// elimination and typed process-local publication.
+    /// The expression closure of exact-reachable CFG blocks is appended to
+    /// `word` transactionally. Limiting publication to that closure is
+    /// semantically required because a procedural memory-read expression
+    /// creates a structural read port rather than a removable pure operation.
+    /// A graph with a residual backedge or automatic-local dependency must
+    /// first pass loop elimination and typed process-local publication.
     ///
     /// # Errors
     ///
@@ -1608,10 +1669,15 @@ impl TransientProcModule {
 
     fn materialize_validated(self, word: &mut WordModule) -> Result<ProcModule, ProcError> {
         let reachable_blocks = self.materialization_reachable_blocks();
+        let reachable_expressions = self.materialization_reachable_expressions(&reachable_blocks);
         let mut values = Vec::with_capacity(self.expressions.len());
         for (expression_index, expression) in self.expressions.iter().enumerate() {
-            let resolve = |id: ProcExprId, values: &[ValueId]| {
-                values.get(id.index()).copied().ok_or_else(|| {
+            if !reachable_expressions[expression_index] {
+                values.push(None);
+                continue;
+            }
+            let resolve = |id: ProcExprId, values: &[Option<ValueId>]| {
+                values.get(id.index()).copied().flatten().ok_or_else(|| {
                     ProcError::new("transient expression operand is not materialized")
                 })
             };
@@ -1753,7 +1819,7 @@ impl TransientProcModule {
                     expression.ty, expression.kind
                 )));
             }
-            values.push(value);
+            values.push(Some(value));
         }
 
         let mut output = ProcBuilder::new();
@@ -1792,7 +1858,7 @@ impl TransientProcModule {
                     output_block,
                     effect.mode,
                     materialize_target(effect.target, &values, &self.expressions)?,
-                    values[effect.value.index()],
+                    materialized_expression(&values, effect.value)?,
                     effect.source.clone(),
                 )?;
             }
@@ -1822,7 +1888,7 @@ impl TransientProcModule {
                     } else {
                         output.terminate_branch(
                             output_block,
-                            values[condition.index()],
+                            materialized_expression(&values, *condition)?,
                             mapped_reachable_block(&block_ids, *then_target)?,
                             mapped_reachable_block(&block_ids, *else_target)?,
                             block.terminator.source.clone(),
@@ -1835,13 +1901,16 @@ impl TransientProcModule {
                     default,
                 } => output.terminate_switch(
                     output_block,
-                    values[selector.index()],
-                    arms.iter().map(|arm| SwitchArmSpec {
-                        pattern: values[arm.pattern.index()],
-                        target: mapped_reachable_block(&block_ids, arm.target)
-                            .expect("every switch successor is reachable"),
-                        source: arm.source.clone(),
-                    }),
+                    materialized_expression(&values, *selector)?,
+                    arms.iter()
+                        .map(|arm| {
+                            Ok(SwitchArmSpec {
+                                pattern: materialized_expression(&values, arm.pattern)?,
+                                target: mapped_reachable_block(&block_ids, arm.target)?,
+                                source: arm.source.clone(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, ProcError>>()?,
                     mapped_reachable_block(&block_ids, *default)?,
                     block.terminator.source.clone(),
                 )?,
@@ -1895,6 +1964,57 @@ impl TransientProcModule {
         }
         reachable
     }
+
+    fn materialization_reachable_expressions(&self, blocks: &[bool]) -> Vec<bool> {
+        let mut reachable = vec![false; self.expressions.len()];
+        let mut pending = Vec::new();
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            if !blocks[block_index] {
+                continue;
+            }
+            for effect_index in block.effects.indices() {
+                let effect = &self.effects[effect_index];
+                pending.push(effect.value);
+                let select = match effect.target {
+                    TransientTarget::Local { select, .. }
+                    | TransientTarget::Signal { select, .. } => select,
+                    TransientTarget::Memory {
+                        address, select, ..
+                    } => {
+                        pending.push(address);
+                        select
+                    }
+                };
+                if let TransientTargetSelect::Dynamic { offset, .. } = select {
+                    pending.push(offset);
+                }
+            }
+            block
+                .terminator
+                .kind
+                .for_each_expression(|expression| pending.push(expression));
+        }
+        while let Some(expression) = pending.pop() {
+            if std::mem::replace(&mut reachable[expression.index()], true) {
+                continue;
+            }
+            self.expressions[expression.index()]
+                .kind
+                .for_each_operand(|operand| pending.push(operand));
+        }
+        reachable
+    }
+}
+
+fn materialized_expression(
+    values: &[Option<ValueId>],
+    expression: ProcExprId,
+) -> Result<ValueId, ProcError> {
+    values
+        .get(expression.index())
+        .copied()
+        .flatten()
+        .ok_or_else(|| ProcError::new("reachable transient expression was not materialized"))
 }
 
 fn mapped_reachable_block(
@@ -1999,25 +2119,27 @@ fn materialize_static_insert(
 
 fn materialize_target(
     target: TransientTarget,
-    values: &[ValueId],
+    values: &[Option<ValueId>],
     expressions: &[ProcExpr],
 ) -> Result<ProcTarget, ProcError> {
-    let select = |select: TransientTargetSelect| match select {
-        TransientTargetSelect::Whole => TargetSelect::Whole,
-        TransientTargetSelect::Static(range) => TargetSelect::Static(range),
-        TransientTargetSelect::Dynamic { offset, width } => {
-            if let Some(lsb) = exact_unsigned_expression(expressions, offset)
-                .and_then(|offset| u32::try_from(offset).ok())
-                && let Some(msb) = lsb.checked_add(width.get() - 1)
-            {
-                TargetSelect::Static(BitRange { msb, lsb })
-            } else {
-                TargetSelect::Dynamic {
-                    offset: values[offset.index()],
-                    width,
+    let select = |select: TransientTargetSelect| -> Result<TargetSelect, ProcError> {
+        Ok(match select {
+            TransientTargetSelect::Whole => TargetSelect::Whole,
+            TransientTargetSelect::Static(range) => TargetSelect::Static(range),
+            TransientTargetSelect::Dynamic { offset, width } => {
+                if let Some(lsb) = exact_unsigned_expression(expressions, offset)
+                    .and_then(|offset| u32::try_from(offset).ok())
+                    && let Some(msb) = lsb.checked_add(width.get() - 1)
+                {
+                    TargetSelect::Static(BitRange { msb, lsb })
+                } else {
+                    TargetSelect::Dynamic {
+                        offset: materialized_expression(values, offset)?,
+                        width,
+                    }
                 }
             }
-        }
+        })
     };
     Ok(match target {
         TransientTarget::Local { .. } => {
@@ -2028,12 +2150,13 @@ fn materialize_target(
         TransientTarget::Signal {
             signal,
             select: target_select,
-        } => ProcTarget::signal(signal).with_select(select(target_select)),
+        } => ProcTarget::signal(signal).with_select(select(target_select)?),
         TransientTarget::Memory {
             memory,
             address,
             select: target_select,
-        } => ProcTarget::memory(memory, values[address.index()]).with_select(select(target_select)),
+        } => ProcTarget::memory(memory, materialized_expression(values, address)?)
+            .with_select(select(target_select)?),
     })
 }
 
@@ -2050,7 +2173,7 @@ fn materialize_memory_read(
     memory: MemoryId,
     address: ValueId,
     select: TransientTargetSelect,
-    values: &[ValueId],
+    values: &[Option<ValueId>],
     source: SourceSpan,
 ) -> Result<ValueId, ProcError> {
     let definition = word
@@ -2089,7 +2212,12 @@ fn materialize_memory_read(
             .extract(value, range.msb.min(range.lsb), range.width(), source)
             .map_err(|error| ProcError::new(error.to_string())),
         TransientTargetSelect::Dynamic { offset, width } => word
-            .dynamic_extract(value, values[offset.index()], width.get(), source)
+            .dynamic_extract(
+                value,
+                materialized_expression(values, offset)?,
+                width.get(),
+                source,
+            )
             .map_err(|error| ProcError::new(error.to_string())),
     }
 }
@@ -2265,6 +2393,129 @@ mod tests {
                 .to_string()
                 .contains("retains a control-flow cycle")
         );
+    }
+
+    #[test]
+    fn cfg_promotion_owns_signal_recurrence_and_copyback_policy() {
+        let mut word = WordModule::new("top");
+        let state = word.add_wire("state", nibble(), span()).unwrap();
+        let output = word
+            .add_port("result", PortDirection::Output, nibble(), span())
+            .unwrap();
+        let output = word.port(output).unwrap().signal;
+        let state_value = word.read_signal(state, span()).unwrap();
+
+        let mut builder = TransientProcBuilder::new();
+        let zero = builder
+            .constant(
+                ConstBits::from_bits(vec![BitVal::Zero; 4]).unwrap(),
+                nibble(),
+                span(),
+            )
+            .unwrap();
+        let one = builder
+            .constant(
+                ConstBits::from_bits(vec![BitVal::Zero, BitVal::Zero, BitVal::Zero, BitVal::One])
+                    .unwrap(),
+                nibble(),
+                span(),
+            )
+            .unwrap();
+        let limit = builder
+            .constant(
+                ConstBits::from_bits(vec![BitVal::Zero, BitVal::Zero, BitVal::One, BitVal::One])
+                    .unwrap(),
+                nibble(),
+                span(),
+            )
+            .unwrap();
+        let loop_read = builder
+            .add_module_value(state_value, nibble(), span())
+            .unwrap();
+        let condition = builder
+            .binary(BinaryOp::Lt, loop_read, limit, span())
+            .unwrap();
+        let increment = builder
+            .binary(BinaryOp::Add, loop_read, one, span())
+            .unwrap();
+        let exit_read = builder
+            .add_module_value(state_value, nibble(), span())
+            .unwrap();
+
+        let procedure = builder
+            .add_combinational_procedure(ProcedureKind::Combinational, span())
+            .unwrap();
+        let entry = builder.add_block(procedure, span()).unwrap();
+        let header = builder.add_block(procedure, span()).unwrap();
+        let body = builder.add_block(procedure, span()).unwrap();
+        let latch = builder.add_block(procedure, span()).unwrap();
+        let exit = builder.add_block(procedure, span()).unwrap();
+        builder
+            .assign(
+                entry,
+                AssignmentMode::Blocking,
+                TransientTarget::signal(state),
+                zero,
+                span(),
+            )
+            .unwrap();
+        builder.terminate_jump(entry, header, span()).unwrap();
+        builder
+            .terminate_branch(header, condition, body, exit, span())
+            .unwrap();
+        builder.terminate_jump(body, latch, span()).unwrap();
+        builder
+            .assign(
+                latch,
+                AssignmentMode::Blocking,
+                TransientTarget::signal(state),
+                increment,
+                span(),
+            )
+            .unwrap();
+        builder.terminate_jump(latch, header, span()).unwrap();
+        builder
+            .assign(
+                exit,
+                AssignmentMode::Blocking,
+                TransientTarget::signal(output),
+                exit_read,
+                span(),
+            )
+            .unwrap();
+        builder.terminate_return(exit, span()).unwrap();
+        builder
+            .add_loop_region(LoopRegion {
+                procedure,
+                header,
+                body,
+                latch,
+                exit,
+                form: LoopForm::PreTest,
+                parent: None,
+                source: span(),
+            })
+            .unwrap();
+
+        let promoted = builder
+            .seal()
+            .unwrap()
+            .promote_loop_signal_state(&word)
+            .unwrap();
+        assert_eq!(promoted.locals().len(), 1);
+        assert!(
+            promoted
+                .block_effects(latch)
+                .unwrap()
+                .any(|effect| matches!(effect.target, TransientTarget::Local { .. }))
+        );
+        assert!(promoted.block_effects(exit).unwrap().any(|effect| matches!(
+            effect.target,
+            TransientTarget::Signal { signal, .. } if signal == state
+        )));
+        promoted
+            .prove_and_eliminate_loops(&word, LoopAnalysisLimits::default())
+            .unwrap();
     }
 
     #[test]
@@ -2604,8 +2855,8 @@ mod tests {
         let procedures = graph.materialize_acyclic(&mut word).unwrap();
         assert_eq!(
             procedures.blocks().len(),
-            15,
-            "process-local decisions remain source ordered for joint normalization"
+            13,
+            "exact-infeasible control and dead local updates are not published"
         );
     }
 

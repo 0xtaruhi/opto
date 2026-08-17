@@ -1530,6 +1530,21 @@ void opto_slang_collect_modules(
         std::move(driver), std::move(compilation), std::move(jobs));
 }
 
+void set_lowering_failure_source(
+    OptoSlangLoweringFailure& failure,
+    const OptoSlangSnapshot& design,
+    SourceLocation location) {
+    if (!location.valid() || !design.source_manager) {
+        return;
+    }
+    location = design.source_manager->getFullyOriginalLoc(location);
+    failure.file = design.source_manager->getFullPath(location.buffer()).string();
+    failure.line = static_cast<uint32_t>(std::min<size_t>(
+        design.source_manager->getLineNumber(location), UINT32_MAX));
+    failure.column = static_cast<uint32_t>(std::min<size_t>(
+        design.source_manager->getColumnNumber(location), UINT32_MAX));
+}
+
 OptoSlangStatus opto_slang_materialize_module(OptoSlangSnapshot& design, size_t module_index) {
     if (!design.compilation_state || module_index >= design.modules.size()) {
         return OPTO_SLANG_ERROR;
@@ -1542,7 +1557,7 @@ OptoSlangStatus opto_slang_materialize_module(OptoSlangSnapshot& design, size_t 
                 ++target.materialize_users;
                 return OPTO_SLANG_OK;
             }
-            if (!target.materialize_error.empty()) {
+            if (target.materialize_failure) {
                 return OPTO_SLANG_ERROR;
             }
             // Slang supports parallel visitation of a frozen AST only when the
@@ -1554,18 +1569,66 @@ OptoSlangStatus opto_slang_materialize_module(OptoSlangSnapshot& design, size_t 
             target.payload = lower_module_job(design, job);
             target.materialize_users = 1;
             return OPTO_SLANG_OK;
+        } catch (const LoweringFailure& error) {
+            try {
+                OptoSlangLoweringFailure failure;
+                failure.category = error.category;
+                failure.code = error.code;
+                failure.message = error.what();
+                set_lowering_failure_source(failure, design, error.location);
+                target.materialize_failure = std::move(failure);
+            } catch (...) {
+                target.materialize_failure.reset();
+            }
+            return OPTO_SLANG_ERROR;
+        } catch (const std::bad_alloc& error) {
+            try {
+                target.materialize_failure = OptoSlangLoweringFailure{
+                    OPTO_SLANG_LOWERING_CAPACITY, 1, error.what()};
+                set_lowering_failure_source(
+                    *target.materialize_failure,
+                    design,
+                    design.compilation_state->jobs[module_index].body->getDefinition().location);
+            } catch (...) {
+                target.materialize_failure.reset();
+            }
+            return OPTO_SLANG_ERROR;
+        } catch (const std::logic_error& error) {
+            try {
+                target.materialize_failure = OptoSlangLoweringFailure{
+                    OPTO_SLANG_LOWERING_INVARIANT, 1, error.what()};
+                set_lowering_failure_source(
+                    *target.materialize_failure,
+                    design,
+                    design.compilation_state->jobs[module_index].body->getDefinition().location);
+            } catch (...) {
+                target.materialize_failure.reset();
+            }
+            return OPTO_SLANG_ERROR;
         } catch (const std::exception& error) {
             try {
-                target.materialize_error = error.what();
+                target.materialize_failure = OptoSlangLoweringFailure{
+                    OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE, 1, error.what()};
+                set_lowering_failure_source(
+                    *target.materialize_failure,
+                    design,
+                    design.compilation_state->jobs[module_index].body->getDefinition().location);
             } catch (...) {
-                target.materialize_error.clear();
+                target.materialize_failure.reset();
             }
             return OPTO_SLANG_ERROR;
         } catch (...) {
             try {
-                target.materialize_error = "unknown slang module materialization failure";
+                target.materialize_failure = OptoSlangLoweringFailure{
+                    OPTO_SLANG_LOWERING_NATIVE,
+                    1,
+                    "unknown slang module materialization failure"};
+                set_lowering_failure_source(
+                    *target.materialize_failure,
+                    design,
+                    design.compilation_state->jobs[module_index].body->getDefinition().location);
             } catch (...) {
-                target.materialize_error.clear();
+                target.materialize_failure.reset();
             }
             return OPTO_SLANG_ERROR;
         }

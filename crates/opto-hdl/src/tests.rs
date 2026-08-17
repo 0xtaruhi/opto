@@ -382,12 +382,44 @@ fn verilog_frontend_flattens_async_reset_array_state() {
         )
         .count();
     assert_eq!(
-        memory_effects, 6,
-        "joint normalization removes the final value-unreachable reset clone"
+        memory_effects, 5,
+        "exact-local specialization removes the unreachable final reset clone"
     );
     assert!(!update.modules[0].procedures().effects().iter().any(
         |effect| matches!(effect.target, ProcTarget::Signal { signal, .. } if signal == index)
     ));
+}
+
+#[test]
+fn verilog_frontend_publishes_only_reachable_loop_memory_reads() {
+    let sources = [
+        (
+            "clocked-memory-shift.sv",
+            "module top(input logic clk, input logic [5:0] din, output logic [5:0] dout); logic [5:0] queue [0:3]; integer i; always_ff @(posedge clk) begin queue[0] <= din; for (i = 1; i < 4; i++) queue[i] <= queue[i-1]; end assign dout = queue[3]; endmodule\n",
+            4,
+        ),
+        (
+            "clocked-byte-enable.sv",
+            "module top(input logic clk, we, input logic [31:0] din, input logic [3:0] be, input logic [3:0] address, output logic [31:0] dout); logic [31:0] memory [0:15]; integer i; always_ff @(posedge clk) begin dout <= we ? '0 : memory[address]; if (we) for (i = 0; i < 4; i++) memory[address][i*8 +: 8] <= be[i] ? din[i*8 +: 8] : memory[address][i*8 +: 8]; end endmodule\n",
+            5,
+        ),
+    ];
+
+    for (name, text, expected_reads) in sources {
+        let source = TestSource::new(name, text);
+        let update = Frontend::read_verilog(
+            std::slice::from_ref(&source.path),
+            &FrontendOptions::default(),
+            &opto_runtime::ExecutionContext::default(),
+        )
+        .unwrap();
+        let rtl = &update.modules[0];
+        assert_eq!(
+            rtl.word().memory_read_ports().len(),
+            expected_reads,
+            "{name}: dead pre-specialization reads must not become physical ports"
+        );
+    }
 }
 
 #[test]
@@ -1513,8 +1545,8 @@ fn verilog_frontend_proves_and_eliminates_cyclic_constant_repeat() {
                 ProcTarget::Signal { signal, .. } if signal == y
             ))
             .count(),
-        5,
-        "the acyclic graph retains one unreachable-by-value body clone for joint normalization"
+        2,
+        "loop-carried output state is copied in once and back once after local expansion"
     );
     assert!(rtl.word().signals().iter().all(|signal| {
         signal.name.is_none_or(|name| {

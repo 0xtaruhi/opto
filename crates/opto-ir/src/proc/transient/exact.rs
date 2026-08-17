@@ -99,7 +99,6 @@ impl ExactValue {
         self.width
     }
 
-    #[cfg(test)]
     pub(super) fn to_constant(&self) -> Option<ConstBits> {
         ConstBits::from_bits(
             self.bits()

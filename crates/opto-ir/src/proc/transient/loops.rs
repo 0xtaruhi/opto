@@ -8,8 +8,8 @@ use super::{
     LoopRegion, ProcExprKind, TransientProcModule, TransientTarget, TransientTargetSelect,
     TransientTerminatorKind,
 };
-use crate::proc::{BlockId, LoopRegionId, ProcError};
-use crate::word::{SourceSpan, WordModule};
+use crate::proc::{BlockId, LoopRegionId, ProcError, ProcExprId};
+use crate::word::{BitRange, SourceSpan, WordModule};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Deterministic work limits for boundedness proof and structural expansion.
@@ -405,62 +405,69 @@ impl<'a> LoopBoundednessAnalysis<'a> {
                 "unknown transient block {block:?} during loop proof"
             ))
         })? {
-            let TransientTarget::Local { local, select } = effect.target else {
-                continue;
-            };
-            if !relevant_locals.get(local.index()).copied().unwrap_or(false) {
-                continue;
+            Self::apply_effect(effect, state, relevant_locals, evaluator)?;
+        }
+        Ok(())
+    }
+
+    fn apply_effect(
+        effect: &super::TransientEffect,
+        state: &mut ExactState,
+        relevant_locals: &[bool],
+        evaluator: &ExactEvaluator<'_>,
+    ) -> Result<(), ProcError> {
+        let TransientTarget::Local { local, select } = effect.target else {
+            return Ok(());
+        };
+        if !relevant_locals.get(local.index()).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        if effect.mode != crate::proc::AssignmentMode::Blocking {
+            return Err(ProcError::new(
+                "exact loop proof does not model nonblocking automatic-local assignments",
+            ));
+        }
+        let value = evaluator.evaluate(effect.value, state);
+        let dynamic_offset = match select {
+            TransientTargetSelect::Dynamic { offset, .. } => evaluator
+                .evaluate(offset, state)
+                .and_then(|value| value.unsigned_usize()),
+            TransientTargetSelect::Whole | TransientTargetSelect::Static(_) => None,
+        };
+        let slot = local_slot(state, local)
+            .ok_or_else(|| ProcError::new("loop effect targets an unknown local"))?;
+        match (select, value) {
+            (TransientTargetSelect::Whole, value) => *slot = value,
+            (TransientTargetSelect::Static(range), Some(value)) => {
+                let mut base = slot.clone().ok_or_else(|| {
+                    ProcError::new("partial local update requires an exact incoming local value")
+                })?;
+                base.assign_slice(
+                    range.msb.min(range.lsb) as usize,
+                    &value,
+                    range.msb < range.lsb,
+                )
+                .ok_or_else(|| ProcError::new("static local update is out of bounds"))?;
+                *slot = Some(base);
             }
-            if effect.mode != crate::proc::AssignmentMode::Blocking {
-                return Err(ProcError::new(
-                    "exact loop proof does not model nonblocking automatic-local assignments",
-                ));
-            }
-            let value = evaluator.evaluate(effect.value, state);
-            let dynamic_offset = match select {
-                TransientTargetSelect::Dynamic { offset, .. } => evaluator
-                    .evaluate(offset, state)
-                    .and_then(|value| value.unsigned_usize()),
-                TransientTargetSelect::Whole | TransientTargetSelect::Static(_) => None,
-            };
-            let slot = local_slot(state, local)
-                .ok_or_else(|| ProcError::new("loop effect targets an unknown local"))?;
-            match (select, value) {
-                (TransientTargetSelect::Whole, value) => *slot = value,
-                (TransientTargetSelect::Static(range), Some(value)) => {
-                    let mut base = slot.clone().ok_or_else(|| {
-                        ProcError::new(
-                            "partial local update requires an exact incoming local value",
-                        )
-                    })?;
-                    base.assign_slice(
-                        range.msb.min(range.lsb) as usize,
-                        &value,
-                        range.msb < range.lsb,
-                    )
-                    .ok_or_else(|| ProcError::new("static local update is out of bounds"))?;
-                    *slot = Some(base);
+            (TransientTargetSelect::Dynamic { offset: _, width }, Some(value)) => {
+                if value.width() != width.get() as usize {
+                    return Err(ProcError::new(
+                        "dynamic local update width does not match its value",
+                    ));
                 }
-                (TransientTargetSelect::Dynamic { offset: _, width }, Some(value)) => {
-                    if value.width() != width.get() as usize {
-                        return Err(ProcError::new(
-                            "dynamic local update width does not match its value",
-                        ));
-                    }
-                    if let (Some(mut base), Some(offset)) = (slot.clone(), dynamic_offset) {
-                        if base.assign_slice(offset, &value, false).is_some() {
-                            *slot = Some(base);
-                        } else {
-                            *slot = None;
-                        }
+                if let (Some(mut base), Some(offset)) = (slot.clone(), dynamic_offset) {
+                    if base.assign_slice(offset, &value, false).is_some() {
+                        *slot = Some(base);
                     } else {
                         *slot = None;
                     }
+                } else {
+                    *slot = None;
                 }
-                (
-                    TransientTargetSelect::Static(_) | TransientTargetSelect::Dynamic { .. },
-                    None,
-                ) => *slot = None,
+            }
+            (TransientTargetSelect::Static(_) | TransientTargetSelect::Dynamic { .. }, None) => {
+                *slot = None;
             }
         }
         Ok(())
@@ -635,8 +642,315 @@ impl TransientProcModule {
             };
             self = self.eliminate_proved_loop(region, max_header_visits, limits)?;
         }
+        self.specialize_exact_locals(word, limits)?;
         self.validate()?;
         Ok(self)
+    }
+
+    fn specialize_exact_locals(
+        &mut self,
+        word: &WordModule,
+        limits: LoopAnalysisLimits,
+    ) -> Result<(), ProcError> {
+        let mut expressions = self.expressions.to_vec();
+        let mut effects = self.effects.to_vec();
+        let mut blocks = self.blocks.to_vec();
+        let mut feasible_blocks = BTreeSet::new();
+        {
+            let evaluator = ExactEvaluator::new(self, word);
+            let analysis = LoopBoundednessAnalysis::new(self, word, limits);
+            let relevant = vec![true; self.locals.len()];
+            for procedure in &self.procedures {
+                let mut pending = vec![(procedure.entry, unknown_state(self.locals.len()))];
+                let mut visited = BTreeSet::new();
+                let mut entries = BTreeMap::<usize, BTreeSet<ExactState>>::new();
+                let mut exhausted = false;
+                while let Some((block, mut state)) = pending.pop() {
+                    if !visited.insert((block.index(), state.clone())) {
+                        continue;
+                    }
+                    if visited.len() > limits.max_analysis_states
+                        || visited.len() > limits.max_analysis_steps
+                    {
+                        exhausted = true;
+                        break;
+                    }
+                    entries
+                        .entry(block.index())
+                        .or_default()
+                        .insert(state.clone());
+                    if analysis
+                        .apply_effects(block, &mut state, &relevant, &evaluator)
+                        .is_err()
+                    {
+                        exhausted = true;
+                        break;
+                    }
+                    for successor in analysis.successors(block, &state, &evaluator)? {
+                        pending.push((successor, state.clone()));
+                    }
+                }
+                if exhausted {
+                    feasible_blocks.extend(procedure.blocks.iter().map(|block| block.index()));
+                    continue;
+                }
+                feasible_blocks.extend(entries.keys().copied());
+                for (block_index, incoming) in entries {
+                    let mut states = incoming.into_iter().collect::<Vec<_>>();
+                    for effect_index in self.blocks[block_index].effects.indices() {
+                        let original = &self.effects[effect_index];
+                        effects[effect_index].value = self.specialize_expression(
+                            original.value,
+                            &states,
+                            &evaluator,
+                            &mut expressions,
+                        )?;
+                        Self::specialize_target(
+                            self,
+                            &mut effects[effect_index].target,
+                            &states,
+                            &evaluator,
+                            &mut expressions,
+                        )?;
+                        for state in &mut states {
+                            LoopBoundednessAnalysis::apply_effect(
+                                original, state, &relevant, &evaluator,
+                            )?;
+                        }
+                    }
+                    Self::specialize_terminator(
+                        self,
+                        &mut blocks[block_index].terminator.kind,
+                        &states,
+                        &evaluator,
+                        &mut expressions,
+                    )?;
+                }
+            }
+        }
+        self.expressions = expressions.into_boxed_slice();
+        self.effects = effects.into_boxed_slice();
+        self.blocks = blocks.into_boxed_slice();
+        self.eliminate_dead_local_effects(&feasible_blocks)?;
+        Ok(())
+    }
+
+    fn eliminate_dead_local_effects(
+        &mut self,
+        feasible_blocks: &BTreeSet<usize>,
+    ) -> Result<(), ProcError> {
+        let mut pending = Vec::new();
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            if !feasible_blocks.contains(&block_index) {
+                continue;
+            }
+            for effect_index in block.effects.indices() {
+                let effect = &self.effects[effect_index];
+                match effect.target {
+                    TransientTarget::Memory {
+                        address, select, ..
+                    } => {
+                        pending.push(effect.value);
+                        pending.push(address);
+                        if let TransientTargetSelect::Dynamic { offset, .. } = select {
+                            pending.push(offset);
+                        }
+                    }
+                    TransientTarget::Signal { select, .. } => {
+                        pending.push(effect.value);
+                        if let TransientTargetSelect::Dynamic { offset, .. } = select {
+                            pending.push(offset);
+                        }
+                    }
+                    TransientTarget::Local { .. } => {}
+                }
+            }
+            block
+                .terminator
+                .kind
+                .for_each_expression(|expression| pending.push(expression));
+        }
+        let mut visited = BTreeSet::new();
+        let mut read = BTreeSet::new();
+        loop {
+            while let Some(expression) = pending.pop() {
+                if !visited.insert(expression.index()) {
+                    continue;
+                }
+                let stored = &self.expressions[expression.index()];
+                if let ProcExprKind::LocalRead(local) = stored.kind {
+                    read.insert(local);
+                }
+                stored
+                    .kind
+                    .for_each_operand(|operand| pending.push(operand));
+            }
+            for effect in &self.effects {
+                let TransientTarget::Local { local, select } = effect.target else {
+                    continue;
+                };
+                if !read.contains(&local) {
+                    continue;
+                }
+                if !visited.contains(&effect.value.index()) {
+                    pending.push(effect.value);
+                }
+                if let TransientTargetSelect::Dynamic { offset, .. } = select
+                    && !visited.contains(&offset.index())
+                {
+                    pending.push(offset);
+                }
+            }
+            if pending.is_empty() {
+                break;
+            }
+        }
+
+        let old = self.effects.to_vec();
+        let mut effects = Vec::new();
+        for block in &mut self.blocks {
+            let start = effects.len();
+            effects.extend(block.effects.indices().filter_map(|index| {
+                let effect = &old[index];
+                let dead = matches!(
+                    effect.target,
+                    TransientTarget::Local { local, .. } if !read.contains(&local)
+                );
+                (!dead).then(|| effect.clone())
+            }));
+            block.effects = super::ArenaRange::new(
+                start,
+                effects.len() - start,
+                "specialized transient effect",
+            )?;
+        }
+        self.effects = effects.into_boxed_slice();
+        Ok(())
+    }
+
+    fn specialize_expression(
+        &self,
+        root: ProcExprId,
+        states: &[ExactState],
+        evaluator: &ExactEvaluator<'_>,
+        expressions: &mut Vec<super::ProcExpr>,
+    ) -> Result<ProcExprId, ProcError> {
+        let original = &self.expressions[root.index()];
+        let exact = states
+            .first()
+            .and_then(|state| evaluator.evaluate(root, state))
+            .filter(|first| {
+                states
+                    .iter()
+                    .skip(1)
+                    .all(|state| evaluator.evaluate(root, state).as_ref() == Some(first))
+            });
+        if let Some(exact) = exact {
+            let constant = ProcExprId::from_index(expressions.len())?;
+            expressions.push(super::ProcExpr {
+                ty: original.ty,
+                kind: ProcExprKind::Constant(exact.to_constant().ok_or_else(|| {
+                    ProcError::new("exact local specialization produced an invalid constant")
+                })?),
+                source: original.source.clone(),
+            });
+            return Ok(constant);
+        }
+
+        let mut kind = original.kind.clone();
+        let mut changed = false;
+        let mut error = None;
+        kind.for_each_operand_mut(|operand| {
+            if error.is_some() {
+                return;
+            }
+            match self.specialize_expression(*operand, states, evaluator, expressions) {
+                Ok(replacement) => {
+                    changed |= replacement != *operand;
+                    *operand = replacement;
+                }
+                Err(found) => error = Some(found),
+            }
+        });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        if !changed {
+            return Ok(root);
+        }
+        let replacement = ProcExprId::from_index(expressions.len())?;
+        expressions.push(super::ProcExpr {
+            ty: original.ty,
+            kind,
+            source: original.source.clone(),
+        });
+        Ok(replacement)
+    }
+
+    fn specialize_target(
+        graph: &Self,
+        target: &mut TransientTarget,
+        states: &[ExactState],
+        evaluator: &ExactEvaluator<'_>,
+        expressions: &mut Vec<super::ProcExpr>,
+    ) -> Result<(), ProcError> {
+        let select = match target {
+            TransientTarget::Local { select, .. } | TransientTarget::Signal { select, .. } => {
+                select
+            }
+            TransientTarget::Memory {
+                address, select, ..
+            } => {
+                *address = graph.specialize_expression(*address, states, evaluator, expressions)?;
+                select
+            }
+        };
+        if let TransientTargetSelect::Dynamic { offset, width } = *select {
+            let exact = states
+                .first()
+                .and_then(|state| evaluator.evaluate(offset, state))
+                .filter(|first| {
+                    states
+                        .iter()
+                        .skip(1)
+                        .all(|state| evaluator.evaluate(offset, state).as_ref() == Some(first))
+                })
+                .and_then(|value| value.unsigned_usize())
+                .and_then(|offset| u32::try_from(offset).ok());
+            if let Some(lsb) = exact
+                && let Some(msb) = lsb.checked_add(width.get() - 1)
+            {
+                *select = TransientTargetSelect::Static(BitRange { msb, lsb });
+            } else if let TransientTargetSelect::Dynamic { offset, .. } = select {
+                *offset = graph.specialize_expression(*offset, states, evaluator, expressions)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn specialize_terminator(
+        graph: &Self,
+        terminator: &mut TransientTerminatorKind,
+        states: &[ExactState],
+        evaluator: &ExactEvaluator<'_>,
+        expressions: &mut Vec<super::ProcExpr>,
+    ) -> Result<(), ProcError> {
+        match terminator {
+            TransientTerminatorKind::Return | TransientTerminatorKind::Jump(_) => {}
+            TransientTerminatorKind::Branch { condition, .. } => {
+                *condition =
+                    graph.specialize_expression(*condition, states, evaluator, expressions)?;
+            }
+            TransientTerminatorKind::Switch { selector, arms, .. } => {
+                *selector =
+                    graph.specialize_expression(*selector, states, evaluator, expressions)?;
+                for arm in arms {
+                    arm.pattern =
+                        graph.specialize_expression(arm.pattern, states, evaluator, expressions)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn eliminate_proved_loop(
@@ -813,7 +1127,10 @@ impl TransientProcModule {
         Ok(self)
     }
 
-    fn natural_loop_blocks(&self, region: &LoopRegion) -> Result<BTreeSet<usize>, ProcError> {
+    pub(super) fn natural_loop_blocks(
+        &self,
+        region: &LoopRegion,
+    ) -> Result<BTreeSet<usize>, ProcError> {
         let procedure = &self.procedures[region.procedure.index()];
         let mut predecessors = procedure
             .blocks

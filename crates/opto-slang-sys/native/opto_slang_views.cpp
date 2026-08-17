@@ -112,18 +112,31 @@ OptoSlangStatus opto_slang_module_materialize(OptoSlangSnapshot* design, size_t 
     return opto_slang_materialize_module(*design, module_index);
 }
 
-const char*
-opto_slang_module_materialize_error(const OptoSlangSnapshot* design, size_t module_index) {
-    if (!design || module_index >= design->modules.size()) {
-        return "invalid slang module index";
+OptoSlangStatus opto_slang_module_materialize_failure(
+    const OptoSlangSnapshot* design,
+    size_t module_index,
+    OptoSlangLoweringFailureView* view) {
+    if (!design || !view || module_index >= design->modules.size()) {
+        return OPTO_SLANG_ERROR;
     }
     try {
         auto& module = *design->modules[module_index];
         std::lock_guard lock(module.materialize_mutex);
-        return module.materialize_error.empty() ? "slang module materialization failed"
-                                                : module.materialize_error.c_str();
+        if (!module.materialize_failure) {
+            return OPTO_SLANG_ERROR;
+        }
+        const auto& failure = *module.materialize_failure;
+        view->category = failure.category;
+        view->code = failure.code;
+        view->message = failure.message.c_str();
+        view->source = {
+            failure.file.empty() ? nullptr : failure.file.c_str(),
+            failure.line,
+            failure.column,
+        };
+        return OPTO_SLANG_OK;
     } catch (...) {
-        return "failed to read slang module materialization error";
+        return OPTO_SLANG_ERROR;
     }
 }
 

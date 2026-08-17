@@ -9,7 +9,10 @@
 
 use crate::bridge::{read, read_invariant};
 use crate::ffi;
-use crate::{SlangDiagnostic, SlangError, SlangPortDirection};
+use crate::{
+    SlangDiagnostic, SlangDiagnosticLocation, SlangError, SlangLoweringFailure,
+    SlangLoweringFailureCategory, SlangPortDirection,
+};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -196,14 +199,48 @@ impl<'a> SlangModule<'a> {
         let status =
             unsafe { ffi::opto_slang_module_materialize(self.design.as_mut_ptr(), self.index) };
         if status != ffi::OK {
-            // SAFETY: a failed materialization retains an error string in this live snapshot.
-            let error = unsafe {
-                required_str(
-                    ffi::opto_slang_module_materialize_error(self.design.as_ptr(), self.index),
-                    "module materialization error",
-                )
+            // SAFETY: a failed materialization retains immutable failure data in this snapshot.
+            let failure = unsafe {
+                read("module materialization failure", |view| {
+                    ffi::opto_slang_module_materialize_failure(
+                        self.design.as_ptr(),
+                        self.index,
+                        view,
+                    )
+                })
             }?;
-            return Err(SlangError::CompileFailed(error.to_string()));
+            let category = match failure.category {
+                ffi::LOWERING_UNSUPPORTED_PROFILE => {
+                    SlangLoweringFailureCategory::UnsupportedProfile
+                }
+                ffi::LOWERING_INVALID_PROJECTION => SlangLoweringFailureCategory::InvalidProjection,
+                ffi::LOWERING_CAPACITY => SlangLoweringFailureCategory::Capacity,
+                ffi::LOWERING_INVARIANT => SlangLoweringFailureCategory::Invariant,
+                ffi::LOWERING_NATIVE => SlangLoweringFailureCategory::Native,
+                raw => {
+                    return Err(SlangError::BridgeInvariant(format!(
+                        "native slang bridge returned unknown lowering failure category {raw}"
+                    )));
+                }
+            };
+            // SAFETY: failure strings remain owned by the live snapshot.
+            let message =
+                unsafe { required_str(failure.message, "module materialization failure message") }?;
+            // SAFETY: the optional source path has the same snapshot lifetime as the message.
+            let source_path =
+                unsafe { optional_str(failure.source.file, "lowering failure source path") }?;
+            let location = source_path.map(|path| SlangDiagnosticLocation {
+                path: path.into(),
+                line: failure.source.line,
+                column: failure.source.column,
+                length: 1,
+            });
+            return Err(SlangError::LoweringFailed(SlangLoweringFailure {
+                category,
+                code: failure.code,
+                message: message.to_string(),
+                location,
+            }));
         }
         // SAFETY: successful materialization acquired a lease and initializes the view on success.
         let view = unsafe {

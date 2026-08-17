@@ -164,8 +164,9 @@ and step expressions remain ordered effects, and `continue` reaches the common
 step path. A conditionless `for` or `forever` must still have a provably finite
 exit.
 
-Classic module-scope Verilog induction variables are copied into fresh
-activation locals after a known initializer. They are copied back only when
+Classic module-scope Verilog induction variables are promoted by the Rust CFG
+pass into fresh activation locals after a unique reaching initializer. They are
+copied back only when
 later procedural code, another process or continuous expression, an instance
 connection, or an output/inout port observes the final value. Nested loops bind
 outer induction locals explicitly, so inner updates participate in the outer

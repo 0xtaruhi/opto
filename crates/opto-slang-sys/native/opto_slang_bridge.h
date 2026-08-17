@@ -33,6 +33,14 @@ typedef enum OptoSlangDiagnosticSeverity {
     OPTO_SLANG_DIAGNOSTIC_ERROR = 2
 } OptoSlangDiagnosticSeverity;
 
+typedef enum OptoSlangLoweringFailureCategory {
+    OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE = 0,
+    OPTO_SLANG_LOWERING_INVALID_PROJECTION = 1,
+    OPTO_SLANG_LOWERING_CAPACITY = 2,
+    OPTO_SLANG_LOWERING_INVARIANT = 3,
+    OPTO_SLANG_LOWERING_NATIVE = 4
+} OptoSlangLoweringFailureCategory;
+
 typedef enum OptoSlangPortDirection {
     OPTO_SLANG_PORT_INPUT = 0,
     OPTO_SLANG_PORT_OUTPUT = 1,
@@ -133,6 +141,13 @@ typedef struct OptoSlangSourceSpanView {
     uint32_t line;
     uint32_t column;
 } OptoSlangSourceSpanView;
+
+typedef struct OptoSlangLoweringFailureView {
+    OptoSlangLoweringFailureCategory category;
+    uint16_t code;
+    const char *message;
+    OptoSlangSourceSpanView source;
+} OptoSlangLoweringFailureView;
 
 typedef struct OptoSlangEdgeTargetView {
     uint32_t block;
@@ -387,8 +402,10 @@ OptoSlangStatus opto_slang_module_view(
 OptoSlangStatus opto_slang_module_info(
     const OptoSlangSnapshot *design, size_t module_index, OptoSlangModuleInfoView *view);
 OptoSlangStatus opto_slang_module_materialize(OptoSlangSnapshot *design, size_t module_index);
-const char *opto_slang_module_materialize_error(
-    const OptoSlangSnapshot *design, size_t module_index);
+OptoSlangStatus opto_slang_module_materialize_failure(
+    const OptoSlangSnapshot *design,
+    size_t module_index,
+    OptoSlangLoweringFailureView *view);
 void opto_slang_module_release(OptoSlangSnapshot *design, size_t module_index);
 
 OptoSlangStatus opto_slang_module_attribute_view(
