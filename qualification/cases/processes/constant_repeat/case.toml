@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-constant-repeat"
+kind = "regression"
+covers = ["A constant repeat loop expands in source order over the latest blocking value."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 3
+min_cells = 1

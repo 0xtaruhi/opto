@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "frontend-dynamic-continuous-lvalue"
+kind = "regression"
+covers = ["A runtime-indexed continuous-assignment net lvalue is classified as a language-legality rejection, not an Opto lowering gap."]
+category = "negative"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "elaborate"
+expect = "fail"
+expect_log = ["constant expression"]

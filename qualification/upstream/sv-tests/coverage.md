@@ -49,9 +49,11 @@ static ASIC frontend contract.
 The remaining 890 files stay in the license and inventory audit, but are not
 silently treated as synthesis failures or successes. They cover simulation,
 verification and tool-language behavior, upstream negative tests, or constructs
-outside Opto's synthesizable ASIC contract. In particular, declaration
-initialization is executable time-zero behavior and is not admitted merely
-because some FPGA flows synthesize it.
+outside Opto's synthesizable ASIC contract. In particular, static-lifetime
+declaration initialization is executable time-zero behavior and is not
+admitted merely because some FPGA flows synthesize it. Per-activation
+initialization of an automatic procedural variable is a distinct procedural
+assignment semantic.
 
 When changing the pinned revision or scope, review source semantics and license
 metadata, update `scope.toml`, run the complete qualification, and then update

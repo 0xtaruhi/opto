@@ -9,6 +9,7 @@ use opto_ir::word;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MappedCellSource {
     Instance(word::InstId),
+    StructuralValue(word::ValueId),
     Value {
         value: word::ValueId,
         owner: crate::RegionAnchorId,

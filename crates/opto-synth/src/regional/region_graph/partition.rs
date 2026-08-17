@@ -581,34 +581,46 @@ fn synthesis_root_values(module: &word::WordModule) -> Vec<word::ValueId> {
         .map(|port| port.signal)
         .chain(module.preserved_signals())
         .collect::<BTreeSet<_>>();
-    let mut roots = module
-        .connects()
-        .iter()
-        .filter(|connect| outputs.contains(&connect.target.signal))
-        .flat_map(|connect| {
-            std::iter::once(connect.value)
-                .chain(connect.target.dynamic.map(|dynamic| dynamic.offset))
-        })
-        .chain(
-            module
-                .instances()
-                .iter()
-                .flat_map(|instance| &instance.connections)
-                .map(|connection| connection.value),
-        )
-        .chain(
-            module
-                .memory_read_ports()
-                .iter()
-                .flat_map(memory_read_inputs),
-        )
-        .chain(
-            module
-                .memory_write_ports()
-                .iter()
-                .flat_map(memory_write_inputs),
-        )
-        .collect::<Vec<_>>();
+    let mut roots = Vec::new();
+    for connect in module.connects() {
+        let tri_state = module
+            .signal(connect.target.signal)
+            .is_some_and(|signal| signal.resolution == word::SignalResolution::TriState);
+        if tri_state
+            && let Some(operation) =
+                module
+                    .value(connect.value)
+                    .and_then(|value| match value.kind {
+                        word::ValueKind::Operation(operation) => module.operation(operation),
+                        word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+                    })
+            && let word::OpKind::TriState { data, enable } = operation.kind
+        {
+            roots.extend([data, enable.value]);
+        } else if outputs.contains(&connect.target.signal) {
+            roots.push(connect.value);
+        }
+        roots.extend(connect.target.dynamic.map(|dynamic| dynamic.offset));
+    }
+    roots.extend(
+        module
+            .instances()
+            .iter()
+            .flat_map(|instance| &instance.connections)
+            .map(|connection| connection.value)
+            .chain(
+                module
+                    .memory_read_ports()
+                    .iter()
+                    .flat_map(memory_read_inputs),
+            )
+            .chain(
+                module
+                    .memory_write_ports()
+                    .iter()
+                    .flat_map(memory_write_inputs),
+            ),
+    );
     roots.sort_unstable();
     roots.dedup();
     roots
@@ -1594,6 +1606,11 @@ fn append_operation_hash(
             append_key(*cond, keys, digest)?;
             append_key(*then_value, keys, digest)?;
             append_key(*else_value, keys, digest)?;
+        }
+        word::OpKind::TriState { data, enable } => {
+            digest.update(&[10, u8::from(enable.active_high)]);
+            append_key(*data, keys, digest)?;
+            append_key(enable.value, keys, digest)?;
         }
         word::OpKind::Concat { parts } => {
             digest.update(&[3]);

@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-shared-loop-induction"
+kind = "regression"
+covers = ["A classic module-scope loop variable used by separate procedures becomes independent activation-local proof state and does not create persistent multiple drivers."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 5
+min_cells = 1

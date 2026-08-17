@@ -23,6 +23,10 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                 then_value,
                 else_value,
             } => self.mux_bits(cond, then_value, else_value, result_ty, source),
+            word::OpKind::TriState { .. } => Err(crate::SynthError::unsupported(format!(
+                "tri-state driver in design '{}' at {source:?} requires resolved-net or physical tri-state lowering",
+                self.module.name()
+            ))),
             word::OpKind::Concat { parts } => self.concat_bits(&parts),
             word::OpKind::Extract { value, lsb, width } => {
                 self.extract_bits(value, lsb, width.get())
@@ -95,6 +99,9 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                     self.emit_mux(rewritten_cond, rewritten_then, rewritten_else, source)
                 }
             }
+            word::OpKind::TriState { .. } => Err(crate::SynthError::unsupported(
+                "tri-state driver reached ordinary scalar Boolean legalization",
+            )),
             word::OpKind::Register(register) => {
                 let bits = self.register_bits(&register, source)?;
                 let [value]: [ScalarBit; 1] = bits.try_into().map_err(|bits: Vec<_>| {

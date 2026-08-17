@@ -37,6 +37,53 @@ fn cell(
     }
 }
 
+fn tri_state_cell(name: &str, area: f64, active_high: bool) -> opto_library::TargetCell {
+    let input = |name: &str| opto_library::TargetPin {
+        name: name.to_string(),
+        direction: opto_library::TargetPinDirection::Input,
+        function: None,
+        three_state: None,
+        capacitance: None,
+        rise_capacitance: None,
+        fall_capacitance: None,
+        receiver_capacitance: None,
+        fanout_load: None,
+        next_state_type: None,
+        timing_arcs: Vec::new(),
+        clock_gate_role: None,
+    };
+    opto_library::TargetCell {
+        name: name.to_string(),
+        area: Some(area),
+        dont_use: false,
+        usage: opto_library::TargetCellUsage::default(),
+        pins: vec![
+            input("A"),
+            input("E"),
+            opto_library::TargetPin {
+                name: "Y".to_string(),
+                direction: opto_library::TargetPinDirection::Output,
+                function: Some(opto_library::BooleanFunction::parse("A").unwrap()),
+                three_state: Some(
+                    opto_library::BooleanFunction::parse(if active_high { "!E" } else { "E" })
+                        .unwrap(),
+                ),
+                capacitance: None,
+                rise_capacitance: None,
+                fall_capacitance: None,
+                receiver_capacitance: None,
+                fanout_load: None,
+                next_state_type: None,
+                timing_arcs: Vec::new(),
+                clock_gate_role: None,
+            },
+        ],
+        sequential: Vec::new(),
+        clock_gate: None,
+        memory: None,
+    }
+}
+
 fn source_provenance(module: &word::WordModule) -> SourceInstanceProvenance {
     SourceInstanceProvenance::capture(module)
 }
@@ -149,6 +196,203 @@ fn publication_rejects_an_undriven_observable_output() {
         error
             .to_string()
             .contains("output 'y[0]' has no physical driver")
+    );
+}
+
+#[test]
+fn materializes_a_tri_state_boundary_with_the_smallest_compatible_cell() {
+    let mut module = word::WordModule::new("tri_state_boundary");
+    let bit = word::WordType::bits(1).unwrap();
+    let data_port = module
+        .add_port(
+            "data",
+            word::PortDirection::Input,
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let enable_port = module
+        .add_port(
+            "enable",
+            word::PortDirection::Input,
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let pad_port = module
+        .add_port(
+            "pad",
+            word::PortDirection::Inout,
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let observed_port = module
+        .add_port(
+            "observed",
+            word::PortDirection::Output,
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let pad = module.port(pad_port).unwrap().signal;
+    module
+        .set_signal_resolution(pad, word::SignalResolution::TriState)
+        .unwrap();
+    let data = module
+        .read_signal(
+            module.port(data_port).unwrap().signal,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let enable = module
+        .read_signal(
+            module.port(enable_port).unwrap().signal,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let driver = module
+        .tri_state(
+            data,
+            word::Enable {
+                value: enable,
+                active_high: true,
+            },
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(pad),
+            driver,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let pad_read = module
+        .read_signal(pad, word::SourceSpan::default())
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(module.port(observed_port).unwrap().signal),
+            pad_read,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let options = SynthesisOptions {
+        target_cells: vec![
+            tri_state_cell("TBUF_LARGE", 2.0, true),
+            tri_state_cell("TBUF_SMALL", 1.0, true),
+            tri_state_cell("TBUFN", 0.5, false),
+        ]
+        .into(),
+    };
+    let source_instances = source_provenance(&module);
+
+    let mapped = build_test_substrate(
+        &module,
+        &options,
+        &BTreeSet::new(),
+        &crate::ReferencePortMap::new(),
+        &source_instances,
+        opto_ir::RevisionId::INITIAL,
+    )
+    .unwrap()
+    .netlist;
+
+    assert_eq!(mapped.cell_count(), 1);
+    let cell = mapped.cell_ids().next().unwrap();
+    assert_eq!(mapped.cell_type(cell), Some("TBUF_SMALL"));
+    let pad_net = mapped
+        .port_nets(opto_ir::mapped::PortId::from_index(2).unwrap())
+        .unwrap()[0];
+    let output = mapped
+        .pin_ids(cell)
+        .unwrap()
+        .into_iter()
+        .find(|&pin| {
+            let connection = mapped.connection(pin).unwrap();
+            mapped.pin_name(connection) == Some("Y")
+        })
+        .unwrap();
+    assert_eq!(
+        mapped.connection(output).unwrap().signal,
+        ConnectionSignal::Net(pad_net)
+    );
+    validate_observable_drivers(
+        &mapped,
+        &options.target_cells,
+        &crate::ReferencePortMap::new(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn rejects_a_tri_state_boundary_without_a_polarity_compatible_cell() {
+    let mut module = word::WordModule::new("tri_state_missing_cell");
+    let bit = word::WordType::bits(1).unwrap();
+    let pad_port = module
+        .add_port(
+            "pad",
+            word::PortDirection::Inout,
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let pad = module.port(pad_port).unwrap().signal;
+    module
+        .set_signal_resolution(pad, word::SignalResolution::TriState)
+        .unwrap();
+    let data = module
+        .constant(
+            opto_ir::ConstBits::from_bin_str("1").unwrap(),
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let enable = module
+        .constant(
+            opto_ir::ConstBits::from_bin_str("1").unwrap(),
+            bit,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let driver = module
+        .tri_state(
+            data,
+            word::Enable {
+                value: enable,
+                active_high: true,
+            },
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(pad),
+            driver,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let options = SynthesisOptions {
+        target_cells: vec![tri_state_cell("TBUFN", 1.0, false)].into(),
+    };
+    let source_instances = source_provenance(&module);
+
+    let error = build_test_substrate(
+        &module,
+        &options,
+        &BTreeSet::new(),
+        &crate::ReferencePortMap::new(),
+        &source_instances,
+        opto_ir::RevisionId::INITIAL,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("no compatible active-high tri-state buffer"),
+        "{error}"
     );
 }
 

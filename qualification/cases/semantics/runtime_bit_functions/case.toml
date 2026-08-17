@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "semantics-runtime-bit-functions"
+kind = "regression"
+covers = ["Runtime constant-exponent power and bit-vector counting predicates lower to bounded combinational logic."]
+category = "semantics"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 6
+min_cells = 1

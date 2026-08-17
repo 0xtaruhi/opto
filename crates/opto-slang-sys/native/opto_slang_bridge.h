@@ -36,7 +36,8 @@ typedef enum OptoSlangDiagnosticSeverity {
 typedef enum OptoSlangPortDirection {
     OPTO_SLANG_PORT_INPUT = 0,
     OPTO_SLANG_PORT_OUTPUT = 1,
-    OPTO_SLANG_PORT_INOUT = 2
+    OPTO_SLANG_PORT_INOUT = 2,
+    OPTO_SLANG_PORT_REF = 3
 } OptoSlangPortDirection;
 
 typedef enum OptoSlangNetResolution {
@@ -111,6 +112,12 @@ typedef enum OptoSlangProcedureKind {
     OPTO_SLANG_PROCEDURE_FLOP = 2,
     OPTO_SLANG_PROCEDURE_COMB_OR_LATCH = 3
 } OptoSlangProcedureKind;
+
+typedef enum OptoSlangLoopForm {
+    OPTO_SLANG_LOOP_PRE_TEST = 0,
+    OPTO_SLANG_LOOP_POST_TEST = 1,
+    OPTO_SLANG_LOOP_UNCONDITIONAL = 2
+} OptoSlangLoopForm;
 
 typedef enum OptoSlangEdge { OPTO_SLANG_EDGE_POS = 0, OPTO_SLANG_EDGE_NEG = 1 } OptoSlangEdge;
 
@@ -230,9 +237,21 @@ typedef struct OptoSlangProcedureView {
     OptoSlangProcedureKind kind;
     size_t event_count;
     size_t block_count;
+    size_t loop_region_count;
     uint32_t entry_block;
     OptoSlangSourceSpanView source;
 } OptoSlangProcedureView;
+
+typedef struct OptoSlangLoopRegionView {
+    uint32_t header;
+    uint32_t body;
+    uint32_t latch;
+    uint32_t exit;
+    OptoSlangLoopForm form;
+    int has_parent;
+    uint32_t parent;
+    OptoSlangSourceSpanView source;
+} OptoSlangLoopRegionView;
 
 typedef struct OptoSlangEventView {
     OptoSlangEdge edge;
@@ -414,6 +433,10 @@ OptoSlangStatus opto_slang_event_view(
     const OptoSlangProcedureData *procedure, size_t event_index, OptoSlangEventView *view);
 OptoSlangStatus opto_slang_block_view(
     const OptoSlangProcedureData *procedure, size_t block_index, OptoSlangBlockView *view);
+OptoSlangStatus opto_slang_loop_region_view(
+    const OptoSlangProcedureData *procedure,
+    size_t region_index,
+    OptoSlangLoopRegionView *view);
 OptoSlangStatus opto_slang_effect_view(
     const OptoSlangProcedureData *procedure,
     size_t block_index,

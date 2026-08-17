@@ -123,6 +123,8 @@ pub(super) struct CaseSpec {
     #[serde(default)]
     pub(super) sources: Vec<PathBuf>,
     #[serde(default)]
+    pub(super) equivalence_sources: Vec<PathBuf>,
+    #[serde(default)]
     pub(super) flow: Flow,
     #[serde(default)]
     pub(super) library: Option<PathBuf>,
@@ -214,6 +216,18 @@ impl Case {
     pub(super) fn sources(&self) -> Vec<PathBuf> {
         self.spec
             .sources
+            .iter()
+            .map(|path| self.relative_path(path))
+            .collect()
+    }
+
+    pub(super) fn equivalence_sources(&self) -> Vec<PathBuf> {
+        let sources = if self.spec.equivalence_sources.is_empty() {
+            &self.spec.sources
+        } else {
+            &self.spec.equivalence_sources
+        };
+        sources
             .iter()
             .map(|path| self.relative_path(path))
             .collect()

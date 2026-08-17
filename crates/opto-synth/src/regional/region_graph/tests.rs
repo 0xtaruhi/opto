@@ -57,6 +57,48 @@ fn operation(module: &WordModule, value: ValueId) -> OpId {
 }
 
 #[test]
+fn physical_tri_state_shell_is_not_owned_by_a_boolean_region() {
+    let mut module = WordModule::new("tri_state_boundary");
+    let a = input(&mut module, "a");
+    let e = input(&mut module, "e");
+    let data = module.unary(UnaryOp::BitNot, a, test_span()).unwrap();
+    let enable = module.unary(UnaryOp::LogicalNot, e, test_span()).unwrap();
+    let pad_port = module
+        .add_port(
+            "pad",
+            PortDirection::Inout,
+            WordType::bits(1).unwrap(),
+            test_span(),
+        )
+        .unwrap();
+    let pad = module.port(pad_port).unwrap().signal;
+    module
+        .set_signal_resolution(pad, opto_ir::word::SignalResolution::TriState)
+        .unwrap();
+    let driver = module
+        .tri_state(
+            data,
+            opto_ir::word::Enable {
+                value: enable,
+                active_high: true,
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(LValue::signal(pad), driver, test_span())
+        .unwrap();
+    let observed = module.read_signal(pad, test_span()).unwrap();
+    output(&mut module, "observed", observed);
+
+    let reachable = super::partition::synthesis_reachable_operations(&module).unwrap();
+
+    assert!(reachable[operation(&module, data).index()]);
+    assert!(reachable[operation(&module, enable).index()]);
+    assert!(!reachable[operation(&module, driver).index()]);
+}
+
+#[test]
 fn deterministic_split_materializes_typed_cross_region_ports() {
     let mut module = WordModule::new("chain");
     let a = input(&mut module, "a");

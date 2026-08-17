@@ -24,6 +24,8 @@ fn main() {
     println!("cargo:rerun-if-changed=native/opto_slang_lower_internal.h");
     println!("cargo:rerun-if-changed=native/opto_slang_lower_support.cpp");
     println!("cargo:rerun-if-changed=native/opto_slang_lower_expr.cpp");
+    println!("cargo:rerun-if-changed=native/opto_slang_procedure_cfg.h");
+    println!("cargo:rerun-if-changed=native/opto_slang_procedure_cfg.cpp");
     println!("cargo:rerun-if-changed=native/opto_slang_lower_process.cpp");
     println!("cargo:rerun-if-changed=native/opto_slang_lower_hierarchy.cpp");
     println!("cargo:rerun-if-changed=native/opto_slang_views.cpp");

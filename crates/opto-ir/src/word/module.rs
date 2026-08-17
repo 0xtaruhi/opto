@@ -115,6 +115,7 @@ pub struct SpeculationCheckpoint {
     type_layouts: usize,
     connects: usize,
     instances: usize,
+    named_signals: usize,
 }
 
 fn dense_id<T: Copy>(index: &[Option<T>], name: NameId) -> Option<T> {
@@ -481,6 +482,31 @@ impl WordModule {
     #[must_use]
     pub fn memory_read_ports(&self) -> &[MemoryReadPort] {
         &self.memory_read_ports
+    }
+
+    /// Retargets one memory read port to an equivalent procedural address.
+    ///
+    /// This operation is used while procedural SSA replaces activation-local
+    /// address operands. The port identity and data signal remain stable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WordError`] for an unknown port or an address whose type is
+    /// incompatible with the referenced memory.
+    pub fn set_memory_read_port_address(
+        &mut self,
+        port: MemoryReadPortId,
+        address: ValueId,
+    ) -> Result<(), WordError> {
+        let mut candidate = self
+            .memory_read_ports
+            .get(port.index())
+            .cloned()
+            .ok_or_else(|| WordError::new(format!("unknown memory read port {port:?}")))?;
+        candidate.address = address;
+        self.validate_memory_read_port(&candidate, Some(port.index()))?;
+        self.memory_read_ports[port.index()].address = address;
+        Ok(())
     }
 
     /// Returns memory write ports in stable insertion order.
@@ -969,10 +995,12 @@ impl WordModule {
             type_layouts: self.type_layouts.len(),
             connects: self.connects.len(),
             instances: self.instances.len(),
+            named_signals: self.named_signals.len(),
         }
     }
 
-    /// Discards the values and operations appended since `checkpoint`.
+    /// Discards values, operations, generated signals, and asynchronous memory
+    /// read ports appended since `checkpoint`.
     ///
     /// The rollback is atomic: it rejects changes to any other arena, then
     /// validates the prospective prefix before discarding the suffix. Existing
@@ -995,7 +1023,12 @@ impl WordModule {
         self.names
             .validate_checkpoint(checkpoint.names)
             .map_err(WordError::from)?;
-        if checkpoint.values > self.values.len() || checkpoint.operations > self.operations.len() {
+        if checkpoint.values > self.values.len()
+            || checkpoint.operations > self.operations.len()
+            || checkpoint.signals > self.signals.len()
+            || checkpoint.memory_read_ports > self.memory_read_ports.len()
+            || checkpoint.named_signals > self.named_signals.len()
+        {
             return Err(WordError::new(
                 "speculation checkpoint is ahead of the module arenas",
             ));
@@ -1003,9 +1036,7 @@ impl WordModule {
         if checkpoint.annotations != self.annotations.len()
             || checkpoint.synthesis_directives != self.synthesis_directives.len()
             || checkpoint.ports != self.ports.len()
-            || checkpoint.signals != self.signals.len()
             || checkpoint.memories != self.memories.len()
-            || checkpoint.memory_read_ports != self.memory_read_ports.len()
             || checkpoint.memory_write_ports != self.memory_write_ports.len()
             || checkpoint.type_layouts != self.type_layouts.len()
             || checkpoint.connects != self.connects.len()
@@ -1017,12 +1048,16 @@ impl WordModule {
         }
         if self.speculation_prefix_retains_suffix(checkpoint) {
             return Err(WordError::new(
-                "speculation rollback would strand a value or operation ID",
+                "speculation rollback would strand a generated object ID",
             ));
         }
 
         self.values.truncate(checkpoint.values);
         self.operations.truncate(checkpoint.operations);
+        self.memory_read_ports
+            .truncate(checkpoint.memory_read_ports);
+        self.signals.truncate(checkpoint.signals);
+        self.named_signals.truncate(checkpoint.named_signals);
         self.names
             .rollback(checkpoint.names)
             .map_err(WordError::from)?;
@@ -1033,6 +1068,7 @@ impl WordModule {
         let target_retains_suffix = |target: AnnotationTarget| match target {
             AnnotationTarget::Value(value) => value.index() >= checkpoint.values,
             AnnotationTarget::Operation(operation) => operation.index() >= checkpoint.operations,
+            AnnotationTarget::Signal(signal) => signal.index() >= checkpoint.signals,
             _ => false,
         };
         if self
@@ -1048,49 +1084,66 @@ impl WordModule {
         }
 
         let value_retains_suffix = |value: ValueId| value.index() >= checkpoint.values;
-        if self.memory_read_ports.iter().any(|port| {
-            value_retains_suffix(port.address)
-                || match port.timing {
-                    MemoryReadTiming::Asynchronous => false,
-                    MemoryReadTiming::Synchronous { clock, enable, .. } => {
-                        value_retains_suffix(clock.value)
-                            || enable.is_some_and(|enable| value_retains_suffix(enable.value))
-                    }
-                }
-        }) || self.memory_write_ports.iter().any(|port| {
-            value_retains_suffix(port.address)
-                || value_retains_suffix(port.data)
-                || value_retains_suffix(port.clock.value)
-                || port
-                    .enable
-                    .is_some_and(|enable| value_retains_suffix(enable.value))
-                || port
-                    .mask
-                    .is_some_and(|mask| value_retains_suffix(mask.value))
-        }) {
+        let signal_retains_suffix = |signal: SignalId| signal.index() >= checkpoint.signals;
+        if self.ports[..checkpoint.ports]
+            .iter()
+            .any(|port| signal_retains_suffix(port.signal))
+            || self.memory_read_ports[..checkpoint.memory_read_ports]
+                .iter()
+                .any(|port| {
+                    signal_retains_suffix(port.data)
+                        || value_retains_suffix(port.address)
+                        || match port.timing {
+                            MemoryReadTiming::Asynchronous => false,
+                            MemoryReadTiming::Synchronous { clock, enable, .. } => {
+                                value_retains_suffix(clock.value)
+                                    || enable
+                                        .is_some_and(|enable| value_retains_suffix(enable.value))
+                            }
+                        }
+                })
+            || self.memory_write_ports[..checkpoint.memory_write_ports]
+                .iter()
+                .any(|port| {
+                    value_retains_suffix(port.address)
+                        || value_retains_suffix(port.data)
+                        || value_retains_suffix(port.clock.value)
+                        || port
+                            .enable
+                            .is_some_and(|enable| value_retains_suffix(enable.value))
+                        || port
+                            .mask
+                            .is_some_and(|mask| value_retains_suffix(mask.value))
+                })
+        {
             return true;
         }
-
-        if self.values[..checkpoint.values].iter().any(|value| {
-            matches!(value.kind, ValueKind::Operation(operation) if operation.index() >= checkpoint.operations)
-        }) || self.operations[..checkpoint.operations]
+        if self.values[..checkpoint.values]
             .iter()
-            .any(|operation| {
-                if value_retains_suffix(operation.result) {
-                    return true;
-                }
-                let mut retains_suffix = false;
-                operation.kind.for_each_input(|value| {
-                    retains_suffix |= value_retains_suffix(value);
-                });
-                retains_suffix
+            .any(|value| match value.kind {
+                ValueKind::Operation(operation) => operation.index() >= checkpoint.operations,
+                ValueKind::Signal(reference) => signal_retains_suffix(reference.signal),
+                ValueKind::Constant(_) => false,
             })
+            || self.operations[..checkpoint.operations]
+                .iter()
+                .any(|operation| {
+                    if value_retains_suffix(operation.result) {
+                        return true;
+                    }
+                    let mut retains_suffix = false;
+                    operation.kind.for_each_input(|value| {
+                        retains_suffix |= value_retains_suffix(value);
+                    });
+                    retains_suffix
+                })
         {
             return true;
         }
 
-        self.connects.iter().any(|connect| {
-            value_retains_suffix(connect.value)
+        self.connects[..checkpoint.connects].iter().any(|connect| {
+            signal_retains_suffix(connect.target.signal)
+                || value_retains_suffix(connect.value)
                 || connect
                     .target
                     .dynamic

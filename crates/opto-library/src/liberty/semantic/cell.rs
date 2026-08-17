@@ -149,7 +149,12 @@ pub(super) fn parse_cell(
                 }
             }
             ("bus", super::super::syntax::StatementKind::Group { arguments, body }) => {
-                let bus = memory::parse_memory_bus(&GroupRef { arguments, body }, config, context)?;
+                let bus = memory::parse_memory_bus(
+                    &GroupRef { arguments, body },
+                    config,
+                    table_builder,
+                    context,
+                )?;
                 cell.pins.extend(bus.pins.iter().map(|name| TargetPin {
                     name: name.clone(),
                     direction: bus.direction,
@@ -162,7 +167,7 @@ pub(super) fn parse_cell(
                     fanout_load: None,
                     next_state_type: None,
                     clock_gate_role: None,
-                    timing_arcs: Vec::new(),
+                    timing_arcs: bus.timing_arcs.clone(),
                 }));
                 memory_buses.push(bus);
             }

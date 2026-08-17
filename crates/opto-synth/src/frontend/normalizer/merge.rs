@@ -58,7 +58,7 @@ impl ProcedureNormalizer<'_> {
             scheduled: self.merge_frames(
                 &inputs,
                 |state| state.scheduled,
-                inferred_reset_kind(self.procedure),
+                inferred_reset_kind(self.procedure, &self.event_controls),
                 MergeSite::Block(block),
             )?,
         })
@@ -95,7 +95,7 @@ impl ProcedureNormalizer<'_> {
             scheduled: self.merge_frames(
                 &inputs,
                 |state| state.scheduled,
-                inferred_reset_kind(self.procedure),
+                inferred_reset_kind(self.procedure, &self.event_controls),
                 MergeSite::Exit,
             )?,
         })
@@ -109,14 +109,20 @@ impl ProcedureNormalizer<'_> {
         key: TargetKey,
         site: MergeSite,
     ) -> Result<Slot, crate::SynthError> {
+        if control.requires_predicate_fallback() {
+            return self.merge_slots_plain(inputs, reset_kind, key);
+        }
         let mut results = vec![None::<SlotInput>; control.len()];
         for (node_index, node) in control.postorder() {
+            if !node.leaves.is_empty() && !node.choices.is_empty() {
+                // A certified loop expansion can join early-exit choices with
+                // its final proof-exit path. The latter bypasses every local
+                // decision and therefore lives at the trie root. Preserve the
+                // exact accumulated edge guards for this mixed node instead
+                // of inventing a source-level choice for the proof exit.
+                return self.merge_slots_plain(inputs, reset_kind, key);
+            }
             if !node.leaves.is_empty() {
-                if !node.choices.is_empty() {
-                    return Err(crate::SynthError::invariant(
-                        "procedural control-tree node mixes a terminal path with a decision",
-                    ));
-                }
                 let &first = node.leaves.first().ok_or_else(|| {
                     crate::SynthError::invariant("procedural control-tree leaf disappeared")
                 })?;
@@ -240,7 +246,7 @@ impl ProcedureNormalizer<'_> {
                 .iter()
                 .zip(&input_frames)
                 .map(|(state_input, input)| SlotInput {
-                    selection: Predicate::Always,
+                    selection: state_input.guard,
                     slot: self
                         .states
                         .get(*input, key)
@@ -303,6 +309,9 @@ impl ProcedureNormalizer<'_> {
             .all(|pair| pair[0].slot.resets == pair[1].slot.resets)
         {
             if reset_kind != Some(word::ResetKind::Sync) {
+                if let Some(factored) = self.factor_common_async_resets(inputs)? {
+                    return self.merge_slots_plain(&factored, reset_kind, key);
+                }
                 let name = self
                     .module
                     .signal(key.signal)
@@ -414,6 +423,53 @@ impl ProcedureNormalizer<'_> {
             resets: inputs[0].slot.resets.clone(),
             source: self.procedure.source.clone(),
         })
+    }
+
+    fn factor_common_async_resets(
+        &mut self,
+        inputs: &[SlotInput],
+    ) -> Result<Option<Vec<SlotInput>>, crate::SynthError> {
+        let Some(common) = inputs
+            .iter()
+            .map(|input| &input.slot.resets)
+            .find(|resets| !resets.is_empty())
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if inputs
+            .iter()
+            .any(|input| !input.slot.resets.is_empty() && input.slot.resets != common)
+        {
+            return Ok(None);
+        }
+
+        let mut asserted = Predicate::Never;
+        for reset in &common {
+            let predicate = self.predicate(reset.value)?;
+            let predicate = if reset.active_high {
+                predicate
+            } else {
+                Self::not(predicate)
+            };
+            asserted = self.or(asserted, predicate)?;
+        }
+
+        let mut factored = inputs.to_vec();
+        for input in &mut factored {
+            if !input.slot.resets.is_empty() {
+                continue;
+            }
+            let mut reset_asserted = self.predicates.restriction(asserted, true)?;
+            if self.restrict_predicate(input.selection, &mut reset_asserted)? != Predicate::Never {
+                return Ok(None);
+            }
+            // The reset-free path cannot be selected while any common reset
+            // is asserted, so attaching the reset list changes no reachable
+            // transition and permits the outer conditional hold to merge.
+            input.slot.resets.clone_from(&common);
+        }
+        Ok(Some(factored))
     }
 
     fn infer_path_reset(

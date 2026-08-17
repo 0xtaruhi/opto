@@ -3,13 +3,14 @@
 
 use crate::{DbUpdate, FrontendOptions, HdlError};
 use opto_ir::proc::{
-    AssignmentMode, BlockId, ProcBuilder, ProcTarget, ProcedureKind, SensitivityEvent,
-    SwitchArmSpec, TargetSelect,
+    AssignmentMode, BlockId, LoopAnalysisLimits, LoopForm, LoopRegion, LoopRegionId, ProcExprId,
+    ProcExprKind, ProcLocal, ProcLocalId, ProcedureKind, SensitivityEvent, SwitchArmSpec,
+    TargetSelect, TransientProcBuilder, TransientTarget, TransientTargetSelect,
 };
 use opto_ir::rtl::RtlModule;
 use opto_ir::word::{
     AnnotationTarget, AnnotationValueSpec, ArrayKind, BinaryOp, BitRange, CastKind, DefinitionKind,
-    Edge, IndexRange, LValue, LogicStateKind, MemoryId, MemoryReadPort, MemoryReadTiming,
+    Edge, Enable, IndexRange, LValue, LogicStateKind, MemoryId, MemoryReadPort, MemoryReadTiming,
     PortDirection, ReadDuringWrite, SignalResolution, SourceIdentity, SourceOrigin, SourceSpan,
     SynthesisDirectiveKind, TypeLayoutFieldSpec, TypeLayoutSpec, UnaryOp, ValueId, WordModule,
     WordType,
@@ -18,9 +19,9 @@ use opto_ir::{BitVal, ConstBits};
 use opto_slang_sys::{
     SlangArrayKind, SlangAssignmentMode, SlangAttribute, SlangAttributeValue, SlangBinaryOp,
     SlangBitRange, SlangCastKind, SlangCompilation, SlangEdge, SlangEdgeTarget, SlangExpression,
-    SlangExpressionKind, SlangMaterializedModule, SlangNetResolution, SlangPortDirection,
-    SlangProcedure, SlangProcedureKind, SlangSensitivityEvent, SlangSignalRef, SlangSourceSpan,
-    SlangTerminatorKind, SlangTypeLayout, SlangTypeLayoutKind, SlangUnaryOp,
+    SlangExpressionKind, SlangLoopForm, SlangMaterializedModule, SlangNetResolution,
+    SlangPortDirection, SlangProcedure, SlangProcedureKind, SlangSensitivityEvent, SlangSignalRef,
+    SlangSourceSpan, SlangTerminatorKind, SlangTypeLayout, SlangTypeLayoutKind, SlangUnaryOp,
 };
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -31,14 +32,15 @@ mod memory;
 mod module;
 
 use memory::{
-    MemorySelection, dynamic_memory_select, memory_address_constant, memory_address_offset,
-    read_memory, read_memory_span, read_whole_memory, static_memory_select,
+    MemorySelection, dynamic_memory_select, read_memory, read_memory_span, read_whole_memory,
+    static_memory_select,
 };
 pub(crate) use module::compilation;
 
 struct ModuleLowerer {
     module: WordModule,
-    procedures: ProcBuilder,
+    procedures: TransientProcBuilder,
+    process_locals: HashMap<String, ProcLocalId>,
     source_origins: HashMap<PathBuf, HashMap<&'static str, SourceOrigin>>,
     syntax_occurrences: HashMap<[u8; 32], u64>,
 }
@@ -74,7 +76,8 @@ impl ModuleLowerer {
     fn new(name: &str) -> Self {
         Self {
             module: WordModule::new(name),
-            procedures: ProcBuilder::new(),
+            procedures: TransientProcBuilder::new(),
+            process_locals: HashMap::new(),
             source_origins: HashMap::new(),
             syntax_occurrences: HashMap::new(),
         }
@@ -142,8 +145,37 @@ impl ModuleLowerer {
     }
 
     fn finish(mut self) -> Result<RtlModule, HdlError> {
+        let procedures = std::mem::take(&mut self.procedures)
+            .seal()?
+            .prove_and_eliminate_loops(&self.module, LoopAnalysisLimits::default())?
+            .materialize_locals(&mut self.module)?
+            .materialize_acyclic(&mut self.module)?;
         self.module.consolidate_names().map_err(HdlError::Ir)?;
-        Ok(RtlModule::new(self.module, self.procedures.seal()?)?)
+        Ok(RtlModule::new(self.module, procedures)?)
+    }
+
+    fn add_process_local(
+        &mut self,
+        name: &str,
+        ty: WordType,
+        source: SourceSpan,
+    ) -> Result<ProcLocalId, HdlError> {
+        if self.process_locals.contains_key(name) {
+            return Err(HdlError::invalid(format!(
+                "verilog frontend: duplicate process-local name '{name}'"
+            )));
+        }
+        let local = self.procedures.add_local(ProcLocal {
+            name: name.into(),
+            ty,
+            source,
+        })?;
+        self.process_locals.insert(name.to_string(), local);
+        Ok(local)
+    }
+
+    fn process_local(&self, name: &str) -> Option<ProcLocalId> {
+        self.process_locals.get(name).copied()
     }
 }
 
@@ -173,16 +205,11 @@ struct SignalTarget {
 }
 
 #[derive(Clone, Copy)]
-enum AssignmentTarget {
-    Signal(SignalTarget),
-    Memory {
-        memory: MemoryId,
-        address: ValueId,
-        select: TargetSelect,
-    },
+enum ProceduralAssignmentTarget {
+    Single(TransientTarget),
     MemorySpan {
         memory: MemoryId,
-        address: ValueId,
+        address: ProcExprId,
         elements: NonZeroU32,
     },
     WholeMemory {
@@ -190,135 +217,122 @@ enum AssignmentTarget {
     },
 }
 
-impl AssignmentTarget {
-    fn continuous(self) -> Result<LValue, HdlError> {
-        let Self::Signal(target) = self else {
-            return Err(HdlError::unsupported(
-                "verilog frontend: continuous assignments cannot write unpacked memories",
-            ));
-        };
-        Ok(match target.select {
-            TargetSelect::Whole => LValue::signal(target.signal),
-            TargetSelect::Static(range) => LValue::signal(target.signal).with_range(range),
-            TargetSelect::Dynamic { offset, width } => {
-                LValue::signal(target.signal).with_dynamic_range(offset, width)
-            }
-        })
-    }
-
-    fn procedural(self) -> ProcTarget {
-        match self {
-            Self::Signal(target) => ProcTarget::signal(target.signal).with_select(target.select),
-            Self::Memory {
-                memory,
-                address,
-                select,
-            } => ProcTarget::memory(memory, address).with_select(select),
-            Self::MemorySpan { .. } | Self::WholeMemory { .. } => {
-                unreachable!(
-                    "multi-element memory assignments must be expanded before IR construction"
-                )
-            }
-        }
-    }
-
+impl ProceduralAssignmentTarget {
     fn coerce_value(
         self,
         module: &mut ModuleLowerer,
-        value: ValueId,
+        value: ProcExprId,
         source: SourceSpan,
-    ) -> Result<ValueId, HdlError> {
-        let (memory, select) = match self {
-            Self::Signal(_) => return Ok(value),
-            Self::Memory { memory, select, .. } => (memory, select),
+    ) -> Result<ProcExprId, HdlError> {
+        let actual = module
+            .procedures
+            .expression_type(value)
+            .ok_or_else(|| HdlError::invalid("verilog frontend: unknown assignment value"))?;
+        let expected = match self {
+            Self::Single(TransientTarget::Signal { .. } | TransientTarget::Local { .. }) => {
+                return Ok(value);
+            }
+            Self::Single(TransientTarget::Memory { memory, select, .. }) => {
+                let element = module
+                    .memory(memory)
+                    .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?
+                    .element_type;
+                let width = match select {
+                    TransientTargetSelect::Whole => element.width(),
+                    TransientTargetSelect::Static(range) => range.width(),
+                    TransientTargetSelect::Dynamic { width, .. } => width.get(),
+                };
+                WordType::new(width, element.is_signed(), element.state()).map_err(HdlError::Ir)?
+            }
             Self::MemorySpan {
                 memory, elements, ..
             } => {
-                let definition = module
+                let element = module
                     .memory(memory)
-                    .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?;
-                let expected_width = definition
-                    .element_type
-                    .width()
-                    .checked_mul(elements.get())
-                    .ok_or_else(|| {
-                        HdlError::invalid(
-                            "verilog frontend: memory span assignment width exceeds 32-bit capacity",
-                        )
-                    })?;
-                let actual = module
-                    .value(value)
-                    .ok_or_else(|| HdlError::invalid("verilog frontend: unknown assignment value"))?
-                    .ty;
-                if actual.width() != expected_width
-                    || actual.state() != definition.element_type.state()
-                {
-                    return Err(HdlError::invalid(
-                        "verilog frontend: memory span assignment type does not match its storage",
-                    ));
-                }
-                return Ok(value);
+                    .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?
+                    .element_type;
+                let width = element.width().checked_mul(elements.get()).ok_or_else(|| {
+                    HdlError::invalid(
+                        "verilog frontend: memory span assignment width exceeds capacity",
+                    )
+                })?;
+                WordType::new(width, false, element.state()).map_err(HdlError::Ir)?
             }
             Self::WholeMemory { memory } => {
                 let definition = module
                     .memory(memory)
                     .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?;
-                let expected_width = definition
+                let width = definition
                     .element_type
                     .width()
                     .checked_mul(definition.depth.get())
                     .ok_or_else(|| {
                         HdlError::invalid(
-                            "verilog frontend: whole-memory assignment width exceeds 32-bit capacity",
+                            "verilog frontend: whole-memory assignment width exceeds capacity",
                         )
                     })?;
-                let actual = module
-                    .value(value)
-                    .ok_or_else(|| HdlError::invalid("verilog frontend: unknown assignment value"))?
-                    .ty;
-                if actual.width() != expected_width
-                    || actual.state() != definition.element_type.state()
-                {
-                    return Err(HdlError::invalid(
-                        "verilog frontend: whole-memory assignment type does not match its storage",
-                    ));
-                }
-                return Ok(value);
+                WordType::new(width, false, definition.element_type.state())
+                    .map_err(HdlError::Ir)?
             }
         };
-        let mut expected = module
-            .memory(memory)
-            .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?
-            .element_type;
-        let width = match select {
-            TargetSelect::Whole => expected.width(),
-            TargetSelect::Static(range) => range.width(),
-            TargetSelect::Dynamic { width, .. } => width.get(),
-        };
-        expected =
-            WordType::new(width, expected.is_signed(), expected.state()).map_err(HdlError::Ir)?;
-        let actual = module
-            .value(value)
-            .ok_or_else(|| HdlError::invalid("verilog frontend: unknown assignment value"))?
-            .ty;
         if actual == expected {
             return Ok(value);
         }
         if actual.width() != expected.width() || actual.state() != expected.state() {
             return Err(HdlError::invalid(
-                "verilog frontend: memory assignment type does not match its element",
+                "verilog frontend: procedural memory assignment type does not match storage",
             ));
         }
-        module
-            .cast(CastKind::ZeroExtend, value, expected, source)
-            .map_err(HdlError::Ir)
+        Ok(module
+            .procedures
+            .cast(CastKind::ZeroExtend, value, expected, source)?)
     }
+}
+
+impl SignalTarget {
+    fn continuous(self) -> LValue {
+        let target = self;
+        match target.select {
+            TargetSelect::Whole => LValue::signal(target.signal),
+            TargetSelect::Static(range) => LValue::signal(target.signal).with_range(range),
+            TargetSelect::Dynamic { offset, width } => {
+                LValue::signal(target.signal).with_dynamic_range(offset, width)
+            }
+        }
+    }
+}
+
+fn import_proc_value(
+    module: &mut ModuleLowerer,
+    value: ValueId,
+    source: SourceSpan,
+) -> Result<ProcExprId, HdlError> {
+    let ty = module
+        .value(value)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown procedural expression value"))?
+        .ty;
+    Ok(module.procedures.add_module_value(value, ty, source)?)
+}
+
+fn import_proc_select(
+    module: &mut ModuleLowerer,
+    select: TargetSelect,
+    source: SourceSpan,
+) -> Result<TransientTargetSelect, HdlError> {
+    Ok(match select {
+        TargetSelect::Whole => TransientTargetSelect::Whole,
+        TargetSelect::Static(range) => TransientTargetSelect::Static(range),
+        TargetSelect::Dynamic { offset, width } => TransientTargetSelect::Dynamic {
+            offset: import_proc_value(module, offset, source)?,
+            width,
+        },
+    })
 }
 
 fn lower_signal_target(
     module: &WordModule,
     signal: SlangSignalRef<'_>,
-) -> Result<AssignmentTarget, HdlError> {
+) -> Result<SignalTarget, HdlError> {
     if signal.name.trim().is_empty() {
         return Err(HdlError::invalid(
             "verilog frontend: signal reference has empty name",
@@ -330,7 +344,7 @@ fn lower_signal_target(
             signal.name
         ))
     })?;
-    Ok(AssignmentTarget::Signal(SignalTarget {
+    Ok(SignalTarget {
         signal: signal_id,
         select: signal.range.map_or(TargetSelect::Whole, |range| {
             TargetSelect::Static(BitRange {
@@ -338,40 +352,22 @@ fn lower_signal_target(
                 lsb: range.lsb,
             })
         }),
-    }))
+    })
 }
 
 fn lower_target(
     module: &mut ModuleLowerer,
     expression: SlangExpression<'_>,
     path: SyntaxPath,
-) -> Result<AssignmentTarget, HdlError> {
-    let source = module.identified_span(
-        expression.source().map_err(frontend_error)?,
-        "assignment target",
-        path,
-    );
+) -> Result<SignalTarget, HdlError> {
     match expression.kind().map_err(frontend_error)? {
         SlangExpressionKind::Signal(signal) => {
-            if let Some(memory) = module.memory_id(signal.name) {
-                let Some(range) = signal.range else {
-                    return Ok(AssignmentTarget::WholeMemory { memory });
-                };
-                Ok(match static_memory_select(module, memory, range, source)? {
-                    MemorySelection::Element { address, select } => AssignmentTarget::Memory {
-                        memory,
-                        address,
-                        select,
-                    },
-                    MemorySelection::Span { address, elements } => AssignmentTarget::MemorySpan {
-                        memory,
-                        address,
-                        elements,
-                    },
-                })
-            } else {
-                lower_signal_target(module, signal)
+            if module.memory_id(signal.name).is_some() {
+                return Err(HdlError::unsupported(
+                    "verilog frontend: continuous assignments cannot write unpacked memories",
+                ));
             }
+            lower_signal_target(module, signal)
         }
         SlangExpressionKind::DynamicExtract {
             value,
@@ -383,33 +379,12 @@ fn lower_target(
                     "verilog frontend: dynamic assignment target must select a signal",
                 ));
             };
-            if let Some(memory) = module.memory_id(signal.name) {
-                if signal.range.is_some() {
-                    return Err(HdlError::unsupported(
-                        "verilog frontend: nested dynamic memory assignment target is not supported",
-                    ));
-                }
-                let offset = lower_expression(module, offset, path.child(0))?;
-                return Ok(
-                    match dynamic_memory_select(module, memory, offset, width, source)? {
-                        MemorySelection::Element { address, select } => AssignmentTarget::Memory {
-                            memory,
-                            address,
-                            select,
-                        },
-                        MemorySelection::Span { address, elements } => {
-                            AssignmentTarget::MemorySpan {
-                                memory,
-                                address,
-                                elements,
-                            }
-                        }
-                    },
-                );
+            if module.memory_id(signal.name).is_some() {
+                return Err(HdlError::unsupported(
+                    "verilog frontend: continuous assignments cannot write unpacked memories",
+                ));
             }
-            let AssignmentTarget::Signal(target) = lower_signal_target(module, signal)? else {
-                unreachable!("memory targets were handled before signal lowering");
-            };
+            let target = lower_signal_target(module, signal)?;
             if signal.range.is_some() {
                 return Err(HdlError::unsupported(
                     "verilog frontend: nested dynamic assignment target is not supported",
@@ -419,13 +394,129 @@ fn lower_target(
             let width = NonZeroU32::new(width).ok_or_else(|| {
                 HdlError::invalid("verilog frontend: dynamic assignment width must be non-zero")
             })?;
-            Ok(AssignmentTarget::Signal(SignalTarget {
+            Ok(SignalTarget {
                 select: TargetSelect::Dynamic { offset, width },
                 ..target
-            }))
+            })
         }
         _ => Err(HdlError::invalid(
             "verilog frontend: assignment target is not a signal selection",
+        )),
+    }
+}
+
+fn lower_procedural_target(
+    module: &mut ModuleLowerer,
+    expression: SlangExpression<'_>,
+    path: SyntaxPath,
+) -> Result<ProceduralAssignmentTarget, HdlError> {
+    let source = module.identified_span(
+        expression.source().map_err(frontend_error)?,
+        "procedural assignment target",
+        path,
+    );
+    match expression.kind().map_err(frontend_error)? {
+        SlangExpressionKind::Signal(signal) => {
+            if let Some(local) = module.process_local(signal.name) {
+                let select = signal.range.map_or(TransientTargetSelect::Whole, |range| {
+                    TransientTargetSelect::Static(BitRange {
+                        msb: range.msb,
+                        lsb: range.lsb,
+                    })
+                });
+                return Ok(ProceduralAssignmentTarget::Single(
+                    TransientTarget::local(local).with_select(select),
+                ));
+            }
+            if let Some(memory) = module.memory_id(signal.name) {
+                let Some(range) = signal.range else {
+                    return Ok(ProceduralAssignmentTarget::WholeMemory { memory });
+                };
+                return Ok(
+                    match procedural_static_memory_select(module, memory, range, &source)? {
+                        ProceduralMemorySelection::Element { address, select } => {
+                            ProceduralAssignmentTarget::Single(TransientTarget::Memory {
+                                memory,
+                                address,
+                                select,
+                            })
+                        }
+                        ProceduralMemorySelection::Span { address, elements } => {
+                            ProceduralAssignmentTarget::MemorySpan {
+                                memory,
+                                address,
+                                elements,
+                            }
+                        }
+                    },
+                );
+            }
+            let target = lower_signal_target(module, signal)?;
+            Ok(ProceduralAssignmentTarget::Single(
+                TransientTarget::signal(target.signal).with_select(import_proc_select(
+                    module,
+                    target.select,
+                    source,
+                )?),
+            ))
+        }
+        SlangExpressionKind::DynamicExtract {
+            value,
+            offset,
+            width,
+        } => {
+            let SlangExpressionKind::Signal(signal) = value.kind().map_err(frontend_error)? else {
+                return Err(HdlError::invalid(
+                    "verilog frontend: dynamic procedural target must select a signal",
+                ));
+            };
+            if signal.range.is_some() {
+                return Err(HdlError::unsupported(
+                    "verilog frontend: nested dynamic procedural target is not supported",
+                ));
+            }
+            let offset = lower_procedural_expression(module, offset, path.child(0))?;
+            if let Some(memory) = module.memory_id(signal.name) {
+                return Ok(
+                    match procedural_dynamic_memory_select(module, memory, offset, width, source)? {
+                        ProceduralMemorySelection::Element { address, select } => {
+                            ProceduralAssignmentTarget::Single(TransientTarget::Memory {
+                                memory,
+                                address,
+                                select,
+                            })
+                        }
+                        ProceduralMemorySelection::Span { address, elements } => {
+                            ProceduralAssignmentTarget::MemorySpan {
+                                memory,
+                                address,
+                                elements,
+                            }
+                        }
+                    },
+                );
+            }
+            let width = NonZeroU32::new(width).ok_or_else(|| {
+                HdlError::invalid("verilog frontend: dynamic assignment width must be non-zero")
+            })?;
+            let select = TransientTargetSelect::Dynamic { offset, width };
+            if let Some(local) = module.process_local(signal.name) {
+                return Ok(ProceduralAssignmentTarget::Single(
+                    TransientTarget::local(local).with_select(select),
+                ));
+            }
+            let signal_id = module.signal_id(signal.name).ok_or_else(|| {
+                HdlError::invalid(format!(
+                    "verilog frontend: unknown signal '{}'",
+                    signal.name
+                ))
+            })?;
+            Ok(ProceduralAssignmentTarget::Single(
+                TransientTarget::signal(signal_id).with_select(select),
+            ))
+        }
+        _ => Err(HdlError::invalid(
+            "verilog frontend: procedural target is not a signal selection",
         )),
     }
 }
@@ -550,6 +641,30 @@ fn lower_expression(
             then_value,
             else_value,
         } => {
+            let then_is_high_impedance = is_high_impedance_expression(then_value)?;
+            let else_is_high_impedance = is_high_impedance_expression(else_value)?;
+            if then_is_high_impedance ^ else_is_high_impedance {
+                let source = module.identified_span(source, "tri-state expression", path);
+                let condition = lower_expression(module, condition, path.child(0))?;
+                let (data, active_high) = if else_is_high_impedance {
+                    (lower_expression(module, then_value, path.child(1))?, true)
+                } else {
+                    (lower_expression(module, else_value, path.child(2))?, false)
+                };
+                return module
+                    .tri_state(
+                        data,
+                        Enable {
+                            value: condition,
+                            active_high,
+                        },
+                        source.clone(),
+                    )
+                    .map_err(|source_error| HdlError::IrAt {
+                        location: source_location_text(&source),
+                        source: source_error,
+                    });
+            }
             let source = module.identified_span(source, "mux expression", path);
             let condition = lower_expression(module, condition, path.child(0))?;
             let then_value = lower_expression(module, then_value, path.child(1))?;
@@ -639,6 +754,552 @@ fn lower_expression(
                 .map_err(HdlError::Ir)
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ProceduralMemorySelection {
+    Element {
+        address: ProcExprId,
+        select: TransientTargetSelect,
+    },
+    Span {
+        address: ProcExprId,
+        elements: NonZeroU32,
+    },
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "this exhaustive dispatch owns the native-expression to transient Proc expression boundary"
+)]
+fn lower_procedural_expression(
+    module: &mut ModuleLowerer,
+    expression: SlangExpression<'_>,
+    path: SyntaxPath,
+) -> Result<ProcExprId, HdlError> {
+    let source_view = expression.source().map_err(frontend_error)?;
+    match expression.kind().map_err(frontend_error)? {
+        SlangExpressionKind::Signal(signal) => {
+            let source = module.identified_span(source_view, "procedural signal read", path);
+            lower_procedural_signal_value(module, signal, source)
+        }
+        SlangExpressionKind::Constant(constant) => {
+            if constant.bits.is_empty() {
+                return Err(HdlError::invalid(
+                    "verilog frontend: constant expression has empty value",
+                ));
+            }
+            let bits = ConstBits::from_bin_str(constant.bits).map_err(HdlError::Constant)?;
+            let width = constant.width.unwrap_or_else(|| bits.width());
+            let ty = WordType::new(width, constant.signed, LogicStateKind::FourState)
+                .map_err(HdlError::Ir)?;
+            let source = module.identified_span(source_view, "procedural constant", path);
+            Ok(module.procedures.constant(bits, ty, source)?)
+        }
+        SlangExpressionKind::Unary { op, arg } => {
+            let arg = lower_procedural_expression(module, arg, path.child(0))?;
+            let source = module.identified_span(source_view, "procedural unary expression", path);
+            Ok(module.procedures.unary(lower_unary_op(op), arg, source)?)
+        }
+        SlangExpressionKind::Binary { op, left, right } => {
+            let left = lower_procedural_expression(module, left, path.child(0))?;
+            let right = lower_procedural_expression(module, right, path.child(1))?;
+            let source = module.identified_span(source_view, "procedural binary expression", path);
+            Ok(module
+                .procedures
+                .binary(lower_binary_op(op), left, right, source)?)
+        }
+        SlangExpressionKind::Mux {
+            condition,
+            then_value,
+            else_value,
+        } => {
+            let source = module.identified_span(source_view, "procedural mux expression", path);
+            let condition = lower_procedural_expression(module, condition, path.child(0))?;
+            let then_is_high_impedance = is_high_impedance_expression(then_value)?;
+            let else_is_high_impedance = is_high_impedance_expression(else_value)?;
+            if then_is_high_impedance ^ else_is_high_impedance {
+                let (data, active_high) = if else_is_high_impedance {
+                    (
+                        lower_procedural_expression(module, then_value, path.child(1))?,
+                        true,
+                    )
+                } else {
+                    (
+                        lower_procedural_expression(module, else_value, path.child(2))?,
+                        false,
+                    )
+                };
+                return Ok(module
+                    .procedures
+                    .tri_state(data, condition, active_high, source)?);
+            }
+            let then_value = lower_procedural_expression(module, then_value, path.child(1))?;
+            let else_value = lower_procedural_expression(module, else_value, path.child(2))?;
+            Ok(module
+                .procedures
+                .mux(condition, then_value, else_value, source)?)
+        }
+        SlangExpressionKind::Concat(concat) => {
+            if concat.parts().len() == 0 {
+                return Err(HdlError::invalid(
+                    "verilog frontend: concat expression is empty",
+                ));
+            }
+            let mut parts = Vec::with_capacity(concat.parts().len());
+            for (index, part) in concat.parts().enumerate() {
+                let role = u32::try_from(index).map_err(|_| {
+                    HdlError::invalid("concat operand count exceeds 32-bit capacity")
+                })?;
+                parts.push(lower_procedural_expression(
+                    module,
+                    part.map_err(frontend_error)?,
+                    path.child(role),
+                )?);
+            }
+            let source = module.identified_span(source_view, "procedural concat expression", path);
+            Ok(module.procedures.concat(parts, source)?)
+        }
+        SlangExpressionKind::Cast {
+            kind,
+            value,
+            width,
+            signed,
+        } => {
+            let value = lower_procedural_expression(module, value, path.child(0))?;
+            let target =
+                WordType::new(width, signed, LogicStateKind::FourState).map_err(HdlError::Ir)?;
+            let source =
+                module.identified_span(source_view, "procedural conversion expression", path);
+            Ok(module.procedures.cast(
+                match kind {
+                    SlangCastKind::ZeroExtend => CastKind::ZeroExtend,
+                    SlangCastKind::SignExtend => CastKind::SignExtend,
+                    SlangCastKind::Truncate => CastKind::Truncate,
+                },
+                value,
+                target,
+                source,
+            )?)
+        }
+        SlangExpressionKind::Extract { value, lsb, width } => {
+            let value = lower_procedural_expression(module, value, path.child(0))?;
+            let source = module.identified_span(source_view, "procedural select expression", path);
+            Ok(module.procedures.extract(value, lsb, width, source)?)
+        }
+        SlangExpressionKind::DynamicExtract {
+            value,
+            offset,
+            width,
+        } => {
+            if let SlangExpressionKind::Signal(signal) = value.kind().map_err(frontend_error)?
+                && signal.range.is_none()
+                && let Some(memory) = module.memory_id(signal.name)
+            {
+                let offset = lower_procedural_expression(module, offset, path.child(1))?;
+                let source =
+                    module.identified_span(source_view, "procedural dynamic memory read", path);
+                let selection = procedural_dynamic_memory_select(
+                    module,
+                    memory,
+                    offset,
+                    width,
+                    source.clone(),
+                )?;
+                return lower_procedural_memory_selection(module, memory, selection, source);
+            }
+            let value = lower_procedural_expression(module, value, path.child(0))?;
+            let offset = lower_procedural_expression(module, offset, path.child(1))?;
+            let source =
+                module.identified_span(source_view, "procedural dynamic select expression", path);
+            Ok(module
+                .procedures
+                .dynamic_extract(value, offset, width, source)?)
+        }
+    }
+}
+
+fn lower_procedural_signal_value(
+    module: &mut ModuleLowerer,
+    signal: SlangSignalRef<'_>,
+    source: SourceSpan,
+) -> Result<ProcExprId, HdlError> {
+    if let Some(local) = module.process_local(signal.name) {
+        let value = module.procedures.read_local(local, source.clone())?;
+        let Some(range) = signal.range else {
+            return Ok(value);
+        };
+        let value = module.procedures.extract(
+            value,
+            range.msb.min(range.lsb),
+            range.msb.abs_diff(range.lsb) + 1,
+            source.clone(),
+        )?;
+        let ty = module
+            .procedures
+            .expression_type(value)
+            .ok_or_else(|| HdlError::invalid("verilog frontend: unknown process-local slice"))?;
+        if !ty.is_signed() {
+            return Ok(value);
+        }
+        let unsigned = WordType::new(ty.width(), false, ty.state()).map_err(HdlError::Ir)?;
+        return Ok(module
+            .procedures
+            .cast(CastKind::ZeroExtend, value, unsigned, source)?);
+    }
+    if let Some(memory) = module.memory_id(signal.name) {
+        let selection = if let Some(range) = signal.range {
+            procedural_static_memory_select(module, memory, range, &source)?
+        } else {
+            let depth = module
+                .memory(memory)
+                .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?
+                .depth;
+            let address = procedural_memory_address_constant(module, 0, depth, source.clone())?;
+            ProceduralMemorySelection::Span {
+                address,
+                elements: depth,
+            }
+        };
+        return lower_procedural_memory_selection(module, memory, selection, source);
+    }
+    let value = lower_signal_value(module, signal, source.clone())?;
+    import_proc_value(module, value, source)
+}
+
+fn lower_procedural_memory_selection(
+    module: &mut ModuleLowerer,
+    memory: MemoryId,
+    selection: ProceduralMemorySelection,
+    source: SourceSpan,
+) -> Result<ProcExprId, HdlError> {
+    let element_type = module
+        .memory(memory)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?
+        .element_type;
+    match selection {
+        ProceduralMemorySelection::Element { address, select } => {
+            let width = match select {
+                TransientTargetSelect::Whole => element_type.width(),
+                TransientTargetSelect::Static(range) => range.width(),
+                TransientTargetSelect::Dynamic { width, .. } => width.get(),
+            };
+            let ty = WordType::new(width, element_type.is_signed(), element_type.state())
+                .map_err(HdlError::Ir)?;
+            Ok(module
+                .procedures
+                .memory_read(memory, address, select, ty, source)?)
+        }
+        ProceduralMemorySelection::Span { address, elements } => {
+            let mut values = Vec::with_capacity(elements.get() as usize);
+            for offset in (0..elements.get()).rev() {
+                let address =
+                    procedural_memory_address_offset(module, address, offset, source.clone())?;
+                values.push(module.procedures.memory_read(
+                    memory,
+                    address,
+                    TransientTargetSelect::Whole,
+                    element_type,
+                    source.clone(),
+                )?);
+            }
+            Ok(module.procedures.concat(values, source)?)
+        }
+    }
+}
+
+fn procedural_static_memory_select(
+    module: &mut ModuleLowerer,
+    memory: MemoryId,
+    range: SlangBitRange,
+    source: &SourceSpan,
+) -> Result<ProceduralMemorySelection, HdlError> {
+    let definition = module
+        .memory(memory)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?;
+    let element_width = definition.element_type.width();
+    let depth = definition.depth;
+    let lsb = range.lsb.min(range.msb);
+    let width = range.msb.abs_diff(range.lsb) + 1;
+    let address_value = lsb / element_width;
+    let element_lsb = lsb % element_width;
+    let end = lsb
+        .checked_add(width)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: memory selection range overflows"))?;
+    if address_value >= depth.get()
+        || end
+            > element_width.checked_mul(depth.get()).ok_or_else(|| {
+                HdlError::invalid("verilog frontend: flattened memory width exceeds capacity")
+            })?
+    {
+        return Err(HdlError::unsupported(
+            "verilog frontend: memory selection is outside storage bounds",
+        ));
+    }
+    let address = procedural_memory_address_constant(module, address_value, depth, source.clone())?;
+    if width > element_width {
+        if element_lsb != 0 || !width.is_multiple_of(element_width) {
+            return Err(HdlError::unsupported(
+                "verilog frontend: a static memory span must contain whole elements",
+            ));
+        }
+        return Ok(ProceduralMemorySelection::Span {
+            address,
+            elements: NonZeroU32::new(width / element_width)
+                .expect("a wider aligned memory span contains at least one element"),
+        });
+    }
+    if element_lsb
+        .checked_add(width)
+        .is_none_or(|selection_end| selection_end > element_width)
+    {
+        return Err(HdlError::unsupported(
+            "verilog frontend: a static memory selection cannot cross an element boundary",
+        ));
+    }
+    let select = if element_lsb == 0 && width == element_width {
+        TransientTargetSelect::Whole
+    } else {
+        TransientTargetSelect::Static(BitRange {
+            msb: element_lsb + width - 1,
+            lsb: element_lsb,
+        })
+    };
+    Ok(ProceduralMemorySelection::Element { address, select })
+}
+
+fn procedural_dynamic_memory_select(
+    module: &mut ModuleLowerer,
+    memory: MemoryId,
+    offset: ProcExprId,
+    width: u32,
+    source: SourceSpan,
+) -> Result<ProceduralMemorySelection, HdlError> {
+    let definition = module
+        .memory(memory)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?;
+    let element_width = definition.element_type.width();
+    let depth = definition.depth;
+    let offset_type = module
+        .procedures
+        .expression_type(offset)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory offset"))?;
+    if offset_type.is_signed() {
+        return Err(HdlError::invalid(
+            "verilog frontend: memory offsets must be unsigned",
+        ));
+    }
+    let width = NonZeroU32::new(width).ok_or_else(|| {
+        HdlError::invalid("verilog frontend: dynamic memory selection width must be non-zero")
+    })?;
+    let scale = procedural_unsigned_constant(module, element_width, offset_type, source.clone())?;
+    let address = if element_width == 1 {
+        offset
+    } else if let Some(address) = scaled_procedural_memory_address(module, offset, element_width) {
+        address
+    } else {
+        module
+            .procedures
+            .binary(BinaryOp::Div, offset, scale, source.clone())?
+    };
+    let address = canonical_procedural_memory_address(module, address, depth, source.clone())?;
+    if width.get() > element_width {
+        if !width.get().is_multiple_of(element_width) {
+            return Err(HdlError::unsupported(
+                "verilog frontend: a dynamic memory span must contain whole elements",
+            ));
+        }
+        return Ok(ProceduralMemorySelection::Span {
+            address,
+            elements: NonZeroU32::new(width.get() / element_width)
+                .expect("a wider aligned memory span contains at least one element"),
+        });
+    }
+    let select = if width.get() == element_width {
+        TransientTargetSelect::Whole
+    } else {
+        TransientTargetSelect::Dynamic {
+            offset: module
+                .procedures
+                .binary(BinaryOp::Mod, offset, scale, source)?,
+            width,
+        }
+    };
+    Ok(ProceduralMemorySelection::Element { address, select })
+}
+
+fn scaled_procedural_memory_address(
+    module: &ModuleLowerer,
+    offset: ProcExprId,
+    element_width: u32,
+) -> Option<ProcExprId> {
+    let ProcExprKind::Binary {
+        op: BinaryOp::Mul,
+        left,
+        right,
+    } = module.procedures.expression(offset)?.kind
+    else {
+        return None;
+    };
+    if procedural_unsigned_constant_value(module, right) == Some(element_width) {
+        Some(left)
+    } else if procedural_unsigned_constant_value(module, left) == Some(element_width) {
+        Some(right)
+    } else {
+        None
+    }
+}
+
+fn canonical_procedural_memory_address(
+    module: &mut ModuleLowerer,
+    address: ProcExprId,
+    depth: NonZeroU32,
+    source: SourceSpan,
+) -> Result<ProcExprId, HdlError> {
+    let address_type = module
+        .procedures
+        .expression_type(address)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown procedural memory address"))?;
+    let width = (u32::BITS - (depth.get() - 1).leading_zeros()).max(1);
+    if address_type.width() <= width {
+        return Ok(address);
+    }
+    let maximum = procedural_unsigned_maximum(module, address);
+    if maximum.is_none_or(|maximum| maximum >= u128::from(depth.get())) {
+        return Ok(address);
+    }
+    let ty = WordType::new(width, false, address_type.state()).map_err(HdlError::Ir)?;
+    Ok(module
+        .procedures
+        .cast(CastKind::Truncate, address, ty, source)?)
+}
+
+fn procedural_unsigned_maximum(module: &ModuleLowerer, value: ProcExprId) -> Option<u128> {
+    let expression = module.procedures.expression(value)?;
+    match &expression.kind {
+        ProcExprKind::ModuleValue(value) => opto_ir::word::unsigned_value_range(module, *value)
+            .map(opto_ir::word::UnsignedValueRange::maximum),
+        ProcExprKind::Constant(_) => {
+            procedural_unsigned_constant_value(module, value).map(u128::from)
+        }
+        ProcExprKind::Cast { kind, value } => {
+            let maximum = procedural_unsigned_maximum(module, *value)?;
+            match kind {
+                CastKind::ZeroExtend => Some(maximum),
+                CastKind::SignExtend => module
+                    .procedures
+                    .expression_type(*value)
+                    .is_some_and(|ty| !ty.is_signed())
+                    .then_some(maximum),
+                CastKind::Truncate => Some(maximum.min(if expression.ty.width() >= u128::BITS {
+                    u128::MAX
+                } else {
+                    (1u128 << expression.ty.width()) - 1
+                })),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn procedural_unsigned_constant_value(module: &ModuleLowerer, value: ProcExprId) -> Option<u32> {
+    let expression = module.procedures.expression(value)?;
+    let bits = match &expression.kind {
+        ProcExprKind::Constant(bits) => bits,
+        ProcExprKind::ModuleValue(value) => {
+            let opto_ir::word::ValueKind::Constant(bits) = &module.value(*value)?.kind else {
+                return None;
+            };
+            bits
+        }
+        _ => return None,
+    };
+    bits.as_slice().iter().try_fold(0u32, |value, bit| {
+        let bit = match bit {
+            BitVal::Zero => 0,
+            BitVal::One => 1,
+            BitVal::X | BitVal::Z => return None,
+        };
+        value.checked_mul(2)?.checked_add(bit)
+    })
+}
+
+fn procedural_memory_address_constant(
+    module: &mut ModuleLowerer,
+    address: u32,
+    depth: NonZeroU32,
+    source: SourceSpan,
+) -> Result<ProcExprId, HdlError> {
+    let width = (u32::BITS - (depth.get() - 1).leading_zeros()).max(1);
+    let ty = WordType::new(width, false, LogicStateKind::FourState).map_err(HdlError::Ir)?;
+    procedural_unsigned_constant(module, address, ty, source)
+}
+
+fn procedural_memory_address_offset(
+    module: &mut ModuleLowerer,
+    address: ProcExprId,
+    offset: u32,
+    source: SourceSpan,
+) -> Result<ProcExprId, HdlError> {
+    if offset == 0 {
+        return Ok(address);
+    }
+    let ty = module
+        .procedures
+        .expression_type(address)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory address"))?;
+    let offset = procedural_unsigned_constant(module, offset, ty, source.clone())?;
+    Ok(module
+        .procedures
+        .binary(BinaryOp::Add, address, offset, source)?)
+}
+
+fn procedural_unsigned_constant(
+    module: &mut ModuleLowerer,
+    value: u32,
+    ty: WordType,
+    source: SourceSpan,
+) -> Result<ProcExprId, HdlError> {
+    if ty.is_signed() || value.checked_shr(ty.width()).unwrap_or(0) != 0 {
+        return Err(HdlError::invalid(
+            "verilog frontend: procedural constant exceeds its unsigned type",
+        ));
+    }
+    let bits = (0..ty.width())
+        .rev()
+        .map(|bit| {
+            if value.checked_shr(bit).unwrap_or(0) & 1 == 0 {
+                BitVal::Zero
+            } else {
+                BitVal::One
+            }
+        })
+        .collect();
+    Ok(module.procedures.constant(
+        ConstBits::from_bits(bits).map_err(HdlError::Constant)?,
+        ty,
+        source,
+    )?)
+}
+
+fn is_high_impedance_expression(expression: SlangExpression<'_>) -> Result<bool, HdlError> {
+    Ok(matches!(
+        expression.kind().map_err(frontend_error)?,
+        SlangExpressionKind::Constant(constant)
+            if !constant.bits.is_empty() && constant.bits.bytes().all(|bit| bit == b'z')
+    ))
+}
+
+fn is_tri_state_expression(expression: SlangExpression<'_>) -> Result<bool, HdlError> {
+    let SlangExpressionKind::Mux {
+        then_value,
+        else_value,
+        ..
+    } = expression.kind().map_err(frontend_error)?
+    else {
+        return Ok(false);
+    };
+    Ok(is_high_impedance_expression(then_value)? ^ is_high_impedance_expression(else_value)?)
 }
 
 fn source_location_text(source: &SourceSpan) -> String {
@@ -742,6 +1403,45 @@ fn lower_procedure(
     module
         .procedures
         .set_entry(procedure_id, mapped_block(&block_ids, procedure.entry())?)?;
+    let mut loop_region_ids = Vec::<Option<LoopRegionId>>::new();
+    for (index, region) in procedure.loop_regions().enumerate() {
+        let role = u32::try_from(index)
+            .map_err(|_| HdlError::invalid("loop-region count exceeds 32-bit capacity"))?;
+        let source = module.identified_span(
+            region.source().map_err(frontend_error)?,
+            "procedural loop region",
+            procedure_path.named_child(b"loop-region", &role.to_le_bytes(), 0),
+        );
+        let parent = region
+            .parent()
+            .map(|parent| {
+                loop_region_ids
+                    .get(parent.index())
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| {
+                        HdlError::invalid(
+                            "verilog frontend: loop parent must precede its child region",
+                        )
+                    })
+            })
+            .transpose()?;
+        let id = module.procedures.add_loop_region(LoopRegion {
+            procedure: procedure_id,
+            header: mapped_block(&block_ids, region.header())?,
+            body: mapped_block(&block_ids, region.body())?,
+            latch: mapped_block(&block_ids, region.latch())?,
+            exit: mapped_block(&block_ids, region.exit())?,
+            form: match region.form().map_err(frontend_error)? {
+                SlangLoopForm::PreTest => LoopForm::PreTest,
+                SlangLoopForm::PostTest => LoopForm::PostTest,
+                SlangLoopForm::Unconditional => LoopForm::Unconditional,
+            },
+            parent,
+            source,
+        })?;
+        loop_region_ids.push(Some(id));
+    }
     let mut effect_ordinals = HashMap::<Vec<u8>, u64>::new();
     for block in blocks {
         let id = mapped_block(&block_ids, block.id())?;
@@ -765,45 +1465,45 @@ fn lower_procedure(
                 },
                 effect_path,
             );
-            let target = lower_target(module, lhs, effect_path.child(0))?;
-            let value = lower_expression(
+            let target = lower_procedural_target(module, lhs, effect_path.child(0))?;
+            let value = lower_procedural_expression(
                 module,
                 effect.rhs().map_err(frontend_error)?,
                 effect_path.child(1),
             )?;
             let value = target.coerce_value(module, value, source.clone())?;
-            assign_procedural_target(module, id, mode, target, value, source)?;
+            assign_owned_procedural_target(module, id, mode, target, value, source)?;
         }
         lower_terminator(module, id, &block_ids, block.terminator(), procedure_path)?;
     }
     Ok(())
 }
 
-fn assign_procedural_target(
+fn assign_owned_procedural_target(
     module: &mut ModuleLowerer,
     block: BlockId,
     mode: AssignmentMode,
-    target: AssignmentTarget,
-    value: ValueId,
+    target: ProceduralAssignmentTarget,
+    value: ProcExprId,
     source: SourceSpan,
 ) -> Result<(), HdlError> {
     let (memory, base_address, elements) = match target {
-        AssignmentTarget::WholeMemory { memory } => {
+        ProceduralAssignmentTarget::WholeMemory { memory } => {
             let depth = module
                 .memory(memory)
                 .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?
                 .depth;
             (memory, None, depth)
         }
-        AssignmentTarget::MemorySpan {
+        ProceduralAssignmentTarget::MemorySpan {
             memory,
             address,
             elements,
         } => (memory, Some(address), elements),
-        _ => {
+        ProceduralAssignmentTarget::Single(target) => {
             module
                 .procedures
-                .assign(block, mode, target.procedural(), value, source)?;
+                .assign(block, mode, target, value, source)?;
             return Ok(());
         }
     };
@@ -819,25 +1519,26 @@ fn assign_procedural_target(
             )
         })?;
         let element = module
-            .extract(value, lsb, element_width, source.clone())
-            .map_err(HdlError::Ir)?;
+            .procedures
+            .extract(value, lsb, element_width, source.clone())?;
         let address_value = match base_address {
-            Some(address) => memory_address_offset(module, address, offset, source.clone())?,
-            None => memory_address_constant(module, offset, depth, source.clone())?,
+            Some(address) => {
+                procedural_memory_address_offset(module, address, offset, source.clone())?
+            }
+            None => procedural_memory_address_constant(module, offset, depth, source.clone())?,
         };
-        let element_target = AssignmentTarget::Memory {
+        let element_target = ProceduralAssignmentTarget::Single(TransientTarget::Memory {
             memory,
             address: address_value,
-            select: TargetSelect::Whole,
-        };
+            select: TransientTargetSelect::Whole,
+        });
         let element = element_target.coerce_value(module, element, source.clone())?;
-        module.procedures.assign(
-            block,
-            mode,
-            element_target.procedural(),
-            element,
-            source.clone(),
-        )?;
+        let ProceduralAssignmentTarget::Single(element_target) = element_target else {
+            unreachable!("an expanded memory element is a single procedural target");
+        };
+        module
+            .procedures
+            .assign(block, mode, element_target, element, source.clone())?;
     }
     Ok(())
 }
@@ -917,7 +1618,7 @@ fn lower_terminator(
             then_edge,
             else_edge,
         } => {
-            let condition = lower_expression(module, condition, path.child(0))?;
+            let condition = lower_procedural_expression(module, condition, path.child(0))?;
             let then_target = mapped_block(blocks, then_edge.block)?;
             let else_target = mapped_block(blocks, else_edge.block)?;
             let source = module.identified_span(
@@ -938,7 +1639,7 @@ fn lower_terminator(
             arms,
             default,
         } => {
-            let selector = lower_expression(module, selector, path.child(0))?;
+            let selector = lower_procedural_expression(module, selector, path.child(0))?;
             let mut lowered_arms = Vec::with_capacity(arms.len());
             for (index, arm) in arms.iter().enumerate() {
                 let edge = arm.edge().map_err(frontend_error)?;
@@ -948,14 +1649,17 @@ fn lower_terminator(
                 let arm_role = role.checked_add(1).ok_or_else(|| {
                     HdlError::invalid("case arm count exceeds 32-bit syntax-path capacity")
                 })?;
+                let arm_source =
+                    module.identified_span(edge.source, "case item", path.child(arm_role));
+                let pattern = lower_procedural_expression(
+                    module,
+                    arm.pattern().map_err(frontend_error)?,
+                    path.child(arm_role),
+                )?;
                 lowered_arms.push(SwitchArmSpec {
-                    pattern: lower_expression(
-                        module,
-                        arm.pattern().map_err(frontend_error)?,
-                        path.child(arm_role),
-                    )?,
+                    pattern,
                     target: mapped_block(blocks, edge.block)?,
-                    source: module.identified_span(edge.source, "case item", path.child(arm_role)),
+                    source: arm_source,
                 });
             }
             let source = module.identified_span(

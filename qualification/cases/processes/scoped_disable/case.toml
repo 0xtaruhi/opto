@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-scoped-disable"
+kind = "regression"
+covers = ["Lexical named-block and current-task disable preserve scope exit, unrolled-loop completion, and task output copy-out semantics."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 7
+min_cells = 1

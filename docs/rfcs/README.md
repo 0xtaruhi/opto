@@ -24,6 +24,7 @@ tree actually provides and names any accepted work that is still pending;
 - [RFC 0007: Timing-driven partitioning and region-private optimization](0007-timing-driven-partitioning.md)
 - [RFC 0009: Operator-local timing and region-local architecture selection](0009-operator-local-timing.md)
 - [RFC 0011: Compile-once global choice synthesis](0011-compile-once-global-choice-synthesis.md)
+- [RFC 0012: Versioned synthesizable SystemVerilog profile](0012-synthesizable-systemverilog-profile.md)
 
 RFC 0004 was removed after its hierarchy-derived regional model was replaced
 by RFC 0006. Still-valid canonical-root and provenance-overlay rules now live

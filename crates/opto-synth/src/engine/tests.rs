@@ -236,7 +236,7 @@ fn target_options() -> SynthesisOptions {
     }
 }
 
-fn inverter_options() -> SynthesisOptions {
+fn inverter_cell() -> opto_library::TargetCell {
     let mut inverter = cell("INV", 1.0);
     inverter.pins = vec![
         opto_library::TargetPin {
@@ -268,9 +268,110 @@ fn inverter_options() -> SynthesisOptions {
             clock_gate_role: None,
         },
     ];
+    inverter
+}
+
+fn inverter_options() -> SynthesisOptions {
     SynthesisOptions {
-        target_cells: vec![inverter].into(),
+        target_cells: vec![inverter_cell()].into(),
     }
+}
+
+fn tri_state_options() -> SynthesisOptions {
+    let inverter = inverter_cell();
+    let input = |name: &str| opto_library::TargetPin {
+        name: name.to_string(),
+        direction: opto_library::TargetPinDirection::Input,
+        function: None,
+        three_state: None,
+        capacitance: None,
+        rise_capacitance: None,
+        fall_capacitance: None,
+        receiver_capacitance: None,
+        fanout_load: None,
+        next_state_type: None,
+        timing_arcs: Vec::new(),
+        clock_gate_role: None,
+    };
+    let mut tri_state = cell("TBUF", 1.0);
+    tri_state.pins = vec![
+        input("A"),
+        input("E"),
+        opto_library::TargetPin {
+            name: "Y".to_string(),
+            direction: opto_library::TargetPinDirection::Output,
+            function: Some(opto_library::BooleanFunction::parse("A").unwrap()),
+            three_state: Some(opto_library::BooleanFunction::parse("!E").unwrap()),
+            capacitance: None,
+            rise_capacitance: None,
+            fall_capacitance: None,
+            receiver_capacitance: None,
+            fanout_load: None,
+            next_state_type: None,
+            timing_arcs: Vec::new(),
+            clock_gate_role: None,
+        },
+    ];
+    SynthesisOptions {
+        target_cells: vec![inverter, tri_state].into(),
+    }
+}
+
+#[test]
+fn tri_state_inputs_preserve_their_combinational_cover() {
+    let mut module = word::WordModule::new("tri_state_input_logic");
+    let bit = word::WordType::bits(1).unwrap();
+    let data_port = module
+        .add_port("data", word::PortDirection::Input, bit, test_span())
+        .unwrap();
+    let enable_port = module
+        .add_port("enable", word::PortDirection::Input, bit, test_span())
+        .unwrap();
+    let pad_port = module
+        .add_port("pad", word::PortDirection::Inout, bit, test_span())
+        .unwrap();
+    let pad = module.port(pad_port).unwrap().signal;
+    module
+        .set_signal_resolution(pad, word::SignalResolution::TriState)
+        .unwrap();
+    let data = module
+        .read_signal(module.port(data_port).unwrap().signal, test_span())
+        .unwrap();
+    let enable = module
+        .read_signal(module.port(enable_port).unwrap().signal, test_span())
+        .unwrap();
+    let inverted = module
+        .unary(word::UnaryOp::BitNot, data, test_span())
+        .unwrap();
+    let driver = module
+        .tri_state(
+            inverted,
+            word::Enable {
+                value: enable,
+                active_high: true,
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(word::LValue::signal(pad), driver, test_span())
+        .unwrap();
+
+    let result = SynthesisEngine::new()
+        .synthesize(
+            SynthesisRequest::unconstrained(structural(module), tri_state_options()),
+            crate::test_runtime(),
+            &mut |_| {},
+        )
+        .unwrap();
+    let mut cell_types = result
+        .mapped()
+        .cell_ids()
+        .map(|cell| result.mapped().cell_type(cell).unwrap())
+        .collect::<Vec<_>>();
+    cell_types.sort_unstable();
+
+    assert_eq!(cell_types, ["INV", "TBUF"]);
 }
 
 #[test]

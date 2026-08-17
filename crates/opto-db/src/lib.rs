@@ -49,6 +49,8 @@ pub enum Direction {
     Output,
     /// Both the design and environment may drive the resolved signal.
     Inout,
+    /// Exact variable alias bound by an enclosing design instance.
+    Ref,
 }
 
 impl Direction {
@@ -59,6 +61,7 @@ impl Direction {
             Direction::Input => "input",
             Direction::Output => "output",
             Direction::Inout => "inout",
+            Direction::Ref => "ref",
         }
     }
 }

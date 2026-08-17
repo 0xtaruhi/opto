@@ -3,9 +3,11 @@
 
 //! Append-only construction and deterministic sealing of procedural IR.
 //!
-//! Drafts use convenient nested vectors while frontends emit control flow.
-//! Sealing validates completeness and flattens them into contiguous arenas
-//! without reordering source effects or blocks.
+//! Drafts use convenient nested vectors while frontends emit acyclic control
+//! flow. Sealing validates completeness and flattens them into contiguous
+//! arenas without reordering source effects or blocks. Cyclic source control
+//! belongs to the transient procedural IR and must be eliminated before this
+//! final builder is sealed.
 
 use super::{
     ArenaRange, AssignmentMode, Block, BlockId, EdgeId, EdgeRecord, Effect, ProcError, ProcModule,
@@ -14,45 +16,53 @@ use super::{
 };
 
 #[derive(Debug)]
-struct ProcedureDraft {
-    kind: ProcedureKind,
-    events: Vec<SensitivityEvent>,
-    source: SourceSpan,
-    block_start: usize,
-    block_count: usize,
-    entry: Option<BlockId>,
+pub(super) struct ProcedureDraft {
+    pub(super) kind: ProcedureKind,
+    pub(super) events: Vec<SensitivityEvent>,
+    pub(super) source: SourceSpan,
+    pub(super) block_start: usize,
+    pub(super) block_count: usize,
+    pub(super) entry: Option<BlockId>,
 }
 
 #[derive(Debug)]
-struct BlockDraft {
-    procedure: ProcedureId,
-    effects: Vec<Effect>,
-    terminator: Option<TerminatorDraft>,
-    source: SourceSpan,
+pub(super) struct EffectDraft<T, V> {
+    pub(super) mode: AssignmentMode,
+    pub(super) target: T,
+    pub(super) value: V,
+    pub(super) source: SourceSpan,
 }
 
 #[derive(Debug)]
-enum TerminatorDraft {
+pub(super) struct BlockDraft<T, V> {
+    pub(super) procedure: ProcedureId,
+    pub(super) effects: Vec<EffectDraft<T, V>>,
+    pub(super) terminator: Option<TerminatorDraft<V>>,
+    pub(super) source: SourceSpan,
+}
+
+#[derive(Debug)]
+pub(super) enum TerminatorDraft<V> {
     Return(SourceSpan),
     Jump {
         target: BlockId,
         source: SourceSpan,
     },
     Branch {
-        condition: ValueId,
+        condition: V,
         then_target: BlockId,
         else_target: BlockId,
         source: SourceSpan,
     },
     Switch {
-        selector: ValueId,
-        arms: Vec<SwitchArmSpec>,
+        selector: V,
+        arms: Vec<SwitchArmSpec<V>>,
         default: BlockId,
         source: SourceSpan,
     },
 }
 
-impl TerminatorDraft {
+impl<V> TerminatorDraft<V> {
     fn arena_counts(&self) -> Option<(usize, usize)> {
         match self {
             Self::Return(_) => Some((0, 0)),
@@ -64,24 +74,41 @@ impl TerminatorDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// Unsealed switch-arm input accepted by [`ProcBuilder`].
-pub struct SwitchArmSpec {
+/// Unsealed switch-arm input accepted by [`ProcGraphBuilder`].
+pub struct SwitchArmSpec<V = ValueId> {
     /// Pattern compared with the switch selector.
-    pub pattern: ValueId,
+    pub pattern: V,
     /// Block entered when the pattern matches.
     pub target: BlockId,
     /// Source span of the arm label.
     pub source: SourceSpan,
 }
 
-/// Transient, append-oriented frontend builder.
-#[derive(Debug, Default)]
-pub struct ProcBuilder {
-    procedures: Vec<ProcedureDraft>,
-    blocks: Vec<BlockDraft>,
+/// Shared append-oriented CFG construction core.
+///
+/// The value and target domains distinguish a cyclic transient procedure from
+/// the final acyclic [`ProcModule`]. Both forms therefore share block identity,
+/// edge construction, procedure ownership, and source ordering without
+/// conflating activation-scoped expressions with module-level [`ValueId`]s.
+#[derive(Debug)]
+pub struct ProcGraphBuilder<V, T> {
+    pub(super) procedures: Vec<ProcedureDraft>,
+    pub(super) blocks: Vec<BlockDraft<T, V>>,
 }
 
-impl ProcBuilder {
+impl<V, T> Default for ProcGraphBuilder<V, T> {
+    fn default() -> Self {
+        Self {
+            procedures: Vec::new(),
+            blocks: Vec::new(),
+        }
+    }
+}
+
+/// Final-procedure builder over module-level word values and targets.
+pub type ProcBuilder = ProcGraphBuilder<ValueId, ProcTarget>;
+
+impl<V, T> ProcGraphBuilder<V, T> {
     /// Creates an empty procedural IR builder.
     #[must_use]
     pub fn new() -> Self {
@@ -211,11 +238,11 @@ impl ProcBuilder {
         &mut self,
         block: BlockId,
         mode: AssignmentMode,
-        target: ProcTarget,
-        value: ValueId,
+        target: T,
+        value: V,
         source: SourceSpan,
     ) -> Result<(), ProcError> {
-        self.block_mut(block)?.effects.push(Effect {
+        self.block_mut(block)?.effects.push(EffectDraft {
             mode,
             target,
             value,
@@ -261,7 +288,7 @@ impl ProcBuilder {
     pub fn terminate_branch(
         &mut self,
         block: BlockId,
-        condition: ValueId,
+        condition: V,
         then_target: BlockId,
         else_target: BlockId,
         source: SourceSpan,
@@ -286,8 +313,8 @@ impl ProcBuilder {
     pub fn terminate_switch(
         &mut self,
         block: BlockId,
-        selector: ValueId,
-        arms: impl IntoIterator<Item = SwitchArmSpec>,
+        selector: V,
+        arms: impl IntoIterator<Item = SwitchArmSpec<V>>,
         default: BlockId,
         source: SourceSpan,
     ) -> Result<(), ProcError> {
@@ -306,7 +333,11 @@ impl ProcBuilder {
         )
     }
 
-    fn terminate(&mut self, block: BlockId, terminator: TerminatorDraft) -> Result<(), ProcError> {
+    fn terminate(
+        &mut self,
+        block: BlockId,
+        terminator: TerminatorDraft<V>,
+    ) -> Result<(), ProcError> {
         let slot = &mut self.block_mut(block)?.terminator;
         if slot.is_some() {
             return Err(ProcError::new(format!(
@@ -317,12 +348,14 @@ impl ProcBuilder {
         Ok(())
     }
 
-    fn block_mut(&mut self, block: BlockId) -> Result<&mut BlockDraft, ProcError> {
+    fn block_mut(&mut self, block: BlockId) -> Result<&mut BlockDraft<T, V>, ProcError> {
         self.blocks
             .get_mut(block.index())
             .ok_or_else(|| ProcError::new(format!("unknown procedural block {block:?}")))
     }
+}
 
+impl ProcGraphBuilder<ValueId, ProcTarget> {
     /// Validates and compacts all drafts into immutable procedural arenas.
     ///
     /// Sealing preserves procedure, block, effect, event, and switch-arm
@@ -331,7 +364,8 @@ impl ProcBuilder {
     /// # Errors
     ///
     /// Returns [`ProcError`] for capacity overflow, missing terminators, invalid
-    /// cross-procedure edges, malformed switch arms, or unreachable blocks.
+    /// cross-procedure edges, malformed switch arms, unreachable blocks, or
+    /// control-flow cycles.
     pub fn seal(self) -> Result<ProcModule, ProcError> {
         let event_count = self
             .procedures
@@ -390,7 +424,12 @@ impl ProcBuilder {
         for (index, block) in self.blocks.into_iter().enumerate() {
             let id = BlockId::from_index(index)?;
             let effect_range = ArenaRange::new(effects.len(), block.effects.len(), "effect")?;
-            effects.extend(block.effects);
+            effects.extend(block.effects.into_iter().map(|effect| Effect {
+                mode: effect.mode,
+                target: effect.target,
+                value: effect.value,
+                source: effect.source,
+            }));
             let terminator = block.terminator.ok_or_else(|| {
                 ProcError::new(format!("procedural block {id:?} has no terminator"))
             })?;
@@ -417,7 +456,7 @@ impl ProcBuilder {
 
 fn materialize_terminator(
     block: BlockId,
-    draft: TerminatorDraft,
+    draft: TerminatorDraft<ValueId>,
     edges: &mut Vec<EdgeRecord>,
     switch_arms: &mut Vec<SwitchArm>,
 ) -> Result<Terminator, ProcError> {

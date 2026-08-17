@@ -9,6 +9,7 @@ use opto_runtime::ExecutionContext;
 pub(crate) struct RegionLogicGraph {
     network: LogicGraph,
     value_nodes: Box<[(word::ValueId, LogicNodeId)]>,
+    dont_care_values: Box<[word::ValueId]>,
     inputs: Box<[word::ValueId]>,
 }
 
@@ -16,6 +17,7 @@ pub(crate) struct RegionLogicGraph {
 pub(crate) struct CanonicalRegionLogic {
     pub(crate) network: LogicGraph,
     pub(crate) value_nodes: Box<[(word::ValueId, LogicNodeId)]>,
+    pub(crate) dont_care_values: Box<[word::ValueId]>,
     pub(crate) inputs: Box<[word::ValueId]>,
 }
 
@@ -96,6 +98,7 @@ impl RegionLogicGraph {
         Ok(Self {
             network: optimized.network,
             value_nodes: value_nodes.into_boxed_slice(),
+            dont_care_values: subject.dont_care_values,
             inputs: subject.inputs,
         })
     }
@@ -115,5 +118,10 @@ impl RegionLogicGraph {
             .binary_search_by_key(&value, |&(candidate, _)| candidate)
             .ok()?;
         Some(self.value_nodes[index].1)
+    }
+
+    /// Return whether a published value has no Boolean care obligation.
+    pub(crate) fn is_dont_care(&self, value: word::ValueId) -> bool {
+        self.dont_care_values.binary_search(&value).is_ok()
     }
 }

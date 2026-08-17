@@ -169,10 +169,21 @@ struct OptoSlangEventData {
     OptoSlangSourceSpanView source{};
 };
 
+struct OptoSlangLoopRegionData {
+    uint32_t header = 0;
+    uint32_t body = 0;
+    uint32_t latch = 0;
+    uint32_t exit = 0;
+    OptoSlangLoopForm form = OPTO_SLANG_LOOP_PRE_TEST;
+    std::optional<uint32_t> parent;
+    OptoSlangSourceSpanView source{};
+};
+
 struct OptoSlangProcedureData {
     OptoSlangProcedureKind kind = OPTO_SLANG_PROCEDURE_COMB;
     std::vector<OptoSlangEventData> events;
     std::vector<OptoSlangBlockData> blocks;
+    std::vector<OptoSlangLoopRegionData> loop_regions;
     uint32_t entry_block = 0;
     OptoSlangSourceSpanView source{};
 };

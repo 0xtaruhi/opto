@@ -411,7 +411,9 @@ impl<'module> WordLogicEncoder<'module> {
                 value,
                 target,
             } => self.cast(*kind, *value, *target),
-            word::OpKind::Register(_) | word::OpKind::Latch(_) => Err(SymbolicError::Unsupported),
+            word::OpKind::TriState { .. } | word::OpKind::Register(_) | word::OpKind::Latch(_) => {
+                Err(SymbolicError::Unsupported)
+            }
         }
     }
 

@@ -16,6 +16,7 @@ workspace = true
 blake3.workspace = true
 opto-core.workspace = true
 serde.workspace = true
+smallvec.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

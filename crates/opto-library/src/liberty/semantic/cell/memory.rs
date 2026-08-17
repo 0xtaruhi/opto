@@ -6,10 +6,11 @@ use crate::liberty::semantic::{
     GroupRef, ParseContext, Reader, optional_value, parse_integer, required_value,
 };
 use crate::liberty::syntax::{SourceSlice, StatementKind};
+use crate::lookup_table::LookupTableBuilder;
 use crate::{
     BooleanFunction, LibraryError, TargetMemory, TargetMemoryClock, TargetMemoryDisabledRead,
     TargetMemoryEdge, TargetMemoryEnable, TargetMemoryKind, TargetMemoryReadDuringWrite,
-    TargetMemoryReadPort, TargetMemoryWritePort, TargetPinDirection,
+    TargetMemoryReadPort, TargetMemoryWritePort, TargetPinDirection, TargetTimingArc,
 };
 use std::collections::BTreeMap;
 
@@ -29,6 +30,7 @@ pub(super) struct ParsedMemoryBus {
     name: String,
     pub(super) pins: Vec<String>,
     pub(super) direction: TargetPinDirection,
+    pub(super) timing_arcs: Vec<TargetTimingArc>,
     read_address: Option<String>,
     write: Option<ParsedMemoryWrite>,
 }
@@ -96,6 +98,7 @@ fn positive_u32(value: i32, attribute: &'static str) -> Result<u32, LibraryError
 pub(super) fn parse_memory_bus(
     group: &GroupRef<'_>,
     config: &CellParseConfig<'_>,
+    table_builder: &mut LookupTableBuilder,
     context: &ParseContext<'_>,
 ) -> Result<ParsedMemoryBus, LibraryError> {
     let name = required_value(&group.arguments, "bus")?.into_owned();
@@ -103,6 +106,7 @@ pub(super) fn parse_memory_bus(
     let mut direction = TargetPinDirection::Internal;
     let mut read_address = None;
     let mut write = None;
+    let mut timing_arcs = Vec::new();
     let mut reader = Reader::new(group.body, context);
     while let Some(statement) = reader.next()? {
         match (statement.name, statement.kind) {
@@ -133,6 +137,14 @@ pub(super) fn parse_memory_bus(
             ("memory_write", StatementKind::Group { arguments: _, body }) => {
                 write = Some(parse_memory_write(body, context)?);
             }
+            ("timing", StatementKind::Group { arguments, body }) => {
+                timing_arcs.extend(super::parse_timing(
+                    &GroupRef { arguments, body },
+                    config,
+                    table_builder,
+                    context,
+                )?);
+            }
             _ => {}
         }
     }
@@ -156,6 +168,7 @@ pub(super) fn parse_memory_bus(
         name,
         pins,
         direction,
+        timing_arcs,
         read_address,
         write,
     })

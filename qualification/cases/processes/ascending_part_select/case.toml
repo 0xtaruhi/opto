@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-ascending-part-select"
+kind = "regression"
+covers = ["Procedural part-select assignments preserve source bit order on ascending packed declarations."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 3
+min_cells = 1

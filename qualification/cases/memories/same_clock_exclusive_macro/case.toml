@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "memories-same-clock-exclusive-macro"
+kind = "regression"
+covers = ["Mutually exclusive logical writes on one clock bind separate physical ports of a characterized multi-write memory macro without assuming collision priority."]
+category = "memories"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/opto_memory_test.lib"
+sequential = true
+equivalence = false
+
+[assertions]
+min_ports = 9
+min_cells = 1

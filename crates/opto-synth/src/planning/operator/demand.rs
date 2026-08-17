@@ -172,6 +172,10 @@ impl<'a> DemandAnalysis<'a> {
                 self.require_value(then_value, demand)?;
                 self.require_value(else_value, demand)
             }
+            word::OpKind::TriState { data, enable } => {
+                self.require_value(data, demand)?;
+                self.require_value_full(enable.value)
+            }
             word::OpKind::Concat { parts } => {
                 let mut remaining = demand;
                 for part in parts.into_iter().rev() {

@@ -88,7 +88,7 @@ impl Session {
                 let direction = match port.direction {
                     Direction::Input => TimingPortDirection::Input,
                     Direction::Output => TimingPortDirection::Output,
-                    Direction::Inout => TimingPortDirection::Inout,
+                    Direction::Inout | Direction::Ref => TimingPortDirection::Inout,
                 };
                 let design_uid = self
                     .state

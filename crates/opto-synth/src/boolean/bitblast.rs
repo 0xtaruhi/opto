@@ -253,7 +253,12 @@ pub(crate) fn bitblast_module_with_regions(
         },
     )?;
     for connect in connects {
-        blaster.lower_connect(&connect)?;
+        match blaster.classify_connect(&connect)? {
+            io::ConnectLowering::Boolean => blaster.lower_boolean_connect(&connect)?,
+            io::ConnectLowering::PhysicalTriState(connect) => {
+                blaster.lower_physical_tri_state_connect(connect)?;
+            }
+        }
     }
     for (instance_index, port, value, source) in instance_connections {
         blaster.lower_instance_connection(instance_index, port, value, source)?;
@@ -338,6 +343,7 @@ pub(crate) fn lower_local_region_boolean(
     bindings.sort_unstable();
     bindings.dedup();
     let mut value_nodes = Vec::new();
+    let mut dont_care_values = Vec::new();
     for original in bindings {
         let span = blaster
             .cache
@@ -369,7 +375,19 @@ pub(crate) fn lower_local_region_boolean(
                     };
                     (handle, Some(node))
                 }
-                ScalarBit::DontCare(value) => (value, None),
+                ScalarBit::DontCare(_) => {
+                    // Preserve don't-care propagation through the Boolean
+                    // cone, then choose a deterministic constant only at the
+                    // physical publication boundary. Publishing the constant
+                    // node lets the mapper create a real output driver without
+                    // introducing a logic-cell cost.
+                    let handle = blaster.binding_constant(original, false)?;
+                    dont_care_values.push(handle);
+                    (
+                        handle,
+                        Some(crate::boolean::logic::network::LogicGraph::constant(false)),
+                    )
+                }
                 ScalarBit::Word(_) => {
                     return Err(crate::SynthError::invariant(
                         "regional AXM binding contains a scalar Word value",
@@ -392,12 +410,15 @@ pub(crate) fn lower_local_region_boolean(
     }
     value_nodes.sort_by_key(|&(value, _)| value);
     value_nodes.dedup_by_key(|(value, _)| *value);
+    dont_care_values.sort_unstable();
+    dont_care_values.dedup();
     let (network, inputs) = std::mem::take(&mut blaster.backend).finish();
     Ok(LocalRegionBooleanLowering {
         ownership: blaster.lowered_owners,
         subject: crate::boolean::logic::CanonicalRegionLogic {
             network,
             value_nodes: value_nodes.into_boxed_slice(),
+            dont_care_values: dont_care_values.into_boxed_slice(),
             inputs,
         },
     })

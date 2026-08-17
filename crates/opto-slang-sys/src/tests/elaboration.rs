@@ -4,7 +4,7 @@
 use super::*;
 
 #[test]
-fn native_compile_unrolls_constant_procedural_for_loops() {
+fn native_compile_lowers_constant_procedural_for_body_once() {
     let source = NativeTestSource::new(
         "module top(input logic [3:0] a, output logic [3:0] y); always_comb begin y = '0; for (int i = 0; i < 4; i++) y[i] = a[3-i]; end endmodule\n",
     );
@@ -12,20 +12,19 @@ fn native_compile_unrolls_constant_procedural_for_loops() {
     let module = first_module(&compilation);
     let effects = procedure_effects(module.procedures().next().unwrap());
 
-    assert_eq!(effects.len(), 5);
-    for (index, effect) in effects.iter().skip(1).enumerate() {
-        let lhs = effect.lhs().unwrap();
-        let rhs = effect.rhs().unwrap();
-        let SlangExpressionKind::Signal(lhs) = lhs.kind().unwrap() else {
-            panic!("expected unrolled signal target");
-        };
-        let index = u32::try_from(index).expect("test unrolled index fits u32");
-        assert_eq!(lhs.range.unwrap().msb, index);
-        let SlangExpressionKind::Signal(rhs) = rhs.kind().unwrap() else {
-            panic!("expected selected input bit");
-        };
-        assert_eq!(rhs.range.unwrap().msb, 3 - index);
-    }
+    let procedure = module.procedures().next().unwrap();
+    assert_eq!(procedure.loop_regions().len(), 1);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(
+                effect.lhs().and_then(SlangExpression::kind),
+                Ok(SlangExpressionKind::DynamicExtract { .. })
+            ))
+            .count(),
+        1,
+        "the source body remains dynamic and is lowered once"
+    );
 }
 
 #[test]
@@ -93,6 +92,243 @@ fn native_compile_preserves_tristate_primitive_semantics() {
                 })
             )
     ));
+}
+
+#[test]
+fn native_compile_preserves_inverting_tristate_primitive_semantics() {
+    let source = NativeTestSource::new(
+        "module top(input wire a, en, output wire y); notif0 (y, a, en); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let rhs = module.assigns().next().unwrap().rhs().unwrap();
+
+    assert!(matches!(
+        rhs.kind().unwrap(),
+        SlangExpressionKind::Mux {
+            condition,
+            then_value,
+            else_value,
+        } if is_signal(condition, "en")
+            && matches!(
+                then_value.kind().unwrap(),
+                SlangExpressionKind::Constant(SlangLogicConstant {
+                    width: Some(1),
+                    bits: "z",
+                    ..
+                })
+            )
+            && matches!(
+                else_value.kind().unwrap(),
+                SlangExpressionKind::Unary {
+                    op: SlangUnaryOp::BitNot,
+                    arg,
+                } if is_signal(arg, "a")
+            )
+    ));
+}
+
+#[test]
+fn native_compile_lowers_pull_primitives_to_constant_drivers() {
+    let source = NativeTestSource::new(
+        "module top(output wire high, low); pullup (high); pulldown (low); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assigns = module.assigns().collect::<Vec<_>>();
+
+    assert_eq!(assigns.len(), 2);
+    assert!(matches!(
+        assigns[0].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Constant(SlangLogicConstant {
+            width: Some(1),
+            bits: "1",
+            ..
+        })
+    ));
+    assert!(matches!(
+        assigns[1].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Constant(SlangLogicConstant {
+            width: Some(1),
+            bits: "0",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn native_compile_rejects_switch_level_primitives_explicitly() {
+    let cases = [
+        ("cmos", "z, a, en, p"),
+        ("rcmos", "z, a, en, p"),
+        ("nmos", "z, a, en"),
+        ("pmos", "z, a, en"),
+        ("rnmos", "z, a, en"),
+        ("rpmos", "z, a, en"),
+        ("tran", "x, y"),
+        ("rtran", "x, y"),
+        ("tranif0", "x, y, en"),
+        ("tranif1", "x, y, en"),
+        ("rtranif0", "x, y, en"),
+        ("rtranif1", "x, y, en"),
+    ];
+
+    for (primitive, terminals) in cases {
+        let source = NativeTestSource::new(&format!(
+            "module top(input wire a, en, p, inout wire x, y, output wire z); {primitive} ({terminals}); endmodule\n"
+        ));
+        let error = compile(
+            std::slice::from_ref(&source.path),
+            &SlangCompileOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("primitive '{primitive}'")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn native_compile_lowers_combinational_udp_tables() {
+    let source = NativeTestSource::new(
+        "primitive udp_majority(output out, input a, b, c); table 0 0 ? : 0; 0 ? 0 : 0; ? 0 0 : 0; 1 1 ? : 1; 1 ? 1 : 1; ? 1 1 : 1; endtable endprimitive module top(input logic a, b, c, output logic y); udp_majority u_majority(y, a, b, c); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assigns = module.assigns().collect::<Vec<_>>();
+
+    assert_eq!(assigns.len(), 1);
+    assert!(matches!(
+        assigns[0].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Mux { .. }
+    ));
+    assert_eq!(module.instances().len(), 0);
+}
+
+#[test]
+fn native_compile_lowers_level_sensitive_sequential_udp() {
+    let source = NativeTestSource::new(
+        "primitive udp_latch(q, d, en); output reg q; input d, en; table ? 0 : ? : -; 0 1 : ? : 0; 1 1 : ? : 1; endtable endprimitive module top(input logic d, en, output logic q); udp_latch u_latch(q, d, en); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let process = module
+        .procedures()
+        .next()
+        .expect("UDP should lower to Proc IR");
+
+    assert_eq!(process.kind().unwrap(), SlangProcedureKind::CombOrLatch);
+    assert_eq!(procedure_effects(process).len(), 2);
+    let _ = first_branch(process);
+}
+
+#[test]
+fn native_compile_lowers_edge_sensitive_udp_to_flop_events() {
+    let source = NativeTestSource::new(
+        "primitive udp_dff(q, d, clk); output reg q; input d, clk; table 0 (01) : ? : 0; 1 (01) : ? : 1; ? (10) : ? : -; endtable endprimitive module top(input logic d, clk, output logic q); udp_dff u_dff(q, d, clk); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let process = module
+        .procedures()
+        .next()
+        .expect("UDP should lower to Proc IR");
+    let events = process.events().collect::<Vec<_>>();
+
+    assert_eq!(process.kind().unwrap(), SlangProcedureKind::Flop);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].edge().unwrap(), SlangEdge::Pos);
+    assert_eq!(events[0].signal().unwrap().name, "clk");
+    let effects = procedure_effects(process);
+    assert_eq!(effects.len(), 2);
+    assert!(
+        effects
+            .iter()
+            .all(|effect| effect.mode() == SlangAssignmentMode::Nonblocking)
+    );
+}
+
+#[test]
+fn native_compile_normalizes_udp_edge_shorthands_in_the_binary_domain() {
+    let source = NativeTestSource::new(
+        "primitive udp_toggle(q, clk); output reg q; input clk; table p : 0 : 1; p : 1 : 0; n : 0 : 1; n : 1 : 0; endtable endprimitive module top(input logic clk, output logic q); udp_toggle u_toggle(q, clk); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let process = module.procedures().next().unwrap();
+    let events = process.events().collect::<Vec<_>>();
+
+    assert_eq!(process.kind().unwrap(), SlangProcedureKind::Flop);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].edge().unwrap(), SlangEdge::Pos);
+    assert_eq!(events[1].edge().unwrap(), SlangEdge::Neg);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.signal().unwrap().name == "clk")
+    );
+    assert_eq!(procedure_effects(process).len(), 4);
+}
+
+#[test]
+fn native_compile_lowers_udp_level_row_as_one_async_control() {
+    let source = NativeTestSource::new(
+        "primitive udp_dff(q, d, clk, reset_n); output reg q; input d, clk, reset_n; table ? ? 0 : ? : 0; 0 p 1 : ? : 0; 1 p 1 : ? : 1; endtable endprimitive module top(input logic d, clk, reset_n, output logic q); udp_dff u_dff(q, d, clk, reset_n); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let process = module.procedures().next().unwrap();
+    let events = process.events().collect::<Vec<_>>();
+
+    assert_eq!(process.kind().unwrap(), SlangProcedureKind::Flop);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].edge().unwrap(), SlangEdge::Pos);
+    assert_eq!(events[0].signal().unwrap().name, "clk");
+    assert_eq!(events[1].edge().unwrap(), SlangEdge::Neg);
+    assert_eq!(events[1].signal().unwrap().name, "reset_n");
+    assert_eq!(procedure_effects(process).len(), 3);
+    let _ = first_branch(process);
+}
+
+#[test]
+fn native_compile_lowers_udp_edge_row_as_a_distinct_async_control_event() {
+    let source = NativeTestSource::new(
+        "primitive udp_dff(q, d, clk, reset); output reg q; input d, clk, reset; table ? ? r : ? : 0; ? r 1 : ? : 0; 0 r 0 : ? : 0; 1 r 0 : ? : 1; endtable endprimitive module top(input logic d, clk, reset, output logic q); udp_dff u_dff(q, d, clk, reset); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let process = module.procedures().next().unwrap();
+    let events = process.events().collect::<Vec<_>>();
+
+    assert_eq!(process.kind().unwrap(), SlangProcedureKind::Flop);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].signal().unwrap().name, "clk");
+    assert_eq!(events[0].edge().unwrap(), SlangEdge::Pos);
+    assert_eq!(events[1].signal().unwrap().name, "reset");
+    assert_eq!(events[1].edge().unwrap(), SlangEdge::Pos);
+    assert_eq!(procedure_effects(process).len(), 4);
+}
+
+#[test]
+fn native_compile_rejects_udp_updates_from_distinct_transition_inputs() {
+    let source = NativeTestSource::new(
+        "primitive udp_multi(q, a, b); output reg q; input a, b; table r ? : ? : 0; ? r : ? : 1; endtable endprimitive module top(input logic a, b, output logic q); udp_multi u_multi(q, a, b); endmodule\n",
+    );
+    let error = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions::default(),
+    )
+    .expect_err("distinct update-event inputs require a unique data clock");
+
+    assert!(
+        error
+            .to_string()
+            .contains("has no unique data-update transition input"),
+        "{error}"
+    );
 }
 
 #[test]

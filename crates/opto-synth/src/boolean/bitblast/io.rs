@@ -3,6 +3,19 @@
 
 use super::{BitBackend, BitBlaster, BitSpan, BitVal, ConstBits, ScalarBit, word};
 
+pub(super) enum ConnectLowering {
+    Boolean,
+    PhysicalTriState(PhysicalTriStateConnect),
+}
+
+pub(super) struct PhysicalTriStateConnect {
+    target: word::LValue,
+    original: word::ValueId,
+    data: word::ValueId,
+    enable: word::Enable,
+    source: word::SourceSpan,
+}
+
 impl<B: BitBackend> BitBlaster<'_, B> {
     pub(super) fn binding_constant(
         &mut self,
@@ -82,7 +95,97 @@ impl<B: BitBackend> BitBlaster<'_, B> {
         Ok(value)
     }
 
-    pub(super) fn lower_connect(
+    pub(super) fn classify_connect(
+        &self,
+        connect: &word::Connect,
+    ) -> Result<ConnectLowering, crate::SynthError> {
+        if self.global_scope != super::GlobalBitblastScope::RegionalShell
+            || self
+                .module
+                .signal(connect.target.signal)
+                .is_none_or(|signal| signal.resolution != word::SignalResolution::TriState)
+        {
+            return Ok(ConnectLowering::Boolean);
+        }
+
+        let value = self.module.value(connect.value).ok_or_else(|| {
+            crate::SynthError::invariant("physical tri-state connect value is unknown")
+        })?;
+        let word::ValueKind::Operation(operation) = value.kind else {
+            return Err(crate::SynthError::invariant(
+                "physical tri-state connect lost its explicit driver operation",
+            ));
+        };
+        let operation = self.module.operation(operation).ok_or_else(|| {
+            crate::SynthError::invariant("physical tri-state driver operation is unknown")
+        })?;
+        let word::OpKind::TriState { data, enable } = operation.kind else {
+            return Err(crate::SynthError::invariant(
+                "physical tri-state connect lost its data/enable contract",
+            ));
+        };
+        Ok(ConnectLowering::PhysicalTriState(PhysicalTriStateConnect {
+            target: connect.target.clone(),
+            original: connect.value,
+            data,
+            enable,
+            source: connect.source.clone(),
+        }))
+    }
+
+    pub(super) fn lower_physical_tri_state_connect(
+        &mut self,
+        connect: PhysicalTriStateConnect,
+    ) -> Result<(), crate::SynthError> {
+        let value = self.module.value(connect.original).ok_or_else(|| {
+            crate::SynthError::invariant("physical tri-state connect value is unknown")
+        })?;
+        if value.ty.width() != 1
+            || self.lvalue_width(&connect.target)? != 1
+            || self
+                .module
+                .value(connect.data)
+                .is_none_or(|value| value.ty.width() != 1)
+            || self
+                .module
+                .value(connect.enable.value)
+                .is_none_or(|value| value.ty.width() != 1)
+        {
+            return Err(crate::SynthError::invariant(
+                "non-scalar physical tri-state connect reached the regional shell",
+            ));
+        }
+        let data = self.scalar_value(connect.data)?;
+        let data = self.backend.word_value(data).ok_or_else(|| {
+            crate::SynthError::invariant(
+                "physical tri-state data cannot cross the regional Word shell",
+            )
+        })?;
+        let enable_value = self.scalar_value(connect.enable.value)?;
+        let enable_value = self.backend.word_value(enable_value).ok_or_else(|| {
+            crate::SynthError::invariant(
+                "physical tri-state enable cannot cross the regional Word shell",
+            )
+        })?;
+        let lowered = self
+            .module
+            .tri_state(
+                data,
+                word::Enable {
+                    value: enable_value,
+                    active_high: connect.enable.active_high,
+                },
+                connect.source.clone(),
+            )
+            .map_err(crate::SynthError::from)?;
+        self.provenance
+            .copy_value_origin(connect.original, lowered)?;
+        self.module
+            .connect(connect.target, lowered, connect.source)
+            .map_err(crate::SynthError::from)
+    }
+
+    pub(super) fn lower_boolean_connect(
         &mut self,
         connect: &word::Connect,
     ) -> Result<(), crate::SynthError> {

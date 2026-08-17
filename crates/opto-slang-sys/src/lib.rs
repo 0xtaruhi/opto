@@ -32,9 +32,10 @@ pub use view::{
     SlangArrayKind, SlangAttribute, SlangAttributeValue, SlangBlock, SlangBlockId,
     SlangCompilation, SlangConcat, SlangContinuousAssign, SlangEdgeTarget, SlangEffect,
     SlangExpression, SlangExpressionKind, SlangIndexRange, SlangInstance, SlangInstanceConnection,
-    SlangLogicConstant, SlangMaterializedModule, SlangModule, SlangNet, SlangPort, SlangProcedure,
-    SlangSensitivityEvent, SlangSignalRef, SlangSourceSpan, SlangSwitchArm, SlangSwitchArms,
-    SlangTerminator, SlangTerminatorKind, SlangTypeField, SlangTypeLayout, SlangTypeLayoutKind,
+    SlangLogicConstant, SlangLoopRegion, SlangLoopRegionId, SlangMaterializedModule, SlangModule,
+    SlangNet, SlangPort, SlangProcedure, SlangSensitivityEvent, SlangSignalRef, SlangSourceSpan,
+    SlangSwitchArm, SlangSwitchArms, SlangTerminator, SlangTerminatorKind, SlangTypeField,
+    SlangTypeLayout, SlangTypeLayoutKind,
 };
 
 /// Stable digest of the pinned Slang sources and Opto's native bridge.
@@ -169,6 +170,8 @@ pub enum SlangPortDirection {
     Output,
     /// Bidirectional resolved port.
     Inout,
+    /// Exact variable alias shared with the containing instance.
+    Ref,
 }
 
 /// Inclusive source indices of a packed bit range.
@@ -269,6 +272,17 @@ pub enum SlangProcedureKind {
     Flop,
     /// Classic `always` block whose combinational/latch status is inferred later.
     CombOrLatch,
+}
+
+/// Placement of a source loop's continuation condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlangLoopForm {
+    /// Condition is tested before the body.
+    PreTest,
+    /// Condition is tested after the body.
+    PostTest,
+    /// The source loop has no condition.
+    Unconditional,
 }
 
 /// Scheduling semantics of a procedural assignment.

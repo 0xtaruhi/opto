@@ -111,13 +111,9 @@ fn lower_module(module: &SlangMaterializedModule<'_>) -> Result<RtlModule, HdlEr
         let ty = WordType::new(width, port.is_signed(), LogicStateKind::FourState)
             .map_err(HdlError::Ir)?;
         let source = rtl.declaration_span(b"port", name.as_bytes(), "port");
+        let direction = lower_direction(port.direction().map_err(frontend_error)?);
         let port_id = rtl
-            .add_port(
-                name,
-                lower_direction(port.direction().map_err(frontend_error)?),
-                ty,
-                source,
-            )
+            .add_port(name, direction, ty, source)
             .map_err(HdlError::Ir)?;
         let signal = rtl
             .port(port_id)
@@ -126,11 +122,19 @@ fn lower_module(module: &SlangMaterializedModule<'_>) -> Result<RtlModule, HdlEr
         let layout = lower_type_layout(port.type_layout().map_err(frontend_error)?)?;
         rtl.set_signal_type_layout(signal, &layout)
             .map_err(HdlError::Ir)?;
-        rtl.set_signal_resolution(
-            signal,
-            lower_resolution(port.resolution().map_err(frontend_error)?),
-        )
-        .map_err(HdlError::Ir)?;
+        let resolution = lower_resolution(port.resolution().map_err(frontend_error)?);
+        let resolution = if resolution == SignalResolution::SingleDriver
+            && (direction == PortDirection::Inout
+                || writes
+                    .get(name)
+                    .is_some_and(WriteClasses::requires_tri_state_resolution))
+        {
+            SignalResolution::TriState
+        } else {
+            resolution
+        };
+        rtl.set_signal_resolution(signal, resolution)
+            .map_err(HdlError::Ir)?;
         lower_annotations(
             port.attributes(),
             &mut rtl,
@@ -151,26 +155,27 @@ fn lower_module(module: &SlangMaterializedModule<'_>) -> Result<RtlModule, HdlEr
         let has_unpacked = type_layout
             .as_ref()
             .is_some_and(TypeLayoutSpec::contains_unpacked_array);
-        let writes = writes.get(name).copied().unwrap_or_default();
+        let writes = writes.get(name).cloned().unwrap_or_default();
         if has_unpacked && writes.is_mixed() {
             return Err(HdlError::unsupported(format!(
                 "verilog frontend: unpacked storage '{name}' has mixed {} drivers",
                 writes.description()
             )));
         }
-        if has_unpacked && writes.contains(WriteClass::Flop) && !writes.has_multi_event_flop() {
-            let Some((depth, element_width)) =
-                layout.map(unpacked_memory_shape).transpose()?.flatten()
-            else {
-                return Err(HdlError::unsupported(
-                    "verilog frontend: procedural unpacked storage must use contiguous leading unpacked dimensions",
-                ));
-            };
-            if net.is_process_local() {
-                return Err(HdlError::unsupported(
-                    "verilog frontend: process-local unpacked arrays are not supported",
-                ));
-            }
+        // Irregular aggregate layouts remain ordinary flattened state. Only a
+        // contiguous leading unpacked prefix has an exact first-class memory
+        // shape; selectors on every other legal layout use the canonical
+        // signal extract/insert path below.
+        let first_class_memory_shape = if has_unpacked
+            && writes.contains(WriteClass::Flop)
+            && !writes.has_multi_event_flop()
+            && !net.is_process_local()
+        {
+            layout.map(unpacked_memory_shape).transpose()?.flatten()
+        } else {
+            None
+        };
+        if let Some((depth, element_width)) = first_class_memory_shape {
             if lower_resolution(net.resolution().map_err(frontend_error)?)
                 != SignalResolution::SingleDriver
             {
@@ -206,26 +211,34 @@ fn lower_module(module: &SlangMaterializedModule<'_>) -> Result<RtlModule, HdlEr
         }
         let ty = WordType::new(width, net.is_signed(), LogicStateKind::FourState)
             .map_err(HdlError::Ir)?;
-        let source = if net.is_process_local() {
-            rtl.declaration_span(b"process-local", name.as_bytes(), "process local")
-        } else {
-            rtl.declaration_span(b"net", name.as_bytes(), "net")
-        };
-        let signal = if net.is_process_local() {
-            rtl.add_process_local_signal(name, ty, source)
-        } else {
-            rtl.add_wire(name, ty, source)
+        if net.is_process_local() {
+            if lower_resolution(net.resolution().map_err(frontend_error)?)
+                != SignalResolution::SingleDriver
+            {
+                return Err(HdlError::invalid(format!(
+                    "verilog frontend: process local '{name}' must have single-driver resolution"
+                )));
+            }
+            let source = rtl.declaration_span(b"process-local", name.as_bytes(), "process local");
+            rtl.add_process_local(name, ty, source)?;
+            continue;
         }
-        .map_err(HdlError::Ir)?;
+        let source = rtl.declaration_span(b"net", name.as_bytes(), "net");
+        let signal = rtl.add_wire(name, ty, source).map_err(HdlError::Ir)?;
         if let Some(layout) = type_layout {
             rtl.set_signal_type_layout(signal, &layout)
                 .map_err(HdlError::Ir)?;
         }
-        rtl.set_signal_resolution(
-            signal,
-            lower_resolution(net.resolution().map_err(frontend_error)?),
-        )
-        .map_err(HdlError::Ir)?;
+        let resolution = lower_resolution(net.resolution().map_err(frontend_error)?);
+        let resolution = if resolution == SignalResolution::SingleDriver
+            && writes.requires_tri_state_resolution()
+        {
+            SignalResolution::TriState
+        } else {
+            resolution
+        };
+        rtl.set_signal_resolution(signal, resolution)
+            .map_err(HdlError::Ir)?;
         lower_annotations(
             net.attributes(),
             &mut rtl,
@@ -281,7 +294,7 @@ fn lower_module(module: &SlangMaterializedModule<'_>) -> Result<RtlModule, HdlEr
         let lhs_expression = assign.lhs().map_err(frontend_error)?;
         let key = target_identity(lhs_expression)?;
         let path = rtl.syntax_root(b"continuous-assignment", &key);
-        let lhs = lower_target(&mut rtl, lhs_expression, path.child(0))?.continuous()?;
+        let lhs = lower_target(&mut rtl, lhs_expression, path.child(0))?.continuous();
         let rhs_expression = assign.rhs().map_err(frontend_error)?;
         let source = rtl.identified_span(
             rhs_expression.source().map_err(frontend_error)?,
@@ -445,10 +458,11 @@ impl WriteClass {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct WriteClasses {
     classes: u8,
     multi_event_flop: bool,
+    tri_state_driver: bool,
 }
 
 impl WriteClasses {
@@ -461,19 +475,33 @@ impl WriteClasses {
         self.multi_event_flop |= multi_event;
     }
 
-    const fn contains(self, class: WriteClass) -> bool {
+    fn insert_continuous(&mut self, tri_state: bool) {
+        self.insert(WriteClass::Continuous);
+        self.tri_state_driver |= tri_state;
+    }
+
+    fn insert_procedural(&mut self, class: WriteClass, tri_state: bool) {
+        self.insert(class);
+        self.tri_state_driver |= tri_state;
+    }
+
+    const fn contains(&self, class: WriteClass) -> bool {
         self.classes & class.bit() != 0
     }
 
-    const fn has_multi_event_flop(self) -> bool {
+    const fn has_multi_event_flop(&self) -> bool {
         self.multi_event_flop
     }
 
-    const fn is_mixed(self) -> bool {
+    const fn is_mixed(&self) -> bool {
         self.classes.count_ones() > 1
     }
 
-    fn description(self) -> String {
+    const fn requires_tri_state_resolution(&self) -> bool {
+        self.tri_state_driver
+    }
+
+    fn description(&self) -> String {
         [
             self.contains(WriteClass::Continuous)
                 .then_some("continuous"),
@@ -495,10 +523,8 @@ fn classify_writes<'a>(
     let mut writes: HashMap<&str, WriteClasses> = HashMap::new();
     for assignment in module.assigns() {
         if let Some(name) = assignment_signal_name(assignment.lhs().map_err(frontend_error)?)? {
-            writes
-                .entry(name)
-                .or_default()
-                .insert(WriteClass::Continuous);
+            let tri_state = is_tri_state_expression(assignment.rhs().map_err(frontend_error)?)?;
+            writes.entry(name).or_default().insert_continuous(tri_state);
         }
     }
 
@@ -515,10 +541,12 @@ fn classify_writes<'a>(
             for effect in block.effects() {
                 if let Some(name) = assignment_signal_name(effect.lhs().map_err(frontend_error)?)? {
                     let writes = writes.entry(name).or_default();
+                    let tri_state = is_tri_state_expression(effect.rhs().map_err(frontend_error)?)?;
                     if class == WriteClass::Flop {
                         writes.insert_flop(multi_event_flop);
+                        writes.tri_state_driver |= tri_state;
                     } else {
-                        writes.insert(class);
+                        writes.insert_procedural(class, tri_state);
                     }
                 }
             }
@@ -530,7 +558,8 @@ fn classify_writes<'a>(
 fn assignment_signal_name(expression: SlangExpression<'_>) -> Result<Option<&str>, HdlError> {
     match expression.kind().map_err(frontend_error)? {
         SlangExpressionKind::Signal(signal) => Ok(Some(signal.name)),
-        SlangExpressionKind::DynamicExtract { value, .. } => assignment_signal_name(value),
+        SlangExpressionKind::Extract { value, .. }
+        | SlangExpressionKind::DynamicExtract { value, .. } => assignment_signal_name(value),
         _ => Ok(None),
     }
 }
@@ -605,9 +634,7 @@ fn unpacked_memory_shape(
     }
     let element = lower_type_layout(layout)?;
     if element.contains_unpacked_array() {
-        return Err(HdlError::unsupported(
-            "verilog frontend: unpacked memory dimensions must be contiguous",
-        ));
+        return Ok(None);
     }
     Ok(Some((
         NonZeroU32::new(depth).expect("an unpacked dimension has nonzero depth"),
@@ -620,6 +647,7 @@ fn lower_direction(direction: SlangPortDirection) -> PortDirection {
         SlangPortDirection::Input => PortDirection::Input,
         SlangPortDirection::Output => PortDirection::Output,
         SlangPortDirection::Inout => PortDirection::Inout,
+        SlangPortDirection::Ref => PortDirection::Ref,
     }
 }
 

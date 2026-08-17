@@ -711,6 +711,11 @@ impl RegionalWordImporter<'_> {
                 let else_value = self.import(*else_value)?;
                 self.module.mux(cond, then_value, else_value, span)
             }
+            word::OpKind::TriState { data, enable } => {
+                let data = self.import(*data)?;
+                let enable = self.import_enable(*enable)?;
+                self.module.tri_state(data, enable, span)
+            }
             word::OpKind::Concat { parts } => {
                 let parts = parts
                     .iter()

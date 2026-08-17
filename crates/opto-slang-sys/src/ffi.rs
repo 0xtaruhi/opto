@@ -13,6 +13,7 @@ pub(crate) const LANGUAGE_SYSTEM_VERILOG_2017: c_int = 1;
 pub(crate) const PORT_INPUT: c_int = 0;
 pub(crate) const PORT_OUTPUT: c_int = 1;
 pub(crate) const PORT_INOUT: c_int = 2;
+pub(crate) const PORT_REF: c_int = 3;
 
 pub(crate) const TYPE_SCALAR: c_int = 0;
 pub(crate) const TYPE_ARRAY: c_int = 1;
@@ -66,6 +67,10 @@ pub(crate) const PROCEDURE_COMB: c_int = 0;
 pub(crate) const PROCEDURE_LATCH: c_int = 1;
 pub(crate) const PROCEDURE_FLOP: c_int = 2;
 pub(crate) const PROCEDURE_COMB_OR_LATCH: c_int = 3;
+
+pub(crate) const LOOP_PRE_TEST: c_int = 0;
+pub(crate) const LOOP_POST_TEST: c_int = 1;
+pub(crate) const LOOP_UNCONDITIONAL: c_int = 2;
 
 pub(crate) const EDGE_POS: c_int = 0;
 pub(crate) const EDGE_NEG: c_int = 1;
@@ -220,7 +225,21 @@ pub(crate) struct ProcedureView {
     pub(crate) kind: c_int,
     pub(crate) event_count: usize,
     pub(crate) block_count: usize,
+    pub(crate) loop_region_count: usize,
     pub(crate) entry_block: u32,
+    pub(crate) source: SourceSpanView,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LoopRegionView {
+    pub(crate) header: u32,
+    pub(crate) body: u32,
+    pub(crate) latch: u32,
+    pub(crate) exit: u32,
+    pub(crate) form: c_int,
+    pub(crate) has_parent: c_int,
+    pub(crate) parent: u32,
     pub(crate) source: SourceSpanView,
 }
 
@@ -516,6 +535,11 @@ unsafe extern "C" {
         procedure: *const Procedure,
         block_index: usize,
         view: *mut BlockView,
+    ) -> c_int;
+    pub(crate) fn opto_slang_loop_region_view(
+        procedure: *const Procedure,
+        region_index: usize,
+        view: *mut LoopRegionView,
     ) -> c_int;
     pub(crate) fn opto_slang_effect_view(
         procedure: *const Procedure,

@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-ref-arguments"
+kind = "regression"
+covers = ["Exact subroutine ref aliases preserve shared-actual visibility and snapshot dynamic unpacked-array selectors at call entry."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 5
+min_cells = 1

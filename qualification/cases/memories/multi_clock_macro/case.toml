@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "memories-multi-clock-macro"
+kind = "regression"
+covers = ["Potentially overlapping writes on independent clocks bind an exact characterized two-write-port Liberty memory macro."]
+category = "memories"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/opto_memory_test.lib"
+sequential = true
+equivalence = false
+
+[assertions]
+min_ports = 9
+min_cells = 1

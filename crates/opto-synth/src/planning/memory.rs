@@ -16,6 +16,7 @@ mod macro_binding;
 struct Bank {
     words: Vec<word::ValueId>,
     next: Vec<word::ValueId>,
+    clocks: Vec<word::MemoryClock>,
 }
 
 #[derive(Debug, Default)]
@@ -116,7 +117,7 @@ pub(crate) fn lower_selected_memories(
             "selected memory implementations do not align with the memory arena",
         ));
     }
-    preflight(module, implementations, target_cells)?;
+    let register_bank_clocks = preflight(module, implementations, target_cells)?;
     let resources = module.take_memory_resources();
     if resources.is_empty() {
         return Ok(MemoryLoweringOwnership::default());
@@ -143,7 +144,12 @@ pub(crate) fn lower_selected_memories(
         let first_operation = module.operations().len();
         match implementations[index] {
             crate::planning::regional::MemoryImplementationCandidate::RegisterBank => {
-                let bank = materialize_storage(module, memory, &writes[index])?;
+                let clocks = register_bank_clocks[index].as_deref().ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "register-bank memory has no preflight word-clock assignment",
+                    )
+                })?;
+                let bank = materialize_storage(module, memory, &writes[index], clocks)?;
                 for port in std::mem::take(&mut reads[index]) {
                     materialize_read(module, &bank, &writes[index], port)?;
                 }
@@ -201,40 +207,30 @@ fn preflight(
     module: &word::WordModule,
     implementations: &[crate::planning::regional::MemoryImplementationCandidate],
     target_cells: &TargetCellSet,
-) -> Result<(), crate::SynthError> {
-    let mut clocks = BTreeMap::<word::MemoryId, word::MemoryClock>::new();
-    for port in module.memory_write_ports() {
-        if implementations[port.memory.index()]
-            != crate::planning::regional::MemoryImplementationCandidate::RegisterBank
-        {
-            continue;
-        }
-        if let Some(clock) = clocks.insert(port.memory, port.clock)
-            && !same_clock(module, clock, port.clock)
-        {
-            let name = module
-                .memory(port.memory)
-                .map_or("<unknown>", |memory| module.name_str(memory.name));
-            return Err(crate::SynthError::unsupported(format!(
-                "register-bank memory '{name}' has multiple write clocks"
-            )));
-        }
-    }
+) -> Result<Vec<Option<Vec<word::MemoryClock>>>, crate::SynthError> {
+    let mut register_bank_clocks = vec![None; module.memories().len()];
     for (index, memory) in module.memories().iter().enumerate() {
         let id = word::MemoryId::from_index(index)
             .map_err(|error| crate::SynthError::capacity(error.to_string()))?;
         match implementations[index] {
             crate::planning::regional::MemoryImplementationCandidate::RegisterBank => {
-                if !module
+                let has_write = module
                     .memory_write_ports()
                     .iter()
-                    .any(|port| port.memory == id)
-                {
+                    .any(|port| port.memory == id);
+                if !has_write {
                     return Err(crate::SynthError::unsupported(format!(
                         "memory '{}' has no writable storage implementation",
                         module.name_str(memory.name)
                     )));
                 }
+                let clocks = register_bank_word_clocks(module, id).ok_or_else(|| {
+                    crate::SynthError::unsupported(format!(
+                        "register-bank memory '{}' has multiple write clocks that may update the same word",
+                        module.name_str(memory.name)
+                    ))
+                })?;
+                register_bank_clocks[index] = Some(clocks);
             }
             crate::planning::regional::MemoryImplementationCandidate::Macro(cell_index) => {
                 let cell = target_cells.get(cell_index as usize).ok_or_else(|| {
@@ -252,7 +248,7 @@ fn preflight(
             }
         }
     }
-    Ok(())
+    Ok(register_bank_clocks)
 }
 
 pub(crate) fn compatible_memory_macros(
@@ -281,14 +277,53 @@ pub(crate) fn register_bank_is_supported(
     module: &word::WordModule,
     memory: word::MemoryId,
 ) -> bool {
-    let mut writes = module
+    module
         .memory_write_ports()
         .iter()
-        .filter(|port| port.memory == memory);
-    let Some(first) = writes.next() else {
-        return false;
+        .any(|port| port.memory == memory)
+        && register_bank_word_clocks(module, memory).is_some()
+}
+
+/// Assigns one physical clock domain to every scalarized word. Different
+/// clocks are safe only when conservative address bounds prove that they
+/// cannot reach the same word; an unknown bound therefore conflicts with
+/// every clock domain. Unwritten words use the first write clock solely to
+/// retain an unconstrained storage value without inventing another clock.
+fn register_bank_word_clocks(
+    module: &word::WordModule,
+    memory: word::MemoryId,
+) -> Option<Vec<word::MemoryClock>> {
+    let depth = module.memory(memory)?.depth.get() as usize;
+    let writes = module
+        .memory_write_ports()
+        .iter()
+        .filter(|port| port.memory == memory)
+        .collect::<Vec<_>>();
+    let fallback = writes.first()?.clock;
+    let mut clocks = Vec::with_capacity(depth);
+    for index in 0..depth {
+        let mut clock = None;
+        for write in writes
+            .iter()
+            .copied()
+            .filter(|write| write_may_address(module, write.address, index))
+        {
+            if clock.is_some_and(|clock| !same_clock(module, clock, write.clock)) {
+                return None;
+            }
+            clock = Some(write.clock);
+        }
+        clocks.push(clock.unwrap_or(fallback));
+    }
+    Some(clocks)
+}
+
+fn write_may_address(module: &word::WordModule, address: word::ValueId, index: usize) -> bool {
+    let Ok(index) = u128::try_from(index) else {
+        return true;
     };
-    writes.all(|write| same_clock(module, first.clock, write.clock))
+    word::unsigned_value_range(module, address)
+        .is_none_or(|range| range.minimum() <= index && index <= range.maximum())
 }
 
 fn memory_macro_is_compatible(
@@ -317,28 +352,33 @@ fn memory_macro_is_compatible(
         || target.read_ports.len() != read_count
         || target.write_ports.len() != write_count
         || (target.kind == opto_library::TargetMemoryKind::Rom && write_count != 0)
-        || write_count > 1
+        || !macro_write_clocks_are_supported(module, writes.clone())
     {
         return Ok(false);
     }
     for (source, target) in reads.clone().zip(&target.read_ports) {
-        if module
-            .value(source.address)
-            .is_none_or(|value| value.ty.width() as usize != target.address_pins.len())
-            || target.data_pins.len() != memory.element_type.width() as usize
+        if !macro_address_matches(
+            module,
+            source.address,
+            target.address_pins.len(),
+            memory.depth.get(),
+        ) || target.data_pins.len() != memory.element_type.width() as usize
             || !read_timing_matches(source, target)
-            || source.read_during_write != target_read_during_write(target.read_during_write)
+            || (matches!(source.timing, word::MemoryReadTiming::Synchronous { .. })
+                && source.read_during_write != target_read_during_write(target.read_during_write))
         {
             return Ok(false);
         }
     }
     for (source, target) in writes.clone().zip(&target.write_ports) {
-        if module
-            .value(source.address)
-            .is_none_or(|value| value.ty.width() as usize != target.address_pins.len())
-            || module
-                .value(source.data)
-                .is_none_or(|value| value.ty.width() as usize != target.data_pins.len())
+        if !macro_address_matches(
+            module,
+            source.address,
+            target.address_pins.len(),
+            memory.depth.get(),
+        ) || module
+            .value(source.data)
+            .is_none_or(|value| value.ty.width() as usize != target.data_pins.len())
             || !clock_matches(source.clock, &target.clock)
             || !enable_matches(source.enable, target.enable.as_ref())
             || !mask_matches(module, source.mask, target)
@@ -349,6 +389,141 @@ fn memory_macro_is_compatible(
     Ok(macro_binding::bindings_are_consistent(
         module, reads, writes, target,
     ))
+}
+
+/// A widened unsigned address may bind to narrower macro pins only when range
+/// analysis proves every discarded high bit is zero. This retains the
+/// frontend's overflow-safe arithmetic width without changing out-of-range
+/// memory behavior at the physical boundary.
+fn macro_address_matches(
+    module: &word::WordModule,
+    address: word::ValueId,
+    pin_count: usize,
+    depth: u32,
+) -> bool {
+    let Some(value) = module.value(address) else {
+        return false;
+    };
+    let width = value.ty.width() as usize;
+    width == pin_count
+        || (width > pin_count
+            && word::unsigned_value_range(module, address)
+                .is_some_and(|range| range.maximum() < u128::from(depth)))
+}
+
+/// Multiple physical write ports are exact when their source clock events are
+/// independent or their effective enables are provably mutually exclusive.
+/// Other same-clock logical ports may encode procedural priority or
+/// simultaneous writes, neither of which a plain Liberty memory port list
+/// specifies, so they remain ineligible until an explicit collision contract
+/// is available.
+fn macro_write_clocks_are_supported<'a>(
+    module: &word::WordModule,
+    writes: impl Iterator<Item = &'a word::MemoryWritePort>,
+) -> bool {
+    let writes = writes.collect::<Vec<_>>();
+    let mut facts = word::KnownBitsAnalysis::new(module);
+    writes.iter().enumerate().all(|(index, left)| {
+        writes[index + 1..].iter().all(|right| {
+            !same_clock(module, left.clock, right.clock)
+                || write_enables_are_mutually_exclusive(module, left, right, &mut facts)
+        })
+    })
+}
+
+#[derive(Debug, Default)]
+struct EnableConjunction {
+    impossible: bool,
+    literals: Vec<(word::ValueId, bool)>,
+}
+
+fn write_enables_are_mutually_exclusive(
+    module: &word::WordModule,
+    left: &word::MemoryWritePort,
+    right: &word::MemoryWritePort,
+    facts: &mut word::KnownBitsAnalysis,
+) -> bool {
+    let Some(left) = left.enable else {
+        return false;
+    };
+    let Some(right) = right.enable else {
+        return false;
+    };
+    let left = enable_conjunction(module, left, facts);
+    let right = enable_conjunction(module, right, facts);
+    left.impossible
+        || right.impossible
+        || left.literals.iter().any(|&(left_value, left_high)| {
+            right.literals.iter().any(|&(right_value, right_high)| {
+                left_high != right_high && same_value(module, left_value, right_value)
+            })
+        })
+}
+
+fn enable_conjunction(
+    module: &word::WordModule,
+    enable: word::Enable,
+    facts: &mut word::KnownBitsAnalysis,
+) -> EnableConjunction {
+    let mut result = EnableConjunction::default();
+    collect_enable_conjunction(module, enable.value, enable.active_high, facts, &mut result);
+    result
+}
+
+fn collect_enable_conjunction(
+    module: &word::WordModule,
+    value: word::ValueId,
+    asserted_high: bool,
+    facts: &mut word::KnownBitsAnalysis,
+    result: &mut EnableConjunction,
+) {
+    if result.impossible {
+        return;
+    }
+    if let Some(constant) = facts.constant(module, value)
+        && let Some(bit) = constant.bit_lsb(0)
+    {
+        let truth = bit == BitVal::One;
+        result.impossible = truth != asserted_high;
+        return;
+    }
+    let operation = module.value(value).and_then(|value| match value.kind {
+        word::ValueKind::Operation(operation) => module.operation(operation),
+        word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+    });
+    match operation.map(|operation| &operation.kind) {
+        Some(word::OpKind::Unary {
+            op: word::UnaryOp::LogicalNot,
+            arg,
+        }) => collect_enable_conjunction(module, *arg, !asserted_high, facts, result),
+        Some(word::OpKind::Binary {
+            op: word::BinaryOp::LogicalAnd | word::BinaryOp::BitAnd,
+            left,
+            right,
+        }) if asserted_high => {
+            collect_enable_conjunction(module, *left, true, facts, result);
+            collect_enable_conjunction(module, *right, true, facts, result);
+        }
+        Some(word::OpKind::Binary {
+            op: word::BinaryOp::LogicalOr | word::BinaryOp::BitOr,
+            left,
+            right,
+        }) if !asserted_high => {
+            collect_enable_conjunction(module, *left, false, facts, result);
+            collect_enable_conjunction(module, *right, false, facts, result);
+        }
+        _ => {
+            if result.literals.iter().any(|&(existing, high)| {
+                high != asserted_high && same_value(module, existing, value)
+            }) {
+                result.impossible = true;
+            } else if !result.literals.iter().any(|&(existing, high)| {
+                high == asserted_high && same_value(module, existing, value)
+            }) {
+                result.literals.push((value, asserted_high));
+            }
+        }
+    }
 }
 
 fn read_timing_matches(
@@ -599,25 +774,30 @@ fn same_clock(
     left: word::MemoryClock,
     right: word::MemoryClock,
 ) -> bool {
-    left.edge == right.edge
-        && (left.value == right.value
-            || module
-                .value(left.value)
-                .zip(module.value(right.value))
-                .is_some_and(|(left, right)| left.ty == right.ty && left.kind == right.kind))
+    left.edge == right.edge && same_value(module, left.value, right.value)
+}
+
+fn same_value(module: &word::WordModule, left: word::ValueId, right: word::ValueId) -> bool {
+    left == right
+        || module
+            .value(left)
+            .zip(module.value(right))
+            .is_some_and(|(left, right)| left.ty == right.ty && left.kind == right.kind)
 }
 
 fn materialize_storage(
     module: &mut word::WordModule,
     memory: &word::Memory,
     writes: &[word::MemoryWritePort],
+    clocks: &[word::MemoryClock],
 ) -> Result<Bank, crate::SynthError> {
-    let clock = writes
-        .first()
-        .expect("preflight requires a memory write port")
-        .clock;
     let name = module.name_str(memory.name).to_string();
     let depth = memory.depth.get() as usize;
+    if clocks.len() != depth {
+        return Err(crate::SynthError::invariant(
+            "register-bank word-clock assignment does not match memory depth",
+        ));
+    }
     let mut signals = Vec::with_capacity(depth);
     let mut words = Vec::with_capacity(depth);
     for index in 0..depth {
@@ -637,9 +817,12 @@ fn materialize_storage(
     }
 
     let mut next = Vec::with_capacity(depth);
-    for (index, (&signal, &old)) in signals.iter().zip(&words).enumerate() {
+    for (index, ((&signal, &old), &clock)) in signals.iter().zip(&words).zip(clocks).enumerate() {
         let mut value = old;
         for port in writes {
+            if !write_may_address(module, port.address, index) {
+                continue;
+            }
             let selected = address_match(module, port.address, index, &port.source)?;
             let enabled = port
                 .enable
@@ -669,7 +852,11 @@ fn materialize_storage(
             .map_err(crate::SynthError::from)?;
         next.push(value);
     }
-    Ok(Bank { words, next })
+    Ok(Bank {
+        words,
+        next,
+        clocks: clocks.to_vec(),
+    })
 }
 
 fn materialize_read(
@@ -688,14 +875,26 @@ fn materialize_read(
             disabled,
         } => {
             let same_clock_writes = writes
-                .first()
-                .is_some_and(|write| same_clock(module, write.clock, clock));
-            let words =
-                if read.read_during_write == word::ReadDuringWrite::NewData && same_clock_writes {
-                    &bank.next
-                } else {
-                    &bank.words
-                };
+                .iter()
+                .filter(|write| same_clock(module, write.clock, clock))
+                .cloned()
+                .collect::<Vec<_>>();
+            let forwarded_words =
+                (read.read_during_write == word::ReadDuringWrite::NewData).then(|| {
+                    bank.words
+                        .iter()
+                        .zip(&bank.next)
+                        .zip(&bank.clocks)
+                        .map(|((&old, &new), &word_clock)| {
+                            if same_clock(module, word_clock, clock) {
+                                new
+                            } else {
+                                old
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                });
+            let words = forwarded_words.as_deref().unwrap_or(&bank.words);
             let read_enable = enable
                 .map(|enable| normalize_enable(module, enable, &read.source))
                 .transpose()?;
@@ -712,12 +911,12 @@ fn materialize_read(
                     None
                 }
             };
-            if same_clock_writes
+            if !same_clock_writes.is_empty()
                 && matches!(
                     read.read_during_write,
                     word::ReadDuringWrite::NoChange | word::ReadDuringWrite::Undefined
                 )
-                && let Some(mut collision) = read_collision(module, &read, writes)?
+                && let Some(mut collision) = read_collision(module, &read, &same_clock_writes)?
             {
                 collision = and(module, collision, read_enable, &read.source)?;
                 match read.read_during_write {

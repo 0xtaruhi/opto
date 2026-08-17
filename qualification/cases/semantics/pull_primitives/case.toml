@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "semantics-pull-primitives"
+kind = "regression"
+covers = ["Built-in pullup and pulldown primitives lower to constant one and zero network drivers."]
+category = "semantics"
+language = "verilog"
+top = "top"
+sources = ["top.v"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 2

@@ -427,6 +427,10 @@ fn remap_operation_kind(kind: &mut OpKind, remap: &[Option<ValueId>]) -> Result<
             remap_one(then_value)?;
             remap_one(else_value)?;
         }
+        OpKind::TriState { data, enable } => {
+            remap_one(data)?;
+            remap_one(&mut enable.value)?;
+        }
         OpKind::Concat { parts } => {
             for part in parts {
                 remap_one(part)?;

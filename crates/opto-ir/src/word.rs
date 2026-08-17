@@ -24,7 +24,7 @@ mod compact;
 pub use compact::NetlistRemap;
 mod linked_elaboration;
 pub use linked_elaboration::elaborate_linked_root;
-pub(crate) use linked_elaboration::{ModuleRemap, elaborate_linked_root_with};
+pub(crate) use linked_elaboration::{ModuleRemap, SignalBindingOffset, elaborate_linked_root_with};
 mod validate;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

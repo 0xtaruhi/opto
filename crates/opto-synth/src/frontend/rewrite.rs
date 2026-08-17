@@ -57,6 +57,7 @@ enum OperationNode {
     Unary(word::UnaryOp, word::ValueId),
     Binary(word::BinaryOp, word::ValueId, word::ValueId),
     Mux(word::ValueId, word::ValueId, word::ValueId),
+    TriState(word::ValueId, word::Enable),
     Concat(usize),
     Extract(word::ValueId, u32, std::num::NonZeroU32),
     DynamicExtract(word::ValueId, word::ValueId, std::num::NonZeroU32),
@@ -135,6 +136,7 @@ where
                 then_value,
                 else_value,
             } => OperationNode::Mux(*cond, *then_value, *else_value),
+            OpKind::TriState { data, enable } => OperationNode::TriState(*data, *enable),
             OpKind::Concat { parts } => OperationNode::Concat(parts.len()),
             OpKind::Extract { value, lsb, width } => OperationNode::Extract(*value, *lsb, *width),
             OpKind::DynamicExtract {
@@ -183,6 +185,25 @@ where
                         && rewritten_else == else_value,
                     |module, source| {
                         module.mux(rewritten_cond, rewritten_then, rewritten_else, source)
+                    },
+                )
+            }
+            OperationNode::TriState(data, enable) => {
+                let rewritten_data = self.rewrite(data)?;
+                let rewritten_enable = self.rewrite(enable.value)?;
+                self.changed(
+                    original,
+                    operation,
+                    rewritten_data == data && rewritten_enable == enable.value,
+                    |module, source| {
+                        module.tri_state(
+                            rewritten_data,
+                            word::Enable {
+                                value: rewritten_enable,
+                                active_high: enable.active_high,
+                            },
+                            source,
+                        )
                     },
                 )
             }

@@ -48,6 +48,7 @@ fn rtl_module_for(design: &DesignIndex) -> RtlModule {
             Direction::Input => opto_ir::word::PortDirection::Input,
             Direction::Output => opto_ir::word::PortDirection::Output,
             Direction::Inout => opto_ir::word::PortDirection::Inout,
+            Direction::Ref => opto_ir::word::PortDirection::Ref,
         };
         module
             .add_port(

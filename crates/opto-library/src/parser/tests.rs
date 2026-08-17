@@ -733,6 +733,11 @@ library(memory_demo) {
       bus_type : data_t;
       direction : output;
       memory_read() { address : A; }
+      timing() {
+        related_pin : "A[0]";
+        cell_rise(scalar) { values("0.25"); }
+        cell_fall(scalar) { values("0.25"); }
+      }
     }
     pin(CLK) { direction : input; }
     pin(WE) { direction : input; }
@@ -755,4 +760,9 @@ library(memory_demo) {
     assert_eq!(memory.write_ports[0].data_pins[7], "D[7]");
     assert_eq!(memory.write_ports[0].clock.pin, "CLK");
     assert_eq!(memory.write_ports[0].enable.as_ref().unwrap().pin, "WE");
+    assert!(
+        cell.pins()
+            .filter(|pin| pin.name().starts_with("Q["))
+            .all(|pin| pin.timing_arcs().count() == 1)
+    );
 }

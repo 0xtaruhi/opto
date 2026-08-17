@@ -116,7 +116,7 @@ impl Slot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct FrameId(usize);
 
 #[derive(Debug, Default)]

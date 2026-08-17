@@ -24,8 +24,9 @@ pub use expression::{
     SlangSourceSpan,
 };
 pub use procedure::{
-    SlangBlock, SlangBlockId, SlangEdgeTarget, SlangEffect, SlangProcedure, SlangSensitivityEvent,
-    SlangSwitchArm, SlangSwitchArms, SlangTerminator, SlangTerminatorKind,
+    SlangBlock, SlangBlockId, SlangEdgeTarget, SlangEffect, SlangLoopRegion, SlangLoopRegionId,
+    SlangProcedure, SlangSensitivityEvent, SlangSwitchArm, SlangSwitchArms, SlangTerminator,
+    SlangTerminatorKind,
 };
 pub use type_layout::{
     SlangArrayKind, SlangIndexRange, SlangTypeField, SlangTypeLayout, SlangTypeLayoutKind,

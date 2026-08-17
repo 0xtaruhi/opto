@@ -66,6 +66,9 @@ impl CnfEncoder<'_> {
                 then_value,
                 else_value,
             } => self.mux(*cond, *then_value, *else_value),
+            word::OpKind::TriState { .. } => Err(FormalError::unsupported(
+                "equivalence proof requires tri-state drivers to be resolved first",
+            )),
             word::OpKind::Concat { parts } => {
                 let mut result = Vec::new();
                 for &part in parts.iter().rev() {

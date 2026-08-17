@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "sequential-event-iff-enable"
+kind = "regression"
+covers = ["A runtime clock iff qualifier plus post-edge-true reset and constant-false discarded events lower to exact reset and register-enable controls."]
+category = "sequential"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+sequential = true
+equivalence = true
+
+[assertions]
+min_ports = 6
+min_cells = 1

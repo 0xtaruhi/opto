@@ -535,6 +535,17 @@ impl ProvenanceBuilder {
             }
             let (origin, owner) = match cell_source {
                 MappedCellSource::Instance(_) => (OriginSetId::EMPTY, InitialCellOwner::Global),
+                MappedCellSource::StructuralValue(value) => (
+                    self.value_origins
+                        .get(value.index())
+                        .copied()
+                        .ok_or_else(|| {
+                            crate::SynthError::invariant(format!(
+                                "mapped cell {cell:?} references structural value {value:?} without provenance"
+                            ))
+                        })?,
+                    InitialCellOwner::Global,
+                ),
                 MappedCellSource::Value { value, owner } => (
                     self.value_origins
                         .get(value.index())

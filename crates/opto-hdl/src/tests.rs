@@ -8,6 +8,65 @@ use opto_ir::proc::{
 use opto_ir::word::{BinaryOp, Edge, OpKind, SignalResolution, TypeSelector, ValueKind};
 
 #[test]
+fn verilog_frontend_eliminates_reference_ports_during_linked_elaboration() {
+    let source = TestSource::new(
+        "reference-port.sv",
+        "module child(ref logic [3:0] value, input logic [3:0] data); always_comb value = data; endmodule\nmodule top(input logic [3:0] data, output logic [3:0] y); logic [3:0] shared; child u_child(.value(shared), .data(data)); assign y = shared; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions {
+            top: Some("top".to_string()),
+            ..FrontendOptions::default()
+        },
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let top = update
+        .modules
+        .iter()
+        .find(|module| module.word().name() == "top")
+        .unwrap();
+    let flat = opto_ir::rtl::elaborate_linked_root(top, update.modules.iter()).unwrap();
+    let shared = flat.word().signal_id("shared").unwrap();
+    assert!(flat.word().signal_id("u_child/value").is_none());
+    assert!(flat.procedures().effects().iter().any(
+        |effect| matches!(effect.target, ProcTarget::Signal { signal, .. } if signal == shared)
+    ));
+}
+
+#[test]
+fn verilog_frontend_composes_dynamic_unpacked_reference_port_aliases() {
+    let source = TestSource::new(
+        "dynamic-reference-port.sv",
+        "module child(ref logic [7:0] value, input logic [7:0] data); always_comb value = data; endmodule\nmodule top(input logic [7:0] data, input logic [1:0] index, output logic [7:0] y); logic [7:0] values [0:3]; child u_child(.value(values[index]), .data(data)); assign y = values[index]; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions {
+            top: Some("top".to_string()),
+            ..FrontendOptions::default()
+        },
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let top = update
+        .modules
+        .iter()
+        .find(|module| module.word().name() == "top")
+        .unwrap();
+    let flat = opto_ir::rtl::elaborate_linked_root(top, update.modules.iter()).unwrap();
+    let values = flat.word().signal_id("values").unwrap();
+    assert!(flat.procedures().effects().iter().any(|effect| matches!(
+        effect.target,
+        ProcTarget::Signal {
+            signal,
+            select: opto_ir::proc::TargetSelect::Dynamic { width, .. },
+        } if signal == values && width.get() == 8
+    )));
+}
+
+#[test]
 fn verilog_frontend_keeps_continuously_driven_unpacked_arrays_as_signals() {
     let source = TestSource::new(
         "continuous-array.sv",
@@ -185,6 +244,153 @@ fn verilog_frontend_keeps_async_reset_flop_arrays_as_register_signals() {
 }
 
 #[test]
+fn verilog_frontend_materializes_automatic_flop_array_locals_for_normalization() {
+    let source = TestSource::new(
+        "automatic-flop-array.sv",
+        "module top(input logic clk, input logic [1:0] index, input logic [7:0] a, b, output logic [7:0] q); always_ff @(posedge clk) begin automatic logic [7:0] temporary [0:3]; temporary[0] = a; temporary[1] = b; temporary[2] = a ^ b; temporary[3] = a + b; q <= temporary[index]; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    assert!(module.memories().is_empty());
+    assert!(
+        module
+            .signals()
+            .iter()
+            .any(|signal| signal.kind == opto_ir::word::SignalKind::ProcessLocal)
+    );
+    assert!(
+        module
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation.kind, OpKind::DynamicExtract { .. }))
+    );
+    assert!(module.operations().iter().any(|operation| matches!(
+        operation.kind,
+        OpKind::DynamicExtract { width, .. } if width.get() == 8
+    )));
+}
+
+#[test]
+fn verilog_frontend_makes_process_local_part_selects_unsigned() {
+    let source = TestSource::new(
+        "automatic-signed-slice.sv",
+        "module top(input logic [4:0] data, output logic [2:0] y); always_comb begin automatic integer temporary; temporary = data; y = temporary[2:0]; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let output = rtl.word().signal_id("y").unwrap();
+    let effect = rtl
+        .procedures()
+        .effects()
+        .iter()
+        .find(
+            |effect| matches!(effect.target, ProcTarget::Signal { signal, .. } if signal == output),
+        )
+        .unwrap();
+
+    assert!(!rtl.word().value(effect.value).unwrap().ty.is_signed());
+}
+
+#[test]
+fn verilog_frontend_flattens_noncontiguous_unpacked_state() {
+    let source = TestSource::new(
+        "noncontiguous-unpacked-state.sv",
+        "typedef struct { logic [7:0] lanes [0:1]; logic [3:0] tag; } entry_t; module top(input logic clk, row, column, input logic [7:0] data, output logic [7:0] q); entry_t state [0:1]; always_ff @(posedge clk) state[row].lanes[column] <= data; assign q = state[row].lanes[column]; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let module = rtl.word();
+    let state = module
+        .signal_id("state")
+        .expect("irregular aggregate state must use flattened signal storage");
+
+    assert!(module.memory_id("state").is_none());
+    assert_eq!(module.signal(state).unwrap().ty.width(), 40);
+    assert!(rtl.procedures().effects().iter().any(|effect| matches!(
+        effect.target,
+        ProcTarget::Signal {
+            signal,
+            select: opto_ir::proc::TargetSelect::Dynamic { width, .. },
+        } if signal == state && width.get() == 8
+    )));
+}
+
+#[test]
+fn verilog_frontend_flattens_async_reset_array_state() {
+    let source = TestSource::new(
+        "async-reset-array-state.sv",
+        "module top(input logic clk, rst_n, we, input logic [1:0] address, input logic [7:0] data, output logic [7:0] q); logic [7:0] memory [0:3]; integer index; always_ff @(posedge clk or negedge rst_n) begin if (!rst_n) begin for (index = 0; index < 4; index = index + 1) memory[index] <= '0; end else if (we) memory[address] <= data; end assign q = memory[address]; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let memory = module
+        .signal_id("memory")
+        .expect("asynchronously reset array state must use flattened signal storage");
+    let index = module
+        .signal_id("index")
+        .expect("the source loop index remains a declared module signal");
+
+    assert!(module.memory_id("memory").is_none());
+    assert_eq!(module.signal(memory).unwrap().ty.width(), 32);
+    assert_eq!(
+        update.modules[0]
+            .procedures()
+            .sensitivity_events(ProcedureId::FIRST)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        update.modules[0]
+            .procedures()
+            .effects()
+            .iter()
+            .any(|effect| matches!(
+                effect.target,
+                ProcTarget::Signal {
+                    signal,
+                    select: opto_ir::proc::TargetSelect::Dynamic { width, .. },
+                } if signal == memory && width.get() == 8
+            ))
+    );
+    let memory_effects = update.modules[0]
+        .procedures()
+        .effects()
+        .iter()
+        .filter(
+            |effect| matches!(effect.target, ProcTarget::Signal { signal, .. } if signal == memory),
+        )
+        .count();
+    assert_eq!(
+        memory_effects, 6,
+        "joint normalization removes the final value-unreachable reset clone"
+    );
+    assert!(!update.modules[0].procedures().effects().iter().any(
+        |effect| matches!(effect.target, ProcTarget::Signal { signal, .. } if signal == index)
+    ));
+}
+
+#[test]
 fn verilog_frontend_rejects_mixed_unpacked_array_drivers() {
     let source = TestSource::new(
         "mixed-array-drivers.sv",
@@ -313,6 +519,40 @@ fn verilog_frontend_uses_memory_ports_for_static_and_dynamic_accesses() {
 }
 
 #[test]
+fn verilog_frontend_composes_nested_dynamic_memory_bit_targets() {
+    let source = TestSource::new(
+        "nested-memory-bit-target.sv",
+        "module top(input logic clk, we, input logic [1:0] address, bit_index, input logic data, output logic [7:0] q); logic [7:0] memory[4]; always_ff @(posedge clk) begin if (we) begin memory[2][bit_index] <= data; memory[address][bit_index + 2'd1] <= data; end end assign q = memory[address]; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let module = rtl.word();
+    let memory = module.memory_id("memory").unwrap();
+    let dynamic_writes = rtl
+        .procedures()
+        .effects()
+        .iter()
+        .filter(|effect| {
+            matches!(
+                effect.target,
+                ProcTarget::Memory {
+                    memory: target,
+                    select: opto_ir::proc::TargetSelect::Dynamic { width, .. },
+                    ..
+                } if target == memory && width.get() == 1
+            )
+        })
+        .count();
+
+    assert_eq!(dynamic_writes, 2);
+}
+
+#[test]
 fn verilog_frontend_lowers_wide_memory_addresses_without_overflow() {
     let source = TestSource::new(
         "wide-memory-address.sv",
@@ -333,6 +573,39 @@ fn verilog_frontend_lowers_wide_memory_addresses_without_overflow() {
 
     assert_eq!(module.memory_read_ports().len(), 1);
     assert_eq!(module.memory_read_ports()[0].memory, memory);
+}
+
+#[test]
+fn verilog_frontend_narrows_proven_memory_addresses_to_physical_width() {
+    let source = TestSource::new(
+        "canonical-memory-address.sv",
+        "module top(input logic clk, we, input logic [1:0] address, input logic [7:0] data, output logic [7:0] result); logic [7:0] memory[0:3]; always_ff @(posedge clk) if (we) memory[address] <= data; assign result = memory[address]; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let module = rtl.word();
+    let memory = module.memory_id("memory").unwrap();
+
+    assert_eq!(
+        module
+            .value(module.memory_read_ports()[0].address)
+            .unwrap()
+            .ty
+            .width(),
+        2
+    );
+    assert!(rtl.procedures().effects().iter().any(|effect| matches!(
+        effect.target,
+        ProcTarget::Memory {
+            memory: target,
+            ..
+        } if target == memory
+    )));
 }
 
 #[test]
@@ -436,14 +709,17 @@ fn verilog_frontend_expands_multielement_memory_accesses() {
             .iter()
             .all(|port| port.memory == memory)
     );
-    assert_eq!(rtl.procedures().effects().len(), 4);
-    assert!(rtl.procedures().effects().iter().all(|effect| matches!(
-        effect.target,
-        ProcTarget::Memory {
-            memory: target,
-            ..
-        } if target == memory
-    )));
+    assert_eq!(
+        rtl.procedures()
+            .effects()
+            .iter()
+            .filter(|effect| matches!(
+                effect.target,
+                ProcTarget::Memory { memory: target, .. } if target == memory
+            ))
+            .count(),
+        4
+    );
 }
 
 #[test]
@@ -537,6 +813,168 @@ fn verilog_frontend_preserves_wired_net_resolution() {
             .unwrap()
             .resolution,
         SignalResolution::WiredOr
+    );
+}
+
+#[test]
+fn verilog_frontend_materializes_tri_state_driver_contract() {
+    let source = TestSource::new(
+        "wired-tristate.sv",
+        "module top(input logic data, enable, output wand y); bufif1 (y, data, enable); endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let connect = module.connects().first().unwrap();
+    let ValueKind::Operation(operation) = module.value(connect.value).unwrap().kind else {
+        panic!("tri-state assignment must be an explicit operation");
+    };
+    assert!(matches!(
+        module.operation(operation).unwrap().kind,
+        OpKind::TriState {
+            enable: opto_ir::word::Enable {
+                active_high: true,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn verilog_frontend_lowers_pull_primitives_to_constant_connections() {
+    let source = TestSource::new(
+        "pull-primitives.v",
+        "module top(output wire high, low); pullup (high); pulldown (low); endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let high = module.signal_id("high").unwrap();
+    let low = module.signal_id("low").unwrap();
+
+    let driven_bit = |signal| {
+        let connect = module
+            .connects()
+            .iter()
+            .find(|connect| connect.target.signal == signal)
+            .unwrap();
+        let ValueKind::Constant(ref constant) = module.value(connect.value).unwrap().kind else {
+            panic!("pull primitive must lower to a constant connection");
+        };
+        constant.bit_lsb(0)
+    };
+    assert_eq!(driven_bit(high), Some(opto_ir::BitVal::One));
+    assert_eq!(driven_bit(low), Some(opto_ir::BitVal::Zero));
+}
+
+#[test]
+fn verilog_frontend_marks_inout_tri_state_as_a_physical_boundary() {
+    let source = TestSource::new(
+        "inout-tristate.sv",
+        "module top(input logic data, enable, inout wire pad); assign pad = enable ? data : 1'bz; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+
+    assert_eq!(
+        module
+            .signal(module.signal_id("pad").unwrap())
+            .unwrap()
+            .resolution,
+        SignalResolution::TriState
+    );
+}
+
+#[test]
+fn linked_elaboration_preserves_feedback_tri_state_boundary() {
+    let source = TestSource::new(
+        "feedback-tristate.v",
+        "module top(inout wire pad, input enable); reg captured; always @(pad or enable) if (!enable) captured <= pad; assign pad = enable ? ~captured : 1'bz; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let flat =
+        opto_ir::rtl::elaborate_linked_root(&update.modules[0], update.modules.iter()).unwrap();
+    let pad = flat.word().signal_id("pad").unwrap();
+
+    assert_eq!(
+        flat.word().signal(pad).unwrap().resolution,
+        SignalResolution::TriState
+    );
+}
+
+#[test]
+fn verilog_frontend_marks_procedural_tri_state_as_a_physical_boundary() {
+    let source = TestSource::new(
+        "procedural-tristate.v",
+        "module top(input en, data, output reg y); always @(en or data) y <= en ? data : 1'bz; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let y = module.signal_id("y").unwrap();
+
+    assert_eq!(
+        module.signal(y).unwrap().resolution,
+        SignalResolution::TriState
+    );
+    let effect = update.modules[0]
+        .procedures()
+        .effects()
+        .iter()
+        .find(|effect| matches!(effect.target, ProcTarget::Signal { signal, .. } if signal == y))
+        .unwrap();
+    let ValueKind::Operation(operation) = module.value(effect.value).unwrap().kind else {
+        panic!("procedural tri-state assignment must remain an explicit operation");
+    };
+    assert!(matches!(
+        module.operation(operation).unwrap().kind,
+        OpKind::TriState { .. }
+    ));
+}
+
+#[test]
+fn verilog_frontend_keeps_disjoint_continuous_slices_single_driver() {
+    let source = TestSource::new(
+        "disjoint-continuous-slices.sv",
+        "module top(input logic [2:0] a, output logic [2:0] y); assign y[2] = a[2]; assign y[1] = a[1]; assign y[0] = a[0]; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+
+    assert_eq!(
+        module
+            .signal(module.signal_id("y").unwrap())
+            .unwrap()
+            .resolution,
+        SignalResolution::SingleDriver
     );
 }
 
@@ -932,6 +1370,364 @@ fn verilog_frontend_lowers_always_comb_control_flow() {
 }
 
 #[test]
+fn verilog_frontend_lowers_bounded_runtime_condition_loops_to_acyclic_cfg() {
+    let source = TestSource::new(
+        "bounded-runtime-loops.sv",
+        "module top(input logic [3:0] keep, output logic [2:0] while_count, do_count); always_comb begin integer i; integer j; i = 0; j = 0; while (i < 4 && keep[i]) i++; do j++; while (j < 4 && keep[j]); while_count = i; do_count = j; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let cfg = rtl.procedures();
+
+    assert!(
+        cfg.blocks()
+            .iter()
+            .filter(|block| matches!(block.terminator.kind, TerminatorKind::Branch { .. }))
+            .count()
+            >= 7
+    );
+    let assigned_outputs = cfg
+        .effects()
+        .iter()
+        .filter_map(|effect| match effect.target {
+            ProcTarget::Signal { signal, .. } => rtl
+                .word()
+                .signal(signal)
+                .and_then(|signal| signal.name)
+                .and_then(|name| rtl.word().resolve_name(name)),
+            ProcTarget::Memory { .. } => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(assigned_outputs.contains("while_count"));
+    assert!(assigned_outputs.contains("do_count"));
+}
+
+#[test]
+fn verilog_frontend_proves_signed_division_loop_progress() {
+    let source = TestSource::new(
+        "signed-division-loop.sv",
+        "module top(output logic signed [7:0] result); always_comb begin int signed value; value = -16; while (value < -1) value = value / 32'sd2; result = value[7:0]; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+
+    rtl.procedures().validate().unwrap();
+    assert!(rtl.procedures().effects().iter().any(|effect| matches!(
+        effect.target,
+        ProcTarget::Signal { signal, .. }
+            if rtl.word().resolve_name(rtl.word().signal(signal).unwrap().name.unwrap())
+                == Some("result")
+    )));
+}
+
+#[test]
+fn verilog_frontend_rejects_loops_without_a_finite_rust_proof() {
+    let cases = [
+        (
+            "runtime-while.sv",
+            "module top(input logic enable, output logic y); always_comb while (enable) y = 1; endmodule\n",
+        ),
+        (
+            "continue-without-progress.sv",
+            "module top(input logic skip, output logic [3:0] y); always_comb begin integer i; i = 0; y = 0; while (i < 4) begin if (skip) continue; i++; y[i - 1] = 1; end end endmodule\n",
+        ),
+        (
+            "repeating-state.sv",
+            "module top(output logic y); always_comb begin integer i; i = 0; y = 0; while (i < 2) begin y = ~y; i ^= 1; end end endmodule\n",
+        ),
+        (
+            "runtime-forever-break.sv",
+            "module top(input logic stop, output logic y); always_comb begin y = 0; forever begin if (stop) break; y = 1; end end endmodule\n",
+        ),
+        (
+            "nonexhaustive-forever-case.sv",
+            "module top(input logic select, output logic y); always_comb forever begin y = 1; case (select) 1'b0: break; endcase end endmodule\n",
+        ),
+    ];
+
+    for (name, text) in cases {
+        let source = TestSource::new(name, text);
+        let error = Frontend::read_verilog(
+            std::slice::from_ref(&source.path),
+            &FrontendOptions::default(),
+            &opto_runtime::ExecutionContext::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("cannot prove loop finite"),
+            "{name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn verilog_frontend_does_not_treat_an_uninitialized_loop_local_as_known() {
+    let source = TestSource::new(
+        "uninitialized-loop-local.sv",
+        "module top(output logic [3:0] y); always_comb begin integer i; y = 0; while (i < 4) begin i++; y = i[3:0]; end end endmodule\n",
+    );
+    let error = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("cannot prove loop finite"),
+        "{error}"
+    );
+}
+
+#[test]
+fn verilog_frontend_proves_and_eliminates_cyclic_constant_repeat() {
+    let source = TestSource::new(
+        "cyclic-constant-repeat.sv",
+        "module top(input logic [3:0] a, output logic [3:0] y); always_comb begin y = a; repeat (3) y = y + 1'b1; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let y = rtl.word().signal_id("y").unwrap();
+
+    assert_eq!(
+        rtl.procedures()
+            .effects()
+            .iter()
+            .filter(|effect| matches!(
+                effect.target,
+                ProcTarget::Signal { signal, .. } if signal == y
+            ))
+            .count(),
+        5,
+        "the acyclic graph retains one unreachable-by-value body clone for joint normalization"
+    );
+    assert!(rtl.word().signals().iter().all(|signal| {
+        signal.name.is_none_or(|name| {
+            rtl.word().resolve_name(name).is_none_or(|name| {
+                !name.starts_with("__opto_repeat_")
+                    || signal.kind == opto_ir::word::SignalKind::ProcessLocal
+            })
+        })
+    }));
+    rtl.procedures().validate().unwrap();
+}
+
+#[test]
+fn verilog_frontend_preserves_repeat_return_and_disable_transfers() {
+    let source = TestSource::new(
+        "cyclic-repeat-transfers.sv",
+        "module top(input logic stop_return, stop_scope, output logic [3:0] returned, scoped); function automatic logic [3:0] run(input logic stop); logic [3:0] value; value = 0; repeat (3) begin value++; if (stop) return value; end return value; endfunction always_comb returned = run(stop_return); always_comb begin scoped = 0; begin : scope repeat (3) begin scoped++; if (stop_scope) disable scope; scoped += 2; end scoped += 4; end scoped += 8; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+
+    assert_eq!(rtl.procedures().procedures().len(), 2);
+    assert!(rtl.word().signals().iter().all(|signal| {
+        signal.name.is_none_or(|name| {
+            rtl.word().resolve_name(name).is_none_or(|name| {
+                (!name.starts_with("__opto_repeat_")
+                    && !name.starts_with("__opto_disable_")
+                    && !name.ends_with("_returned"))
+                    || signal.kind == opto_ir::word::SignalKind::ProcessLocal
+            })
+        })
+    }));
+    rtl.procedures().validate().unwrap();
+}
+
+#[test]
+fn verilog_frontend_eliminates_repeat_break_and_continue_edges() {
+    let source = TestSource::new(
+        "cyclic-repeat-loop-transfers.sv",
+        "module top(input logic stop, skip, output logic [3:0] y); always_comb begin y = 0; repeat (3) begin y++; if (stop) break; if (skip) continue; y += 2; end end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+
+    assert!(rtl.word().signals().iter().all(|signal| {
+        signal.name.is_none_or(|name| {
+            rtl.word().resolve_name(name).is_none_or(|name| {
+                (!name.starts_with("__opto_repeat_") && !name.starts_with("__opto_loop_"))
+                    || signal.kind == opto_ir::word::SignalKind::ProcessLocal
+            })
+        })
+    }));
+    rtl.procedures().validate().unwrap();
+}
+
+#[test]
+fn verilog_frontend_eliminates_nested_cyclic_repeat_regions() {
+    let source = TestSource::new(
+        "nested-cyclic-repeat.sv",
+        "module top(output logic [3:0] y); always_comb begin y = 0; repeat (2) repeat (3) y++; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+
+    assert!(rtl.word().signals().iter().all(|signal| {
+        signal.name.is_none_or(|name| {
+            rtl.word()
+                .resolve_name(name)
+                .is_none_or(|name| !name.starts_with("__opto_repeat_"))
+        })
+    }));
+    rtl.procedures().validate().unwrap();
+}
+
+#[test]
+fn verilog_frontend_lowers_bounded_forever_loops_to_acyclic_cfg() {
+    let source = TestSource::new(
+        "bounded-forever-loop.sv",
+        "module top(input logic [3:0] stop, skip, output logic [3:0] mask, output logic [2:0] count); always_comb begin integer i; i = 0; mask = '0; forever begin if (stop[i] || i == 4) break; i++; if (skip[i - 1]) continue; mask[i - 1] = 1'b1; end count = i[2:0]; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+
+    assert!(
+        rtl.procedures()
+            .blocks()
+            .iter()
+            .filter(|block| matches!(block.terminator.kind, TerminatorKind::Branch { .. }))
+            .count()
+            >= 8
+    );
+    assert!(rtl.word().signals().iter().all(|signal| {
+        signal.name.is_none_or(|name| {
+            rtl.word()
+                .resolve_name(name)
+                .is_none_or(|name| !name.ends_with("_broken") && !name.ends_with("_continued"))
+        })
+    }));
+}
+
+#[test]
+fn verilog_frontend_lowers_scoped_disable_to_acyclic_cfg() {
+    let source = TestSource::new(
+        "scoped-disable.sv",
+        "module top(input logic stop_inner, stop_outer, stop_loop, stop_task, output logic [7:0] block_value, loop_value, task_value); task automatic leave(output logic [7:0] value, input logic stop); value = 1; if (stop) disable leave; value = value + 2; endtask always_comb begin block_value = 0; begin : outer block_value = block_value + 1; begin : inner block_value = block_value + 2; if (stop_inner) disable inner; block_value = block_value + 4; if (stop_outer) disable outer; block_value = block_value + 8; end block_value = block_value + 16; end block_value = block_value + 32; end always_comb begin loop_value = 0; begin : loop_scope for (int i = 0; i < 4; i++) begin loop_value = loop_value + 1; if (stop_loop && i == 1) disable loop_scope; loop_value = loop_value + 2; end loop_value = loop_value + 16; end loop_value = loop_value + 32; end always_comb begin leave(task_value, stop_task); task_value = task_value + 4; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+
+    assert_eq!(rtl.procedures().procedures().len(), 3);
+    assert!(
+        rtl.procedures()
+            .blocks()
+            .iter()
+            .filter(|block| matches!(block.terminator.kind, TerminatorKind::Branch { .. }))
+            .count()
+            >= 8
+    );
+    assert_eq!(
+        rtl.word()
+            .signals()
+            .iter()
+            .filter(|signal| signal.name.is_some_and(|name| {
+                rtl.word()
+                    .resolve_name(name)
+                    .is_some_and(|name| name.starts_with("__opto_disable_"))
+            }))
+            .count(),
+        4,
+        "lexical-disable flags remain typed process locals until joint normalization"
+    );
+}
+
+#[test]
+fn verilog_frontend_lowers_pattern_conditions_to_acyclic_cfg() {
+    let source = TestSource::new(
+        "pattern-conditions.sv",
+        "module top(input logic [1:0] opcode, input logic [3:0] payload, output logic [3:0] y); typedef struct packed { logic [1:0] opcode; logic [3:0] payload; } packet_t; packet_t packet; always_comb begin packet = '{opcode: opcode, payload: payload}; if (packet matches '{opcode: 2'b01, payload: .captured} &&& captured[3]) y = captured; else y = 4'h0; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+
+    assert!(
+        rtl.procedures()
+            .blocks()
+            .iter()
+            .any(|block| matches!(block.terminator.kind, TerminatorKind::Branch { .. }))
+    );
+    assert!(rtl.word().signals().iter().all(|signal| {
+        signal.name.is_none_or(|name| {
+            rtl.word().resolve_name(name).is_none_or(|name| {
+                !name.starts_with("__opto_pattern_")
+                    || signal.kind == opto_ir::word::SignalKind::ProcessLocal
+            })
+        })
+    }));
+}
+
+#[test]
+fn verilog_frontend_preserves_tagged_union_discriminants() {
+    let source = TestSource::new(
+        "tagged-union.sv",
+        "module top(input logic [7:0] data, output logic [7:0] y); typedef union tagged { void Empty; logic [3:0] Small; logic [7:0] Large; } value_t; value_t value; always_comb begin value = tagged Large data; y = '0; if (value matches tagged Large .captured) y = captured; end endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let value = rtl.word().signal_id("value").unwrap();
+
+    assert_eq!(rtl.word().signal(value).unwrap().ty.width(), 10);
+    assert!(
+        rtl.procedures()
+            .blocks()
+            .iter()
+            .any(|block| matches!(block.terminator.kind, TerminatorKind::Branch { .. }))
+    );
+}
+
+#[test]
 fn verilog_frontend_converts_untyped_parameter_slices_to_lvalue_type() {
     let source = TestSource::new(
         "assignment-signedness.sv",
@@ -984,6 +1780,32 @@ fn verilog_frontend_lowers_always_ff_clock_enable() {
         cfg.effects()
             .iter()
             .all(|effect| effect.mode == AssignmentMode::Nonblocking)
+    );
+}
+
+#[test]
+fn verilog_frontend_lowers_single_event_iff_as_register_enable() {
+    let source = TestSource::new(
+        "event-iff.sv",
+        "module top(input logic clk, en, d, output logic q); always_ff @(posedge clk iff en) q <= d; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let cfg = rtl.procedures();
+    let process = &cfg.procedures()[0];
+    let events = cfg.sensitivity_events(ProcedureId::FIRST).unwrap();
+
+    assert_eq!(process.kind, ProcedureKind::FlipFlop);
+    assert_eq!(events.len(), 1);
+    assert!(
+        cfg.blocks()
+            .iter()
+            .any(|block| matches!(block.terminator.kind, TerminatorKind::Branch { .. }))
     );
 }
 

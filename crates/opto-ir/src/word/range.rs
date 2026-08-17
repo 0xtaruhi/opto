@@ -190,6 +190,7 @@ fn operation_range(
         OpKind::Extract { .. }
         | OpKind::DynamicExtract { .. }
         | OpKind::DynamicInsert { .. }
+        | OpKind::TriState { .. }
         | OpKind::Register(_)
         | OpKind::Latch(_) => None,
     }

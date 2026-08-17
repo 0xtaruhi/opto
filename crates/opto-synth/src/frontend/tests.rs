@@ -120,6 +120,55 @@ fn parallel_cfg_analysis_preserves_serial_word_ir() {
 }
 
 #[test]
+fn latch_procedure_supports_per_target_assignment_scheduling() {
+    let mut module = WordModule::new("mixed_latch_scheduling");
+    let gate_signal = input(&mut module, "gate");
+    let data_signal = input(&mut module, "data");
+    let blocking_target = output(&mut module, "blocking_target");
+    let nonblocking_target = output(&mut module, "nonblocking_target");
+    let gate = read(&mut module, gate_signal);
+    let data = read(&mut module, data_signal);
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_combinational_procedure(ProcedureKind::CombinationalOrLatch, span())
+        .unwrap();
+    let entry = cfg.add_block(procedure, span()).unwrap();
+    let update = cfg.add_block(procedure, span()).unwrap();
+    let exit = cfg.add_block(procedure, span()).unwrap();
+    cfg.terminate_branch(entry, gate, update, exit, span())
+        .unwrap();
+    cfg.assign(
+        update,
+        AssignmentMode::Blocking,
+        ProcTarget::signal(blocking_target),
+        data,
+        span(),
+    )
+    .unwrap();
+    cfg.assign(
+        update,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(nonblocking_target),
+        data,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(update, exit, span()).unwrap();
+    cfg.terminate_return(exit, span()).unwrap();
+
+    let lowered = lower(module, cfg).unwrap();
+
+    assert_eq!(
+        lowered
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation.kind, word::OpKind::Latch(_)))
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn inherited_assignment_ignores_later_branch_guards() {
     let mut module = WordModule::new("top");
     let decode_signal = input(&mut module, "decode");
@@ -393,7 +442,7 @@ fn process_locals_are_consumed_at_the_phase_boundary() {
 }
 
 #[test]
-fn deep_cfg_is_iterative_and_cycles_are_rejected() {
+fn deep_cfg_is_iterative_and_final_seal_rejects_cycles() {
     let mut module = WordModule::new("top");
     let a_signal = input(&mut module, "a");
     let y = output(&mut module, "y");
@@ -420,7 +469,6 @@ fn deep_cfg_is_iterative_and_cycles_are_rejected() {
         .unwrap();
     assert_eq!(lower(module, cfg).unwrap().connects().len(), 1);
 
-    let module = WordModule::new("cycle");
     let mut cfg = ProcBuilder::new();
     let procedure = cfg
         .add_combinational_procedure(ProcedureKind::Combinational, span())
@@ -429,7 +477,7 @@ fn deep_cfg_is_iterative_and_cycles_are_rejected() {
     let loop_block = cfg.add_block(procedure, span()).unwrap();
     cfg.terminate_jump(entry, loop_block, span()).unwrap();
     cfg.terminate_jump(loop_block, loop_block, span()).unwrap();
-    let error = lower(module, cfg).unwrap_err();
+    let error = cfg.seal().unwrap_err();
     assert!(error.to_string().contains("control-flow cycle"), "{error}");
 }
 
@@ -492,8 +540,10 @@ fn blocking_is_visible_but_nonblocking_is_only_scheduled() {
 fn prioritized_async_set_clear_matches_every_sensitivity_event() {
     let mut module = WordModule::new("top");
     let clock = input(&mut module, "clk");
-    let preset_signal = input(&mut module, "preset");
     let clear_signal = input(&mut module, "clear");
+    // Allocate clear first while keeping preset first in the sensitivity list;
+    // reset matching must be independent of arena and source event order.
+    let preset_signal = input(&mut module, "preset");
     let enable_signal = input(&mut module, "enable");
     let data_signal = input(&mut module, "data");
     let q = output(&mut module, "q");
@@ -596,6 +646,207 @@ fn prioritized_async_set_clear_matches_every_sensitivity_event() {
         &lowered,
         register.resets[1].value,
         clear_signal
+    ));
+}
+
+#[test]
+fn factors_async_reset_through_an_implied_outer_enable_guard() {
+    let mut module = WordModule::new("top");
+    let clock = input(&mut module, "clk");
+    let reset_signal = input(&mut module, "reset_n");
+    let enable_signal = input(&mut module, "enable");
+    let data_signal = input(&mut module, "data");
+    let q = output(&mut module, "q");
+    let reset_n = read(&mut module, reset_signal);
+    let enable = read(&mut module, enable_signal);
+    let data = read(&mut module, data_signal);
+    let reset_asserted = module
+        .unary(word::UnaryOp::LogicalNot, reset_n, span())
+        .unwrap();
+    let reset_or_enable = module
+        .binary(word::BinaryOp::LogicalOr, reset_asserted, enable, span())
+        .unwrap();
+    let zero = module
+        .constant(ConstBits::from_bin_str("0").unwrap(), bit(), span())
+        .unwrap();
+
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_clocked_procedure(
+            [
+                SensitivityEvent {
+                    signal: clock,
+                    edge: word::Edge::Pos,
+                },
+                SensitivityEvent {
+                    signal: reset_signal,
+                    edge: word::Edge::Neg,
+                },
+            ],
+            span(),
+        )
+        .unwrap();
+    let entry = cfg.add_block(procedure, span()).unwrap();
+    let reset_test = cfg.add_block(procedure, span()).unwrap();
+    let reset_block = cfg.add_block(procedure, span()).unwrap();
+    let data_block = cfg.add_block(procedure, span()).unwrap();
+    let hold_block = cfg.add_block(procedure, span()).unwrap();
+    let exit = cfg.add_block(procedure, span()).unwrap();
+    cfg.terminate_branch(entry, reset_or_enable, reset_test, hold_block, span())
+        .unwrap();
+    cfg.terminate_branch(reset_test, reset_asserted, reset_block, data_block, span())
+        .unwrap();
+    cfg.assign(
+        reset_block,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(q),
+        zero,
+        span(),
+    )
+    .unwrap();
+    cfg.assign(
+        data_block,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(q),
+        data,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(reset_block, exit, span()).unwrap();
+    cfg.terminate_jump(data_block, exit, span()).unwrap();
+    cfg.terminate_jump(hold_block, exit, span()).unwrap();
+    cfg.terminate_return(exit, span()).unwrap();
+
+    let lowered = lower(module, cfg).unwrap();
+    let register = lowered
+        .operations()
+        .iter()
+        .find_map(|operation| match &operation.kind {
+            word::OpKind::Register(register) => Some(register),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(register.resets.len(), 1);
+    assert!(!register.resets[0].active_high);
+    assert!(reads_signal(
+        &lowered,
+        register.resets[0].value,
+        reset_signal
+    ));
+    assert!(register.enable.is_some_and(|enable| depends_on_signal(
+        &lowered,
+        enable.value,
+        enable_signal
+    )));
+}
+
+#[test]
+fn dual_edge_state_uses_phase_banks_with_explicit_hold_feedback() {
+    let mut module = WordModule::new("dual_edge");
+    let clock = input(&mut module, "clock");
+    let reset_signal = input(&mut module, "reset");
+    let enable_signal = input(&mut module, "enable");
+    let data_signal = input(&mut module, "data");
+    let q = output(&mut module, "q");
+    let reset = read(&mut module, reset_signal);
+    let enable = read(&mut module, enable_signal);
+    let data = read(&mut module, data_signal);
+    let zero = module
+        .constant(ConstBits::from_bin_str("0").unwrap(), bit(), span())
+        .unwrap();
+
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_clocked_procedure(
+            [
+                SensitivityEvent {
+                    signal: clock,
+                    edge: word::Edge::Pos,
+                },
+                SensitivityEvent {
+                    signal: clock,
+                    edge: word::Edge::Neg,
+                },
+            ],
+            span(),
+        )
+        .unwrap();
+    let entry = cfg.add_block(procedure, span()).unwrap();
+    let reset_block = cfg.add_block(procedure, span()).unwrap();
+    let enable_test = cfg.add_block(procedure, span()).unwrap();
+    let update = cfg.add_block(procedure, span()).unwrap();
+    let hold = cfg.add_block(procedure, span()).unwrap();
+    let exit = cfg.add_block(procedure, span()).unwrap();
+    cfg.terminate_branch(entry, reset, reset_block, enable_test, span())
+        .unwrap();
+    cfg.assign(
+        reset_block,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(q),
+        zero,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(reset_block, exit, span()).unwrap();
+    cfg.terminate_branch(enable_test, enable, update, hold, span())
+        .unwrap();
+    cfg.assign(
+        update,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(q),
+        data,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(update, exit, span()).unwrap();
+    cfg.terminate_jump(hold, exit, span()).unwrap();
+    cfg.terminate_return(exit, span()).unwrap();
+
+    let lowered = lower(module, cfg).unwrap();
+    let registers = lowered
+        .operations()
+        .iter()
+        .filter_map(|operation| match &operation.kind {
+            word::OpKind::Register(register) => Some(register),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(registers.len(), 2);
+    assert_eq!(
+        registers
+            .iter()
+            .map(|register| register.edge)
+            .collect::<Vec<_>>(),
+        [word::Edge::Pos, word::Edge::Neg]
+    );
+    assert!(
+        registers
+            .iter()
+            .all(|register| register.enable.is_none() && register.resets.is_empty())
+    );
+    assert!(
+        registers
+            .iter()
+            .all(|register| depends_on_signal(&lowered, register.d, q))
+    );
+    assert!(
+        registers
+            .iter()
+            .all(|register| depends_on_signal(&lowered, register.d, reset_signal))
+    );
+    let q_value = lowered
+        .connects()
+        .iter()
+        .find(|connect| connect.target.signal == q)
+        .map(|connect| connect.value)
+        .unwrap();
+    assert!(matches!(
+        lowered.value(q_value).unwrap().kind,
+        word::ValueKind::Operation(operation)
+            if matches!(
+                lowered.operation(operation).unwrap().kind,
+                word::OpKind::Mux { cond, .. } if reads_signal(&lowered, cond, clock)
+            )
     ));
 }
 
@@ -832,6 +1083,120 @@ fn dynamic_target_uses_the_latest_blocking_base() {
     assert!(lowered.operations().iter().any(|operation| {
         matches!(operation.kind, word::OpKind::DynamicInsert { value, .. } if value == base)
     }));
+}
+
+#[test]
+fn signed_whole_assignment_splits_into_unsigned_partial_state() {
+    let mut module = WordModule::new("top");
+    let signed = WordType::new(4, true, word::LogicStateKind::FourState).unwrap();
+    let output_port = module
+        .add_port("y", PortDirection::Output, signed, span())
+        .unwrap();
+    let output_signal = module.port(output_port).unwrap().signal;
+    let base = module
+        .constant(ConstBits::from_bin_str("1010").unwrap(), signed, span())
+        .unwrap();
+    let patch = module
+        .constant(ConstBits::from_bin_str("1").unwrap(), bit(), span())
+        .unwrap();
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_combinational_procedure(ProcedureKind::Combinational, span())
+        .unwrap();
+    let block = cfg.add_block(procedure, span()).unwrap();
+    cfg.assign(
+        block,
+        AssignmentMode::Blocking,
+        ProcTarget::signal(output_signal),
+        base,
+        span(),
+    )
+    .unwrap();
+    cfg.assign(
+        block,
+        AssignmentMode::Blocking,
+        ProcTarget::signal(output_signal).with_select(proc::TargetSelect::Static(word::BitRange {
+            msb: 0,
+            lsb: 0,
+        })),
+        patch,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_return(block, span()).unwrap();
+
+    let lowered = lower(module, cfg).unwrap();
+    let upper = lowered
+        .connects()
+        .iter()
+        .find(|connect| {
+            connect.target.signal == output_signal
+                && matches!(connect.target.range, Some(range) if range.lsb == 1 && range.msb == 3)
+        })
+        .expect("upper signed target fragment is committed");
+    let ty = lowered.value(upper.value).unwrap().ty;
+    assert_eq!(ty.width(), 3);
+    assert!(!ty.is_signed());
+}
+
+#[test]
+fn reversed_static_target_preserves_assignment_bit_order() {
+    let mut module = WordModule::new("top");
+    let vector = WordType::bits(4).unwrap();
+    let input_port = module
+        .add_port("a", PortDirection::Input, vector, span())
+        .unwrap();
+    let output_port = module
+        .add_port("y", PortDirection::Output, vector, span())
+        .unwrap();
+    let input_signal = module.port(input_port).unwrap().signal;
+    let output_signal = module.port(output_port).unwrap().signal;
+    let value = read(&mut module, input_signal);
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_combinational_procedure(ProcedureKind::Combinational, span())
+        .unwrap();
+    let block = cfg.add_block(procedure, span()).unwrap();
+    cfg.assign(
+        block,
+        AssignmentMode::Blocking,
+        ProcTarget::signal(output_signal).with_select(proc::TargetSelect::Static(word::BitRange {
+            msb: 0,
+            lsb: 3,
+        })),
+        value,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_return(block, span()).unwrap();
+
+    let lowered = lower(module, cfg).unwrap();
+    let assigned = lowered
+        .connects()
+        .iter()
+        .find(|connect| connect.target.signal == output_signal)
+        .and_then(|connect| lowered.value(connect.value))
+        .and_then(|value| match &value.kind {
+            word::ValueKind::Operation(operation) => lowered.operation(*operation),
+            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+        })
+        .and_then(|operation| match &operation.kind {
+            word::OpKind::Concat { parts } => Some(parts),
+            _ => None,
+        })
+        .expect("reversed assignment is represented by one bit-ordering concatenation");
+    assert_eq!(assigned.len(), 4);
+    for (&part, expected_lsb) in assigned.iter().zip(0..4) {
+        assert!(matches!(
+            lowered.value(part).map(|value| &value.kind),
+            Some(word::ValueKind::Operation(operation))
+                if matches!(
+                    lowered.operation(*operation).map(|operation| &operation.kind),
+                    Some(word::OpKind::Extract { value: source, lsb, width })
+                        if *source == value && *lsb == expected_lsb && width.get() == 1
+                )
+        ));
+    }
 }
 
 #[test]

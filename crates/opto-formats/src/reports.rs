@@ -484,6 +484,10 @@ fn live_operation_counts(module: &word::WordModule) -> (usize, usize) {
                 combinational += 1;
                 work.extend([*cond, *then_value, *else_value]);
             }
+            word::OpKind::TriState { data, enable } => {
+                combinational += 1;
+                work.extend([*data, enable.value]);
+            }
             word::OpKind::Concat { parts } => {
                 combinational += 1;
                 work.extend(parts.iter().copied());

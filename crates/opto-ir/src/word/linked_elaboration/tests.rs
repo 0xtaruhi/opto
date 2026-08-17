@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+use crate::word::BinaryOp;
 
 fn bits(width: u32) -> WordType {
     WordType::bits(width).unwrap()
@@ -91,6 +92,204 @@ fn recursively_elaborates_linked_design_and_preserves_library_leaves() {
     assert!(flat.signal_id("u_middle/u_leaf/a").is_some());
     assert!(flat.signal_id("u_middle/u_leaf/y").is_some());
     assert_eq!(flat.connects().len(), 5);
+}
+
+#[test]
+fn reference_port_elaboration_reuses_the_exact_parent_signal() {
+    let mut child = WordModule::new("child");
+    let value = child
+        .add_port("value", PortDirection::Ref, bits(4), SourceSpan::default())
+        .unwrap();
+    let data = child
+        .add_port("data", PortDirection::Input, bits(4), SourceSpan::default())
+        .unwrap();
+    let data = child
+        .read_signal(child.port(data).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    child
+        .connect(
+            LValue::signal(child.port(value).unwrap().signal),
+            data,
+            SourceSpan::default(),
+        )
+        .unwrap();
+
+    let mut top = WordModule::new("top");
+    let data = top
+        .add_port("data", PortDirection::Input, bits(4), SourceSpan::default())
+        .unwrap();
+    let shared = top
+        .add_wire("shared", bits(4), SourceSpan::default())
+        .unwrap();
+    let data = top
+        .read_signal(top.port(data).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    let shared_value = top.read_signal(shared, SourceSpan::default()).unwrap();
+    top.add_instance(
+        "u_child",
+        "child",
+        vec![
+            ("value".to_string(), shared_value, SourceSpan::default()),
+            ("data".to_string(), data, SourceSpan::default()),
+        ],
+        SourceSpan::default(),
+    )
+    .unwrap();
+
+    let flat = elaborate_linked_root(&top, [&top, &child]).unwrap();
+    let shared = flat.signal_id("shared").unwrap();
+    assert!(flat.signal_id("u_child/value").is_none());
+    assert!(
+        flat.connects()
+            .iter()
+            .any(|connect| connect.target == LValue::signal(shared))
+    );
+}
+
+#[test]
+fn reference_port_slice_composes_dynamic_child_offsets() {
+    let mut child = WordModule::new("child");
+    let value = child
+        .add_port("value", PortDirection::Ref, bits(4), SourceSpan::default())
+        .unwrap();
+    let index = child
+        .add_port(
+            "index",
+            PortDirection::Input,
+            bits(2),
+            SourceSpan::default(),
+        )
+        .unwrap();
+    let bit = child
+        .add_port("bit", PortDirection::Input, bits(1), SourceSpan::default())
+        .unwrap();
+    let index = child
+        .read_signal(child.port(index).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    let bit = child
+        .read_signal(child.port(bit).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    child
+        .connect(
+            LValue {
+                signal: child.port(value).unwrap().signal,
+                range: None,
+                dynamic: Some(DynamicRange {
+                    offset: index,
+                    width: std::num::NonZeroU32::new(1).unwrap(),
+                }),
+            },
+            bit,
+            SourceSpan::default(),
+        )
+        .unwrap();
+
+    let mut top = WordModule::new("top");
+    let bus = top.add_wire("bus", bits(8), SourceSpan::default()).unwrap();
+    let index = top
+        .add_port(
+            "index",
+            PortDirection::Input,
+            bits(2),
+            SourceSpan::default(),
+        )
+        .unwrap();
+    let bit = top
+        .add_port("bit", PortDirection::Input, bits(1), SourceSpan::default())
+        .unwrap();
+    let bus_slice = top
+        .read_signal_slice(bus, 2, 4, SourceSpan::default())
+        .unwrap();
+    let index = top
+        .read_signal(top.port(index).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    let bit = top
+        .read_signal(top.port(bit).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    top.add_instance(
+        "u_child",
+        "child",
+        vec![
+            ("value".to_string(), bus_slice, SourceSpan::default()),
+            ("index".to_string(), index, SourceSpan::default()),
+            ("bit".to_string(), bit, SourceSpan::default()),
+        ],
+        SourceSpan::default(),
+    )
+    .unwrap();
+
+    let flat = elaborate_linked_root(&top, [&top, &child]).unwrap();
+    let bus = flat.signal_id("bus").unwrap();
+    let connect = flat
+        .connects()
+        .iter()
+        .find(|connect| connect.target.signal == bus)
+        .unwrap();
+    let dynamic = connect.target.dynamic.unwrap();
+    let operation = flat
+        .value(dynamic.offset)
+        .and_then(|value| match value.kind {
+            ValueKind::Operation(operation) => flat.operation(operation),
+            ValueKind::Signal(_) | ValueKind::Constant(_) => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        operation.kind,
+        OpKind::Binary {
+            op: BinaryOp::Add,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rejects_reference_port_on_the_linked_root() {
+    let mut top = WordModule::new("top");
+    top.add_port("value", PortDirection::Ref, bits(4), SourceSpan::default())
+        .unwrap();
+
+    let error = elaborate_linked_root(&top, [&top]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("root reference port 'top.value'")
+    );
+}
+
+#[test]
+fn rejects_preserved_hierarchy_around_reference_ports() {
+    let mut child = WordModule::new("child");
+    child
+        .add_port("value", PortDirection::Ref, bits(4), SourceSpan::default())
+        .unwrap();
+    child
+        .set_synthesis_directive(
+            AnnotationTarget::Module,
+            SynthesisDirectiveKind::Ungroup,
+            false,
+            SourceSpan::construct("keep_hierarchy"),
+        )
+        .unwrap();
+
+    let mut top = WordModule::new("top");
+    let value = top
+        .add_wire("value", bits(4), SourceSpan::default())
+        .unwrap();
+    let value = top.read_signal(value, SourceSpan::default()).unwrap();
+    top.add_instance(
+        "u_child",
+        "child",
+        vec![("value".to_string(), value, SourceSpan::default())],
+        SourceSpan::default(),
+    )
+    .unwrap();
+
+    let error = elaborate_linked_root(&top, [&top, &child]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("instance 'u_child' cannot preserve hierarchy")
+    );
 }
 
 #[test]

@@ -295,8 +295,30 @@ OptoSlangStatus opto_slang_procedure_view(
         procedure->kind,
         procedure->events.size(),
         procedure->blocks.size(),
+        procedure->loop_regions.size(),
         procedure->entry_block,
         procedure->source,
+    };
+    return OPTO_SLANG_OK;
+}
+
+OptoSlangStatus opto_slang_loop_region_view(
+    const OptoSlangProcedureData* procedure,
+    size_t region_index,
+    OptoSlangLoopRegionView* view) {
+    if (!procedure || !view || region_index >= procedure->loop_regions.size()) {
+        return OPTO_SLANG_ERROR;
+    }
+    const auto& region = procedure->loop_regions[region_index];
+    *view = OptoSlangLoopRegionView{
+        region.header,
+        region.body,
+        region.latch,
+        region.exit,
+        region.form,
+        region.parent ? 1 : 0,
+        region.parent.value_or(0),
+        region.source,
     };
     return OPTO_SLANG_OK;
 }

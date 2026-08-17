@@ -829,6 +829,7 @@ fn sequential_input(operation: &word::OpKind, role: SequentialInputRole) -> Opti
             word::OpKind::Unary { .. }
             | word::OpKind::Binary { .. }
             | word::OpKind::Mux { .. }
+            | word::OpKind::TriState { .. }
             | word::OpKind::Extract { .. }
             | word::OpKind::DynamicExtract { .. }
             | word::OpKind::DynamicInsert { .. }

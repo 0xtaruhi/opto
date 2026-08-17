@@ -4,6 +4,18 @@
 use super::state::Assignment;
 use opto_ir::{BitVal, proc, word};
 
+pub(super) fn dual_edge_clock<'a>(
+    events: impl IntoIterator<Item = &'a proc::SensitivityEvent>,
+) -> Option<word::SignalId> {
+    let mut events = events.into_iter();
+    let first = *events.next()?;
+    let second = *events.next()?;
+    if events.next().is_some() || first.signal != second.signal || first.edge == second.edge {
+        return None;
+    }
+    Some(first.signal)
+}
+
 pub(super) fn resolve_flop_events(
     module: &mut word::WordModule,
     events: &[proc::SensitivityEvent],
@@ -24,10 +36,12 @@ pub(super) fn resolve_flop_events(
             )
         })?;
     let (clock, async_events) = partition_clock_and_async_controls(module, events, first_resets)?;
-    let expected_controls = async_events
+    let mut expected_controls = async_events
         .iter()
         .map(|event| (event.signal, event.edge == word::Edge::Pos))
         .collect::<Vec<_>>();
+    expected_controls.sort_unstable();
+    expected_controls.dedup();
     let canonical_control = match async_events.as_slice() {
         [event] => Some((
             module

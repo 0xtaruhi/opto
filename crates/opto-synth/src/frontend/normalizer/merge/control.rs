@@ -35,6 +35,7 @@ pub(super) struct ControlNode {
 #[derive(Debug)]
 pub(super) struct ControlTree {
     nodes: Vec<ControlNode>,
+    predicate_fallback: bool,
 }
 
 impl ControlTree {
@@ -49,18 +50,24 @@ impl ControlTree {
         origins: impl IntoIterator<Item = cfg::MergeOrigin>,
         site: cfg::MergeSite,
     ) -> Result<Self, crate::SynthError> {
+        let origins = origins.into_iter().collect::<Vec<_>>();
         let mut tree = Self {
             nodes: vec![ControlNode::default()],
+            predicate_fallback: false,
         };
-        for (input_index, origin) in origins.into_iter().enumerate() {
+        for (input_index, origin) in origins.iter().copied().enumerate() {
             let path = control_path(cfg, decision_choices, origin, site)?;
             let mut node = 0usize;
             for step in path {
                 match tree.nodes[node].decision {
                     Some(decision) if decision != step.decision => {
-                        return Err(crate::SynthError::invariant(
-                            "procedural merge choices do not form a structured control tree",
-                        ));
+                        return Ok(Self {
+                            nodes: vec![ControlNode {
+                                leaves: (0..origins.len()).collect(),
+                                ..ControlNode::default()
+                            }],
+                            predicate_fallback: true,
+                        });
                     }
                     None => tree.nodes[node].decision = Some(step.decision),
                     Some(_) => {}
@@ -89,6 +96,10 @@ impl ControlTree {
         self.nodes.len()
     }
 
+    pub(super) fn requires_predicate_fallback(&self) -> bool {
+        self.predicate_fallback
+    }
+
     /// Visits children before parents without exposing the arena's insertion
     /// order as a requirement on state materialization.
     pub(super) fn postorder(&self) -> impl Iterator<Item = (usize, &ControlNode)> {
@@ -103,7 +114,6 @@ fn control_path(
     site: cfg::MergeSite,
 ) -> Result<smallvec::SmallVec<[ControlStep; 4]>, crate::SynthError> {
     let mut path = smallvec::SmallVec::new();
-    let mut matched = false;
     for &decision in cfg.decisions(site) {
         let Some(choices) = decision_choices.get(&decision) else {
             continue;
@@ -126,13 +136,7 @@ fn control_path(
         }
         if let Some(step) = decision_choice {
             path.push(step);
-            matched = true;
         }
-    }
-    if !matched {
-        return Err(crate::SynthError::invariant(
-            "reachable procedural merge origin has no local control choice",
-        ));
     }
     Ok(path)
 }
