@@ -375,6 +375,318 @@ fn native_compile_flattens_interface_arrays_and_modports() {
 }
 
 #[test]
+fn native_compile_flattens_explicit_modport_expressions() {
+    let source = NativeTestSource::new(
+        "interface bus_if; logic hi; logic lo; logic signed [1:0] signed_value; modport source(input .pair({hi, lo}), .signed_value(signed_value)); modport sink(output .pair({hi, lo})); endinterface\nmodule reader(bus_if.source bus, output logic [1:0] y); assign y = bus.pair ^ bus.signed_value; endmodule\nmodule writer(bus_if.sink bus, input logic [1:0] d); assign bus.pair = d; endmodule\nmodule top(input logic [1:0] d, output logic [1:0] y); bus_if link(); assign link.signed_value = d; writer u_writer(.bus(link), .d(d)); reader u_reader(.bus(link), .y(y)); endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+
+    let reader = module_named(&compilation, "reader");
+    assert_eq!(
+        reader
+            .ports()
+            .map(|port| (
+                port.name().unwrap(),
+                port.direction().unwrap(),
+                port.width()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("bus.pair", SlangPortDirection::Input, 2),
+            ("bus.signed_value", SlangPortDirection::Input, 2),
+            ("y", SlangPortDirection::Output, 2),
+        ]
+    );
+    assert!(
+        reader
+            .ports()
+            .find(|port| port.name().unwrap() == "bus.signed_value")
+            .unwrap()
+            .is_signed()
+    );
+    let writer = module_named(&compilation, "writer");
+    assert_eq!(
+        writer
+            .ports()
+            .map(|port| (
+                port.name().unwrap(),
+                port.direction().unwrap(),
+                port.width()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("bus.pair", SlangPortDirection::Output, 2),
+            ("d", SlangPortDirection::Input, 2),
+        ]
+    );
+    let top = module_named(&compilation, "top");
+    let pair_connections = top
+        .instances()
+        .flat_map(SlangInstance::connections)
+        .filter(|connection| connection.port().unwrap() == "bus.pair")
+        .collect::<Vec<_>>();
+    assert_eq!(pair_connections.len(), 2);
+    assert!(pair_connections.iter().all(|connection| matches!(
+        connection.expression().unwrap().kind().unwrap(),
+        SlangExpressionKind::Concat(_)
+    )));
+}
+
+#[test]
+fn native_compile_flattens_explicit_modport_inout_lvalue() {
+    let source = NativeTestSource::new(
+        "interface pad_if; wire pad; modport device(inout .pin(pad)); endinterface\nmodule transceiver(pad_if.device bus, input logic d, output logic q); assign bus.pin = d; assign q = bus.pin; endmodule\nmodule top(input logic d, output logic q); pad_if link(); transceiver u_transceiver(.bus(link), .d(d), .q(q)); endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+
+    let transceiver = module_named(&compilation, "transceiver");
+    let pin = transceiver
+        .ports()
+        .find(|port| port.name().unwrap() == "bus.pin")
+        .unwrap();
+    assert_eq!(pin.direction().unwrap(), SlangPortDirection::Inout);
+    assert_eq!(pin.width(), 1);
+    let top = module_named(&compilation, "top");
+    let connection = top
+        .instances()
+        .next()
+        .unwrap()
+        .connections()
+        .find(|connection| connection.port().unwrap() == "bus.pin")
+        .unwrap();
+    assert!(matches!(
+        connection.expression().unwrap().kind().unwrap(),
+        SlangExpressionKind::Signal(_)
+    ));
+}
+
+#[test]
+fn native_compile_rejects_non_lvalue_modport_output_expression() {
+    let source = NativeTestSource::new(
+        "interface bus_if; logic a; logic b; modport bad(output .value(a & b)); endinterface\nmodule child(bus_if.bad bus, input logic d); assign bus.value = d; endmodule\nmodule top(input logic d); bus_if bus(); child u_child(.bus(bus), .d(d)); endmodule\n",
+    );
+    let error = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .expect_err("an output modport expression must be an lvalue");
+    let SlangError::Diagnostics(diagnostics) = error else {
+        panic!("expected structured Slang diagnostics, got {error}");
+    };
+    let invalid = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.message.contains("not assignable"))
+        .expect("non-lvalue output diagnostic");
+    assert!(invalid.location.is_some());
+    assert!(invalid.stable_code().starts_with("OPT-HDL-S"));
+}
+
+#[test]
+fn native_compile_flattens_nested_interface_modport_expression() {
+    let source = NativeTestSource::new(
+        "interface leaf_if; logic value; endinterface\ninterface outer_if(leaf_if nested); modport view(input .nested_value(nested.value)); endinterface\nmodule child(outer_if.view bus, output logic y); assign y = bus.nested_value; endmodule\nmodule top(input logic value, output logic y); leaf_if leaf(); outer_if outer(leaf); assign leaf.value = value; child u_child(.bus(outer), .y(y)); endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+    let child = module_named(&compilation, "child");
+    assert_eq!(
+        child
+            .ports()
+            .map(|port| (port.name().unwrap(), port.direction().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            ("bus.nested_value", SlangPortDirection::Input),
+            ("y", SlangPortDirection::Output),
+        ]
+    );
+}
+
+#[test]
+fn native_compile_inlines_imported_modport_subroutines() {
+    let source = NativeTestSource::new(
+        "interface math_if; function automatic logic invert(input logic value); return ~value; endfunction task automatic copy(input logic value, output logic result); result = value; endtask modport user(import invert, copy); endinterface\nmodule child(math_if.user api, input logic a, output logic y, output logic z); assign y = api.invert(a); always_comb api.copy(a, z); endmodule\nmodule top(input logic a, output logic y, output logic z); math_if api(); child u_child(.api(api), .a(a), .y(y), .z(z)); endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+    let child = module_named(&compilation, "child");
+    assert_eq!(
+        child
+            .ports()
+            .map(|port| port.name().unwrap())
+            .collect::<Vec<_>>(),
+        ["a", "y", "z"]
+    );
+    assert!(!child.assigns().collect::<Vec<_>>().is_empty());
+    assert!(!child.procedures().collect::<Vec<_>>().is_empty());
+}
+
+#[test]
+fn native_compile_flattens_imported_method_state_dependencies() {
+    let source = NativeTestSource::new(
+        "interface state_if; logic observed; logic updated; function automatic logic read_helper(); return observed; endfunction function automatic logic read_state(); return read_helper(); endfunction task automatic write_helper(input logic value); updated = value; endtask task automatic write_state(input logic value); write_helper(value); endtask modport user(import read_state, write_state); endinterface\nmodule child(state_if.user api, input logic d, output logic y); assign y = api.read_state(); always_comb api.write_state(d); endmodule\nmodule top(input logic d, input logic observed, output logic y, output logic updated); state_if api(); assign api.observed = observed; assign updated = api.updated; child u_child(.api(api), .d(d), .y(y)); endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+    let child = module_named(&compilation, "child");
+    assert_eq!(
+        child
+            .ports()
+            .map(|port| (port.name().unwrap(), port.direction().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "api.__opto_method_read_state.observed",
+                SlangPortDirection::Input,
+            ),
+            (
+                "api.__opto_method_write_state.updated",
+                SlangPortDirection::Ref,
+            ),
+            ("d", SlangPortDirection::Input),
+            ("y", SlangPortDirection::Output),
+        ]
+    );
+}
+
+#[test]
+fn native_compile_inlines_unambiguous_exported_modport_function() {
+    let source = NativeTestSource::new(
+        "interface callback_if(input logic value); extern function logic transform(input logic source); logic result; always_comb result = transform(value); modport implementation(input value, output result, export transform); endinterface\nmodule provider(callback_if.implementation api); function logic api.transform(input logic source); return ~source; endfunction endmodule\nmodule top(input logic value, output logic result); callback_if api(value); provider u_provider(.api(api)); assign result = api.result; endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+    let top = module_named(&compilation, "top");
+    assert!(!top.procedures().collect::<Vec<_>>().is_empty());
+    let provider = module_named(&compilation, "provider");
+    assert_eq!(
+        provider
+            .ports()
+            .map(|port| port.name().unwrap())
+            .collect::<Vec<_>>(),
+        ["api.value"]
+    );
+}
+
+#[test]
+fn native_compile_rejects_ambiguous_exported_modport_implementations() {
+    let source = NativeTestSource::new(
+        "interface callback_if; extern function logic transform(input logic source); modport implementation(export transform); endinterface\nmodule first(callback_if.implementation api); function logic api.transform(input logic source); return source; endfunction endmodule\nmodule second(callback_if.implementation api); function logic api.transform(input logic source); return ~source; endfunction endmodule\nmodule top; callback_if api(); first u_first(.api(api)); second u_second(.api(api)); endmodule\n",
+    );
+    let error = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .expect_err("multiple exported implementations must be rejected");
+    let SlangError::Diagnostics(diagnostics) = error else {
+        panic!("expected structured Slang diagnostics, got {error}");
+    };
+    let duplicate = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic
+                .message
+                .contains("more than one implementation provided for extern")
+        })
+        .expect("duplicate export diagnostic");
+    assert!(duplicate.location.is_some());
+    assert!(duplicate.stable_code().starts_with("OPT-HDL-S"));
+}
+
+#[test]
+fn native_compile_rejects_nonsynthesizable_modport_method_with_typed_failure() {
+    let source = NativeTestSource::new(
+        "interface callback_if; import \"DPI-C\" function logic callback(input logic source); modport user(import callback); endinterface\nmodule child(callback_if.user api, input logic source, output logic result); assign result = api.callback(source); endmodule\nmodule top(input logic source, output logic result); callback_if api(); child u_child(.api(api), .source(source), .result(result)); endmodule\n",
+    );
+    let error = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .expect_err("DPI modport method must remain outside the synthesis profile");
+    let SlangError::LoweringFailed(failure) = error else {
+        panic!("expected a typed lowering failure, got {error}");
+    };
+    assert_eq!(
+        failure.category,
+        SlangLoweringFailureCategory::UnsupportedProfile
+    );
+    assert_eq!(failure.stable_code(), "OPT-HDL-LP-0002");
+    assert!(failure.message.contains("synthesizable implementation"));
+    assert!(failure.location.is_some());
+}
+
+#[test]
+fn native_compile_rejects_exported_modport_method_external_capture() {
+    let source = NativeTestSource::new(
+        "interface callback_if(input logic value); extern function logic transform(input logic source); logic result; always_comb result = transform(value); modport implementation(input value, output result, export transform); endinterface\nmodule provider(callback_if.implementation api, input logic mask); function logic api.transform(input logic source); return source ^ mask; endfunction endmodule\nmodule top(input logic value, input logic mask, output logic result); callback_if api(value); provider u_provider(.api(api), .mask(mask)); assign result = api.result; endmodule\n",
+    );
+    let error = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .expect_err("exported implementation state outside the interface must be rejected");
+    let SlangError::LoweringFailed(failure) = error else {
+        panic!("expected a typed lowering failure, got {error}");
+    };
+    assert_eq!(
+        failure.category,
+        SlangLoweringFailureCategory::UnsupportedProfile
+    );
+    assert_eq!(failure.stable_code(), "OPT-HDL-LP-0006");
+    assert!(failure.message.contains("outside its interface"));
+    assert!(failure.location.is_some());
+}
+
+#[test]
 fn native_compile_keeps_local_interface_storage_connected_to_modport() {
     let source = NativeTestSource::new(
         "typedef struct packed { logic x; logic y; } payload_t; interface bus_if; logic valid; payload_t data; logic ready; modport master(output valid, output data, input ready); endinterface\nmodule bit_source(input logic a, output logic q); assign q = a; endmodule\nmodule producer(input logic a, bus_if.master bus); bit_source u_valid(.a(a), .q(bus.valid)); bit_source u_data(.a(a), .q(bus.data.x)); assign bus.data.y = a; endmodule\nmodule top(input logic a, output logic y); bus_if link(); producer u_producer(.a(a), .bus(link)); assign link.ready = 1'b1; assign y = link.data.x; endmodule\n",

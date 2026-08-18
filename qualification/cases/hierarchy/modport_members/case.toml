@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "hierarchy-modport-members"
+kind = "regression"
+covers = [
+  "Explicit input and output modport expressions preserve their typed flattened connections.",
+  "Imported methods inline transitive interface-state dependencies and exported methods resolve one static implementation.",
+  "Explicit inout modport members flatten as physical net aliases.",
+]
+category = "hierarchy"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 6
+min_cells = 3

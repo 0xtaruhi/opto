@@ -32,6 +32,7 @@
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/symbols/ParameterSymbols.h"
 #include "slang/ast/symbols/PortSymbols.h"
+#include "slang/ast/symbols/SubroutineSymbols.h"
 #include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/types/AllTypes.h"
 #include "slang/ast/types/NetType.h"
@@ -266,9 +267,14 @@ struct LvalueLeaf {
 
 
 struct InterfaceSignal {
-    std::string_view name;
+    // `value` identifies interface storage when the member is a direct signal
+    // or a hidden method capture. `reference` always owns the declared type and
+    // source identity. Explicit modport expressions have no single `value` and
+    // retain their elaborated `connection` for lowering in the parent scope.
+    std::string name;
     const ValueSymbol* value = nullptr;
     const ValueSymbol* reference = nullptr;
+    const Expression* connection = nullptr;
     ArgumentDirection direction = ArgumentDirection::InOut;
 };
 
@@ -330,6 +336,10 @@ void collect_elaborated_members(
 void collect_interface_leaves(const Symbol* symbol, std::vector<const InstanceSymbol*>& leaves);
 std::vector<InterfaceSignal>
 interface_signals(const InstanceSymbol& instance, std::string_view modport_name);
+const SubroutineSymbol& resolve_synthesizable_subroutine(
+    const SubroutineSymbol& selected, slang::SourceLocation location);
+bool statement_assigns_value(const Statement& statement, const ValueSymbol& value);
+const ValueSymbol* expression_root_value(const Expression& expression);
 std::optional<ArgumentDirection>
 merge_interface_direction(std::optional<ArgumentDirection> current, ArgumentDirection next);
 std::optional<ArgumentDirection> infer_interface_direction_impl(
