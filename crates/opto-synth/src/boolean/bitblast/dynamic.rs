@@ -194,7 +194,19 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             .operator_for_source_operation(source_operation)
             .is_none()
         {
-            if self.plan.is_operation_elided(source_operation) {
+            if self.plan.is_operation_elided(source_operation)
+                || (self.global_scope == super::GlobalBitblastScope::RegionalShell
+                    && self
+                        .operation_regions
+                        .get(source_operation.index())
+                        .copied()
+                        .flatten()
+                        .is_none())
+            {
+                // The regional ownership graph excludes dead operations from
+                // every implementation region, but shell lowering still walks
+                // all frozen connects. Keep that traversal structural without
+                // requesting an architecture for logic that cannot publish.
                 let placeholder = self.constant(BitVal::Zero, result_ty.state(), source)?;
                 return Ok(vec![placeholder; result_ty.width() as usize]);
             }
