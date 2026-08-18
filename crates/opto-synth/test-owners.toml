@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 447
+expected_tests = 450
 
 [[owners]]
 path = "src/api"
@@ -26,13 +26,13 @@ contract = "Procedural normalization and the single validated Word-IR entry boun
 [[owners]]
 path = "src/word"
 owner = "word"
-tests = 10
+tests = 11
 contract = "Reusable Word-IR dependency, driver, cycle, use, and instance analyses."
 
 [[owners]]
 path = "src/planning"
 owner = "planning"
-tests = 72
+tests = 73
 contract = "Region-owned Word optimization, recognition, resource choice, and architecture recipes."
 
 [[owners]]
