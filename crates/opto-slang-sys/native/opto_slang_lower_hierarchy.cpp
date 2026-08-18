@@ -39,6 +39,166 @@ struct UdpAsyncControl {
     bool active_high = false;
 };
 
+struct ExternalPortPart {
+    const PortSymbol* port = nullptr;
+    uint32_t width = 0;
+};
+
+struct ExternalPortProjection {
+    std::string name;
+    ArgumentDirection direction = ArgumentDirection::In;
+    uint32_t width = 0;
+    bool is_signed = false;
+    SourceLocation location;
+    std::vector<ExternalPortPart> parts;
+};
+
+[[noreturn]] void reject_external_port_projection(
+    SourceLocation location, std::string message) {
+    throw LoweringFailure(
+        OPTO_SLANG_LOWERING_INVALID_PROJECTION, 1, location, std::move(message));
+}
+
+const ValueSymbol& external_port_internal_value(
+    const PortSymbol& port, SourceLocation location, std::string_view external_name) {
+    if (!port.internalSymbol || !ValueSymbol::isKind(port.internalSymbol->kind)) {
+        reject_external_port_projection(
+            location,
+            "external port '" + std::string(external_name) +
+                "' does not map to an integral internal value");
+    }
+    return port.internalSymbol->as<ValueSymbol>();
+}
+
+OptoSlangExpr* make_external_port_slice(
+    ModuleLoweringContext& design,
+    const std::string& name,
+    uint32_t total_width,
+    uint32_t lsb,
+    uint32_t width) {
+    auto* value = make_signal_expr(design, name);
+    if (lsb == 0 && width == total_width) {
+        return value;
+    }
+    OptoSlangExpr slice;
+    slice.kind = OPTO_SLANG_EXPR_EXTRACT;
+    slice.extract_value = value;
+    slice.extract_lsb = lsb;
+    slice.extract_width = width;
+    design.module.exprs.push_back(std::move(slice));
+    return &design.module.exprs.back();
+}
+
+OptoSlangExpr* lower_external_port_part(
+    ModuleLoweringContext& design, const ExternalPortPart& part, bool lvalue) {
+    if (!part.port) {
+        throw std::logic_error("external port projection contains a null component");
+    }
+    if (auto* expression = part.port->getInternalExpr()) {
+        return lvalue ? lower_signal_expr(design, *expression) : lower_expr(design, *expression);
+    }
+    const auto& value = external_port_internal_value(
+        *part.port, part.port->externalLoc, part.port->name);
+    return make_signal_expr(design, registered_value_name(design, value));
+}
+
+void validate_external_port_parts(
+    const ExternalPortProjection& projection,
+    const std::vector<OptoSlangExpr*>& parts) {
+    std::unordered_map<std::string_view, std::vector<std::pair<uint32_t, uint32_t>>> occupied;
+    for (size_t index = 0; index < parts.size(); ++index) {
+        const auto* part = parts[index];
+        if (!part || part->kind != OPTO_SLANG_EXPR_SIGNAL || !part->signal_name) {
+            reject_external_port_projection(
+                projection.location,
+                "external port '" + projection.name +
+                    "' contains a non-static or non-signal projection");
+        }
+        const auto lsb = part->signal_has_range
+                             ? std::min(part->signal_msb, part->signal_lsb)
+                             : 0;
+        const auto msb = part->signal_has_range
+                             ? std::max(part->signal_msb, part->signal_lsb)
+                             : projection.parts[index].width - 1;
+        auto& ranges = occupied[*part->signal_name];
+        if (std::ranges::any_of(ranges, [lsb, msb](const auto& range) {
+                return lsb <= range.second && range.first <= msb;
+            })) {
+            reject_external_port_projection(
+                projection.location,
+                "external port '" + projection.name +
+                    "' has overlapping internal bit mappings");
+        }
+        ranges.emplace_back(lsb, msb);
+    }
+}
+
+void lower_external_port_projections(
+    ModuleLoweringContext& design,
+    const std::vector<ExternalPortProjection>& projections) {
+    for (const auto& projection : projections) {
+        uint64_t total_width = 0;
+        for (const auto& part : projection.parts) {
+            total_width += part.width;
+            if (total_width > UINT32_MAX) {
+                reject_external_port_projection(
+                    projection.location,
+                    "external port '" + projection.name + "' width exceeds 32-bit capacity");
+            }
+        }
+        if (projection.parts.empty() || total_width != projection.width) {
+            reject_external_port_projection(
+                projection.location,
+                "external port '" + projection.name +
+                    "' has an internal projection width that does not match its declared width");
+        }
+
+        std::vector<OptoSlangExpr*> lowered_parts;
+        lowered_parts.reserve(projection.parts.size());
+        for (const auto& part : projection.parts) {
+            lowered_parts.push_back(lower_external_port_part(
+                design, part, projection.direction == ArgumentDirection::In));
+        }
+        validate_external_port_parts(projection, lowered_parts);
+
+        if (projection.direction == ArgumentDirection::In) {
+            uint64_t consumed = 0;
+            for (size_t index = 0; index < projection.parts.size(); ++index) {
+                const auto width = projection.parts[index].width;
+                consumed += width;
+                design.module.assigns.push_back(
+                    OptoSlangAssignData{
+                        lowered_parts[index],
+                        make_external_port_slice(
+                            design,
+                            projection.name,
+                            projection.width,
+                            static_cast<uint32_t>(projection.width - consumed),
+                            width),
+                    });
+            }
+            continue;
+        }
+        if (projection.direction != ArgumentDirection::Out) {
+            reject_external_port_projection(
+                projection.location,
+                "external port '" + projection.name +
+                    "' requires an exact whole-signal inout or ref mapping");
+        }
+
+        const OptoSlangExpr* value = lowered_parts.front();
+        if (lowered_parts.size() > 1) {
+            OptoSlangExpr concat;
+            concat.kind = OPTO_SLANG_EXPR_CONCAT;
+            concat.concat_parts.assign(lowered_parts.begin(), lowered_parts.end());
+            design.module.exprs.push_back(std::move(concat));
+            value = &design.module.exprs.back();
+        }
+        design.module.assigns.push_back(
+            OptoSlangAssignData{make_signal_expr(design, projection.name), value});
+    }
+}
+
 bool is_udp_edge_symbol(char symbol) {
     return symbol == '*' || symbol == 'r' || symbol == 'f' || symbol == 'p' || symbol == 'n';
 }
@@ -455,6 +615,29 @@ OptoSlangNetResolution net_resolution(const NetSymbol& net) {
         default:
             return OPTO_SLANG_NET_SINGLE_DRIVER;
     }
+}
+
+OptoSlangNetResolution external_port_resolution(const PortSymbol& port) {
+    return port.internalSymbol && port.internalSymbol->kind == SymbolKind::Net
+               ? net_resolution(port.internalSymbol->as<NetSymbol>())
+               : OPTO_SLANG_NET_SINGLE_DRIVER;
+}
+
+std::vector<OptoSlangAttributeData> lower_multi_port_attributes(
+    ModuleLoweringContext& design, const MultiPortSymbol& port) {
+    std::vector<OptoSlangAttributeData> lowered;
+    std::unordered_set<const AttributeSymbol*> seen;
+    append_symbol_attributes(design, port, seen, lowered);
+    for (auto* part : port.ports) {
+        if (!part) {
+            continue;
+        }
+        append_symbol_attributes(design, *part, seen, lowered);
+        if (part->internalSymbol) {
+            append_symbol_attributes(design, *part->internalSymbol, seen, lowered);
+        }
+    }
+    return lowered;
 }
 
 bool unpacked_element_is_signed(const Type& source_type) {
@@ -1010,6 +1193,7 @@ void lower_body(
     const auto& body = design.body;
     auto& known_value_names = design.net_names;
     const auto& definition = body.getDefinition();
+    std::vector<ExternalPortProjection> external_port_projections;
 
     module.attributes = lower_symbol_attributes(design, definition);
 
@@ -1077,6 +1261,87 @@ void lower_body(
             }
             continue;
         }
+        if (port_symbol->kind == SymbolKind::MultiPort) {
+            const auto& port = port_symbol->as<MultiPortSymbol>();
+            auto name = copy_string(port.name);
+            if (name.empty()) {
+                reject_external_port_projection(
+                    port.location,
+                    "unnamed concatenated external ports cannot be represented in the Opto module interface");
+            }
+            if (!known_value_names.insert(name).second) {
+                reject_external_port_projection(
+                    port.location, "duplicate external port name '" + name + "'");
+            }
+            if (port.ports.empty()) {
+                reject_external_port_projection(
+                    port.location, "external port '" + name + "' has no internal components");
+            }
+
+            ExternalPortProjection projection;
+            projection.name = name;
+            projection.direction = port.direction;
+            projection.width =
+                checked_width(lowered_type_width(port.getType()), port.name);
+            projection.is_signed = port.getType().isSigned();
+            projection.location = port.location;
+            std::optional<ArgumentDirection> component_direction;
+            OptoSlangNetResolution resolution = OPTO_SLANG_NET_SINGLE_DRIVER;
+            bool have_resolution = false;
+            for (auto* component : port.ports) {
+                if (!component) {
+                    throw std::logic_error("multi-port contains a null component");
+                }
+                external_port_internal_value(*component, port.location, port.name);
+                if (component_direction && *component_direction != component->direction) {
+                    reject_external_port_projection(
+                        port.location,
+                        "external port '" + name +
+                            "' mixes input and output component directions");
+                }
+                component_direction = component->direction;
+                const auto component_resolution = external_port_resolution(*component);
+                if (!have_resolution) {
+                    resolution = component_resolution;
+                    have_resolution = true;
+                } else if (resolution != component_resolution) {
+                    resolution = OPTO_SLANG_NET_SINGLE_DRIVER;
+                }
+                projection.parts.push_back(
+                    ExternalPortPart{
+                        component,
+                        checked_width(
+                            lowered_type_width(component->getType()), component->name),
+                    });
+            }
+            if (!component_direction || *component_direction != port.direction) {
+                reject_external_port_projection(
+                    port.location,
+                    "external port '" + name +
+                        "' has a direction inconsistent with its internal components");
+            }
+            if (port.direction != ArgumentDirection::In &&
+                port.direction != ArgumentDirection::Out) {
+                reject_external_port_projection(
+                    port.location,
+                    "external port '" + name +
+                        "' requires an exact whole-signal inout or ref mapping");
+            }
+
+            OptoSlangPortData lowered{
+                name,
+                lower_direction(port.direction),
+                projection.width,
+                projection.is_signed,
+                resolution,
+                intern_type_layout(design, port.getType()),
+                {},
+            };
+            lowered.attributes = lower_multi_port_attributes(design, port);
+            module.ports.push_back(std::move(lowered));
+            external_port_projections.push_back(std::move(projection));
+            continue;
+        }
         if (port_symbol->kind != SymbolKind::Port) {
             throw std::runtime_error(
                 "unsupported " + copy_string(toString(port_symbol->kind)) + " port in module '" +
@@ -1084,8 +1349,30 @@ void lower_body(
         }
         const auto& port = port_symbol->as<PortSymbol>();
         auto name = copy_string(port.name);
-        known_value_names.insert(name);
-        if (port.internalSymbol) {
+        if (!known_value_names.insert(name).second) {
+            reject_external_port_projection(
+                port.externalLoc, "duplicate external port name '" + name + "'");
+        }
+        const auto* internal_expression = port.getInternalExpr();
+        if (internal_expression) {
+            if (port.direction != ArgumentDirection::In &&
+                port.direction != ArgumentDirection::Out) {
+                reject_external_port_projection(
+                    port.externalLoc,
+                    "external port '" + name +
+                        "' requires an exact whole-signal inout or ref mapping");
+            }
+            external_port_projections.push_back(
+                ExternalPortProjection{
+                    name,
+                    port.direction,
+                    checked_width(lowered_type_width(port.getType()), port.name),
+                    port.getType().isSigned(),
+                    port.externalLoc,
+                    {{&port, checked_width(
+                                  lowered_type_width(port.getType()), port.name)}},
+                });
+        } else if (port.internalSymbol) {
             if (port.internalSymbol->kind == SymbolKind::Net) {
                 design.value_names.emplace(&port.internalSymbol->as<NetSymbol>(), name);
             } else if (port.internalSymbol->kind == SymbolKind::Variable) {
@@ -1120,8 +1407,11 @@ void lower_body(
             continue;
         }
         auto name = module_relative_name(body, *net);
-        design.value_names.emplace(net, name);
-        add_value_as_net(design, module, known_value_names, *net, std::move(name));
+        const auto [_, inserted] = design.value_names.emplace(net, name);
+        if (inserted) {
+            add_value_as_net(
+                design, module, known_value_names, *net, std::move(name), false);
+        }
     }
     for (auto* var : members.variables) {
         if (!is_procedural_local(body, *var) && var->getInitializer()) {
@@ -1133,8 +1423,11 @@ void lower_body(
             continue;
         }
         auto name = module_relative_name(body, *var);
-        design.value_names.emplace(var, name);
-        add_value_as_net(design, module, known_value_names, *var, std::move(name));
+        const auto [_, inserted] = design.value_names.emplace(var, name);
+        if (inserted) {
+            add_value_as_net(
+                design, module, known_value_names, *var, std::move(name), false);
+        }
     }
     for (auto* interface_instance : members.interface_instances) {
         for (const auto& signal : interface_signals(*interface_instance, {})) {
@@ -1240,6 +1533,8 @@ void lower_body(
             }
         }
     }
+
+    lower_external_port_projections(design, external_port_projections);
 
     for (auto* child : members.instances) {
         OptoSlangInstanceData instance;

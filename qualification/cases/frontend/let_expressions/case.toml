@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "frontend-let-expressions"
+kind = "regression"
+covers = ["Module, procedural, and interface-scope let expressions expand hygienically across combinational and sequential right-hand sides."]
+category = "frontend"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+sequential = true
+equivalence = true
+
+[assertions]
+min_ports = 6
+min_cells = 1

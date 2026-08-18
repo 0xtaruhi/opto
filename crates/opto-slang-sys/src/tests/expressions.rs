@@ -3,6 +3,76 @@
 
 use super::*;
 
+fn expression_references_signal(expression: SlangExpression<'_>, expected: &str) -> bool {
+    match expression.kind().unwrap() {
+        SlangExpressionKind::Signal(signal) => signal.name == expected,
+        SlangExpressionKind::Unary { arg, .. } => expression_references_signal(arg, expected),
+        SlangExpressionKind::Binary { left, right, .. } => {
+            expression_references_signal(left, expected)
+                || expression_references_signal(right, expected)
+        }
+        SlangExpressionKind::Mux {
+            condition,
+            then_value,
+            else_value,
+        } => {
+            expression_references_signal(condition, expected)
+                || expression_references_signal(then_value, expected)
+                || expression_references_signal(else_value, expected)
+        }
+        SlangExpressionKind::Concat(parts) => parts
+            .parts()
+            .any(|part| expression_references_signal(part.unwrap(), expected)),
+        SlangExpressionKind::Cast { value, .. } | SlangExpressionKind::Extract { value, .. } => {
+            expression_references_signal(value, expected)
+        }
+        SlangExpressionKind::DynamicExtract { value, offset, .. } => {
+            expression_references_signal(value, expected)
+                || expression_references_signal(offset, expected)
+        }
+        SlangExpressionKind::Constant(_) => false,
+    }
+}
+
+#[test]
+fn native_compile_expands_nested_and_procedural_let_invocations() {
+    let source = NativeTestSource::new(
+        "module top(input logic signed [3:0] a, input logic [5:0] b, input logic select, output logic [3:0] y, output logic [3:0] z); let step(logic signed [3:0] value) = value + 4'sd1; let nested = step(a) + 4'sd1; assign y = nested; always_comb begin let choose(logic pick, logic [5:0] first, second) = pick ? first : second; z = choose(select, y, b); end endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+
+    let rhs = module.assigns().next().unwrap().rhs().unwrap();
+    assert!(expression_references_signal(rhs, "a"));
+    assert!(!expression_references_signal(rhs, "value"));
+    let effect = first_effect(module.procedures().next().unwrap());
+    let rhs = effect.rhs().unwrap();
+    assert!(matches!(
+        rhs.kind().unwrap(),
+        SlangExpressionKind::Mux { .. } | SlangExpressionKind::Cast { .. }
+    ));
+    assert!(expression_references_signal(rhs, "select"));
+    assert!(expression_references_signal(rhs, "y"));
+    assert!(expression_references_signal(rhs, "b"));
+}
+
+#[test]
+fn native_compile_expands_interface_scope_let_invocations() {
+    let source = NativeTestSource::new(
+        "interface helper_if; logic [3:0] data; let invert(value) = ~value; function automatic logic [3:0] transformed(); transformed = invert(data); endfunction endinterface module top(input logic [3:0] a, output logic [3:0] y); helper_if bus(); assign bus.data = a; assign y = bus.transformed(); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+
+    assert!(module.procedures().any(|procedure| {
+        procedure_effects(procedure).iter().any(|effect| {
+            effect
+                .rhs()
+                .is_ok_and(|rhs| expression_references_signal(rhs, "bus.data"))
+        })
+    }));
+}
+
 #[test]
 fn native_compile_normalizes_conditional_branch_signedness() {
     let source = NativeTestSource::new(

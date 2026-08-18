@@ -1578,6 +1578,7 @@ defect.
 | One shared sparse MMMC owner service | Implemented |
 | Transactional mapped optimization and exact STA | Implemented |
 | Structured source diagnostics and successful frontend warnings | Implemented across CLI/session, HDL, Liberty, formats, timing, power, and synthesis domains |
+| Legacy external port expressions and SystemVerilog `let` declarations | Implemented for statically shaped named input/output projections and hygienically elaborated non-recursive value lets; overlapping projections and non-exact inout/ref mappings are structured errors |
 | Opto `report_timing` core path report | Implemented; unsupported advanced report modes are explicit errors |
 | Flat Opto command policy | Registered parsing, help, validation behavior, and current root/object database catalogs use generated typed schemas; scenario and structured-report completion remains pending |
 | Same-host real medium-scale regression guard | Implemented for 14 executable 353–10,225-cell cases selected from a pinned 30-case public pool |
