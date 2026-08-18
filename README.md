@@ -295,6 +295,7 @@ Core local quality gates are:
 python3 tools/check_architecture.py
 python3 tools/check_license_headers.py
 python3 tools/check_public_repository.py
+python3 tools/check_cpp_format.py
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

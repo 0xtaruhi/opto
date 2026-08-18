@@ -12,7 +12,7 @@ Describe the problem and the resulting behavior.
 - [ ] The CLA Assistant check passes, or the maintainer has confirmed that an
       existing corporate agreement covers this contribution.
 - [ ] SPDX, public-repository, and architecture checks pass.
-- [ ] `cargo fmt --all`, `cargo check`, Clippy with warnings denied, and tests pass.
+- [ ] C++/Rust formatting, `cargo check`, Clippy with warnings denied, and tests pass.
 - [ ] A regression test covers each fixed bug.
 - [ ] Synthesis changes include equivalence evidence.
 - [ ] QoR-affecting changes include representative results and baseline updates.
