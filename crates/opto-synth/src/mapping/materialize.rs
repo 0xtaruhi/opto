@@ -19,6 +19,9 @@ mod sequential_delta;
 /// The prefix every synthetic internal net name carries.
 pub(crate) const MAPPED_NET_PREFIX: &str = "_mapped_net_";
 
+/// Prefix for physical tri-state drivers introduced at the global boundary.
+const TRI_STATE_CELL_PREFIX: &str = "_tri_state_";
+
 use crate::artifact::MappedCellSource;
 pub(crate) use region_delta::REGION_CELL_PREFIX;
 pub(crate) use sequential_delta::{MappedSequentialArtifact, sequential_binding_values};
@@ -111,6 +114,7 @@ struct ObservableOutput {
 #[derive(Debug)]
 pub(crate) struct FrozenObservableConnectivity {
     boundary_nets: BTreeSet<NetId>,
+    resolved_nets: BTreeSet<NetId>,
     outputs: Box<[ObservableOutput]>,
     static_driver_counts: Box<[u8]>,
     source_driver_pins: BTreeSet<PinId>,
@@ -123,6 +127,7 @@ impl FrozenObservableConnectivity {
         reference_ports: &crate::ReferencePortMap,
     ) -> Result<Self, crate::SynthError> {
         let mut boundary_nets = BTreeSet::new();
+        let mut resolved_nets = BTreeSet::new();
         let mut outputs = Vec::new();
         let mut static_driver_counts = vec![0u8; mapped.net_slot_count()];
         for (index, port) in mapped.ports().iter().enumerate() {
@@ -136,6 +141,9 @@ impl FrozenObservableConnectivity {
                     static_driver_counts[net.index()] =
                         static_driver_counts[net.index()].saturating_add(1);
                 }
+            }
+            if port.direction == PortDirection::Inout {
+                resolved_nets.extend(nets.iter().copied());
             }
             if port.direction == PortDirection::Output {
                 let name = mapped.port_name(id).unwrap_or("<unnamed>");
@@ -184,8 +192,41 @@ impl FrozenObservableConnectivity {
         for &(net, _) in mapped.constant_drivers() {
             static_driver_counts[net.index()] = static_driver_counts[net.index()].saturating_add(1);
         }
+        for cell in mapped.cell_ids() {
+            let stored = mapped
+                .cell(cell)
+                .ok_or_else(|| crate::SynthError::invariant("mapped cell is unknown"))?;
+            let Some(library_index) = stored.library_cell else {
+                continue;
+            };
+            let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
+                crate::SynthError::invariant("mapped cell is absent from the target library")
+            })?;
+            for pin in mapped.pin_ids(cell).into_iter().flatten() {
+                let connection = mapped.connection(pin).ok_or_else(|| {
+                    crate::SynthError::invariant("mapped cell has no pin binding")
+                })?;
+                let library_pin = match connection.library_pin {
+                    Some(pin) => library_cell.pins().nth(pin as usize),
+                    None => mapped
+                        .pin_name(connection)
+                        .and_then(|name| library_cell.pins().find(|pin| pin.name() == name)),
+                }
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "mapped pin is absent from its target-library cell",
+                    )
+                })?;
+                if library_pin.three_state().is_some()
+                    && let ConnectionSignal::Net(net) = connection.signal
+                {
+                    resolved_nets.insert(net);
+                }
+            }
+        }
         let frozen = Self {
             boundary_nets,
+            resolved_nets,
             outputs: outputs.into_boxed_slice(),
             static_driver_counts: static_driver_counts.into_boxed_slice(),
             source_driver_pins,
@@ -212,7 +253,8 @@ impl FrozenObservableConnectivity {
             .iter()
             .filter(|output| affected.contains(&output.net))
         {
-            if self.driver_count(mapped, target_cells, output.net)? != 1 {
+            let drivers = self.driver_count(mapped, target_cells, output.net)?;
+            if drivers == 0 || (!self.resolved_nets.contains(&output.net) && drivers != 1) {
                 return Ok(false);
             }
         }
@@ -234,7 +276,8 @@ impl FrozenObservableConnectivity {
             )));
         }
         for output in &self.outputs {
-            match self.driver_count(mapped, target_cells, output.net)? {
+            let drivers = self.driver_count(mapped, target_cells, output.net)?;
+            match drivers {
                 1 => {}
                 0 => {
                     return Err(crate::SynthError::invariant(format!(
@@ -242,10 +285,14 @@ impl FrozenObservableConnectivity {
                         output.name, output.bit
                     )));
                 }
+                _ if self.resolved_nets.contains(&output.net) => {}
                 _ => {
+                    let sources = self.driver_sources(mapped, target_cells, output.net)?;
                     return Err(crate::SynthError::invariant(format!(
-                        "mapped output '{}[{}]' has multiple physical drivers",
-                        output.name, output.bit
+                        "mapped output '{}[{}]' has {drivers} physical drivers ({})",
+                        output.name,
+                        output.bit,
+                        sources.join(", "),
                     )));
                 }
             }
@@ -305,6 +352,63 @@ impl FrozenObservableConnectivity {
             }
         }
         Ok(count)
+    }
+
+    fn driver_sources(
+        &self,
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+        net: NetId,
+    ) -> Result<Vec<String>, crate::SynthError> {
+        let mut sources = mapped
+            .constant_drivers()
+            .iter()
+            .filter(|&&(candidate, _)| candidate == net)
+            .map(|&(_, value)| format!("constant {}", u8::from(value)))
+            .collect::<Vec<_>>();
+        for pin in mapped.pins_on_net(net).into_iter().flatten() {
+            let cell = mapped.pin_owner(pin).ok_or_else(|| {
+                crate::SynthError::invariant("mapped boundary pin has no live owner")
+            })?;
+            let connection = mapped.connection(pin).ok_or_else(|| {
+                crate::SynthError::invariant("mapped driver cell has no pin binding")
+            })?;
+            let pin_name = mapped.pin_name(connection).unwrap_or("<unnamed>");
+            if self.source_driver_pins.contains(&pin) {
+                sources.push(format!(
+                    "{}.{}",
+                    mapped.cell_type(cell).unwrap_or("<source-cell>"),
+                    pin_name
+                ));
+                continue;
+            }
+            let Some(library_index) = mapped
+                .cell(cell)
+                .ok_or_else(|| crate::SynthError::invariant("mapped boundary cell is unknown"))?
+                .library_cell
+            else {
+                continue;
+            };
+            let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
+                crate::SynthError::invariant("mapped driver cell is absent from the target library")
+            })?;
+            let library_pin = match connection.library_pin {
+                Some(pin) => library_cell.pins().nth(pin as usize),
+                None => library_cell.pins().find(|pin| pin.name() == pin_name),
+            }
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "mapped target-cell pin is absent from its target-library cell",
+                )
+            })?;
+            if matches!(
+                library_pin.direction(),
+                opto_library::TargetPinDirection::Output | opto_library::TargetPinDirection::Inout
+            ) {
+                sources.push(format!("{}.{}", library_cell.name(), pin_name));
+            }
+        }
+        Ok(sources)
     }
 }
 
@@ -466,16 +570,19 @@ pub(crate) fn build_mapped_substrate(
         let nets = (0..signal.ty.width() as usize)
             .map(|bit| net_for_bit(&mut aliases, &root_nets, base + bit))
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
+        let direction = match port.direction {
+            word::PortDirection::Input => PortDirection::Input,
+            word::PortDirection::Output => PortDirection::Output,
+            word::PortDirection::Inout => PortDirection::Inout,
+            word::PortDirection::Ref => {
+                return Err(crate::SynthError::invariant(format!(
+                    "reference port '{}' survived linked elaboration",
+                    module.name_str(port.name)
+                )));
+            }
+        };
         builder
-            .add_port(
-                module.name_str(port.name),
-                match port.direction {
-                    word::PortDirection::Input => PortDirection::Input,
-                    word::PortDirection::Output => PortDirection::Output,
-                    word::PortDirection::Inout => PortDirection::Inout,
-                },
-                &nets,
-            )
+            .add_port(module.name_str(port.name), direction, &nets)
             .map_err(crate::SynthError::from)?;
     }
 
@@ -587,6 +694,15 @@ pub(crate) fn build_mapped_substrate(
             MappedCellSource::Instance(instance_id),
         ));
     }
+    append_tri_state_cells(
+        module,
+        options,
+        &offsets,
+        signal_bit_count,
+        &mut aliases,
+        &root_nets,
+        &mut prepared_cells,
+    )?;
     append_packed_cells(&mut builder, &mut cell_sources, prepared_cells)?;
 
     let observed_nets = observed_values
@@ -650,6 +766,18 @@ fn required_substrate_roots(
             }
         }
     }
+    for connect in module.connects() {
+        let Some(driver) = tri_state_connect_driver(module, connect)? else {
+            continue;
+        };
+        roots.insert(aliases.find(scalar_target_bit(module, offsets, &connect.target)?));
+        for value in [driver.data, driver.enable.value] {
+            if let ScalarSignal::Bit(bit) = scalar_signal(module, offsets, signal_bit_count, value)?
+            {
+                roots.insert(aliases.find(bit));
+            }
+        }
+    }
     for &value in observed_values {
         if let ScalarSignal::Bit(bit) = scalar_signal(module, offsets, signal_bit_count, value)? {
             roots.insert(aliases.find(bit));
@@ -686,6 +814,9 @@ fn build_alias_classes(
     }
     for connect in module.connects() {
         let target = scalar_target_bit(module, offsets, &connect.target)?;
+        if tri_state_connect_driver(module, connect)?.is_some() {
+            continue;
+        }
         match scalar_signal(module, offsets, signal_bit_count, connect.value)? {
             ScalarSignal::Bit(source) => aliases.union(target, source),
             ScalarSignal::Constant(value) => record_constant(&mut constants, target, value)?,
@@ -704,6 +835,206 @@ fn build_alias_classes(
         }
     }
     Ok((aliases, canonical_constants))
+}
+
+#[derive(Clone, Copy)]
+struct TriStateDriver {
+    data: word::ValueId,
+    enable: word::Enable,
+}
+
+fn tri_state_connect_driver(
+    module: &word::WordModule,
+    connect: &word::Connect,
+) -> Result<Option<TriStateDriver>, crate::SynthError> {
+    let signal = module.signal(connect.target.signal).ok_or_else(|| {
+        crate::SynthError::invariant("tri-state connect target signal is unknown")
+    })?;
+    if signal.resolution != word::SignalResolution::TriState {
+        return Ok(None);
+    }
+    let value = module
+        .value(connect.value)
+        .ok_or_else(|| crate::SynthError::invariant("tri-state connect value is unknown"))?;
+    if value.ty.width() != 1 {
+        return Err(crate::SynthError::invariant(
+            "vector tri-state driver reached mapped netlist conversion",
+        ));
+    }
+    let word::ValueKind::Operation(operation) = value.kind else {
+        return Err(crate::SynthError::invariant(
+            "physical tri-state contribution is not an explicit driver operation",
+        ));
+    };
+    let operation = module
+        .operation(operation)
+        .ok_or_else(|| crate::SynthError::invariant("tri-state driver operation is unknown"))?;
+    let word::OpKind::TriState { data, enable } = operation.kind else {
+        return Err(crate::SynthError::invariant(
+            "physical tri-state contribution has no data/enable contract",
+        ));
+    };
+    if module.value(data).is_none_or(|value| value.ty.width() != 1)
+        || module
+            .value(enable.value)
+            .is_none_or(|value| value.ty.width() != 1)
+    {
+        return Err(crate::SynthError::invariant(
+            "scalar tri-state driver has a non-scalar data or enable input",
+        ));
+    }
+    Ok(Some(TriStateDriver { data, enable }))
+}
+
+#[derive(Clone, Copy)]
+struct TriStateTarget<'a> {
+    library_cell: u32,
+    cell: opto_library::TargetCellRef<'a>,
+    data_pin: &'a str,
+    enable_pin: &'a str,
+    output_pin: &'a str,
+}
+
+fn select_tri_state_target(
+    cells: &opto_library::TargetCellSet,
+    active_high: bool,
+) -> Result<TriStateTarget<'_>, crate::SynthError> {
+    let mut compatible = cells
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cell)| {
+            if cell.dont_use()
+                || !cell.usage().is_general_purpose()
+                || cell.clock_gate().is_some()
+                || cell.memory().is_some()
+                || cell.sequential().next().is_some()
+                || cell.pins().len() != 3
+            {
+                return None;
+            }
+            let inputs = cell
+                .pins()
+                .filter(|pin| pin.direction() == opto_library::TargetPinDirection::Input)
+                .collect::<Vec<_>>();
+            let outputs = cell
+                .pins()
+                .filter(|pin| {
+                    matches!(
+                        pin.direction(),
+                        opto_library::TargetPinDirection::Output
+                            | opto_library::TargetPinDirection::Inout
+                    )
+                })
+                .collect::<Vec<_>>();
+            if inputs.len() != 2 || outputs.len() != 1 {
+                return None;
+            }
+            let output = outputs[0];
+            let (data_pin, data_polarity) = output.function()?.as_literal()?;
+            let (enable_pin, disabled_polarity) = output.three_state()?.as_literal()?;
+            if !data_polarity
+                || data_pin == enable_pin
+                || disabled_polarity == active_high
+                || !inputs.iter().any(|pin| pin.name() == data_pin)
+                || !inputs.iter().any(|pin| pin.name() == enable_pin)
+            {
+                return None;
+            }
+            let library_cell = u32::try_from(index).ok()?;
+            Some(TriStateTarget {
+                library_cell,
+                cell,
+                data_pin,
+                enable_pin,
+                output_pin: output.name(),
+            })
+        })
+        .collect::<Vec<_>>();
+    compatible.sort_by(|left, right| {
+        opto_library::normalized_cell_area(left.cell.area())
+            .total_cmp(&opto_library::normalized_cell_area(right.cell.area()))
+            .then_with(|| left.cell.name().cmp(right.cell.name()))
+            .then_with(|| left.library_cell.cmp(&right.library_cell))
+    });
+    compatible.into_iter().next().ok_or_else(|| {
+        crate::SynthError::mapping(format!(
+            "target library has no compatible active-{} tri-state buffer",
+            if active_high { "high" } else { "low" }
+        ))
+    })
+}
+
+fn append_tri_state_cells(
+    module: &word::WordModule,
+    options: &SynthesisOptions,
+    offsets: &[usize],
+    signal_bit_count: usize,
+    aliases: &mut DisjointSets,
+    root_nets: &[Option<NetId>],
+    prepared: &mut Vec<(MappedCellSpec, MappedCellSource)>,
+) -> Result<(), crate::SynthError> {
+    let mut used_names = module
+        .instances()
+        .iter()
+        .map(|instance| module.name_str(instance.name).to_string())
+        .collect::<BTreeSet<_>>();
+    for (index, connect) in module.connects().iter().enumerate() {
+        let Some(driver) = tri_state_connect_driver(module, connect)? else {
+            continue;
+        };
+        let target = select_tri_state_target(&options.target_cells, driver.enable.active_high)?;
+        let data = scalar_signal(module, offsets, signal_bit_count, driver.data)?;
+        let enable = scalar_signal(module, offsets, signal_bit_count, driver.enable.value)?;
+        let output = ConnectionSignal::Net(net_for_bit(
+            aliases,
+            root_nets,
+            scalar_target_bit(module, offsets, &connect.target)?,
+        )?);
+        let mut connection = |signal| match signal {
+            ScalarSignal::Bit(bit) => {
+                net_for_bit(aliases, root_nets, bit).map(ConnectionSignal::Net)
+            }
+            ScalarSignal::Constant(value) => Ok(ConnectionSignal::Constant(value)),
+        };
+        let data = connection(data)?;
+        let enable = connection(enable)?;
+        let mut suffix = index;
+        let name = loop {
+            let candidate = format!("{TRI_STATE_CELL_PREFIX}{suffix}");
+            if used_names.insert(candidate.clone()) {
+                break candidate;
+            }
+            suffix = suffix.checked_add(1).ok_or_else(|| {
+                crate::SynthError::capacity("tri-state cell name suffix overflow")
+            })?;
+        };
+        prepared.push((
+            MappedCellSpec {
+                name,
+                cell_type: target.cell.name().to_string(),
+                library_cell: Some(target.library_cell),
+                connections: vec![
+                    (
+                        target.data_pin.to_string(),
+                        Some(target_pin_id(target.cell, target.data_pin)?),
+                        data,
+                    ),
+                    (
+                        target.enable_pin.to_string(),
+                        Some(target_pin_id(target.cell, target.enable_pin)?),
+                        enable,
+                    ),
+                    (
+                        target.output_pin.to_string(),
+                        Some(target_pin_id(target.cell, target.output_pin)?),
+                        output,
+                    ),
+                ],
+            },
+            MappedCellSource::StructuralValue(connect.value),
+        ));
+    }
+    Ok(())
 }
 
 fn record_constant(

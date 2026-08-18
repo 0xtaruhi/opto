@@ -51,7 +51,7 @@ where
         active_definitions: Vec::new(),
         on_occurrence,
     };
-    inliner.copy_module(root, "", true)?;
+    inliner.copy_module(root, "", true, &BTreeMap::new())?;
     inliner.target.consolidate_names()?;
     Ok(inliner.target)
 }
@@ -134,14 +134,28 @@ struct HierarchyInliner<'a, F> {
     on_occurrence: F,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ModuleRemap {
-    signals: Box<[SignalId]>,
+    signals: Box<[SignalBinding]>,
     memories: Box<[MemoryId]>,
     value_base: usize,
     operation_base: usize,
     memory_read_port_base: usize,
     memory_write_port_base: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SignalBinding {
+    pub(crate) signal: SignalId,
+    pub(crate) offset: SignalBindingOffset,
+    width: u32,
+    actual: Option<ValueId>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SignalBindingOffset {
+    Static(u32),
+    Dynamic { offset: ValueId, base: u32 },
 }
 
 #[derive(Debug)]
@@ -158,6 +172,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
         source: &'a WordModule,
         prefix: &str,
         preserve_ports: bool,
+        signal_bindings: &BTreeMap<SignalId, SignalBinding>,
     ) -> Result<ModuleRemap, E>
     where
         E: From<WordError>,
@@ -172,10 +187,28 @@ impl<'a, F> HierarchyInliner<'a, F> {
         }
         self.active_definitions.push(source.name());
 
-        let signals = self.copy_signals(source, prefix, preserve_ports)?;
+        let signals = self.copy_signals(source, prefix, preserve_ports, signal_bindings)?;
         let memories = self.copy_memories(source, prefix)?;
         let value_base = self.target.values.len();
-        let operation_base = self.target.operations.len();
+        let dynamic_reads =
+            source
+                .values()
+                .iter()
+                .filter(|value| match value.kind {
+                    ValueKind::Signal(reference) => signals
+                        .get(reference.signal.index())
+                        .is_some_and(|binding| {
+                            matches!(binding.offset, SignalBindingOffset::Dynamic { .. })
+                        }),
+                    ValueKind::Constant(_) | ValueKind::Operation(_) => false,
+                })
+                .count();
+        let operation_base = self
+            .target
+            .operations
+            .len()
+            .checked_add(dynamic_reads)
+            .ok_or_else(|| WordError::new("linked elaboration operation count overflow"))?;
         let memory_read_port_base = self.target.memory_read_ports.len();
         let memory_write_port_base = self.target.memory_write_ports.len();
         let remap = ModuleRemap {
@@ -207,9 +240,20 @@ impl<'a, F> HierarchyInliner<'a, F> {
         source: &WordModule,
         prefix: &str,
         preserve_ports: bool,
-    ) -> Result<Vec<SignalId>, WordError> {
+        bindings: &BTreeMap<SignalId, SignalBinding>,
+    ) -> Result<Vec<SignalBinding>, WordError> {
         let mut signals = Vec::with_capacity(source.signals().len());
         for (index, signal) in source.signals().iter().enumerate() {
+            let source_signal = SignalId::from_index(index)?;
+            if let Some(&binding) = bindings.get(&source_signal) {
+                if binding.width != signal.ty.width() {
+                    return Err(WordError::new(
+                        "reference-port binding width does not match its child signal",
+                    ));
+                }
+                signals.push(binding);
+                continue;
+            }
             let local_name = signal.name.map_or_else(
                 || format!("$signal{index}"),
                 |name| source.name_str(name).to_string(),
@@ -223,6 +267,13 @@ impl<'a, F> HierarchyInliner<'a, F> {
                             source.name()
                         ))
                     })?;
+                    if port.direction == PortDirection::Ref {
+                        return Err(WordError::new(format!(
+                            "root reference port '{}.{}' has no enclosing variable binding",
+                            source.name(),
+                            source.name_str(port.name)
+                        )));
+                    }
                     let port_id = self.target.add_port(
                         &name,
                         port.direction,
@@ -252,7 +303,12 @@ impl<'a, F> HierarchyInliner<'a, F> {
             }
             self.target
                 .set_signal_resolution(copied, signal.resolution)?;
-            signals.push(copied);
+            signals.push(SignalBinding {
+                signal: copied,
+                offset: SignalBindingOffset::Static(0),
+                width: signal.ty.width(),
+                actual: None,
+            });
         }
         Ok(signals)
     }
@@ -264,13 +320,50 @@ impl<'a, F> HierarchyInliner<'a, F> {
         remap: &ModuleRemap,
     ) -> Result<(), WordError> {
         self.target.values.reserve(source.values().len());
-        for value in source.values() {
+        let mut binding_reads = Vec::new();
+        for (index, value) in source.values().iter().enumerate() {
+            let result = remap.value(ValueId::from_index(index)?)?;
             let kind = match &value.kind {
-                ValueKind::Signal(reference) => ValueKind::Signal(SignalRef {
-                    signal: remap.signal(reference.signal)?,
-                    lsb: reference.lsb,
-                    width: reference.width,
-                }),
+                ValueKind::Signal(reference) => match remap.signal_binding(reference.signal)? {
+                    SignalBinding {
+                        offset: SignalBindingOffset::Static(_),
+                        ..
+                    } => ValueKind::Signal(remap.signal_ref(*reference)?),
+                    SignalBinding {
+                        offset: SignalBindingOffset::Dynamic { .. },
+                        actual: Some(actual),
+                        ..
+                    } => {
+                        let operation = OpId::from_index(
+                            self.target
+                                .operations
+                                .len()
+                                .checked_add(binding_reads.len())
+                                .ok_or_else(|| {
+                                    WordError::new("reference-port read operation count overflow")
+                                })?,
+                        )?;
+                        binding_reads.push(Operation {
+                            kind: OpKind::Extract {
+                                value: actual,
+                                lsb: reference.lsb,
+                                width: reference.width,
+                            },
+                            result,
+                            source: value.source.in_occurrence(prefix),
+                        });
+                        ValueKind::Operation(operation)
+                    }
+                    SignalBinding {
+                        offset: SignalBindingOffset::Dynamic { .. },
+                        actual: None,
+                        ..
+                    } => {
+                        return Err(WordError::new(
+                            "dynamic reference-port binding has no readable actual",
+                        ));
+                    }
+                },
                 ValueKind::Constant(bits) => ValueKind::Constant(bits.clone()),
                 ValueKind::Operation(operation) => {
                     ValueKind::Operation(remap.operation(*operation)?)
@@ -283,7 +376,10 @@ impl<'a, F> HierarchyInliner<'a, F> {
             });
         }
 
-        self.target.operations.reserve(source.operations().len());
+        self.target
+            .operations
+            .reserve(binding_reads.len() + source.operations().len());
+        self.target.operations.extend(binding_reads);
         for operation in source.operations() {
             let kind = self.remap_operation(source, prefix, remap, &operation.kind)?;
             self.target.operations.push(Operation {
@@ -398,6 +494,10 @@ impl<'a, F> HierarchyInliner<'a, F> {
                 then_value: remap.value(*then_value)?,
                 else_value: remap.value(*else_value)?,
             },
+            OpKind::TriState { data, enable } => OpKind::TriState {
+                data: remap.value(*data)?,
+                enable: Self::remap_enable(remap, *enable)?,
+            },
             OpKind::Concat { parts } => OpKind::Concat {
                 parts: parts
                     .iter()
@@ -507,7 +607,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
 
     fn copy_connects(&mut self, source: &WordModule, remap: &ModuleRemap) -> Result<(), WordError> {
         for connect in source.connects() {
-            let target = Self::remap_lvalue(remap, &connect.target)?;
+            let target = self.remap_lvalue(remap, &connect.target, &connect.source)?;
             let target_ty = self.target.lvalue_ty(&target)?;
             let value =
                 self.coerce_value(remap.value(connect.value)?, target_ty, &connect.source)?;
@@ -621,18 +721,243 @@ impl<'a, F> HierarchyInliner<'a, F> {
         Ok(())
     }
 
-    fn remap_lvalue(remap: &ModuleRemap, lvalue: &LValue) -> Result<LValue, WordError> {
+    fn remap_lvalue(
+        &mut self,
+        remap: &ModuleRemap,
+        lvalue: &LValue,
+        source: &SourceSpan,
+    ) -> Result<LValue, WordError> {
+        let binding = remap.signal_binding(lvalue.signal)?;
+        let (range, dynamic) = match binding.offset {
+            SignalBindingOffset::Static(base) => {
+                let range = match lvalue.range {
+                    Some(range) => Some(BitRange {
+                        msb: base.checked_add(range.msb).ok_or_else(|| {
+                            WordError::new("reference-port lvalue range exceeds 32-bit capacity")
+                        })?,
+                        lsb: base.checked_add(range.lsb).ok_or_else(|| {
+                            WordError::new("reference-port lvalue range exceeds 32-bit capacity")
+                        })?,
+                    }),
+                    None if lvalue.dynamic.is_none() && base != 0 => Some(BitRange {
+                        msb: base.checked_add(binding.width - 1).ok_or_else(|| {
+                            WordError::new("reference-port lvalue range exceeds 32-bit capacity")
+                        })?,
+                        lsb: base,
+                    }),
+                    None => None,
+                };
+                let dynamic = match lvalue.dynamic {
+                    Some(dynamic) => Some(DynamicRange {
+                        offset: self.add_reference_offset(
+                            remap.value(dynamic.offset)?,
+                            base,
+                            source,
+                        )?,
+                        width: dynamic.width,
+                    }),
+                    None => None,
+                };
+                (range, dynamic)
+            }
+            SignalBindingOffset::Dynamic { offset, base } => {
+                let offset = self.add_reference_offset(offset, base, source)?;
+                let (relative, width) = match (lvalue.range, lvalue.dynamic) {
+                    (None, None) => (None, binding.width),
+                    (Some(range), None) => (Some(range.lsb), range.width()),
+                    (None, Some(dynamic)) => {
+                        let relative = remap.value(dynamic.offset)?;
+                        let offset = self.add_reference_offsets(offset, relative, source)?;
+                        return Ok(LValue {
+                            signal: binding.signal,
+                            range: None,
+                            dynamic: Some(DynamicRange {
+                                offset,
+                                width: dynamic.width,
+                            }),
+                        });
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(WordError::new(
+                            "procedural lvalue cannot have static and dynamic ranges",
+                        ));
+                    }
+                };
+                let offset = match relative {
+                    Some(relative) => self.add_reference_offset(offset, relative, source)?,
+                    None => offset,
+                };
+                (
+                    None,
+                    Some(DynamicRange {
+                        offset,
+                        width: std::num::NonZeroU32::new(width)
+                            .expect("reference-port binding width is nonzero"),
+                    }),
+                )
+            }
+        };
         Ok(LValue {
-            signal: remap.signal(lvalue.signal)?,
-            range: lvalue.range,
-            dynamic: match lvalue.dynamic {
-                Some(range) => Some(DynamicRange {
-                    offset: remap.value(range.offset)?,
-                    width: range.width,
-                }),
-                None => None,
-            },
+            signal: binding.signal,
+            range,
+            dynamic,
         })
+    }
+
+    fn add_reference_offset(
+        &mut self,
+        offset: ValueId,
+        base: u32,
+        source: &SourceSpan,
+    ) -> Result<ValueId, WordError> {
+        if base == 0 {
+            return Ok(offset);
+        }
+        let offset_ty = self.target.value_ty(offset)?;
+        let base_width = u32::BITS - base.leading_zeros();
+        let width = offset_ty
+            .width()
+            .max(base_width)
+            .checked_add(1)
+            .ok_or_else(|| WordError::new("reference-port dynamic offset is too wide"))?;
+        let ty = WordType::new(width, false, offset_ty.state())?;
+        let offset = self
+            .target
+            .cast(CastKind::ZeroExtend, offset, ty, source.clone())?;
+        let bits = ConstBits::from_bits(
+            (0..width)
+                .rev()
+                .map(|bit| {
+                    if bit < u32::BITS && base & (1_u32 << bit) != 0 {
+                        BitVal::One
+                    } else {
+                        BitVal::Zero
+                    }
+                })
+                .collect(),
+        )
+        .map_err(|error| WordError::new(error.to_string()))?;
+        let base = self.target.constant(bits, ty, source.clone())?;
+        self.target
+            .binary(super::BinaryOp::Add, offset, base, source.clone())
+    }
+
+    fn add_reference_offsets(
+        &mut self,
+        left: ValueId,
+        right: ValueId,
+        source: &SourceSpan,
+    ) -> Result<ValueId, WordError> {
+        let left_ty = self.target.value_ty(left)?;
+        let right_ty = self.target.value_ty(right)?;
+        let width = left_ty
+            .width()
+            .max(right_ty.width())
+            .checked_add(1)
+            .ok_or_else(|| WordError::new("reference-port dynamic offset is too wide"))?;
+        let state = left_ty.state().merge(right_ty.state());
+        let ty = WordType::new(width, false, state)?;
+        let left = self
+            .target
+            .cast(CastKind::ZeroExtend, left, ty, source.clone())?;
+        let right = self
+            .target
+            .cast(CastKind::ZeroExtend, right, ty, source.clone())?;
+        self.target
+            .binary(super::BinaryOp::Add, left, right, source.clone())
+    }
+
+    fn reference_binding(&mut self, value: ValueId) -> Result<SignalBinding, WordError> {
+        let stored = self
+            .target
+            .value(value)
+            .ok_or_else(|| WordError::new("reference-port actual value disappeared"))?
+            .clone();
+        let mut binding = match stored.kind {
+            ValueKind::Signal(reference) => SignalBinding {
+                signal: reference.signal,
+                offset: SignalBindingOffset::Static(reference.lsb),
+                width: reference.width(),
+                actual: None,
+            },
+            ValueKind::Operation(operation) => {
+                let operation = self
+                    .target
+                    .operation(operation)
+                    .ok_or_else(|| WordError::new("reference-port actual operation disappeared"))?
+                    .clone();
+                match operation.kind {
+                    OpKind::Extract {
+                        value: base,
+                        lsb,
+                        width,
+                    } => {
+                        let mut binding = self.reference_binding(base)?;
+                        binding.offset = match binding.offset {
+                            SignalBindingOffset::Static(base) => SignalBindingOffset::Static(
+                                base.checked_add(lsb).ok_or_else(|| {
+                                    WordError::new(
+                                        "reference-port actual range exceeds 32-bit capacity",
+                                    )
+                                })?,
+                            ),
+                            SignalBindingOffset::Dynamic { offset, base } => {
+                                SignalBindingOffset::Dynamic {
+                                    offset,
+                                    base: base.checked_add(lsb).ok_or_else(|| {
+                                        WordError::new(
+                                            "reference-port actual range exceeds 32-bit capacity",
+                                        )
+                                    })?,
+                                }
+                            }
+                        };
+                        binding.width = width.get();
+                        binding
+                    }
+                    OpKind::DynamicExtract {
+                        value: base,
+                        offset,
+                        width,
+                    } => {
+                        let mut binding = self.reference_binding(base)?;
+                        binding.offset = match binding.offset {
+                            SignalBindingOffset::Static(base) => {
+                                SignalBindingOffset::Dynamic { offset, base }
+                            }
+                            SignalBindingOffset::Dynamic {
+                                offset: outer,
+                                base,
+                            } => SignalBindingOffset::Dynamic {
+                                offset: self.add_reference_offsets(
+                                    outer,
+                                    offset,
+                                    &operation.source,
+                                )?,
+                                base,
+                            },
+                        };
+                        binding.width = width.get();
+                        binding
+                    }
+                    _ => {
+                        return Err(WordError::new(
+                            "reference-port actual must be a variable or unpacked aggregate member",
+                        ));
+                    }
+                }
+            }
+            ValueKind::Constant(_) => {
+                return Err(WordError::new("reference-port actual cannot be a constant"));
+            }
+        };
+        if stored.ty.width() != binding.width {
+            return Err(WordError::new(
+                "reference-port actual type width is inconsistent with its alias range",
+            ));
+        }
+        binding.actual = Some(value);
+        Ok(binding)
     }
 
     #[allow(
@@ -666,6 +991,19 @@ impl<'a, F> HierarchyInliner<'a, F> {
         let preserve_hierarchy = effective_directive(SynthesisDirectiveKind::DontTouch)
             == Some(true)
             || effective_directive(SynthesisDirectiveKind::Ungroup) == Some(false);
+        if preserve_hierarchy
+            && child.is_some_and(|child| {
+                child
+                    .ports()
+                    .iter()
+                    .any(|port| port.direction == PortDirection::Ref)
+            })
+        {
+            return Err(WordError::new(format!(
+                "instance '{instance_name}' cannot preserve hierarchy because reference ports require exact alias elimination"
+            ))
+            .into());
+        }
         let Some(child) = child.filter(|_| !preserve_hierarchy) else {
             let name = self.unique_instance_name(&instance_name);
             let connections = instance
@@ -726,7 +1064,37 @@ impl<'a, F> HierarchyInliner<'a, F> {
             return Ok(());
         };
 
-        let child_remap = self.copy_module(child, &instance_name, false)?;
+        let mut reference_bindings = BTreeMap::new();
+        for child_port in child
+            .ports()
+            .iter()
+            .filter(|port| port.direction == PortDirection::Ref)
+        {
+            let port_name = child.name_str(child_port.name);
+            let connection = instance
+                .connections
+                .iter()
+                .find(|connection| parent.name_str(connection.port) == port_name)
+                .ok_or_else(|| {
+                    WordError::new(format!(
+                        "reference port '{reference}.{port_name}' is not connected on instance '{instance_name}'"
+                    ))
+                })?;
+            let value = parent_remap.value(connection.value)?;
+            let actual_ty = self
+                .target
+                .value(value)
+                .ok_or_else(|| WordError::new("reference-port actual value disappeared"))?
+                .ty;
+            if actual_ty != child_port.ty {
+                return Err(WordError::new(format!(
+                    "reference port '{reference}.{port_name}' type does not match its actual"
+                ))
+                .into());
+            }
+            reference_bindings.insert(child_port.signal, self.reference_binding(value)?);
+        }
+        let child_remap = self.copy_module(child, &instance_name, false, &reference_bindings)?;
         let connected_ports = instance
             .connections
             .iter()
@@ -780,6 +1148,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
                     ))
                     .into());
                 }
+                PortDirection::Ref => {}
             }
         }
         Ok(())
@@ -915,10 +1284,47 @@ fn unique_linked_name(base: &str, occupied: impl Fn(&str) -> bool) -> String {
 
 impl ModuleRemap {
     pub(crate) fn signal(&self, signal: SignalId) -> Result<SignalId, WordError> {
+        self.signal_binding(signal).map(|binding| binding.signal)
+    }
+
+    pub(crate) fn signal_range(
+        &self,
+        signal: SignalId,
+    ) -> Result<(SignalId, SignalBindingOffset, u32), WordError> {
+        self.signal_binding(signal)
+            .map(|binding| (binding.signal, binding.offset, binding.width))
+    }
+
+    fn signal_binding(&self, signal: SignalId) -> Result<SignalBinding, WordError> {
         self.signals.get(signal.index()).copied().ok_or_else(|| {
             WordError::new(format!(
                 "linked elaboration references unknown signal {signal:?}"
             ))
+        })
+    }
+
+    fn signal_ref(&self, reference: SignalRef) -> Result<SignalRef, WordError> {
+        let binding = self.signal_binding(reference.signal)?;
+        let end = reference
+            .lsb
+            .checked_add(reference.width())
+            .ok_or_else(|| WordError::new("reference-port signal range exceeds 32-bit capacity"))?;
+        if end > binding.width {
+            return Err(WordError::new(
+                "reference-port signal range exceeds its bound actual",
+            ));
+        }
+        let SignalBindingOffset::Static(base) = binding.offset else {
+            return Err(WordError::new(
+                "dynamic reference-port binding cannot become a static signal reference",
+            ));
+        };
+        Ok(SignalRef {
+            signal: binding.signal,
+            lsb: base.checked_add(reference.lsb).ok_or_else(|| {
+                WordError::new("reference-port signal range exceeds 32-bit capacity")
+            })?,
+            width: reference.width,
         })
     }
 

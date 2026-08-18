@@ -32,9 +32,10 @@ pub use view::{
     SlangArrayKind, SlangAttribute, SlangAttributeValue, SlangBlock, SlangBlockId,
     SlangCompilation, SlangConcat, SlangContinuousAssign, SlangEdgeTarget, SlangEffect,
     SlangExpression, SlangExpressionKind, SlangIndexRange, SlangInstance, SlangInstanceConnection,
-    SlangLogicConstant, SlangMaterializedModule, SlangModule, SlangNet, SlangPort, SlangProcedure,
-    SlangSensitivityEvent, SlangSignalRef, SlangSourceSpan, SlangSwitchArm, SlangSwitchArms,
-    SlangTerminator, SlangTerminatorKind, SlangTypeField, SlangTypeLayout, SlangTypeLayoutKind,
+    SlangLogicConstant, SlangLoopRegion, SlangLoopRegionId, SlangMaterializedModule, SlangModule,
+    SlangNet, SlangPort, SlangProcedure, SlangSensitivityEvent, SlangSignalRef, SlangSourceSpan,
+    SlangSwitchArm, SlangSwitchArms, SlangTerminator, SlangTerminatorKind, SlangTypeField,
+    SlangTypeLayout, SlangTypeLayoutKind,
 };
 
 /// Stable digest of the pinned Slang sources and Opto's native bridge.
@@ -143,6 +144,49 @@ pub struct SlangDiagnostic {
     pub location: Option<SlangDiagnosticLocation>,
 }
 
+/// Earliest authoritative stage classification for a native lowering failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlangLoweringFailureCategory {
+    /// The source construct is intentionally outside the synthesis profile.
+    UnsupportedProfile,
+    /// Slang semantics could not be represented by the frontend projection.
+    InvalidProjection,
+    /// Deterministic structural capacity was exceeded.
+    Capacity,
+    /// Native lowering violated an internal contract.
+    Invariant,
+    /// A non-standard native failure escaped lowering.
+    Native,
+}
+
+/// Structured failure produced while materializing one lowered module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlangLoweringFailure {
+    /// Stable failure category owned by the lowering boundary.
+    pub category: SlangLoweringFailureCategory,
+    /// Stable code within `category`.
+    pub code: u16,
+    /// Human-readable detail copied out of native storage.
+    pub message: String,
+    /// Source coordinate when the rejecting construct supplied one.
+    pub location: Option<SlangDiagnosticLocation>,
+}
+
+impl SlangLoweringFailure {
+    /// Returns a stable, searchable product-facing code.
+    #[must_use]
+    pub fn stable_code(&self) -> String {
+        let category = match self.category {
+            SlangLoweringFailureCategory::UnsupportedProfile => "P",
+            SlangLoweringFailureCategory::InvalidProjection => "R",
+            SlangLoweringFailureCategory::Capacity => "C",
+            SlangLoweringFailureCategory::Invariant => "I",
+            SlangLoweringFailureCategory::Native => "N",
+        };
+        format!("OPT-HDL-L{category}-{:04}", self.code)
+    }
+}
+
 impl SlangDiagnostic {
     /// Returns a stable, searchable product-facing code.
     #[must_use]
@@ -169,6 +213,8 @@ pub enum SlangPortDirection {
     Output,
     /// Bidirectional resolved port.
     Inout,
+    /// Exact variable alias shared with the containing instance.
+    Ref,
 }
 
 /// Inclusive source indices of a packed bit range.
@@ -271,6 +317,17 @@ pub enum SlangProcedureKind {
     CombOrLatch,
 }
 
+/// Placement of a source loop's continuation condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlangLoopForm {
+    /// Condition is tested before the body.
+    PreTest,
+    /// Condition is tested after the body.
+    PostTest,
+    /// The source loop has no condition.
+    Unconditional,
+}
+
 /// Scheduling semantics of a procedural assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlangAssignmentMode {
@@ -300,6 +357,8 @@ pub enum SlangError {
     CompileFailed(String),
     /// Slang rejected the source and returned structured diagnostics.
     Diagnostics(Vec<SlangDiagnostic>),
+    /// Native module lowering rejected the source with structured context.
+    LoweringFailed(SlangLoweringFailure),
     /// Native data violated an invariant required by the Rust view.
     BridgeInvariant(String),
 }
@@ -321,6 +380,14 @@ impl fmt::Display for SlangError {
                     write!(f, ": {}", primary.message)?;
                 }
                 Ok(())
+            }
+            Self::LoweringFailed(failure) => {
+                write!(
+                    f,
+                    "slang module lowering failed [{}]: {}",
+                    failure.stable_code(),
+                    failure.message
+                )
             }
         }
     }

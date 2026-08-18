@@ -49,6 +49,7 @@ pub(super) fn run(mode: RunMode) {
             language: "sverilog".to_string(),
             top: "top".to_string(),
             sources: vec![PathBuf::from("top.sv")],
+            equivalence_sources: Vec::new(),
             flow: Flow::Synth,
             library: Some(PathBuf::from("qualification/libraries/opto_test.lib")),
             library_key: None,

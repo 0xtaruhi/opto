@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-nested-dynamic-lvalue"
+kind = "regression"
+covers = ["A procedural write composes a runtime unpacked-array index with a runtime packed-bit index."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 4
+min_cells = 1

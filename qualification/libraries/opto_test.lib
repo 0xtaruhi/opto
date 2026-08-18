@@ -210,6 +210,72 @@ library (opto_test) {
       }
     }
   }
+  cell (TBUF_X1) {
+    area : 1.5;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (E) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      three_state : "!E";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "E";
+        timing_type : three_state_enable;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "E";
+        timing_type : three_state_disable;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
+  cell (TBUFN_X1) {
+    area : 1.5;
+    pin (A) { direction : input; capacitance : 0.01; }
+    pin (EN) { direction : input; capacitance : 0.01; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      three_state : "EN";
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "EN";
+        timing_type : three_state_enable;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+      timing () {
+        related_pin : "EN";
+        timing_type : three_state_disable;
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+  }
   cell (DFF_X1) {
     area : 4.0;
     ff (IQ, IQN) {

@@ -2,15 +2,31 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    BTreeMap, BitVal, BlockOutput, Coverage, DecisionChoice, EventControl, ExecutionState, FrameId,
-    HashSet, MaterializedPredicate, PendingWrite, Predicate, PredicateArena, ProcedureCfg,
-    ProcedureInput, ProcedureNormalizer, ResetList, SignalResolutionContext, Slot, StateArena,
-    TargetKey, block_effects, cfg, constant_value, derived_source, extract_assignment,
-    inferred_reset_kind, materialize_synthesis_constant, memory_write_data, predicate, proc,
-    resolve_signal, rewrite_value, target_layout, word,
+    BTreeMap, BTreeSet, BitVal, BlockOutput, Coverage, DecisionChoice, EventControl,
+    ExecutionState, FrameId, HashSet, MaterializedPredicate, PendingWrite, Predicate,
+    PredicateArena, ProcedureCfg, ProcedureInput, ProcedureNormalizer, ResetList,
+    SignalResolutionContext, Slot, StateArena, TargetKey, block_effects, cfg, constant_value,
+    derived_source, extract_assignment, inferred_reset_kind, materialize_synthesis_constant,
+    memory_write_data, predicate, proc, resolve_signal, reverse_assignment_bits, rewrite_value,
+    static_insert, target_layout, word,
 };
 
 mod merge;
+
+fn constant_u32(module: &word::WordModule, value: word::ValueId) -> Option<u32> {
+    let word::ValueKind::Constant(bits) = &module.value(value)?.kind else {
+        return None;
+    };
+    let mut result = 0u32;
+    for index in 0..bits.width() {
+        match bits.bit_lsb(index)? {
+            BitVal::Zero => {}
+            BitVal::One if index < u32::BITS => result |= 1u32 << index,
+            BitVal::One | BitVal::X | BitVal::Z => return None,
+        }
+    }
+    Some(result)
+}
 
 impl<'a> ProcedureNormalizer<'a> {
     pub(super) fn base_value(&self, key: TargetKey) -> Result<word::ValueId, crate::SynthError> {
@@ -111,6 +127,9 @@ impl<'a> ProcedureNormalizer<'a> {
             outputs,
             edge_guards,
             writes: Vec::new(),
+            read_instances: BTreeMap::new(),
+            claimed_reads: BTreeSet::new(),
+            active_read_rewrites: BTreeSet::new(),
             incomplete_comb,
         })
     }
@@ -126,7 +145,6 @@ impl<'a> ProcedureNormalizer<'a> {
     }
 
     fn validate_assignment_styles(&self) -> Result<(), crate::SynthError> {
-        let mut style = None;
         for &block in self.cfg.blocks() {
             for (_, effect) in block_effects(self.procedures, block)? {
                 let proc::ProcTarget::Signal { signal, .. } = effect.target else {
@@ -151,20 +169,6 @@ impl<'a> ProcedureNormalizer<'a> {
                 {
                     return Err(crate::SynthError::unsupported(
                         "nonblocking assignment in always_comb",
-                    ));
-                }
-                if local
-                    || !matches!(
-                        self.procedure.kind,
-                        proc::ProcedureKind::CombinationalOrLatch | proc::ProcedureKind::Latch
-                    )
-                {
-                    continue;
-                }
-                let blocking = effect.mode == proc::AssignmentMode::Blocking;
-                if style.replace(blocking).is_some_and(|old| old != blocking) {
-                    return Err(crate::SynthError::unsupported(
-                        "a latch procedure cannot mix blocking and nonblocking persistent assignments",
                     ));
                 }
             }
@@ -227,7 +231,7 @@ impl<'a> ProcedureNormalizer<'a> {
         let value = self.rewrite(state.visible, effect.value)?;
         match effect.target {
             proc::ProcTarget::Signal { signal, select } => {
-                let select = self.rewrite_select(state.visible, select)?;
+                let select = self.rewrite_select(state.visible, select, &effect.source)?;
                 if effect.mode == proc::AssignmentMode::Blocking {
                     self.assign(state.visible, signal, select, value, &effect.source)?;
                 }
@@ -244,7 +248,7 @@ impl<'a> ProcedureNormalizer<'a> {
                     ));
                 }
                 let address = self.rewrite(state.visible, address)?;
-                let select = self.rewrite_select(state.visible, select)?;
+                let select = self.rewrite_select(state.visible, select, &effect.source)?;
                 let (data, mask) =
                     memory_write_data(self.module, memory, select, value, &effect.source)?;
                 let write = PendingWrite {
@@ -268,12 +272,23 @@ impl<'a> ProcedureNormalizer<'a> {
         &mut self,
         frame: FrameId,
         select: proc::TargetSelect,
+        source: &word::SourceSpan,
     ) -> Result<proc::TargetSelect, crate::SynthError> {
         Ok(match select {
-            proc::TargetSelect::Dynamic { offset, width } => proc::TargetSelect::Dynamic {
-                offset: self.rewrite(frame, offset)?,
-                width,
-            },
+            proc::TargetSelect::Dynamic { offset, width } => {
+                let offset = self.rewrite(frame, offset)?;
+                let offset = materialize_synthesis_constant(self.module, offset, source)?;
+                if let Some(lsb) = constant_u32(self.module, offset) {
+                    let msb = lsb.checked_add(width.get() - 1).ok_or_else(|| {
+                        crate::SynthError::capacity(
+                            "constant procedural target range exceeds 32-bit capacity",
+                        )
+                    })?;
+                    proc::TargetSelect::Static(word::BitRange { msb, lsb })
+                } else {
+                    proc::TargetSelect::Dynamic { offset, width }
+                }
+            }
             other => other,
         })
     }
@@ -321,26 +336,53 @@ impl<'a> ProcedureNormalizer<'a> {
                 }
             }
             proc::TargetSelect::Static(range) => {
-                if range.msb < range.lsb {
-                    return Err(crate::SynthError::unsupported(
-                        "ascending procedural part-select targets",
-                    ));
-                }
-                let end = range
-                    .lsb
+                let lsb = range.msb.min(range.lsb);
+                let end = lsb
                     .checked_add(range.width())
                     .ok_or_else(|| crate::SynthError::capacity("part-select range overflow"))?;
+                let value = if range.msb < range.lsb {
+                    reverse_assignment_bits(self.module, value, source)?
+                } else {
+                    value
+                };
                 for &key in keys
                     .iter()
-                    .filter(|key| key.lsb >= range.lsb && key.lsb + key.width <= end)
+                    .filter(|key| key.lsb < end && key.lsb.saturating_add(key.width) > lsb)
                 {
-                    let value = extract_assignment(
+                    let key_end = key.lsb.checked_add(key.width).ok_or_else(|| {
+                        crate::SynthError::capacity("procedural state range overflow")
+                    })?;
+                    let overlap_lsb = key.lsb.max(lsb);
+                    let overlap_end = key_end.min(end);
+                    let overlap_width = overlap_end - overlap_lsb;
+                    let replacement = extract_assignment(
                         self.module,
                         value,
-                        key.lsb - range.lsb,
-                        key.width,
+                        overlap_lsb - lsb,
+                        overlap_width,
                         source,
                     )?;
+                    let value = if overlap_lsb == key.lsb && overlap_width == key.width {
+                        replacement
+                    } else {
+                        let base = self
+                            .states
+                            .get(frame, key)
+                            .map(|slot| slot.current)
+                            .or_else(|| self.bases.get(&key).copied())
+                            .ok_or_else(|| {
+                                crate::SynthError::invariant(
+                                    "partial procedural target has no current state",
+                                )
+                            })?;
+                        static_insert(
+                            self.module,
+                            base,
+                            overlap_lsb - key.lsb,
+                            replacement,
+                            source,
+                        )?
+                    };
                     self.states
                         .set(frame, key, Slot::assigned(value, source.clone()));
                 }
@@ -367,6 +409,11 @@ impl<'a> ProcedureNormalizer<'a> {
         frame: FrameId,
         value: word::ValueId,
     ) -> Result<word::ValueId, crate::SynthError> {
+        let mut read_overrides = BTreeMap::new();
+        for signal in self.procedural_memory_reads(value)? {
+            let replacement = self.rewrite_memory_read(frame, signal)?;
+            read_overrides.insert(signal, replacement);
+        }
         let states = &self.states;
         let layout = &self.layout;
         let bases = &self.bases;
@@ -384,9 +431,163 @@ impl<'a> ProcedureNormalizer<'a> {
             value,
             self.rewrite_scratch,
             |module, original, reference| {
-                resolve_signal(module, &context, frame, original, reference)
+                if let Some(&(replacement, read_index)) = read_overrides.get(&reference.signal) {
+                    let source = module
+                        .value(original)
+                        .ok_or_else(|| {
+                            crate::SynthError::invariant("procedural memory read value disappeared")
+                        })?
+                        .source
+                        .clone();
+                    let replacement = module
+                        .read_signal_slice(replacement, reference.lsb, reference.width(), source)
+                        .map_err(crate::SynthError::from)?;
+                    let replacement_reference = match module
+                        .value(replacement)
+                        .ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "procedural memory-read replacement disappeared",
+                            )
+                        })?
+                        .kind
+                    {
+                        word::ValueKind::Signal(reference) => reference,
+                        word::ValueKind::Constant(_) | word::ValueKind::Operation(_) => {
+                            return Err(crate::SynthError::invariant(
+                                "procedural memory-read replacement is not signal-backed",
+                            ));
+                        }
+                    };
+                    return resolve_signal(
+                        module,
+                        &context,
+                        frame,
+                        replacement,
+                        replacement_reference,
+                        Some(read_index),
+                    );
+                }
+                resolve_signal(module, &context, frame, original, reference, None)
             },
         )
+    }
+
+    fn procedural_memory_reads(
+        &self,
+        root: word::ValueId,
+    ) -> Result<Vec<word::SignalId>, crate::SynthError> {
+        let mut visited = vec![false; self.module.values().len()];
+        let mut pending = vec![root];
+        let mut reads = BTreeSet::new();
+        while let Some(value) = pending.pop() {
+            let reached = visited.get_mut(value.index()).ok_or_else(|| {
+                crate::SynthError::invariant("procedural expression references an unknown value")
+            })?;
+            if std::mem::replace(reached, true) {
+                continue;
+            }
+            match self
+                .module
+                .value(value)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "procedural expression value disappeared during rewrite",
+                    )
+                })?
+                .kind
+            {
+                word::ValueKind::Signal(reference) => {
+                    if self.reads.contains_key(&reference.signal) {
+                        reads.insert(reference.signal);
+                    }
+                }
+                word::ValueKind::Constant(_) => {}
+                word::ValueKind::Operation(operation) => self
+                    .module
+                    .operation(operation)
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "procedural expression operation disappeared during rewrite",
+                        )
+                    })?
+                    .kind
+                    .for_each_input(|input| pending.push(input)),
+            }
+        }
+        Ok(reads.into_iter().collect())
+    }
+
+    fn rewrite_memory_read(
+        &mut self,
+        frame: FrameId,
+        signal: word::SignalId,
+    ) -> Result<(word::SignalId, usize), crate::SynthError> {
+        let &index = self.reads.get(&signal).ok_or_else(|| {
+            crate::SynthError::invariant("procedural memory read has no source port")
+        })?;
+        if !self.active_read_rewrites.insert((frame, index)) {
+            return Err(crate::SynthError::invalid(
+                "procedural memory-read addresses form a cyclic dependency",
+            ));
+        }
+        let port = self
+            .module
+            .memory_read_ports()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| {
+                crate::SynthError::invariant("procedural memory read port disappeared")
+            })?;
+        let address = self.rewrite(frame, port.address);
+        self.active_read_rewrites.remove(&(frame, index));
+        let address = address?;
+        if let Some(&instance) = self.read_instances.get(&(index, address)) {
+            return Ok(instance);
+        }
+
+        let instance = if self.claimed_reads.insert(index) {
+            let id = word::MemoryReadPortId::from_index(index)
+                .map_err(|error| crate::SynthError::capacity(error.to_string()))?;
+            self.module
+                .set_memory_read_port_address(id, address)
+                .map_err(crate::SynthError::from)?;
+            (port.data, index)
+        } else {
+            let original = self.module.signal(port.data).ok_or_else(|| {
+                crate::SynthError::invariant("procedural memory read data signal disappeared")
+            })?;
+            let base = original
+                .name
+                .map_or("memory$read", |name| self.module.name_str(name))
+                .to_owned();
+            let mut ordinal = self.module.memory_read_ports().len();
+            let name = loop {
+                let candidate = format!("{base}$proc${ordinal}");
+                if self.module.signal_id(&candidate).is_none()
+                    && self.module.memory_id(&candidate).is_none()
+                {
+                    break candidate;
+                }
+                ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                    crate::SynthError::capacity("procedural memory-read name space is exhausted")
+                })?;
+            };
+            let data = self
+                .module
+                .add_wire(name, original.ty, port.source.clone())
+                .map_err(crate::SynthError::from)?;
+            let read_index = self.module.memory_read_ports().len();
+            self.module
+                .add_memory_read_port(word::MemoryReadPort {
+                    address,
+                    data,
+                    ..port
+                })
+                .map_err(crate::SynthError::from)?;
+            (data, read_index)
+        };
+        self.read_instances.insert((index, address), instance);
+        Ok(instance)
     }
 
     pub(super) fn resolve_signal(
@@ -420,7 +621,7 @@ impl<'a> ProcedureNormalizer<'a> {
             reads: self.reads,
             writes: &self.writes,
         };
-        resolve_signal(self.module, &context, frame, original, reference)?
+        resolve_signal(self.module, &context, frame, original, reference, None)?
             .ok_or_else(|| crate::SynthError::invariant("procedural target state was not resolved"))
     }
 
@@ -444,7 +645,23 @@ impl<'a> ProcedureNormalizer<'a> {
                     return self.set_edge_guard(else_edge, Predicate::Never);
                 }
                 let condition = self.rewrite(state.visible, condition)?;
+                let source = &self
+                    .procedures
+                    .block(block)
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant("procedural decision block disappeared")
+                    })?
+                    .source;
+                let condition = materialize_synthesis_constant(self.module, condition, source)?;
                 let condition = self.predicate(condition)?;
+                if condition == Predicate::Always {
+                    self.set_edge_guard(then_edge, guard)?;
+                    return self.set_edge_guard(else_edge, Predicate::Never);
+                }
+                if condition == Predicate::Never {
+                    self.set_edge_guard(then_edge, Predicate::Never)?;
+                    return self.set_edge_guard(else_edge, guard);
+                }
                 let inverse = Self::not(condition);
                 self.decision_choices.insert(
                     block,

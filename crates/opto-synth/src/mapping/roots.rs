@@ -120,7 +120,7 @@ impl<'a> FullDomainRootSemantics<'a> {
                     }
                     _ => PublicationBitResolution {
                         canonical: CanonicalPublicationBit::Value { value, bit },
-                        requires_artifact: !self.signal_is_imported_port(*reference),
+                        requires_artifact: !self.signal_is_physical_boundary(*reference),
                     },
                 }
             }
@@ -186,6 +186,7 @@ impl<'a> FullDomainRootSemantics<'a> {
                     word::OpKind::Unary { .. }
                     | word::OpKind::Binary { .. }
                     | word::OpKind::Mux { .. }
+                    | word::OpKind::TriState { .. }
                     | word::OpKind::DynamicExtract { .. }
                     | word::OpKind::DynamicInsert { .. } => PublicationBitResolution {
                         canonical: CanonicalPublicationBit::Value { value, bit },
@@ -204,8 +205,11 @@ impl<'a> FullDomainRootSemantics<'a> {
         Ok(resolved)
     }
 
-    fn signal_is_imported_port(&self, reference: word::SignalRef) -> bool {
+    fn signal_is_physical_boundary(&self, reference: word::SignalRef) -> bool {
         self.module.signal(reference.signal).is_some_and(|signal| {
+            if signal.resolution == word::SignalResolution::TriState {
+                return true;
+            }
             let word::SignalKind::Port(port) = signal.kind else {
                 return false;
             };
@@ -276,7 +280,7 @@ impl<'a> FullDomainRootSemantics<'a> {
                     }
                     required
                 }
-                _ => !self.signal_is_imported_port(reference),
+                _ => !self.signal_is_physical_boundary(reference),
             },
             word::ValueKind::Operation(operation) => {
                 let operation = self.module.operation(operation).ok_or_else(|| {
@@ -297,6 +301,7 @@ impl<'a> FullDomainRootSemantics<'a> {
                     word::OpKind::Unary { .. }
                     | word::OpKind::Binary { .. }
                     | word::OpKind::Mux { .. }
+                    | word::OpKind::TriState { .. }
                     | word::OpKind::DynamicExtract { .. }
                     | word::OpKind::DynamicInsert { .. } => true,
                 }
@@ -336,6 +341,7 @@ pub(crate) fn scalar_projection_input(
         word::OpKind::Unary { .. }
         | word::OpKind::Binary { .. }
         | word::OpKind::Mux { .. }
+        | word::OpKind::TriState { .. }
         | word::OpKind::Register(_)
         | word::OpKind::Latch(_)
         | word::OpKind::Extract { .. }
@@ -384,6 +390,11 @@ pub(crate) fn mapping_roots(
             let operation = module.operation(operation_id).ok_or_else(|| {
                 crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
             })?;
+            if let word::OpKind::TriState { data, enable } = operation.kind {
+                roots.push(timed_root(data, endpoint_required));
+                roots.push(timed_root(enable.value, endpoint_required));
+                continue;
+            }
             if matches!(
                 operation.kind,
                 word::OpKind::Register(_) | word::OpKind::Latch(_)

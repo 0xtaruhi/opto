@@ -329,6 +329,12 @@ fn hash_operation(
             hash_value(*then_value, values, fingerprint);
             hash_value(*else_value, values, fingerprint);
         }
+        word::OpKind::TriState { data, enable } => {
+            fingerprint.tag(10);
+            hash_value(*data, values, fingerprint);
+            hash_value(enable.value, values, fingerprint);
+            enable.active_high.hash(fingerprint);
+        }
         word::OpKind::Concat { parts } => {
             fingerprint.tag(3);
             parts.len().hash(fingerprint);

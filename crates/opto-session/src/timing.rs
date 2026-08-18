@@ -12,6 +12,16 @@ pub(super) fn design(
     id: opto_db::DesignId,
     port_bindings: &PortBindings,
 ) -> Result<TimingDesign, crate::SessionError> {
+    if let Some(port) = module
+        .ports()
+        .iter()
+        .find(|port| port.direction == word::PortDirection::Ref)
+    {
+        return Err(crate::SessionError::state(format!(
+            "timing: reference port '{}' survived linked elaboration",
+            module.name_str(port.name)
+        )));
+    }
     let ports = module
         .ports()
         .iter()
@@ -74,7 +84,7 @@ fn port_direction(direction: word::PortDirection) -> TimingPortDirection {
     match direction {
         word::PortDirection::Input => TimingPortDirection::Input,
         word::PortDirection::Output => TimingPortDirection::Output,
-        word::PortDirection::Inout => TimingPortDirection::Inout,
+        word::PortDirection::Inout | word::PortDirection::Ref => TimingPortDirection::Inout,
     }
 }
 

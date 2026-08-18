@@ -55,6 +55,7 @@ pub fn write_verilog<W: Write>(out: &mut W, module: &word::WordModule) -> Result
             word::PortDirection::Input => "input",
             word::PortDirection::Output => "output",
             word::PortDirection::Inout => "inout",
+            word::PortDirection::Ref => "ref",
         };
         let storage = if registered_signals.contains(&port.signal) {
             " reg"
@@ -542,6 +543,21 @@ fn write_operation(module: &word::WordModule, op_id: word::OpId) -> Result<Strin
             write_wrapped_value(module, *then_value)?,
             write_wrapped_value(module, *else_value)?
         )),
+        word::OpKind::TriState { data, enable } => {
+            let condition = write_wrapped_value(module, enable.value)?;
+            let data = write_wrapped_value(module, *data)?;
+            let width = module
+                .value(operation.result)
+                .ok_or_else(|| FormatError::invalid("write_verilog: tri-state result is absent"))?
+                .ty
+                .width();
+            let high_impedance = format!("{width}'bz");
+            if enable.active_high {
+                Ok(format!("{condition} ? {data} : {high_impedance}"))
+            } else {
+                Ok(format!("{condition} ? {high_impedance} : {data}"))
+            }
+        }
         word::OpKind::Concat { parts } => Ok(format!(
             "{{{}}}",
             parts
@@ -1149,7 +1165,7 @@ mod word_tests {
     use super::*;
     use opto_ir::ConstBits;
     use opto_ir::word::{
-        AnnotationTarget, AnnotationValueSpec, DefinitionKind, LValue, LogicStateKind,
+        AnnotationTarget, AnnotationValueSpec, DefinitionKind, Enable, LValue, LogicStateKind,
         PortDirection, SourceSpan, UnaryOp, WordModule, WordType,
     };
 
@@ -1217,6 +1233,48 @@ mod word_tests {
             .unwrap();
 
         assert!(verilog_text(&module).contains("assign y = 4'b1010;"));
+    }
+
+    #[test]
+    fn writes_explicit_tri_state_operations() {
+        let mut module = WordModule::new("top");
+        let vector = WordType::new(4, false, LogicStateKind::FourState).unwrap();
+        let bit = WordType::new(1, false, LogicStateKind::FourState).unwrap();
+        let span = SourceSpan::default();
+        let data = module
+            .add_port("data", PortDirection::Input, vector, span.clone())
+            .unwrap();
+        let enable = module
+            .add_port("enable", PortDirection::Input, bit, span.clone())
+            .unwrap();
+        let output = module
+            .add_port("y", PortDirection::Output, vector, span.clone())
+            .unwrap();
+        let data = module
+            .read_signal(module.port(data).unwrap().signal, span.clone())
+            .unwrap();
+        let enable = module
+            .read_signal(module.port(enable).unwrap().signal, span.clone())
+            .unwrap();
+        let driver = module
+            .tri_state(
+                data,
+                Enable {
+                    value: enable,
+                    active_high: true,
+                },
+                span.clone(),
+            )
+            .unwrap();
+        module
+            .connect(
+                LValue::signal(module.port(output).unwrap().signal),
+                driver,
+                span,
+            )
+            .unwrap();
+
+        assert!(verilog_text(&module).contains("assign y = enable ? data : 4'bz;"));
     }
 
     #[test]

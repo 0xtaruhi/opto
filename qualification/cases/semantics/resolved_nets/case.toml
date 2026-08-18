@@ -4,15 +4,19 @@
 format = 1
 id = "semantics-resolved-nets"
 kind = "regression"
-covers = ["Multiple continuous drivers on wand and wor nets preserve resolved AND and OR semantics."]
+covers = [
+  "Multiple continuous drivers on wand and wor nets preserve resolved AND and OR semantics.",
+  "Active-high and active-low tri-state primitive drivers use the wired-net resolution identity while disabled.",
+]
 category = "semantics"
 language = "verilog"
 top = "top"
 sources = ["top.v"]
+equivalence_sources = ["reference.v"]
 flow = "synth"
 library = "../../../libraries/opto_test.lib"
 equivalence = true
 
 [assertions]
-min_ports = 6
+min_ports = 9
 min_cells = 2

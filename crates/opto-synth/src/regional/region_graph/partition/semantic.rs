@@ -39,7 +39,8 @@ pub(crate) fn value_keys(module: &word::WordModule) -> Result<Vec<[u8; 32]>, cra
                             Some(word::PortDirection::Input) => 3,
                             Some(word::PortDirection::Output) => 4,
                             Some(word::PortDirection::Inout) => 5,
-                            None => 6,
+                            Some(word::PortDirection::Ref) => 6,
+                            None => 7,
                         }
                     }
                 }]);

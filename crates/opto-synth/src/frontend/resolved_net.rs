@@ -24,10 +24,11 @@ pub(super) fn lower_resolved_nets(
     module: &mut word::WordModule,
     reference_ports: &ReferencePortMap,
 ) -> Result<(), crate::SynthError> {
+    scalarize_tri_state_drivers(module)?;
     if !module
         .signals()
         .iter()
-        .any(|signal| signal.resolution != word::SignalResolution::SingleDriver)
+        .any(|signal| is_wired_resolution(signal.resolution))
     {
         return Ok(());
     }
@@ -42,11 +43,7 @@ pub(super) fn lower_resolved_nets(
                 connect.target.signal
             ))
         })?;
-        if signal.resolution == word::SignalResolution::SingleDriver {
-            module
-                .connect(connect.target, connect.value, connect.source)
-                .map_err(crate::SynthError::from)?;
-        } else {
+        if is_wired_resolution(signal.resolution) {
             drivers
                 .entry(connect.target.signal)
                 .or_default()
@@ -55,6 +52,10 @@ pub(super) fn lower_resolved_nets(
                     value: connect.value,
                     source: connect.source,
                 });
+        } else {
+            module
+                .connect(connect.target, connect.value, connect.source)
+                .map_err(crate::SynthError::from)?;
         }
     }
 
@@ -62,7 +63,7 @@ pub(super) fn lower_resolved_nets(
         .signals()
         .iter()
         .enumerate()
-        .filter(|(_, signal)| signal.resolution != word::SignalResolution::SingleDriver)
+        .filter(|(_, signal)| is_wired_resolution(signal.resolution))
         .map(|(index, signal)| {
             Ok((
                 word::SignalId::from_index(index)?,
@@ -76,7 +77,9 @@ pub(super) fn lower_resolved_nets(
         let identity = match resolution {
             word::SignalResolution::WiredAnd => BitVal::One,
             word::SignalResolution::WiredOr => BitVal::Zero,
-            word::SignalResolution::SingleDriver => unreachable!(),
+            word::SignalResolution::SingleDriver | word::SignalResolution::TriState => {
+                unreachable!()
+            }
         };
         let identity = module
             .constant(
@@ -87,14 +90,17 @@ pub(super) fn lower_resolved_nets(
             )
             .map_err(crate::SynthError::from)?;
         let mut value = identity;
-        for driver in drivers.remove(&signal).unwrap_or_default() {
+        for mut driver in drivers.remove(&signal).unwrap_or_default() {
+            driver.value = lower_wired_driver(module, resolution, driver.value, &driver.source)?;
             let contribution = full_width_contribution(module, signal, identity, &driver)?;
             value = module
                 .binary(
                     match resolution {
                         word::SignalResolution::WiredAnd => word::BinaryOp::BitAnd,
                         word::SignalResolution::WiredOr => word::BinaryOp::BitOr,
-                        word::SignalResolution::SingleDriver => unreachable!(),
+                        word::SignalResolution::SingleDriver | word::SignalResolution::TriState => {
+                            unreachable!()
+                        }
                     },
                     value,
                     contribution,
@@ -110,6 +116,181 @@ pub(super) fn lower_resolved_nets(
             .map_err(crate::SynthError::from)?;
     }
     Ok(())
+}
+
+/// Converts every physically resolved contribution to one scalar tri-state
+/// driver per target bit. Ordinary contributions on a multi-driver wire use a
+/// constant active enable; explicit high-impedance contributions retain their
+/// source enable and polarity.
+fn scalarize_tri_state_drivers(module: &mut word::WordModule) -> Result<(), crate::SynthError> {
+    if !module
+        .signals()
+        .iter()
+        .any(|signal| signal.resolution == word::SignalResolution::TriState)
+    {
+        return Ok(());
+    }
+    for connect in module.take_connects() {
+        let signal = module.signal(connect.target.signal).ok_or_else(|| {
+            crate::SynthError::invariant("tri-state connect target signal disappeared")
+        })?;
+        if signal.resolution != word::SignalResolution::TriState {
+            module
+                .connect(connect.target, connect.value, connect.source)
+                .map_err(crate::SynthError::from)?;
+            continue;
+        }
+        if connect.target.dynamic.is_some() {
+            return Err(crate::SynthError::unsupported(
+                "dynamic assignment to a physically resolved tri-state net is not supported",
+            ));
+        }
+        let explicit = match module
+            .value(connect.value)
+            .ok_or_else(|| crate::SynthError::invariant("tri-state connect value disappeared"))?
+            .kind
+        {
+            word::ValueKind::Operation(operation) => {
+                module
+                    .operation(operation)
+                    .and_then(|operation| match operation.kind {
+                        word::OpKind::TriState { data, enable } => Some((data, enable)),
+                        _ => None,
+                    })
+            }
+            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+        };
+        let (data, enable) = if let Some(driver) = explicit {
+            driver
+        } else {
+            let source =
+                super::derived_source(&connect.source, "tri-state constant enable", b"active")?;
+            let ty = word::WordType::new(1, false, word::LogicStateKind::FourState)
+                .map_err(crate::SynthError::from)?;
+            let enable = module
+                .constant(
+                    ConstBits::from_bits(vec![BitVal::One]).map_err(crate::SynthError::from)?,
+                    ty,
+                    source,
+                )
+                .map_err(crate::SynthError::from)?;
+            (
+                connect.value,
+                word::Enable {
+                    value: enable,
+                    active_high: true,
+                },
+            )
+        };
+        let width = module
+            .value(data)
+            .ok_or_else(|| crate::SynthError::invariant("tri-state data disappeared"))?
+            .ty
+            .width();
+        for bit in 0..width {
+            let role = bit.to_le_bytes();
+            let source = super::derived_source(&connect.source, "tri-state scalar data", role)?;
+            let data_bit = if width == 1 {
+                data
+            } else {
+                module
+                    .extract(data, bit, 1, source)
+                    .map_err(crate::SynthError::from)?
+            };
+            let source = super::derived_source(&connect.source, "tri-state scalar driver", role)?;
+            let driver = if width == 1 && explicit.is_some() {
+                connect.value
+            } else {
+                module
+                    .tri_state(data_bit, enable, source.clone())
+                    .map_err(crate::SynthError::from)?
+            };
+            let target_bit = match connect.target.range {
+                Some(range) if range.msb < range.lsb => range
+                    .lsb
+                    .checked_sub(bit)
+                    .ok_or_else(|| crate::SynthError::invariant("tri-state target underflow"))?,
+                Some(range) => range
+                    .lsb
+                    .checked_add(bit)
+                    .ok_or_else(|| crate::SynthError::capacity("tri-state target overflow"))?,
+                None => bit,
+            };
+            module
+                .connect(
+                    word::LValue::signal(connect.target.signal).with_range(word::BitRange {
+                        msb: target_bit,
+                        lsb: target_bit,
+                    }),
+                    driver,
+                    source,
+                )
+                .map_err(crate::SynthError::from)?;
+        }
+    }
+    Ok(())
+}
+
+const fn is_wired_resolution(resolution: word::SignalResolution) -> bool {
+    matches!(
+        resolution,
+        word::SignalResolution::WiredAnd | word::SignalResolution::WiredOr
+    )
+}
+
+/// Converts an explicitly enabled high-impedance driver into the identity of
+/// a wired resolution function. This is exact for `wand` and `wor`: a disabled
+/// contribution is respectively all ones or all zeros, while the ordinary
+/// data path remains unchanged.
+fn lower_wired_driver(
+    module: &mut word::WordModule,
+    resolution: word::SignalResolution,
+    value: word::ValueId,
+    source: &word::SourceSpan,
+) -> Result<word::ValueId, crate::SynthError> {
+    let word::ValueKind::Operation(operation) = module
+        .value(value)
+        .ok_or_else(|| crate::SynthError::invariant("resolved-net driver value disappeared"))?
+        .kind
+    else {
+        return Ok(value);
+    };
+    let word::OpKind::TriState { data, enable } = module
+        .operation(operation)
+        .ok_or_else(|| crate::SynthError::invariant("tri-state driver operation disappeared"))?
+        .kind
+    else {
+        return Ok(value);
+    };
+    let data_ty = module
+        .value(data)
+        .ok_or_else(|| crate::SynthError::invariant("tri-state driver data disappeared"))?
+        .ty;
+    let identity_bit = match resolution {
+        word::SignalResolution::WiredAnd => BitVal::One,
+        word::SignalResolution::WiredOr => BitVal::Zero,
+        word::SignalResolution::SingleDriver | word::SignalResolution::TriState => {
+            return Err(crate::SynthError::invariant(
+                "single-driver signal reached wired-net normalization",
+            ));
+        }
+    };
+    let identity = module
+        .constant(
+            ConstBits::from_bits(vec![identity_bit; data_ty.width() as usize])
+                .map_err(crate::SynthError::from)?,
+            data_ty,
+            source.clone(),
+        )
+        .map_err(crate::SynthError::from)?;
+    module
+        .mux(
+            enable.value,
+            if enable.active_high { data } else { identity },
+            if enable.active_high { identity } else { data },
+            source.clone(),
+        )
+        .map_err(crate::SynthError::from)
 }
 
 fn redirect_instance_output_drivers(
@@ -150,7 +331,7 @@ fn redirect_instance_output_drivers(
         if !fragments.iter().any(|fragment| {
             module
                 .signal(fragment.reference.signal)
-                .is_some_and(|signal| signal.resolution != word::SignalResolution::SingleDriver)
+                .is_some_and(|signal| is_wired_resolution(signal.resolution))
         }) {
             continue;
         }
@@ -195,7 +376,7 @@ fn redirect_instance_output_drivers(
             let target = fragment_lvalue(module, fragment)?;
             let resolved = module
                 .signal(fragment.reference.signal)
-                .is_some_and(|signal| signal.resolution != word::SignalResolution::SingleDriver);
+                .is_some_and(|signal| is_wired_resolution(signal.resolution));
             if resolved {
                 drivers
                     .entry(fragment.reference.signal)
@@ -342,4 +523,152 @@ fn add_unique_wire(
         }
     }
     unreachable!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wired_and_consumes_disabled_tri_state_as_resolution_identity() {
+        let mut module = word::WordModule::new("wired_tri_state");
+        let ty = word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap();
+        let source = word::SourceSpan::stable("wired tri-state test");
+        let data_port = module
+            .add_port("data", word::PortDirection::Input, ty, source.clone())
+            .unwrap();
+        let enable_port = module
+            .add_port("enable", word::PortDirection::Input, ty, source.clone())
+            .unwrap();
+        let output_port = module
+            .add_port("y", word::PortDirection::Output, ty, source.clone())
+            .unwrap();
+        let output = module.port(output_port).unwrap().signal;
+        module
+            .set_signal_resolution(output, word::SignalResolution::WiredAnd)
+            .unwrap();
+        let data = module
+            .read_signal(module.port(data_port).unwrap().signal, source.clone())
+            .unwrap();
+        let enable_value = module
+            .read_signal(module.port(enable_port).unwrap().signal, source.clone())
+            .unwrap();
+        let driver = module
+            .tri_state(
+                data,
+                word::Enable {
+                    value: enable_value,
+                    active_high: true,
+                },
+                source.clone(),
+            )
+            .unwrap();
+        module
+            .connect(word::LValue::signal(output), driver, source)
+            .unwrap();
+
+        lower_resolved_nets(&mut module, &ReferencePortMap::new()).unwrap();
+
+        assert_eq!(
+            module.signal(output).unwrap().resolution,
+            word::SignalResolution::SingleDriver
+        );
+        let root = module
+            .connects()
+            .iter()
+            .find(|connect| connect.target.signal == output)
+            .unwrap()
+            .value;
+        assert!(matches!(
+            module.value(root).unwrap().kind,
+            word::ValueKind::Operation(operation)
+                if matches!(module.operation(operation).unwrap().kind, word::OpKind::Binary {
+                    op: word::BinaryOp::BitAnd,
+                    ..
+                })
+        ));
+        assert!(
+            !crate::word::operation_inputs(
+                &module
+                    .operation(match module.value(root).unwrap().kind {
+                        word::ValueKind::Operation(operation) => operation,
+                        _ => unreachable!(),
+                    })
+                    .unwrap()
+                    .kind,
+            )
+            .contains(&driver)
+        );
+    }
+
+    #[test]
+    fn scalarizes_each_vector_tri_state_contribution_without_resolving_the_net() {
+        let mut module = word::WordModule::new("vector_tri_state");
+        let data_ty = word::WordType::new(2, false, word::LogicStateKind::FourState).unwrap();
+        let enable_ty = word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap();
+        let source = word::SourceSpan::stable("vector tri-state test");
+        let data_port = module
+            .add_port("data", word::PortDirection::Input, data_ty, source.clone())
+            .unwrap();
+        let enable_port = module
+            .add_port(
+                "enable",
+                word::PortDirection::Input,
+                enable_ty,
+                source.clone(),
+            )
+            .unwrap();
+        let pad_port = module
+            .add_port("pad", word::PortDirection::Inout, data_ty, source.clone())
+            .unwrap();
+        let pad = module.port(pad_port).unwrap().signal;
+        module
+            .set_signal_resolution(pad, word::SignalResolution::TriState)
+            .unwrap();
+        let data = module
+            .read_signal(module.port(data_port).unwrap().signal, source.clone())
+            .unwrap();
+        let enable_value = module
+            .read_signal(module.port(enable_port).unwrap().signal, source.clone())
+            .unwrap();
+        let driver = module
+            .tri_state(
+                data,
+                word::Enable {
+                    value: enable_value,
+                    active_high: false,
+                },
+                source.clone(),
+            )
+            .unwrap();
+        module
+            .connect(word::LValue::signal(pad), driver, source)
+            .unwrap();
+
+        lower_resolved_nets(&mut module, &ReferencePortMap::new()).unwrap();
+
+        assert_eq!(
+            module.signal(pad).unwrap().resolution,
+            word::SignalResolution::TriState
+        );
+        assert_eq!(module.connects().len(), 2);
+        for (bit, connect) in module.connects().iter().enumerate() {
+            let bit = u32::try_from(bit).unwrap();
+            assert_eq!(
+                connect.target.range,
+                Some(word::BitRange { msb: bit, lsb: bit })
+            );
+            let word::ValueKind::Operation(operation) = module.value(connect.value).unwrap().kind
+            else {
+                panic!("scalar physical contribution must remain a tri-state operation");
+            };
+            let word::OpKind::TriState { data, enable } = module.operation(operation).unwrap().kind
+            else {
+                panic!("scalar physical contribution lost its data/enable contract");
+            };
+            assert_eq!(module.value(data).unwrap().ty.width(), 1);
+            assert_eq!(enable.value, enable_value);
+            assert!(!enable.active_high);
+        }
+    }
 }

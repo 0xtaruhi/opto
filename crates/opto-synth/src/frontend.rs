@@ -23,7 +23,8 @@ use cfg::ProcedureCfg;
 use helpers::{
     SignalResolutionContext, block_effects, constant_value, extract_assignment,
     inferred_reset_kind, materialize_synthesis_constant, memory_write_data, normalized_enable,
-    predicate_enable, resolve_signal, target_layout, whole_target_name,
+    predicate_enable, resolve_signal, reverse_assignment_bits, static_insert, target_layout,
+    whole_target_name,
 };
 use opto_ir::{BitVal, ConstBits, proc, rtl::RtlModule, word};
 use predicate::{MaterializedPredicate, Predicate, PredicateArena};
@@ -204,6 +205,9 @@ struct ProcedureNormalizer<'a> {
     outputs: &'a mut [Option<BlockOutput>],
     edge_guards: &'a mut [Option<Predicate>],
     writes: Vec<PendingWrite>,
+    read_instances: BTreeMap<(usize, word::ValueId), (word::SignalId, usize)>,
+    claimed_reads: BTreeSet<usize>,
+    active_read_rewrites: BTreeSet<(FrameId, usize)>,
     incomplete_comb: &'a mut Vec<Assignment>,
 }
 

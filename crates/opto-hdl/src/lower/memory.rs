@@ -99,11 +99,11 @@ pub(super) fn dynamic_memory_select(
     width: u32,
     source: SourceSpan,
 ) -> Result<MemorySelection, HdlError> {
-    let element_width = module
+    let memory_definition = module
         .memory(memory)
-        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?
-        .element_type
-        .width();
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory"))?;
+    let element_width = memory_definition.element_type.width();
+    let depth = memory_definition.depth;
     let width = NonZeroU32::new(width).ok_or_else(|| {
         HdlError::invalid("verilog frontend: dynamic memory selection width must be non-zero")
     })?;
@@ -137,6 +137,7 @@ pub(super) fn dynamic_memory_select(
             .binary(BinaryOp::Div, offset, scale, source.clone())
             .map_err(HdlError::Ir)?
     };
+    let address = canonical_memory_address(module, address, depth, source.clone())?;
     if width.get() > element_width {
         let elements = NonZeroU32::new(width.get() / element_width).ok_or_else(|| {
             HdlError::invalid("verilog frontend: dynamic memory span must be non-zero")
@@ -159,6 +160,33 @@ pub(super) fn dynamic_memory_select(
         }
     };
     Ok(MemorySelection::Element { address, select })
+}
+
+/// Narrows overflow-safe frontend address arithmetic to the physical memory
+/// width only when conservative bounds prove that every discarded high bit is
+/// zero. Keeping an unproven wide address preserves explicit out-of-range
+/// behavior for later register-bank lowering.
+fn canonical_memory_address(
+    module: &mut ModuleLowerer,
+    address: ValueId,
+    depth: NonZeroU32,
+    source: SourceSpan,
+) -> Result<ValueId, HdlError> {
+    let address_type = module
+        .value(address)
+        .ok_or_else(|| HdlError::invalid("verilog frontend: unknown memory address"))?
+        .ty;
+    let width = (u32::BITS - (depth.get() - 1).leading_zeros()).max(1);
+    if address_type.width() <= width
+        || opto_ir::word::unsigned_value_range(module, address)
+            .is_none_or(|range| range.maximum() >= u128::from(depth.get()))
+    {
+        return Ok(address);
+    }
+    let ty = WordType::new(width, false, address_type.state()).map_err(HdlError::Ir)?;
+    module
+        .cast(CastKind::Truncate, address, ty, source)
+        .map_err(HdlError::Ir)
 }
 
 fn scaled_memory_address(

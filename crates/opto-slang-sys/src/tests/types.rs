@@ -121,6 +121,45 @@ fn native_compile_composes_nested_packed_member_offsets() {
 }
 
 #[test]
+fn native_compile_flattens_unpacked_struct_member_storage() {
+    let source = NativeTestSource::new(
+        "typedef struct { logic [7:0] lanes [0:1]; logic [3:0] tag; } entry_t; module top(input entry_t value, output logic [7:0] first, second, output logic [3:0] tag); assign first = value.lanes[0]; assign second = value.lanes[1]; assign tag = value.tag; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let value = module
+        .ports()
+        .find(|port| port.name().unwrap() == "value")
+        .unwrap();
+    let layout = value.type_layout().unwrap();
+    assert_eq!(layout.kind().unwrap(), SlangTypeLayoutKind::Struct);
+    let fields = layout.fields().unwrap().collect::<Vec<_>>();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].name().unwrap(), "lanes");
+    assert_eq!(fields[0].bit_offset(), 4);
+    assert_eq!(fields[1].name().unwrap(), "tag");
+    assert_eq!(fields[1].bit_offset(), 0);
+    assert_eq!(
+        fields[0].layout().unwrap().array_kind().unwrap(),
+        SlangArrayKind::Unpacked
+    );
+
+    let ranges = module
+        .assigns()
+        .map(|assignment| {
+            let SlangExpressionKind::Signal(signal) = assignment.rhs().unwrap().kind().unwrap()
+            else {
+                panic!("expected flattened unpacked struct member");
+            };
+            signal.range.unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ranges[0], SlangBitRange { msb: 11, lsb: 4 });
+    assert_eq!(ranges[1], SlangBitRange { msb: 19, lsb: 12 });
+    assert_eq!(ranges[2], SlangBitRange { msb: 3, lsb: 0 });
+}
+
+#[test]
 fn native_compile_translates_ascending_indexed_part_selects() {
     let source = NativeTestSource::new(
         "module top(input logic [4:7] a, output logic [1:0] y); assign y = a[5 +: 2]; endmodule\n",
@@ -362,7 +401,7 @@ fn native_compile_folds_static_slice_offsets_into_dynamic_lvalues() {
 }
 
 #[test]
-fn native_compile_folds_procedural_loop_conditions_before_lowering() {
+fn native_compile_keeps_procedural_loop_conditions_in_owned_ir() {
     let source = NativeTestSource::new(
         "module top(output logic [1:0] y); always_comb begin y = '0; for (int i = 0; i < 4; i++) begin if (i >= 2) y[i - 2] = 1'b1; end end endmodule\n",
     );
@@ -370,5 +409,16 @@ fn native_compile_folds_procedural_loop_conditions_before_lowering() {
     let module = first_module(&compilation);
     let effects = procedure_effects(module.procedures().next().unwrap());
 
-    assert_eq!(effects.len(), 3);
+    let procedure = module.procedures().next().unwrap();
+    assert_eq!(procedure.loop_regions().len(), 1);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(
+                effect.lhs().and_then(SlangExpression::kind),
+                Ok(SlangExpressionKind::DynamicExtract { .. })
+            ))
+            .count(),
+        1
+    );
 }

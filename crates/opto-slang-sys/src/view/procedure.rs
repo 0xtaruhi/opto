@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::SlangModule;
-use super::convert::{has_flag, map_edge, map_procedure_kind, unknown_enum};
+use super::convert::{has_flag, map_edge, map_loop_form, map_procedure_kind, unknown_enum};
 use super::expression::{SlangExpression, SlangSignalRef, SlangSourceSpan};
 use crate::bridge::read_invariant;
 use crate::ffi;
-use crate::{SlangAssignmentMode, SlangEdge, SlangError, SlangProcedureKind};
+use crate::{SlangAssignmentMode, SlangEdge, SlangError, SlangLoopForm, SlangProcedureKind};
 use std::marker::PhantomData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -16,6 +16,18 @@ pub struct SlangBlockId(u32);
 impl SlangBlockId {
     #[must_use]
     /// Returns the zero-based block index.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Dense loop-region identity scoped to one [`SlangProcedure`].
+pub struct SlangLoopRegionId(u32);
+
+impl SlangLoopRegionId {
+    #[must_use]
+    /// Returns the zero-based region index.
     pub fn index(self) -> usize {
         self.0 as usize
     }
@@ -79,11 +91,88 @@ impl<'a> SlangProcedure<'a> {
         (0..self.view.block_count).map(move |index| SlangBlock::new(self.view.identity, index))
     }
 
+    /// Iterates over canonical loop regions in parent-before-child order.
+    #[must_use]
+    pub fn loop_regions(self) -> impl ExactSizeIterator<Item = SlangLoopRegion<'a>> {
+        (0..self.view.loop_region_count)
+            .map(move |index| SlangLoopRegion::new(self.view.identity, index))
+    }
+
     /// Looks up a basic block by its procedure-local ID.
     #[must_use]
     pub fn block(self, id: SlangBlockId) -> Option<SlangBlock<'a>> {
         (id.index() < self.view.block_count)
             .then(|| SlangBlock::new(self.view.identity, id.index()))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+/// Borrowed canonical natural-loop metadata; CFG edges remain authoritative.
+pub struct SlangLoopRegion<'a> {
+    view: ffi::LoopRegionView,
+    _lifetime: PhantomData<&'a ()>,
+}
+
+impl<'a> SlangLoopRegion<'a> {
+    fn new(procedure: *const ffi::Procedure, index: usize) -> Self {
+        // SAFETY: the procedure is live and `index` is bounded by its region count.
+        let view = unsafe {
+            read_invariant("procedural loop region", |view| {
+                ffi::opto_slang_loop_region_view(procedure, index, view)
+            })
+        };
+        Self {
+            view,
+            _lifetime: PhantomData,
+        }
+    }
+
+    #[must_use]
+    /// Returns the canonical header block.
+    pub fn header(self) -> SlangBlockId {
+        SlangBlockId(self.view.header)
+    }
+
+    #[must_use]
+    /// Returns the body-entry block.
+    pub fn body(self) -> SlangBlockId {
+        SlangBlockId(self.view.body)
+    }
+
+    #[must_use]
+    /// Returns the continue/latch block.
+    pub fn latch(self) -> SlangBlockId {
+        SlangBlockId(self.view.latch)
+    }
+
+    #[must_use]
+    /// Returns the loop exit block.
+    pub fn exit(self) -> SlangBlockId {
+        SlangBlockId(self.view.exit)
+    }
+
+    /// Returns condition placement for this source loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SlangError::BridgeInvariant`] for an unknown native tag.
+    pub fn form(self) -> Result<SlangLoopForm, SlangError> {
+        map_loop_form(self.view.form)
+    }
+
+    #[must_use]
+    /// Returns the lexically enclosing region, when present.
+    pub fn parent(self) -> Option<SlangLoopRegionId> {
+        has_flag(self.view.has_parent).then_some(SlangLoopRegionId(self.view.parent))
+    }
+
+    /// Returns the source loop location.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SlangError::BridgeInvariant`] if the source view is malformed.
+    pub fn source(self) -> Result<SlangSourceSpan<'a>, SlangError> {
+        SlangSourceSpan::from_view(self.view.source)
     }
 }
 

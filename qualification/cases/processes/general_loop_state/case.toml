@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-general-loop-state"
+kind = "regression"
+covers = ["Static loop-state discovery supports classic module-scope Verilog induction variables, multiple condition variables, nested updates to outer induction state, mutated runtime function arguments bounded by independent static state, and post-loop runtime overwrite or partial update across for, while, do-while, and forever."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 14
+min_cells = 1

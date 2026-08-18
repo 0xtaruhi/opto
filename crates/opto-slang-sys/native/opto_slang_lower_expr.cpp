@@ -4,6 +4,9 @@
 #include "opto_slang_lower_internal.h"
 
 namespace opto::slang_lower {
+constexpr uint64_t RUNTIME_POWER_MULTIPLICATION_LIMIT = 1024;
+constexpr uint64_t ASSIGNMENT_PATTERN_ELEMENT_LIMIT = 65536;
+
 uint32_t dynamic_offset_sum_width(uint32_t left_width, uint32_t right_width) {
     const auto operand_width = std::max(left_width, right_width);
     if (operand_width == UINT32_MAX) {
@@ -75,7 +78,7 @@ void apply_signal_slice(
 
 uint32_t selected_element_width(const Type& type) {
     auto* element = type.getArrayElementType();
-    return element ? checked_width(element->getBitstreamWidth(), "selected array element") : 1;
+    return element ? checked_width(lowered_type_width(*element), "selected array element") : 1;
 }
 
 ConstantRange selection_storage_range(const Type& type) {
@@ -149,7 +152,7 @@ DynamicOffset make_dynamic_offset(
     }
     const auto range = selection_storage_range(selected_type);
     const auto selector_width =
-        checked_width(selector_expression.type->getBitstreamWidth(), "dynamic selector");
+        checked_width(lowered_type_width(*selector_expression.type), "dynamic selector");
     if (range.lower() < 0 || range.upper() < 0) {
         const auto offset_width = std::max(selector_width + 1, 33u);
         auto* selector = selector_expression.type->isSigned()
@@ -297,6 +300,9 @@ OptoSlangExpr* lower_signal_expr(ModuleLoweringContext& design, const Expression
     switch (expr.kind) {
     case ExpressionKind::NamedValue: {
         const auto& value = expr.as<NamedValueExpression>();
+        if (auto* alias = find_function_lvalue(design, value.symbol)) {
+            return make_expr(design, *alias, expr);
+        }
         OptoSlangExpr lowered;
         lowered.kind = OPTO_SLANG_EXPR_SIGNAL;
         lowered.signal_name = intern_string(design, registered_value_name(design, value.symbol));
@@ -333,7 +339,7 @@ OptoSlangExpr* lower_signal_expr(ModuleLoweringContext& design, const Expression
         }
         const auto* element_type = selected_type.getArrayElementType();
         const auto element_width =
-            element_type ? checked_width(element_type->getBitstreamWidth(), "array element") : 1;
+            element_type ? checked_width(lowered_type_width(*element_type), "array element") : 1;
         const auto translated = range.translateIndex(static_cast<int32_t>(*index));
         if (translated < 0) {
             throw std::runtime_error("element select produced a negative bit offset");
@@ -409,16 +415,15 @@ OptoSlangExpr* lower_signal_expr(ModuleLoweringContext& design, const Expression
                 expression_location(design, expr));
         }
         const auto& aggregate_type = access.value().type->getCanonicalType();
-        if (aggregate_type.kind != SymbolKind::PackedStructType &&
-            aggregate_type.kind != SymbolKind::PackedUnionType) {
-            throw std::runtime_error(
-                "only packed struct and union member access is supported at " +
-                expression_location(design, expr));
-        }
         const auto& field = access.member.as<FieldSymbol>();
-        const auto width = checked_width(field.getType().getBitstreamWidth(), field.name);
+        const auto width = checked_width(lowered_type_width(field.getType()), field.name);
         auto* base = lower_signal_expr(design, access.value());
-        apply_signal_slice(design, *base, field.bitOffset, width, expr);
+        apply_signal_slice(
+            design,
+            *base,
+            aggregate_field_storage_offset(aggregate_type, field),
+            width,
+            expr);
         return base;
     }
     default:
@@ -455,7 +460,8 @@ OptoSlangExpr* make_unknown_expression(
     lowered.kind = OPTO_SLANG_EXPR_CONSTANT;
     lowered.constant_has_width = true;
     lowered.constant_width =
-        checked_width(expression.type->getBitstreamWidth(), "unknown expression");
+        checked_width(lowered_type_width(*expression.type), "unknown expression");
+    lowered.constant_signed = expression.type->isSigned();
     lowered.constant_bits.assign(lowered.constant_width, 'x');
     return make_expr(design, std::move(lowered), expression);
 }
@@ -496,6 +502,347 @@ OptoSlangExpr* apply_rvalue_slice(
     return make_expr(design, std::move(selected), source);
 }
 
+OptoSlangExpr* lower_constant_exponent_power(
+    ModuleLoweringContext& design,
+    const BinaryExpression& power,
+    const Expression& source) {
+    auto exponent_value = evaluate_lowering_constant(design, power.right());
+    if (!exponent_value || !exponent_value.isInteger() ||
+        exponent_value.integer().hasUnknown()) {
+        return nullptr;
+    }
+    const auto& exponent_bits = exponent_value.integer();
+    if (exponent_bits.isSigned() && exponent_bits.isNegative()) {
+        throw std::runtime_error(
+            "negative runtime power exponent is not supported at " +
+            expression_location(design, source));
+    }
+    auto exponent = exponent_bits.as<uint64_t>();
+    if (!exponent || *exponent > RUNTIME_POWER_MULTIPLICATION_LIMIT + 1) {
+        throw std::runtime_error(
+            "runtime power requires more than the deterministic limit of " +
+            std::to_string(RUNTIME_POWER_MULTIPLICATION_LIMIT) + " at " +
+            expression_location(design, source));
+    }
+    if (!source.type->isIntegral() || !power.left().type->isIntegral()) {
+        throw std::runtime_error(
+            "runtime power requires integral operands at " + expression_location(design, source));
+    }
+    if (*exponent == 0) {
+        return cast_to_type(
+            design,
+            make_unsigned_constant_expr(
+                design,
+                1,
+                checked_width(lowered_type_width(*source.type), "power result"),
+                source),
+            *source.type,
+            source);
+    }
+
+    auto* base = cast_to_type(design, lower_expr(design, power.left()), *source.type, source);
+    auto* result = base;
+    for (uint64_t multiplication = 1; multiplication < *exponent; ++multiplication) {
+        result = cast_to_type(
+            design,
+            make_binary_expr(design, OPTO_SLANG_BINARY_MUL, result, base, source),
+            *source.type,
+            source);
+    }
+    return result;
+}
+
+OptoSlangExpr* lower_count_ones(
+    ModuleLoweringContext& design,
+    const Expression& argument,
+    const Expression& source) {
+    if (!argument.type->isBitstreamType() || !argument.type->isFixedSize()) {
+        throw std::runtime_error(
+            "$countones requires a fixed-size bitstream argument at " +
+            expression_location(design, source));
+    }
+    const auto width = checked_width(lowered_type_width(*argument.type), "$countones argument");
+    auto* value = lower_expr(design, argument);
+    std::vector<OptoSlangExpr*> terms;
+    terms.reserve(width);
+    for (uint32_t bit = 0; bit < width; ++bit) {
+        terms.push_back(make_unsigned_cast_expr(
+            design, apply_rvalue_slice(design, value, bit, 1, argument), 32, argument));
+    }
+    while (terms.size() > 1) {
+        std::vector<OptoSlangExpr*> reduced;
+        reduced.reserve((terms.size() + 1) / 2);
+        for (size_t index = 0; index < terms.size(); index += 2) {
+            if (index + 1 == terms.size()) {
+                reduced.push_back(terms[index]);
+            } else {
+                reduced.push_back(make_binary_expr(
+                    design,
+                    OPTO_SLANG_BINARY_ADD,
+                    terms[index],
+                    terms[index + 1],
+                    source));
+            }
+        }
+        terms = std::move(reduced);
+    }
+    return cast_to_type(design, terms.front(), *source.type, source);
+}
+
+OptoSlangExpr* lower_count_bits(
+    ModuleLoweringContext& design,
+    std::span<const Expression* const> arguments,
+    const Expression& source) {
+    if (arguments.size() < 2 || !arguments[0]) {
+        throw std::runtime_error(
+            "$countbits requires a value and at least one control bit at " +
+            expression_location(design, source));
+    }
+    bool count_zero = false;
+    bool count_one = false;
+    for (auto* selector : arguments.subspan(1)) {
+        if (!selector) {
+            throw std::runtime_error("$countbits has an empty control-bit argument");
+        }
+        auto value = evaluate_lowering_constant(design, *selector);
+        if (!value || !value.isInteger() || value.integer().hasUnknown()) {
+            throw std::runtime_error(
+                "$countbits runtime X/Z matching is not synthesizable at " +
+                expression_location(design, *selector));
+        }
+        if (value.integer()[0].value == 0) {
+            count_zero = true;
+        } else {
+            count_one = true;
+        }
+    }
+    const auto width = checked_width(
+        lowered_type_width(*arguments[0]->type), "$countbits argument");
+    if (count_zero && count_one) {
+        return cast_to_type(
+            design, make_unsigned_constant_expr(design, width, 32, source), *source.type, source);
+    }
+    auto* ones = lower_count_ones(design, *arguments[0], source);
+    if (count_one) {
+        return ones;
+    }
+    return cast_to_type(
+        design,
+        make_binary_expr(
+            design,
+            OPTO_SLANG_BINARY_SUB,
+            make_unsigned_constant_expr(design, width, 32, source),
+            make_unsigned_cast_expr(design, ones, 32, source),
+            source),
+        *source.type,
+        source);
+}
+
+OptoSlangExpr* lower_onehot_call(
+    ModuleLoweringContext& design,
+    const Expression& argument,
+    const Expression& source,
+    bool allow_zero) {
+    if (!argument.type->isBitstreamType() || !argument.type->isFixedSize()) {
+        throw std::runtime_error(
+            "onehot system call requires a fixed-size bitstream argument at " +
+            expression_location(design, source));
+    }
+    const auto width = checked_width(lowered_type_width(*argument.type), "onehot argument");
+    auto* value = make_unsigned_cast_expr(design, lower_expr(design, argument), width, argument);
+    auto* zero = make_unsigned_constant_expr(design, 0, width, source);
+    auto* one = make_unsigned_constant_expr(design, 1, width, source);
+    auto* predecessor =
+        make_binary_expr(design, OPTO_SLANG_BINARY_SUB, value, one, source);
+    auto* at_most_one = make_binary_expr(
+        design,
+        OPTO_SLANG_BINARY_EQ,
+        make_binary_expr(design, OPTO_SLANG_BINARY_BIT_AND, value, predecessor, source),
+        zero,
+        source);
+    if (allow_zero) {
+        return at_most_one;
+    }
+    return make_binary_expr(
+        design,
+        OPTO_SLANG_BINARY_LOGICAL_AND,
+        make_binary_expr(design, OPTO_SLANG_BINARY_NE, value, zero, source),
+        at_most_one,
+        source);
+}
+
+struct PriorityCode {
+    OptoSlangExpr* any = nullptr;
+    OptoSlangExpr* value = nullptr;
+};
+
+// Builds a balanced priority encoder for the highest set bit. The returned
+// value is the one-based bit position, so it directly represents
+// floor(log2(input)) + 1. Keeping the subtree's reduction alongside its value
+// avoids rebuilding reduction trees at every level.
+PriorityCode lower_highest_set_bit_position(
+    ModuleLoweringContext& design,
+    const OptoSlangExpr* input,
+    uint32_t first_bit,
+    uint32_t width,
+    const Expression& source) {
+    if (width == 0) {
+        throw std::logic_error("priority encoder requires a non-empty input");
+    }
+    if (width == 1) {
+        auto* bit = apply_rvalue_slice(design, input, first_bit, 1, source);
+        return {
+            bit,
+            make_mux_expr(
+                design,
+                bit,
+                make_unsigned_constant_expr(design, first_bit + 1, 32, source),
+                make_unsigned_constant_expr(design, 0, 32, source),
+                source),
+        };
+    }
+
+    const auto lower_width = width / 2;
+    auto lower = lower_highest_set_bit_position(
+        design, input, first_bit, lower_width, source);
+    auto upper = lower_highest_set_bit_position(
+        design, input, first_bit + lower_width, width - lower_width, source);
+    return {
+        make_binary_expr(
+            design, OPTO_SLANG_BINARY_BIT_OR, lower.any, upper.any, source),
+        make_mux_expr(design, upper.any, upper.value, lower.value, source),
+    };
+}
+
+OptoSlangExpr* lower_clog2_call(
+    ModuleLoweringContext& design,
+    const Expression& argument,
+    const Expression& source) {
+    if (!argument.type->isIntegral() || !argument.type->isFixedSize()) {
+        throw std::runtime_error(
+            "$clog2 requires a fixed-size integral argument at " +
+            expression_location(design, source));
+    }
+    const auto width = checked_width(lowered_type_width(*argument.type), "$clog2 argument");
+    if (width == UINT32_MAX) {
+        throw std::runtime_error(
+            "$clog2 argument width exceeds the priority-encoder capacity at " +
+            expression_location(design, source));
+    }
+
+    auto* value = make_unsigned_cast_expr(design, lower_expr(design, argument), width, argument);
+    auto* zero = make_unsigned_constant_expr(design, 0, width, source);
+    auto* predecessor = make_binary_expr(
+        design,
+        OPTO_SLANG_BINARY_SUB,
+        value,
+        make_unsigned_constant_expr(design, 1, width, source),
+        source);
+    auto encoded = lower_highest_set_bit_position(design, predecessor, 0, width, source);
+    auto* result = make_mux_expr(
+        design,
+        make_binary_expr(design, OPTO_SLANG_BINARY_NE, value, zero, source),
+        encoded.value,
+        make_unsigned_constant_expr(design, 0, 32, source),
+        source);
+    return cast_to_type(design, result, *source.type, source);
+}
+
+bool expression_has_intrinsic_two_state_type(const Expression& expression) {
+    switch (expression.kind) {
+    case ExpressionKind::NamedValue:
+        return !expression.as<NamedValueExpression>().symbol.getType().isFourState();
+    case ExpressionKind::HierarchicalValue:
+        return !expression.as<HierarchicalValueExpression>().symbol.getType().isFourState();
+    case ExpressionKind::ElementSelect:
+        return expression_has_intrinsic_two_state_type(
+            expression.as<ElementSelectExpression>().value());
+    case ExpressionKind::RangeSelect:
+        return expression_has_intrinsic_two_state_type(
+            expression.as<RangeSelectExpression>().value());
+    case ExpressionKind::MemberAccess:
+        return !expression.type->isFourState();
+    case ExpressionKind::Conversion:
+        return expression_has_intrinsic_two_state_type(
+            expression.as<ConversionExpression>().operand());
+    default:
+        return !expression.type->isFourState();
+    }
+}
+
+OptoSlangExpr* lower_extended_equality(
+    ModuleLoweringContext& design,
+    const BinaryExpression& equality,
+    const Expression& source) {
+    const bool inequality =
+        equality.op == BinaryOperator::CaseInequality ||
+        equality.op == BinaryOperator::WildcardInequality;
+    if (equality.op == BinaryOperator::CaseEquality ||
+        equality.op == BinaryOperator::CaseInequality) {
+        if (!expression_has_intrinsic_two_state_type(equality.left()) ||
+            !expression_has_intrinsic_two_state_type(equality.right())) {
+            throw std::runtime_error(
+                "four-state case equality requires runtime X/Z observability at " +
+                expression_location(design, source));
+        }
+        return make_binary_expr(
+            design,
+            inequality ? OPTO_SLANG_BINARY_NE : OPTO_SLANG_BINARY_EQ,
+            lower_expr(design, equality.left()),
+            lower_expr(design, equality.right()),
+            source);
+    }
+
+    if (!expression_has_intrinsic_two_state_type(equality.left())) {
+        throw std::runtime_error(
+            "four-state wildcard equality requires runtime X/Z observability on its left operand at " +
+            expression_location(design, source));
+    }
+    auto* value = lower_expr(design, equality.left());
+    if (expression_has_intrinsic_two_state_type(equality.right())) {
+        return make_binary_expr(
+            design,
+            inequality ? OPTO_SLANG_BINARY_NE : OPTO_SLANG_BINARY_EQ,
+            value,
+            lower_expr(design, equality.right()),
+            source);
+    }
+    auto* pattern = lower_expr(design, equality.right());
+    if (pattern->kind != OPTO_SLANG_EXPR_CONSTANT || !pattern->constant_has_width) {
+        throw std::runtime_error(
+            "wildcard equality requires a two-state right operand or a constant wildcard pattern at " +
+            expression_location(design, source));
+    }
+
+    std::string mask;
+    std::string cared;
+    mask.reserve(pattern->constant_bits.size());
+    cared.reserve(pattern->constant_bits.size());
+    for (char bit : pattern->constant_bits) {
+        const bool wildcard = bit == 'x' || bit == 'X' || bit == 'z' || bit == 'Z';
+        mask.push_back(wildcard ? '0' : '1');
+        cared.push_back(wildcard ? '0' : bit);
+    }
+    OptoSlangExpr mask_expression;
+    mask_expression.kind = OPTO_SLANG_EXPR_CONSTANT;
+    mask_expression.constant_has_width = true;
+    mask_expression.constant_width = pattern->constant_width;
+    mask_expression.constant_bits = std::move(mask);
+    auto* mask_value = make_expr(design, std::move(mask_expression), source);
+    OptoSlangExpr cared_expression;
+    cared_expression.kind = OPTO_SLANG_EXPR_CONSTANT;
+    cared_expression.constant_has_width = true;
+    cared_expression.constant_width = pattern->constant_width;
+    cared_expression.constant_bits = std::move(cared);
+    auto* cared_value = make_expr(design, std::move(cared_expression), source);
+    return make_binary_expr(
+        design,
+        inequality ? OPTO_SLANG_BINARY_NE : OPTO_SLANG_BINARY_EQ,
+        make_binary_expr(design, OPTO_SLANG_BINARY_BIT_AND, value, mask_value, source),
+        cared_value,
+        source);
+}
+
 void collect_lvalue_leaves(const Expression& expression, std::vector<LvalueLeaf>& leaves) {
     if (expression.kind == ExpressionKind::Concatenation) {
         for (auto* operand : expression.as<ConcatenationExpression>().operands()) {
@@ -509,7 +856,7 @@ void collect_lvalue_leaves(const Expression& expression, std::vector<LvalueLeaf>
     leaves.push_back(
         LvalueLeaf{
             &expression,
-            checked_width(expression.type->getBitstreamWidth(), "lvalue operand"),
+            checked_width(lowered_type_width(*expression.type), "lvalue operand"),
         });
 }
 
@@ -532,7 +879,7 @@ lower_continuous_assignment(ModuleLoweringContext& design, const AssignmentExpre
     }
 
     const auto total_width =
-        checked_width(assignment.left().type->getBitstreamWidth(), "continuous assignment lvalue");
+        checked_width(lowered_type_width(*assignment.left().type), "continuous assignment lvalue");
     uint64_t consumed = 0;
     std::vector<OptoSlangAssignData> lowered;
     lowered.reserve(leaves.size());
@@ -658,16 +1005,12 @@ OptoSlangExpr* lower_select_expr(ModuleLoweringContext& design, const Expression
         throw std::runtime_error("member access does not select an aggregate field");
     }
     const auto& aggregate_type = access.value().type->getCanonicalType();
-    if (aggregate_type.kind != SymbolKind::PackedStructType &&
-        aggregate_type.kind != SymbolKind::PackedUnionType) {
-        throw std::runtime_error("only packed aggregate member access is synthesizable");
-    }
     const auto& field = access.member.as<FieldSymbol>();
     return apply_rvalue_slice(
         design,
         lower_expr(design, access.value()),
-        field.bitOffset,
-        checked_width(field.getType().getBitstreamWidth(), field.name),
+        aggregate_field_storage_offset(aggregate_type, field),
+        checked_width(lowered_type_width(field.getType()), field.name),
         expr);
 }
 
@@ -792,6 +1135,46 @@ OptoSlangExpr* lower_inside_item_match(
     return make_binary_expr(design, OPTO_SLANG_BINARY_EQ, masked, cared_value, item);
 }
 
+OptoSlangExpr* lower_tagged_union_expression(
+    ModuleLoweringContext& design, const TaggedUnionExpression& tagged) {
+    const auto layout = tagged_union_layout(*tagged.type);
+    const auto& field = tagged.member.as<FieldSymbol>();
+    const auto field_width = checked_width(
+        std::max<uint64_t>(lowered_type_width(field.getType()), 1), field.name);
+    const auto stored_field_width = field.getType().isVoid() ? 0u : field_width;
+    if (stored_field_width > layout.payload_width) {
+        throw std::runtime_error("tagged union member exceeds its canonical payload width");
+    }
+
+    OptoSlangExpr lowered;
+    lowered.kind = OPTO_SLANG_EXPR_CONCAT;
+    if (layout.tag_width != 0) {
+        lowered.concat_parts.push_back(make_unsigned_constant_expr(
+            design, field.fieldIndex, layout.tag_width, tagged));
+    }
+    const auto padding_width = layout.payload_width - stored_field_width;
+    if (padding_width != 0) {
+        OptoSlangExpr padding;
+        padding.kind = OPTO_SLANG_EXPR_CONSTANT;
+        padding.constant_has_width = true;
+        padding.constant_width = padding_width;
+        padding.constant_bits.assign(padding_width, tagged.type->isFourState() ? 'x' : '0');
+        lowered.concat_parts.push_back(make_expr(design, std::move(padding), tagged));
+    }
+    if (tagged.valueExpr) {
+        lowered.concat_parts.push_back(lower_expr(design, *tagged.valueExpr));
+    } else if (stored_field_width != 0) {
+        throw std::runtime_error("non-void tagged union member has no value expression");
+    }
+    if (lowered.concat_parts.empty()) {
+        throw std::runtime_error("zero-width tagged union has no synthesis representation");
+    }
+    if (lowered.concat_parts.size() == 1) {
+        return const_cast<OptoSlangExpr*>(lowered.concat_parts.front());
+    }
+    return make_expr(design, std::move(lowered), tagged);
+}
+
 OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr) {
     if (expr.kind == ExpressionKind::MemberAccess) {
         const auto& access = expr.as<MemberAccessExpression>();
@@ -904,7 +1287,7 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
         lowered.kind = OPTO_SLANG_EXPR_CONSTANT;
         lowered.constant_has_width = true;
         lowered.constant_width =
-            checked_width(expr.type->getBitstreamWidth(), "unconnected expression");
+            checked_width(lowered_type_width(*expr.type), "unconnected expression");
         lowered.constant_bits.assign(lowered.constant_width, 'x');
         return make_expr(design, std::move(lowered), expr);
     }
@@ -916,11 +1299,17 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
         return design.lvalue_references.back();
     case ExpressionKind::UnaryOp: {
         const auto& unary = expr.as<UnaryExpression>();
+        if (unary.op == UnaryOperator::Preincrement ||
+            unary.op == UnaryOperator::Predecrement ||
+            unary.op == UnaryOperator::Postincrement ||
+            unary.op == UnaryOperator::Postdecrement) {
+            return lower_update_expression(design, unary);
+        }
         if (unary.op == UnaryOperator::Plus) {
             return lower_expr(design, unary.operand());
         }
         if (unary.op == UnaryOperator::Minus) {
-            const auto width = checked_width(expr.type->getBitstreamWidth(), "unary minus result");
+            const auto width = checked_width(lowered_type_width(*expr.type), "unary minus result");
             OptoSlangExpr zero;
             zero.kind = OPTO_SLANG_EXPR_CONSTANT;
             zero.constant_has_width = true;
@@ -953,19 +1342,7 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
         const auto& binary = expr.as<BinaryExpression>();
         if (binary.op == BinaryOperator::LogicalAnd ||
             binary.op == BinaryOperator::LogicalOr) {
-            const auto left = constant_boolean_value(design, binary.left());
-            const auto right = constant_boolean_value(design, binary.right());
-            const bool is_and = binary.op == BinaryOperator::LogicalAnd;
-            if ((is_and && (left == false || right == false)) ||
-                (!is_and && (left == true || right == true))) {
-                return make_unsigned_constant_expr(design, is_and ? 0 : 1, 1, expr);
-            }
-            if (left == is_and) {
-                return lower_boolean_context(design, binary.right());
-            }
-            if (right == is_and) {
-                return lower_boolean_context(design, binary.left());
-            }
+            return lower_short_circuit_expression(design, binary);
         }
         if ((binary.op == BinaryOperator::Divide || binary.op == BinaryOperator::Mod ||
              binary.op == BinaryOperator::Power)) {
@@ -996,8 +1373,19 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
                 expr);
             return make_unary_expr(design, OPTO_SLANG_UNARY_BIT_NOT, xored, expr);
         }
+        if (binary.op == BinaryOperator::CaseEquality ||
+            binary.op == BinaryOperator::CaseInequality ||
+            binary.op == BinaryOperator::WildcardEquality ||
+            binary.op == BinaryOperator::WildcardInequality) {
+            return lower_extended_equality(design, binary, expr);
+        }
+        if (binary.op == BinaryOperator::Power) {
+            if (auto* lowered = lower_constant_exponent_power(design, binary, expr)) {
+                return lowered;
+            }
+        }
         if (binary.op == BinaryOperator::Power && integer_literal_u32(design, binary.left()) == 2) {
-            const auto width = checked_width(expr.type->getBitstreamWidth(), "power-of-two result");
+            const auto width = checked_width(lowered_type_width(*expr.type), "power-of-two result");
             return make_binary_expr(
                 design,
                 OPTO_SLANG_BINARY_SHL,
@@ -1050,7 +1438,7 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
             throw std::runtime_error("replication expression requires a positive constant count");
         }
         const auto result_width =
-            checked_width(expr.type->getBitstreamWidth(), "replication expression");
+            checked_width(lowered_type_width(*expr.type), "replication expression");
         if (*count > result_width) {
             throw std::runtime_error("replication count exceeds its elaborated result width");
         }
@@ -1071,66 +1459,62 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
         return make_expr(design, std::move(lowered), expr);
     }
     case ExpressionKind::SimpleAssignmentPattern:
-    case ExpressionKind::StructuredAssignmentPattern: {
-        const auto elements = expr.kind == ExpressionKind::SimpleAssignmentPattern
-                                  ? expr.as<SimpleAssignmentPatternExpression>().elements()
-                                  : expr.as<StructuredAssignmentPatternExpression>().elements();
+    case ExpressionKind::StructuredAssignmentPattern:
+    case ExpressionKind::ReplicatedAssignmentPattern: {
+        std::span<const Expression* const> elements;
+        uint32_t replication_count = 1;
+        if (expr.kind == ExpressionKind::SimpleAssignmentPattern) {
+            elements = expr.as<SimpleAssignmentPatternExpression>().elements();
+        } else if (expr.kind == ExpressionKind::StructuredAssignmentPattern) {
+            elements = expr.as<StructuredAssignmentPatternExpression>().elements();
+        } else {
+            const auto& replicated = expr.as<ReplicatedAssignmentPatternExpression>();
+            const auto count = integer_literal_u32(design, replicated.count());
+            if (!count || *count == 0) {
+                throw std::runtime_error(
+                    "replicated assignment pattern requires a positive constant count");
+            }
+            if (!expr.type->isFixedSize()) {
+                throw std::runtime_error(
+                    "replicated assignment pattern requires a fixed-size synthesis target");
+            }
+            replication_count = *count;
+            elements = replicated.elements();
+        }
+        const auto expanded_elements =
+            static_cast<uint64_t>(elements.size()) * replication_count;
+        if (expanded_elements == 0 ||
+            expanded_elements > ASSIGNMENT_PATTERN_ELEMENT_LIMIT) {
+            throw std::runtime_error(
+                "assignment pattern exceeds the deterministic expansion limit of " +
+                std::to_string(ASSIGNMENT_PATTERN_ELEMENT_LIMIT) + " elements");
+        }
+
+        // Lower in language evaluation order before adapting to the canonical
+        // storage order. This is observable when an element calls a function
+        // or contains an assignment expression.
+        std::vector<const OptoSlangExpr*> parts;
+        parts.reserve(static_cast<size_t>(expanded_elements));
+        for (uint32_t repetition = 0; repetition < replication_count; ++repetition) {
+            for (const auto* element : elements) {
+                if (!element) {
+                    throw std::runtime_error(
+                        "assignment pattern contains an empty elaborated element");
+                }
+                parts.push_back(lower_expr(design, *element));
+            }
+        }
+        if (expr.type->isUnpackedArray()) {
+            std::ranges::reverse(parts);
+        }
+
         OptoSlangExpr lowered;
         lowered.kind = OPTO_SLANG_EXPR_CONCAT;
-        lowered.concat_parts.reserve(elements.size());
-        const auto lower_element = [&](const Expression* element) {
-            if (!element) {
-                throw std::runtime_error("assignment pattern contains an empty elaborated element");
-            }
-            lowered.concat_parts.push_back(lower_expr(design, *element));
-        };
-        if (expr.type->isUnpackedArray()) {
-            for (auto element = elements.rbegin(); element != elements.rend(); ++element) {
-                lower_element(*element);
-            }
-        } else {
-            for (auto* element : elements) {
-                lower_element(element);
-            }
-        }
-        if (lowered.concat_parts.empty()) {
-            throw std::runtime_error("empty assignment pattern is not synthesizable");
-        }
+        lowered.concat_parts = std::move(parts);
         return make_expr(design, std::move(lowered), expr);
     }
     case ExpressionKind::ConditionalOp: {
-        const auto& conditional = expr.as<ConditionalExpression>();
-        if (conditional.conditions.size() != 1) {
-            throw std::runtime_error("conditional expressions require exactly one condition");
-        }
-        if (conditional.conditions[0].pattern) {
-            throw std::runtime_error(
-                "pattern conditions are not supported in conditional expressions");
-        }
-        const auto& condition = *conditional.conditions[0].expr;
-        ConstantValue constant_condition;
-        if (auto* constant = condition.getConstant()) {
-            constant_condition = *constant;
-        } else if (design.eval_context) {
-            constant_condition = condition.eval(*design.eval_context);
-        } else {
-            EvalContext context(design.body);
-            constant_condition = condition.eval(context);
-        }
-        if (constant_condition && constant_condition.isInteger() &&
-            !constant_condition.integer().hasUnknown()) {
-            const auto& selected =
-                constant_condition.isTrue() ? conditional.left() : conditional.right();
-            return cast_to_expression_type(design, lower_expr(design, selected), expr);
-        }
-        auto* then_value = lower_expr(design, conditional.left());
-        auto* else_value = lower_expr(design, conditional.right());
-        return make_mux_expr(
-            design,
-            lower_boolean_context(design, condition),
-            cast_to_expression_type(design, then_value, expr),
-            cast_to_expression_type(design, else_value, expr),
-            expr);
+        return lower_conditional_expression(design, expr.as<ConditionalExpression>());
     }
     case ExpressionKind::Streaming:
         return lower_streaming_concatenation(design, expr.as<StreamingConcatenationExpression>());
@@ -1153,6 +1537,8 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
         }
         return condition;
     }
+    case ExpressionKind::TaggedUnion:
+        return lower_tagged_union_expression(design, expr.as<TaggedUnionExpression>());
     case ExpressionKind::Conversion: {
         const auto& conversion = expr.as<ConversionExpression>();
         const auto& operand = conversion.operand();
@@ -1169,10 +1555,10 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
                 expression_location(design, expr));
         }
         const auto source_bit_width =
-            streaming_width ? *streaming_width : operand.type->getBitstreamWidth();
+            streaming_width ? *streaming_width : lowered_type_width(*operand.type);
         const auto source_width = checked_width(source_bit_width, "conversion source");
         const auto target_width =
-            checked_width(expr.type->getBitstreamWidth(), "conversion target");
+            checked_width(lowered_type_width(*expr.type), "conversion target");
         OptoSlangExpr lowered;
         lowered.kind = OPTO_SLANG_EXPR_CAST;
         lowered.cast_value = lower_expr(design, operand);
@@ -1213,6 +1599,25 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
         }
         const auto name = call.getSubroutineName();
         const auto arguments = call.arguments();
+        if (name == "$countones" && arguments.size() == 1 && arguments[0]) {
+            return lower_count_ones(design, *arguments[0], expr);
+        }
+        if (name == "$countbits") {
+            return lower_count_bits(design, arguments, expr);
+        }
+        if (name == "$onehot" && arguments.size() == 1 && arguments[0]) {
+            return lower_onehot_call(design, *arguments[0], expr, false);
+        }
+        if (name == "$onehot0" && arguments.size() == 1 && arguments[0]) {
+            return lower_onehot_call(design, *arguments[0], expr, true);
+        }
+        if (name == "$clog2" && arguments.size() == 1 && arguments[0]) {
+            return lower_clog2_call(design, *arguments[0], expr);
+        }
+        if (name == "$isunknown") {
+            throw std::runtime_error(
+                "$isunknown requires runtime X/Z observability and is not synthesizable in the Opto ASIC profile");
+        }
         if ((name != "$signed" && name != "$unsigned") || arguments.size() != 1 || !arguments[0]) {
             throw std::runtime_error("unsupported synthesis call '" + copy_string(name) + "'");
         }
@@ -1220,9 +1625,9 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
             throw std::runtime_error("integral cast system call has a non-integral argument");
         }
         const auto source_width =
-            checked_width(arguments[0]->type->getBitstreamWidth(), "system cast source");
+            checked_width(lowered_type_width(*arguments[0]->type), "system cast source");
         const auto target_width =
-            checked_width(expr.type->getBitstreamWidth(), "system cast target");
+            checked_width(lowered_type_width(*expr.type), "system cast target");
         OptoSlangExpr lowered;
         lowered.kind = OPTO_SLANG_EXPR_CAST;
         lowered.cast_value = lower_expr(design, *arguments[0]);
@@ -1239,16 +1644,10 @@ OptoSlangExpr* lower_expr(ModuleLoweringContext& design, const Expression& expr)
     }
     case ExpressionKind::Assignment: {
         const auto& assignment = expr.as<AssignmentExpression>();
-        if (assignment.isCompound()) {
-            throw std::runtime_error("compound assignment expressions are not supported");
-        }
-        if (assignment.timingControl) {
-            throw std::runtime_error("timing controls are not supported in assignments");
-        }
         if (assignment.right().kind == ExpressionKind::EmptyArgument) {
             return lower_expr(design, assignment.left());
         }
-        return lower_expr(design, assignment.right());
+        return lower_assignment_expression(design, assignment);
     }
     default:
         throw std::runtime_error(

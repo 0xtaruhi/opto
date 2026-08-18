@@ -706,14 +706,10 @@ struct AliasResolver<'a> {
 
 impl<'a> AliasResolver<'a> {
     fn new(module: &'a word::WordModule, drivers: &'a DriverIndex) -> Self {
-        let mut preserved_signals = vec![false; module.signals().len()];
-        for signal in module.preserved_signals() {
-            preserved_signals[signal.index()] = true;
-        }
         Self {
             module,
             drivers,
-            preserved_signals,
+            preserved_signals: alias_boundary_signals(module),
             resolved: vec![None; module.values().len()],
             active_bits: vec![false; drivers.bit_count()],
         }
@@ -903,16 +899,29 @@ fn read_signal_bits(
             }
         }
     }
-    // A preserved signal is a directive rather than a derived fact: the user
-    // asked for the wire, so it stays whether or not anything reads it.
-    let mut preserved_signals = vec![false; module.signals().len()];
-    for signal in module.preserved_signals() {
-        preserved_signals[signal.index()] = true;
-    }
     Ok(ReadSignalBits {
         bits,
-        preserved_signals,
+        preserved_signals: alias_boundary_signals(module),
     })
+}
+
+/// Signals whose reads must not collapse onto a local connect driver.
+///
+/// Explicit preservation fixes signal identity. A tri-state net is also an
+/// identity boundary: a read observes the physically resolved net, not merely
+/// one local TBUF contribution. Treating either as an ordinary alias can feed
+/// a `TriState` value into Boolean or sequential logic and delete the physical
+/// driver connection that owns its resolution semantics.
+fn alias_boundary_signals(module: &word::WordModule) -> Vec<bool> {
+    let mut boundaries = module
+        .signals()
+        .iter()
+        .map(|signal| signal.resolution == word::SignalResolution::TriState)
+        .collect::<Vec<_>>();
+    for signal in module.preserved_signals() {
+        boundaries[signal.index()] = true;
+    }
+    boundaries
 }
 
 fn is_register_value(

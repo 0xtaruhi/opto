@@ -129,7 +129,9 @@ impl Session {
                 .filter(|port| {
                     matches!(
                         port.direction,
-                        opto_db::Direction::Input | opto_db::Direction::Inout
+                        opto_db::Direction::Input
+                            | opto_db::Direction::Inout
+                            | opto_db::Direction::Ref
                     )
                 })
                 .filter_map(|port| {
@@ -160,7 +162,9 @@ impl Session {
                 .filter(|port| {
                     matches!(
                         port.direction,
-                        opto_db::Direction::Output | opto_db::Direction::Inout
+                        opto_db::Direction::Output
+                            | opto_db::Direction::Inout
+                            | opto_db::Direction::Ref
                     )
                 })
                 .map(|port| ObjectLocator::Port {

@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-general-for-clauses"
+kind = "regression"
+covers = ["Finite for loops may omit initializer, condition, or step clauses, update induction state in the body, preserve runtime initializer effects, and retain ordered step-clause side effects after continue."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 8
+min_cells = 1

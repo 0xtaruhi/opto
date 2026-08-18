@@ -115,7 +115,65 @@ impl PredicateArena {
         {
             return self.variable(Atom::Signal(signal), value, active_high);
         }
+        let boolean_binary = module.value(value).and_then(|stored| {
+            (stored.ty.width() == 1).then_some(())?;
+            let word::ValueKind::Operation(operation) = stored.kind else {
+                return None;
+            };
+            let operation = module.operation(operation)?;
+            let word::OpKind::Binary { op, left, right } = operation.kind else {
+                return None;
+            };
+            matches!(
+                op,
+                word::BinaryOp::LogicalAnd
+                    | word::BinaryOp::BitAnd
+                    | word::BinaryOp::LogicalOr
+                    | word::BinaryOp::BitOr
+                    | word::BinaryOp::BitXor
+            )
+            .then_some((op, left, right))
+        });
+        if let Some((op, left, right)) = boolean_binary
+            && let (Some(left), Some(right)) = (
+                self.simple_boolean_value(module, left)?,
+                self.simple_boolean_value(module, right)?,
+            )
+        {
+            let predicate = match op {
+                word::BinaryOp::LogicalAnd | word::BinaryOp::BitAnd => self.and(left, right)?,
+                word::BinaryOp::LogicalOr | word::BinaryOp::BitOr => self.or(left, right)?,
+                word::BinaryOp::BitXor => self.xor(left, right)?,
+                _ => unreachable!("filtered Boolean binary operation"),
+            };
+            self.remember_word(value, predicate.literal());
+            return Ok(predicate);
+        }
         self.variable(Atom::Value(value), value, true)
+    }
+
+    fn simple_boolean_value(
+        &mut self,
+        module: &word::WordModule,
+        value: word::ValueId,
+    ) -> Result<Option<Predicate>, crate::SynthError> {
+        if let Some(stored) = module.value(value)
+            && let word::ValueKind::Constant(bits) = &stored.kind
+            && bits.width() == 1
+        {
+            return Ok(Some(match bits.as_slice()[0] {
+                BitVal::Zero => Predicate::Never,
+                BitVal::One => Predicate::Always,
+                BitVal::X | BitVal::Z => self.variable(Atom::Value(value), value, true)?,
+            }));
+        }
+        let Some((signal, active_high)) =
+            super::events::normalize_boolean_value(module, value, true)
+        else {
+            return Ok(None);
+        };
+        self.variable(Atom::Signal(signal), value, active_high)
+            .map(Some)
     }
 
     fn variable(
@@ -192,6 +250,14 @@ impl PredicateArena {
         let literal = self
             .builder
             .or(left.literal(), right.literal(), 0)
+            .map_err(|error| crate::SynthError::capacity(error.to_string()))?;
+        Ok(Predicate::from_literal(literal))
+    }
+
+    fn xor(&mut self, left: Predicate, right: Predicate) -> Result<Predicate, crate::SynthError> {
+        let literal = self
+            .builder
+            .xor(left.literal(), right.literal(), 0)
             .map_err(|error| crate::SynthError::capacity(error.to_string()))?;
         Ok(Predicate::from_literal(literal))
     }

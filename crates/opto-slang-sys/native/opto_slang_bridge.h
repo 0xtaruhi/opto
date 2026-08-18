@@ -33,10 +33,19 @@ typedef enum OptoSlangDiagnosticSeverity {
     OPTO_SLANG_DIAGNOSTIC_ERROR = 2
 } OptoSlangDiagnosticSeverity;
 
+typedef enum OptoSlangLoweringFailureCategory {
+    OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE = 0,
+    OPTO_SLANG_LOWERING_INVALID_PROJECTION = 1,
+    OPTO_SLANG_LOWERING_CAPACITY = 2,
+    OPTO_SLANG_LOWERING_INVARIANT = 3,
+    OPTO_SLANG_LOWERING_NATIVE = 4
+} OptoSlangLoweringFailureCategory;
+
 typedef enum OptoSlangPortDirection {
     OPTO_SLANG_PORT_INPUT = 0,
     OPTO_SLANG_PORT_OUTPUT = 1,
-    OPTO_SLANG_PORT_INOUT = 2
+    OPTO_SLANG_PORT_INOUT = 2,
+    OPTO_SLANG_PORT_REF = 3
 } OptoSlangPortDirection;
 
 typedef enum OptoSlangNetResolution {
@@ -112,6 +121,12 @@ typedef enum OptoSlangProcedureKind {
     OPTO_SLANG_PROCEDURE_COMB_OR_LATCH = 3
 } OptoSlangProcedureKind;
 
+typedef enum OptoSlangLoopForm {
+    OPTO_SLANG_LOOP_PRE_TEST = 0,
+    OPTO_SLANG_LOOP_POST_TEST = 1,
+    OPTO_SLANG_LOOP_UNCONDITIONAL = 2
+} OptoSlangLoopForm;
+
 typedef enum OptoSlangEdge { OPTO_SLANG_EDGE_POS = 0, OPTO_SLANG_EDGE_NEG = 1 } OptoSlangEdge;
 
 typedef enum OptoSlangTerminatorKind {
@@ -126,6 +141,13 @@ typedef struct OptoSlangSourceSpanView {
     uint32_t line;
     uint32_t column;
 } OptoSlangSourceSpanView;
+
+typedef struct OptoSlangLoweringFailureView {
+    OptoSlangLoweringFailureCategory category;
+    uint16_t code;
+    const char *message;
+    OptoSlangSourceSpanView source;
+} OptoSlangLoweringFailureView;
 
 typedef struct OptoSlangEdgeTargetView {
     uint32_t block;
@@ -230,9 +252,21 @@ typedef struct OptoSlangProcedureView {
     OptoSlangProcedureKind kind;
     size_t event_count;
     size_t block_count;
+    size_t loop_region_count;
     uint32_t entry_block;
     OptoSlangSourceSpanView source;
 } OptoSlangProcedureView;
+
+typedef struct OptoSlangLoopRegionView {
+    uint32_t header;
+    uint32_t body;
+    uint32_t latch;
+    uint32_t exit;
+    OptoSlangLoopForm form;
+    int has_parent;
+    uint32_t parent;
+    OptoSlangSourceSpanView source;
+} OptoSlangLoopRegionView;
 
 typedef struct OptoSlangEventView {
     OptoSlangEdge edge;
@@ -368,8 +402,10 @@ OptoSlangStatus opto_slang_module_view(
 OptoSlangStatus opto_slang_module_info(
     const OptoSlangSnapshot *design, size_t module_index, OptoSlangModuleInfoView *view);
 OptoSlangStatus opto_slang_module_materialize(OptoSlangSnapshot *design, size_t module_index);
-const char *opto_slang_module_materialize_error(
-    const OptoSlangSnapshot *design, size_t module_index);
+OptoSlangStatus opto_slang_module_materialize_failure(
+    const OptoSlangSnapshot *design,
+    size_t module_index,
+    OptoSlangLoweringFailureView *view);
 void opto_slang_module_release(OptoSlangSnapshot *design, size_t module_index);
 
 OptoSlangStatus opto_slang_module_attribute_view(
@@ -414,6 +450,10 @@ OptoSlangStatus opto_slang_event_view(
     const OptoSlangProcedureData *procedure, size_t event_index, OptoSlangEventView *view);
 OptoSlangStatus opto_slang_block_view(
     const OptoSlangProcedureData *procedure, size_t block_index, OptoSlangBlockView *view);
+OptoSlangStatus opto_slang_loop_region_view(
+    const OptoSlangProcedureData *procedure,
+    size_t region_index,
+    OptoSlangLoopRegionView *view);
 OptoSlangStatus opto_slang_effect_view(
     const OptoSlangProcedureData *procedure,
     size_t block_index,

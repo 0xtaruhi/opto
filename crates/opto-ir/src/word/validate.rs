@@ -413,6 +413,10 @@ impl WordModule {
                 }
                 then_ty
             }
+            OpKind::TriState { data, enable } => {
+                self.require_value_width(enable.value, 1, "tri-state enable")?;
+                self.value_ty(*data)?
+            }
             OpKind::Concat { parts } => {
                 if parts.is_empty() {
                     return Err(WordError::new("concat has no parts"));

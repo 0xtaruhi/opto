@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    BTreeMap, BTreeSet, BitVal, ConstBits, FrameId, MaterializedPredicate, NonZeroU32,
-    PendingWrite, Predicate, StateArena, TargetKey, derived_source, events, proc, word,
+    BTreeMap, BTreeSet, BitVal, ConstBits, EventControl, FrameId, MaterializedPredicate,
+    NonZeroU32, PendingWrite, Predicate, StateArena, TargetKey, derived_source, events, proc, word,
 };
 
 pub(super) fn block_effects(
@@ -94,6 +94,7 @@ pub(super) fn resolve_signal(
     frame: FrameId,
     original: word::ValueId,
     reference: word::SignalRef,
+    memory_read: Option<usize>,
 ) -> Result<Option<word::ValueId>, crate::SynthError> {
     let original_source = module
         .value(original)
@@ -101,10 +102,9 @@ pub(super) fn resolve_signal(
         .source
         .clone();
     let stateful = context.layout.contains_key(&reference.signal);
-    let forwarded = context
-        .reads
-        .get(&reference.signal)
-        .and_then(|&index| module.memory_read_ports().get(index))
+    let read_index = memory_read.or_else(|| context.reads.get(&reference.signal).copied());
+    let forwarded = read_index
+        .and_then(|index| module.memory_read_ports().get(index))
         .is_some_and(|read| {
             matches!(read.timing, word::MemoryReadTiming::Asynchronous)
                 && context
@@ -190,7 +190,9 @@ pub(super) fn resolve_signal(
     };
     if forwarded {
         let (memory, address, source) = {
-            let read = &module.memory_read_ports()[context.reads[&reference.signal]];
+            let read = &module.memory_read_ports()[read_index.ok_or_else(|| {
+                crate::SynthError::invariant("forwarded memory read has no source port")
+            })?];
             (read.memory, read.address, read.source.clone())
         };
         let full = if reference.lsb == 0
@@ -393,24 +395,17 @@ pub(super) fn static_insert(
     let value_width = value_type(module, value)?.width();
     let mut parts = Vec::with_capacity(3);
     if lsb + value_width < width {
-        parts.push(
-            module
-                .extract(
-                    base,
-                    lsb + value_width,
-                    width - lsb - value_width,
-                    source.clone(),
-                )
-                .map_err(crate::SynthError::from)?,
-        );
+        parts.push(extract_static_value(
+            module,
+            base,
+            lsb + value_width,
+            width - lsb - value_width,
+            source,
+        )?);
     }
     parts.push(value);
     if lsb > 0 {
-        parts.push(
-            module
-                .extract(base, 0, lsb, source.clone())
-                .map_err(crate::SynthError::from)?,
-        );
+        parts.push(extract_static_value(module, base, 0, lsb, source)?);
     }
     let result = match parts.as_slice() {
         [value] => *value,
@@ -439,8 +434,136 @@ pub(super) fn extract_assignment(
     if lsb == 0 && width == value_width {
         Ok(value)
     } else {
+        let extracted = extract_static_value(module, value, lsb, width, source)?;
+        let extracted_ty = value_type(module, extracted)?;
+        if !extracted_ty.is_signed() {
+            return Ok(extracted);
+        }
+        // Generic Word-IR extracts preserve arithmetic signedness, but a
+        // procedural state partition denotes a packed part-select target and
+        // is therefore unsigned. Normalize the fragment before publication so
+        // its value type matches the corresponding partial lvalue.
+        let target_ty = word::WordType::new(width, false, extracted_ty.state())
+            .map_err(crate::SynthError::from)?;
         module
+            .cast(
+                word::CastKind::ZeroExtend,
+                extracted,
+                target_ty,
+                source.clone(),
+            )
+            .map_err(crate::SynthError::from)
+    }
+}
+
+fn extract_static_value(
+    module: &mut word::WordModule,
+    value: word::ValueId,
+    lsb: u32,
+    width: u32,
+    source: &word::SourceSpan,
+) -> Result<word::ValueId, crate::SynthError> {
+    let value_width = value_type(module, value)?.width();
+    if lsb == 0 && width == value_width {
+        return Ok(value);
+    }
+    let end = lsb
+        .checked_add(width)
+        .ok_or_else(|| crate::SynthError::capacity("static extraction range overflow"))?;
+    let operation = module.value(value).and_then(|stored| match stored.kind {
+        word::ValueKind::Operation(operation) => module.operation(operation),
+        word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+    });
+    match operation.map(|operation| operation.kind.clone()) {
+        Some(word::OpKind::Extract {
+            value: inner,
+            lsb: inner_lsb,
+            ..
+        }) => extract_static_value(
+            module,
+            inner,
+            inner_lsb
+                .checked_add(lsb)
+                .ok_or_else(|| crate::SynthError::capacity("nested extraction range overflow"))?,
+            width,
+            source,
+        ),
+        Some(word::OpKind::Concat { parts }) => {
+            let mut base = 0u32;
+            let mut selected = Vec::new();
+            for part in parts.iter().rev().copied() {
+                let part_width = value_type(module, part)?.width();
+                let part_end = base.checked_add(part_width).ok_or_else(|| {
+                    crate::SynthError::capacity("concatenation extraction range overflow")
+                })?;
+                let overlap_lsb = base.max(lsb);
+                let overlap_end = part_end.min(end);
+                if overlap_lsb < overlap_end {
+                    selected.push(extract_static_value(
+                        module,
+                        part,
+                        overlap_lsb - base,
+                        overlap_end - overlap_lsb,
+                        source,
+                    )?);
+                }
+                base = part_end;
+            }
+            selected.reverse();
+            match selected.as_slice() {
+                [part] => Ok(*part),
+                [] => Err(crate::SynthError::invariant(
+                    "static extraction does not overlap its source value",
+                )),
+                _ => module
+                    .concat(selected, source.clone())
+                    .map_err(crate::SynthError::from),
+            }
+        }
+        Some(_) | None => module
             .extract(value, lsb, width, source.clone())
+            .map_err(crate::SynthError::from),
+    }
+}
+
+/// Reverses the bit order of one procedural assignment value.
+///
+/// A reversed static target walks toward decreasing canonical storage offsets
+/// as successive source-value bits are assigned. Word values remain
+/// least-significant-bit first, so normalization reverses the value once and
+/// can then reuse the ordinary ascending storage partition.
+pub(super) fn reverse_assignment_bits(
+    module: &mut word::WordModule,
+    value: word::ValueId,
+    source: &word::SourceSpan,
+) -> Result<word::ValueId, crate::SynthError> {
+    let ty = value_type(module, value)?;
+    if ty.width() == 1 {
+        return Ok(value);
+    }
+    let capacity = usize::try_from(ty.width())
+        .map_err(|_| crate::SynthError::capacity("assignment width exceeds host capacity"))?;
+    let mut parts = Vec::new();
+    parts.try_reserve_exact(capacity).map_err(|error| {
+        crate::SynthError::capacity(format!(
+            "cannot reserve reversed assignment fragments: {error}"
+        ))
+    })?;
+    for lsb in 0..ty.width() {
+        parts.push(
+            module
+                .extract(value, lsb, 1, source.clone())
+                .map_err(crate::SynthError::from)?,
+        );
+    }
+    let reversed = module
+        .concat(parts, source.clone())
+        .map_err(crate::SynthError::from)?;
+    if value_type(module, reversed)? == ty {
+        Ok(reversed)
+    } else {
+        module
+            .cast(word::CastKind::ZeroExtend, reversed, ty, source.clone())
             .map_err(crate::SynthError::from)
     }
 }
@@ -461,21 +584,33 @@ pub(super) fn cast_like(
     }
 }
 
-pub(super) fn predicate_enable(predicate: MaterializedPredicate) -> Option<word::Enable> {
+pub(super) fn predicate_enable(
+    module: &mut word::WordModule,
+    predicate: MaterializedPredicate,
+    source: &word::SourceSpan,
+) -> Result<Option<word::Enable>, crate::SynthError> {
     match predicate {
-        MaterializedPredicate::Never | MaterializedPredicate::Always => None,
-        MaterializedPredicate::Value(value) => Some(word::Enable {
-            value,
-            active_high: true,
-        }),
+        MaterializedPredicate::Never | MaterializedPredicate::Always => Ok(None),
+        MaterializedPredicate::Value(value) => normalized_enable(module, value, source).map(Some),
     }
 }
 
-pub(super) fn inferred_reset_kind(procedure: &proc::Procedure) -> Option<word::ResetKind> {
+pub(super) fn inferred_reset_kind(
+    procedure: &proc::Procedure,
+    event_controls: &[EventControl],
+) -> Option<word::ResetKind> {
     match procedure.kind {
         proc::ProcedureKind::Latch => Some(word::ResetKind::Async),
         proc::ProcedureKind::FlipFlop => Some(match procedure.sensitivity {
-            proc::Sensitivity::Edges(events) if events.len() > 1 => word::ResetKind::Async,
+            proc::Sensitivity::Edges(events)
+                if events.len() > 1
+                    && events::dual_edge_clock(
+                        event_controls.iter().map(|control| &control.event),
+                    )
+                    .is_none() =>
+            {
+                word::ResetKind::Async
+            }
             _ => word::ResetKind::Sync,
         }),
         proc::ProcedureKind::Combinational | proc::ProcedureKind::CombinationalOrLatch => None,

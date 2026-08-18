@@ -375,9 +375,15 @@ fn derive_operation(
             }
         }
         OpKind::Binary { op, left, right } => {
-            let left = value_facts(module, *left, analysis);
-            let right = value_facts(module, *right, analysis);
-            derive_binary(*op, left, right, result_ty, analysis)
+            let left_id = *left;
+            let right_id = *right;
+            let left = value_facts(module, left_id, analysis);
+            let right = value_facts(module, right_id, analysis);
+            let comparison_signed = module
+                .value(left_id)
+                .zip(module.value(right_id))
+                .is_some_and(|(left, right)| left.ty.is_signed() && right.ty.is_signed());
+            derive_binary(*op, left, right, result_ty, comparison_signed, analysis)
         }
         OpKind::Mux {
             cond,
@@ -475,7 +481,9 @@ fn derive_operation(
                 }
             })
         }
-        OpKind::Register(_) | OpKind::Latch(_) => FactRange::unknown(width),
+        OpKind::TriState { .. } | OpKind::Register(_) | OpKind::Latch(_) => {
+            FactRange::unknown(width)
+        }
     }
 }
 
@@ -488,6 +496,7 @@ fn derive_binary(
     left: FactRange,
     right: FactRange,
     result_ty: super::WordType,
+    comparison_signed: bool,
     analysis: &mut KnownBitsAnalysis,
 ) -> FactRange {
     let width = result_ty.width();
@@ -531,6 +540,24 @@ fn derive_binary(
             }
             if is_one(right, &analysis.arena) && left.width == width {
                 return copy_facts(left, analysis);
+            }
+            if left.width == width
+                && let Some(shift) = power_of_two(right, &analysis.arena)
+            {
+                return store_generated(analysis, width, |arena, index| {
+                    index
+                        .checked_sub(shift)
+                        .map_or(KnownBit::Zero, |source| left.bit(arena, source))
+                });
+            }
+            if right.width == width
+                && let Some(shift) = power_of_two(left, &analysis.arena)
+            {
+                return store_generated(analysis, width, |arena, index| {
+                    index
+                        .checked_sub(shift)
+                        .map_or(KnownBit::Zero, |source| right.bit(arena, source))
+                });
             }
             let zeros = trailing_zeros(left, &analysis.arena)
                 .saturating_add(trailing_zeros(right, &analysis.arena))
@@ -605,13 +632,63 @@ fn derive_binary(
                 _ => KnownBit::Unknown,
             })
         }
-        BinaryOp::Div
-        | BinaryOp::Mod
-        | BinaryOp::Lt
-        | BinaryOp::Le
-        | BinaryOp::Gt
-        | BinaryOp::Ge => FactRange::unknown(width),
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            let value =
+                compare_facts(left, right, comparison_signed, &analysis.arena).map(|ordering| {
+                    match op {
+                        BinaryOp::Lt => ordering.is_lt(),
+                        BinaryOp::Le => ordering.is_le(),
+                        BinaryOp::Gt => ordering.is_gt(),
+                        BinaryOp::Ge => ordering.is_ge(),
+                        _ => unreachable!("comparison operation was filtered"),
+                    }
+                });
+            store_scalar(
+                value.map_or(KnownBit::Unknown, |value| {
+                    if value { KnownBit::One } else { KnownBit::Zero }
+                }),
+                &mut analysis.arena,
+            )
+        }
+        BinaryOp::Div | BinaryOp::Mod => FactRange::unknown(width),
     }
+}
+
+fn compare_facts(
+    left: FactRange,
+    right: FactRange,
+    signed: bool,
+    arena: &[FactWord],
+) -> Option<std::cmp::Ordering> {
+    let width = left.width.max(right.width);
+    let extended_bit = |value: FactRange, index: u32| {
+        if index < value.width {
+            value.bit(arena, index)
+        } else if signed {
+            value.bit(arena, value.width.saturating_sub(1))
+        } else {
+            KnownBit::Zero
+        }
+    };
+    if signed {
+        let left_negative = extended_bit(left, width.saturating_sub(1));
+        let right_negative = extended_bit(right, width.saturating_sub(1));
+        match (left_negative, right_negative) {
+            (KnownBit::One, KnownBit::Zero) => return Some(std::cmp::Ordering::Less),
+            (KnownBit::Zero, KnownBit::One) => return Some(std::cmp::Ordering::Greater),
+            (KnownBit::Unknown, _) | (_, KnownBit::Unknown) => return None,
+            _ => {}
+        }
+    }
+    for index in (0..width).rev() {
+        match (extended_bit(left, index), extended_bit(right, index)) {
+            (KnownBit::Zero, KnownBit::One) => return Some(std::cmp::Ordering::Less),
+            (KnownBit::One, KnownBit::Zero) => return Some(std::cmp::Ordering::Greater),
+            (KnownBit::Zero, KnownBit::Zero) | (KnownBit::One, KnownBit::One) => {}
+            (KnownBit::Unknown, _) | (_, KnownBit::Unknown) => return None,
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
 }
 
 fn value_facts(module: &WordModule, value: ValueId, analysis: &mut KnownBitsAnalysis) -> FactRange {
@@ -894,6 +971,18 @@ fn is_one(input: FactRange, arena: &[FactWord]) -> bool {
         && (1..input.width).all(|index| input.bit(arena, index) == KnownBit::Zero)
 }
 
+fn power_of_two(input: FactRange, arena: &[FactWord]) -> Option<u32> {
+    let mut one = None;
+    for index in 0..input.width {
+        match input.bit(arena, index) {
+            KnownBit::Zero => {}
+            KnownBit::One if one.is_none() => one = Some(index),
+            KnownBit::One | KnownBit::Unknown => return None,
+        }
+    }
+    one
+}
+
 fn known_usize(input: FactRange, arena: &[FactWord]) -> Option<usize> {
     let mut value = 0usize;
     for index in 0..input.width {
@@ -913,6 +1002,96 @@ mod tests {
 
     fn ty(width: u32) -> WordType {
         WordType::new(width, false, LogicStateKind::FourState).unwrap()
+    }
+
+    #[test]
+    fn evaluates_ordering_after_exact_arithmetic() {
+        let mut module = WordModule::new("comparisons");
+        let signed = WordType::new(4, true, LogicStateKind::FourState).unwrap();
+        let zero = module
+            .constant(
+                ConstBits::from_bin_str("0000").unwrap(),
+                signed,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let one = module
+            .constant(
+                ConstBits::from_bin_str("0001").unwrap(),
+                signed,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let four = module
+            .constant(
+                ConstBits::from_bin_str("0100").unwrap(),
+                signed,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let minus_one = module
+            .constant(
+                ConstBits::from_bin_str("1111").unwrap(),
+                signed,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let incremented = module
+            .binary(BinaryOp::Add, zero, one, SourceSpan::default())
+            .unwrap();
+        let below_bound = module
+            .binary(BinaryOp::Lt, incremented, four, SourceSpan::default())
+            .unwrap();
+        let negative_below_zero = module
+            .binary(BinaryOp::Lt, minus_one, zero, SourceSpan::default())
+            .unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(
+            facts.constant(&module, below_bound),
+            Some(ConstBits::from_bin_str("1").unwrap())
+        );
+        assert_eq!(
+            facts.constant(&module, negative_below_zero),
+            Some(ConstBits::from_bin_str("1").unwrap())
+        );
+    }
+
+    #[test]
+    fn evaluates_multiplication_by_an_exact_power_of_two() {
+        let mut module = WordModule::new("power_of_two_product");
+        let signed = WordType::new(32, true, LogicStateKind::FourState).unwrap();
+        let unsigned = WordType::new(32, false, LogicStateKind::FourState).unwrap();
+        let offset = WordType::new(35, false, LogicStateKind::FourState).unwrap();
+        let three = module
+            .constant(
+                ConstBits::from_bin_str(&format!("{}11", "0".repeat(30))).unwrap(),
+                signed,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let three = module
+            .cast(CastKind::ZeroExtend, three, unsigned, SourceSpan::default())
+            .unwrap();
+        let three = module
+            .cast(CastKind::ZeroExtend, three, offset, SourceSpan::default())
+            .unwrap();
+        let eight = module
+            .constant(
+                ConstBits::from_bin_str(&format!("{}1000", "0".repeat(31))).unwrap(),
+                offset,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let product = module
+            .binary(BinaryOp::Mul, three, eight, SourceSpan::default())
+            .unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(
+            facts.constant(&module, product),
+            Some(ConstBits::from_bin_str(&format!("{}11000", "0".repeat(30))).unwrap())
+        );
     }
 
     #[test]

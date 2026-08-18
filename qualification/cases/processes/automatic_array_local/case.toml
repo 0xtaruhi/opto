@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "processes-automatic-array-local"
+kind = "regression"
+covers = ["An automatic unpacked array in edge-triggered procedural code lowers as fully assigned temporary combinational state."]
+category = "processes"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+sequential = true
+equivalence = true
+
+[assertions]
+min_ports = 5
+min_cells = 1

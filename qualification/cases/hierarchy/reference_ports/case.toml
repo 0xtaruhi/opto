@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "hierarchy-reference-ports"
+kind = "regression"
+covers = ["Module ref ports, including runtime-selected unpacked-array actuals, are eliminated as exact parent-variable aliases before synthesis."]
+category = "hierarchy"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 7
+min_cells = 1

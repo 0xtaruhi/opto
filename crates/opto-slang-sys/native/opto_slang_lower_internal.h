@@ -11,6 +11,7 @@
 #include "slang/ast/Compilation.h"
 #include "slang/ast/EvalContext.h"
 #include "slang/ast/Expression.h"
+#include "slang/ast/Patterns.h"
 #include "slang/ast/SemanticFacts.h"
 #include "slang/ast/TimingControl.h"
 #include "slang/ast/expressions/AssertionExpr.h"
@@ -68,6 +69,23 @@ using namespace slang::syntax;
 
 namespace opto::slang_lower {
 
+// Carries policy failures across the native materialization boundary without
+// making rendered exception text part of the Rust diagnostic contract.
+class LoweringFailure final : public std::runtime_error {
+public:
+    LoweringFailure(
+        OptoSlangLoweringFailureCategory category,
+        uint16_t code,
+        slang::SourceLocation location,
+        std::string message)
+        : std::runtime_error(std::move(message)), category(category), code(code),
+          location(location) {}
+
+    OptoSlangLoweringFailureCategory category;
+    uint16_t code;
+    slang::SourceLocation location;
+};
+
 template <typename Cleanup> class ScopeExit {
 public:
     explicit ScopeExit(Cleanup cleanup) : cleanup(std::move(cleanup)) {}
@@ -103,10 +121,25 @@ struct FunctionReturnControl {
     const OptoSlangExpr* true_value = nullptr;
 };
 
+struct LoopControlFlag {
+    const OptoSlangExpr* value = nullptr;
+    const OptoSlangExpr* inactive = nullptr;
+};
+
 struct LoopControl {
-    const OptoSlangExpr* broken = nullptr;
-    const OptoSlangExpr* not_broken = nullptr;
+    std::optional<uint32_t> break_target;
+    std::optional<uint32_t> continue_target;
+    std::optional<uint32_t> cyclic_region;
+};
+
+// One activation of a named sequential block or inlined task. A disable
+// targets symbol identity, while recursive or unrolled activations receive
+// distinct flags and resolve the innermost active match.
+struct DisableControl {
+    const Symbol* target = nullptr;
+    LoopControlFlag disabled;
     const OptoSlangExpr* true_value = nullptr;
+    const OptoSlangExpr* false_value = nullptr;
 };
 
 struct ValueShape {
@@ -116,8 +149,22 @@ struct ValueShape {
     bool operator==(const ValueShape&) const = default;
 };
 
+struct TaggedUnionLayout {
+    // Both packed and unpacked tagged unions use [tag | padding | payload].
+    // Padding is not part of member identity and the active value is always
+    // aligned to bit zero, matching Slang's packed tagged-union convention.
+    uint32_t tag_width = 0;
+    uint32_t payload_width = 0;
+    uint32_t total_width = 0;
+};
+
 struct CfgFragment;
 class ProcedureBuilder;
+
+struct GuardedEffectData {
+    const OptoSlangExpr* condition = nullptr;
+    OptoSlangEffectData effect;
+};
 
 // A fresh context is created for each materialized module. It encapsulates all
 // mutable lowering arenas and scope stacks; the long-lived snapshot retains
@@ -143,17 +190,20 @@ struct ModuleLoweringContext {
         interface_port_names;
     const std::unordered_map<const InstanceBodySymbol*, std::string>& body_names;
     std::unordered_map<const ValueSymbol*, ConstantValue> procedural_constants;
-    std::unordered_set<const VariableSymbol*> procedural_loop_variables;
     std::unordered_map<const ValueSymbol*, OptoSlangExpr*> function_values;
+    std::unordered_map<const ValueSymbol*, OptoSlangExpr*> function_lvalues;
     std::vector<const VariableSymbol*> function_returns;
     std::vector<FunctionReturnControl> function_return_controls;
     std::vector<LoopControl> loop_controls;
+    std::vector<DisableControl> disable_controls;
+    uint32_t cyclic_loop_depth = 0;
     std::vector<OptoSlangExpr*> lvalue_references;
     CfgFragment* active_expression_prelude = nullptr;
     ProcedureBuilder* active_procedure_builder = nullptr;
     std::vector<const SubroutineSymbol*> function_stack;
     uint64_t next_function_instance = 0;
     uint64_t next_loop_instance = 0;
+    uint64_t next_disable_instance = 0;
     uint64_t next_lvalue_instance = 0;
     EvalContext* eval_context = nullptr;
     const SourceManager* source_manager = nullptr;
@@ -227,11 +277,17 @@ ConstantValue evaluate_lowering_constant(
     ModuleLoweringContext& design, const Expression& expression);
 std::string copy_string(std::string_view text);
 uint32_t checked_width(uint64_t width, std::string_view object_name);
+// Returns the one canonical hardware storage width. Unlike Slang's
+// getBitstreamWidth(), this includes the out-of-band discriminant of an
+// unpacked tagged union and recursively accounts for nested tagged values.
+uint64_t lowered_type_width(const Type& source_type);
+TaggedUnionLayout tagged_union_layout(const Type& source_type);
 const OptoSlangTypeLayout*
 store_type_layout(ModuleLoweringContext& design, OptoSlangTypeLayout layout);
 const OptoSlangTypeLayout* scalar_type_layout(ModuleLoweringContext& design);
 const OptoSlangTypeLayout*
 intern_type_layout(ModuleLoweringContext& design, const Type& source_type);
+uint32_t aggregate_field_storage_offset(const Type& aggregate_type, const FieldSymbol& field);
 OptoSlangPortDirection lower_direction(ArgumentDirection direction);
 OptoSlangUnaryOp lower_unary_op(UnaryOperator op);
 OptoSlangBinaryOp lower_binary_op(BinaryOperator op);
@@ -304,6 +360,8 @@ std::string add_internal_net(
     bool is_process_local = false);
 std::string registered_value_name(const ModuleLoweringContext& design, const ValueSymbol& symbol);
 bool has_registered_value(const ModuleLoweringContext& design, const ValueSymbol& symbol);
+const OptoSlangExpr*
+find_function_lvalue(const ModuleLoweringContext& design, const ValueSymbol& symbol);
 std::optional<uint32_t> integer_literal_u32(ModuleLoweringContext& design, const Expression& expr);
 std::string exact_binary_string(const SVInt& value);
 const Expression& require_primitive_port(
@@ -368,6 +426,10 @@ OptoSlangExpr* lower_boolean_context(ModuleLoweringContext& design, const Expres
 bool is_empty_connection_expression(const Expression& expr);
 const Expression& call_output_lvalue(const Expression& actual);
 OptoSlangExpr* lower_function_call(ModuleLoweringContext&, const CallExpression&);
+OptoSlangExpr* lower_assignment_expression(ModuleLoweringContext&, const AssignmentExpression&);
+OptoSlangExpr* lower_update_expression(ModuleLoweringContext&, const UnaryExpression&);
+OptoSlangExpr* lower_conditional_expression(ModuleLoweringContext&, const ConditionalExpression&);
+OptoSlangExpr* lower_short_circuit_expression(ModuleLoweringContext&, const BinaryExpression&);
 bool constant_element_select_is_out_of_range(ModuleLoweringContext&, const Expression&);
 OptoSlangExpr* lower_signal_expr(ModuleLoweringContext&, const Expression&);
 OptoSlangExpr* apply_rvalue_slice(
@@ -379,5 +441,10 @@ std::optional<bool>
 constant_boolean_value(ModuleLoweringContext&, const Expression&);
 OptoSlangExpr* lower_expr(ModuleLoweringContext&, const Expression&);
 OptoSlangProcedureData lower_procedure(ModuleLoweringContext&, const InstanceBodySymbol&, const ProceduralBlockSymbol&);
+OptoSlangProcedureData make_guarded_procedure(
+    std::vector<GuardedEffectData>,
+    OptoSlangProcedureKind,
+    std::vector<OptoSlangEventData>,
+    OptoSlangSourceSpanView);
 void validate_initial_process(ModuleLoweringContext&, const InstanceBodySymbol&, const ProceduralBlockSymbol&);
 } // namespace opto::slang_lower

@@ -405,6 +405,87 @@ fn native_compile_keeps_local_interface_storage_connected_to_modport() {
 }
 
 #[test]
+fn native_compile_preserves_module_reference_ports_as_exact_aliases() {
+    let source = NativeTestSource::new(
+        "module child(ref logic value, input logic d); always_comb value = d; endmodule\nmodule top(input logic d, output logic y); logic shared; child u_child(.value(shared), .d(d)); assign y = shared; endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+    let child = module_named(&compilation, "child");
+    assert_eq!(
+        child
+            .ports()
+            .map(|port| (port.name().unwrap(), port.direction().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            ("value", SlangPortDirection::Ref),
+            ("d", SlangPortDirection::Input),
+        ]
+    );
+    let top = module_named(&compilation, "top");
+    let connection = top
+        .instances()
+        .next()
+        .unwrap()
+        .connections()
+        .find(|connection| connection.port().unwrap() == "value")
+        .unwrap();
+    let SlangExpressionKind::Signal(actual) = connection.expression().unwrap().kind().unwrap()
+    else {
+        panic!("reference-port actual should remain one signal alias");
+    };
+    assert_eq!(actual.name, "shared");
+}
+
+#[test]
+fn native_compile_flattens_reference_modport_members_as_aliases() {
+    let source = NativeTestSource::new(
+        "interface bus_if; logic [7:0] data; modport alias_port(ref data); endinterface\nmodule child(bus_if.alias_port bus, input logic [7:0] d); always_comb bus.data = d; endmodule\nmodule top(input logic [7:0] d, output logic [7:0] y); bus_if link(); child u_child(.bus(link), .d(d)); assign y = link.data; endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+    let child = module_named(&compilation, "child");
+    assert_eq!(
+        child
+            .ports()
+            .map(|port| (port.name().unwrap(), port.direction().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            ("bus.data", SlangPortDirection::Ref),
+            ("d", SlangPortDirection::Input),
+        ]
+    );
+}
+
+#[test]
+fn native_compile_accepts_dynamic_unpacked_reference_port_actuals() {
+    let source = NativeTestSource::new(
+        "module child(ref logic [7:0] value, input logic [7:0] d); always_comb value = d; endmodule\nmodule top(input logic [7:0] d, input logic [1:0] index, output logic [7:0] y); logic [7:0] values [0:3]; child u_child(.value(values[index]), .d(d)); assign y = values[index]; endmodule\n",
+    );
+    let compilation = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions {
+            top: Some("top".to_string()),
+            ..SlangCompileOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(module_named(&compilation, "child").ports().len(), 2);
+}
+
+#[test]
 fn native_compile_resolves_direct_child_input_port_references() {
     let source = NativeTestSource::new(
         "module child(input logic a); endmodule\nmodule top(input logic a, output logic y); child u_child(.a(a)); assign y = u_child.a; endmodule\n",

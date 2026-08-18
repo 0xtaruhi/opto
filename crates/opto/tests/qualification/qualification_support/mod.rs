@@ -356,6 +356,13 @@ fn validate_case(case: &Case) {
             for source in case.sources() {
                 assert!(source.is_file(), "missing case source {}", source.display());
             }
+            for source in case.equivalence_sources() {
+                assert!(
+                    source.is_file(),
+                    "missing equivalence source {}",
+                    source.display()
+                );
+            }
         }
         CaseKind::Upstream => {}
     }
@@ -365,6 +372,10 @@ fn validate_case(case: &Case) {
             "equivalence_initial_state requires sequential equivalence"
         );
     }
+    assert!(
+        case.spec.equivalence_sources.is_empty() || case.spec.equivalence,
+        "equivalence_sources requires equivalence"
+    );
     if case.spec.equivalence && case.spec.kind == CaseKind::Regression {
         assert!(
             case.spec.library.is_some(),
@@ -796,21 +807,21 @@ fn run_equivalence(
         ""
     };
     let sources = case
-        .sources()
+        .equivalence_sources()
         .iter()
         .map(yosys_quote)
         .collect::<Vec<_>>()
         .join(" ");
     // Preserve latch state identity across both sides of a sequential proof.
     let gold_lowering = if case.spec.sequential {
-        "proc; flatten; memory; opt; techmap; opt; clk2fflogic; opt"
+        "proc; flatten; memory; tribuf -formal; opt; techmap; opt; clk2fflogic; opt"
     } else {
-        "proc; flatten; memory; opt; techmap; opt"
+        "proc; flatten; memory; tribuf -formal; opt; techmap; opt"
     };
     let gate_lowering = if case.spec.sequential {
-        "flatten; opt; clk2fflogic; opt"
+        "flatten; tribuf -formal; opt; clk2fflogic; opt"
     } else {
-        "flatten; opt"
+        "flatten; tribuf -formal; opt"
     };
     let mut commands = vec![
         format!("read_verilog{read_flag} {sources}"),
@@ -899,6 +910,18 @@ fn case_inputs(case: &Case, library: Option<&Path>) -> BTreeMap<String, String> 
         .zip(case.sources())
         .map(|(relative, source)| (relative.display().to_string(), sha256(&source)))
         .collect::<BTreeMap<_, _>>();
+    inputs.extend(
+        case.spec
+            .equivalence_sources
+            .iter()
+            .zip(case.equivalence_sources())
+            .map(|(relative, source)| {
+                (
+                    format!("equivalence:{}", relative.display()),
+                    sha256(&source),
+                )
+            }),
+    );
     inputs.insert("case.toml".to_string(), sha256(&case.path));
     if let Some(script) = &case.spec.script {
         inputs.insert("script".to_string(), sha256(&case.relative_path(script)));

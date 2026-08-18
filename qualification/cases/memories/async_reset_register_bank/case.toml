@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "memories-async-reset-register-bank"
+kind = "regression"
+covers = ["A statically bounded asynchronous reset over every unpacked-array element lowers to resettable register-bank state with a dynamic data write."]
+category = "memories"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+sequential = true
+equivalence = true
+equivalence_initial_state = "zero"
+
+[assertions]
+min_ports = 7
+min_cells = 1

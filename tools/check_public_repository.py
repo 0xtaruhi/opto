@@ -113,6 +113,7 @@ SELF = Path("tools/check_public_repository.py")
 PUBLIC_SYNTHETIC_LIBRARIES = {
     "benchmarks/qor/libraries/cover_test.lib",
     "qualification/libraries/frontend_sequential.lib",
+    "qualification/libraries/opto_memory_test.lib",
     "qualification/libraries/opto_test.lib",
 }
 

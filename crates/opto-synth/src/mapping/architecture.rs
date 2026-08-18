@@ -353,26 +353,46 @@ impl RegionArchitectureMaterializer<'_, '_> {
 
     fn value_is_region_sink(&self, value: word::ValueId, region: SynthesisRegion) -> bool {
         self.request.source.connects().iter().any(|connect| {
-            connect.value == value
-                && (self
+            let is_observable_connect = self
+                .request
+                .source
+                .signal_is_preserved(connect.target.signal)
+                || self
                     .request
                     .source
-                    .signal_is_preserved(connect.target.signal)
-                    || self
-                        .request
-                        .source
-                        .signal(connect.target.signal)
-                        .is_some_and(|signal| {
-                            let word::SignalKind::Port(port) = signal.kind else {
-                                return false;
-                            };
-                            self.request.source.port(port).is_some_and(|port| {
-                                matches!(
-                                    port.direction,
-                                    word::PortDirection::Output | word::PortDirection::Inout
-                                )
-                            })
-                        }))
+                    .signal(connect.target.signal)
+                    .is_some_and(|signal| {
+                        let word::SignalKind::Port(port) = signal.kind else {
+                            return false;
+                        };
+                        self.request.source.port(port).is_some_and(|port| {
+                            matches!(
+                                port.direction,
+                                word::PortDirection::Output | word::PortDirection::Inout
+                            )
+                        })
+                    });
+            if connect.value == value && is_observable_connect {
+                return true;
+            }
+            let Some(word::ValueKind::Operation(operation)) = self
+                .request
+                .source
+                .value(connect.value)
+                .map(|stored| &stored.kind)
+            else {
+                return false;
+            };
+            self.request
+                .source
+                .operation(*operation)
+                .is_some_and(|operation| {
+                    matches!(
+                        operation.kind,
+                        word::OpKind::TriState { data, enable }
+                            if data == value || enable.value == value
+                    )
+                })
         }) || self
             .request
             .source

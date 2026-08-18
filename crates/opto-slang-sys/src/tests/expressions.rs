@@ -258,6 +258,31 @@ fn native_compile_preserves_invariant_division_for_synthesis_planning() {
 }
 
 #[test]
+fn native_compile_preserves_division_by_zero_for_dont_care_lowering() {
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] value, output logic [7:0] quotient, remainder); assign quotient = value / 8'd0; assign remainder = value % 8'd0; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
+
+    assert!(matches!(
+        assignments[0].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Binary {
+            op: SlangBinaryOp::Div,
+            ..
+        }
+    ));
+    assert!(matches!(
+        assignments[1].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Binary {
+            op: SlangBinaryOp::Mod,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn native_compile_reduces_dynamic_power_of_two_exponentiation() {
     fn contains_shift(expression: SlangExpression<'_>) -> bool {
         match expression.kind().unwrap() {
@@ -279,6 +304,217 @@ fn native_compile_reduces_dynamic_power_of_two_exponentiation() {
     let rhs = module.assigns().next().unwrap().rhs().unwrap();
 
     assert!(contains_shift(rhs));
+}
+
+#[test]
+fn native_compile_expands_runtime_base_with_constant_exponent() {
+    fn multiplication_count(expression: SlangExpression<'_>) -> usize {
+        match expression.kind().unwrap() {
+            SlangExpressionKind::Binary { op, left, right } => {
+                usize::from(op == SlangBinaryOp::Mul)
+                    + multiplication_count(left)
+                    + multiplication_count(right)
+            }
+            SlangExpressionKind::Cast { value, .. }
+            | SlangExpressionKind::Extract { value, .. } => multiplication_count(value),
+            _ => 0,
+        }
+    }
+
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] base, output logic [7:0] value); assign value = base ** 3; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let rhs = module.assigns().next().unwrap().rhs().unwrap();
+
+    assert_eq!(multiplication_count(rhs), 2);
+}
+
+#[test]
+fn native_compile_lowers_runtime_bit_vector_system_functions() {
+    fn contains_binary(expression: SlangExpression<'_>, expected: SlangBinaryOp) -> bool {
+        match expression.kind().unwrap() {
+            SlangExpressionKind::Binary { op, left, right } => {
+                op == expected
+                    || contains_binary(left, expected)
+                    || contains_binary(right, expected)
+            }
+            SlangExpressionKind::Cast { value, .. }
+            | SlangExpressionKind::Extract { value, .. }
+            | SlangExpressionKind::Unary { arg: value, .. } => contains_binary(value, expected),
+            _ => false,
+        }
+    }
+
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] value, output logic [31:0] count, output logic exactly_one, at_most_one); assign count = $countones(value); assign exactly_one = $onehot(value); assign at_most_one = $onehot0(value); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
+
+    assert!(contains_binary(
+        assignments[0].rhs().unwrap(),
+        SlangBinaryOp::Add
+    ));
+    assert!(contains_binary(
+        assignments[1].rhs().unwrap(),
+        SlangBinaryOp::LogicalAnd
+    ));
+    assert!(contains_binary(
+        assignments[2].rhs().unwrap(),
+        SlangBinaryOp::Eq
+    ));
+}
+
+#[test]
+fn native_compile_lowers_runtime_clog2_to_a_balanced_priority_encoder() {
+    fn mux_depth(expression: SlangExpression<'_>) -> usize {
+        match expression.kind().unwrap() {
+            SlangExpressionKind::Mux {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                1 + mux_depth(condition)
+                    .max(mux_depth(then_value))
+                    .max(mux_depth(else_value))
+            }
+            SlangExpressionKind::Binary { left, right, .. } => {
+                mux_depth(left).max(mux_depth(right))
+            }
+            SlangExpressionKind::Cast { value, .. }
+            | SlangExpressionKind::Extract { value, .. }
+            | SlangExpressionKind::Unary { arg: value, .. } => mux_depth(value),
+            _ => 0,
+        }
+    }
+
+    fn contains_subtraction(expression: SlangExpression<'_>) -> bool {
+        match expression.kind().unwrap() {
+            SlangExpressionKind::Binary { op, left, right } => {
+                op == SlangBinaryOp::Sub
+                    || contains_subtraction(left)
+                    || contains_subtraction(right)
+            }
+            SlangExpressionKind::Mux {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                contains_subtraction(condition)
+                    || contains_subtraction(then_value)
+                    || contains_subtraction(else_value)
+            }
+            SlangExpressionKind::Cast { value, .. }
+            | SlangExpressionKind::Extract { value, .. }
+            | SlangExpressionKind::Unary { arg: value, .. } => contains_subtraction(value),
+            _ => false,
+        }
+    }
+
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] value, input logic signed [7:0] signed_value, output logic signed [31:0] magnitude, signed_magnitude); assign magnitude = $clog2(value); assign signed_magnitude = $clog2(signed_value); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
+
+    for assignment in assignments {
+        let expression = assignment.rhs().unwrap();
+        assert!(contains_subtraction(expression));
+        assert!(mux_depth(expression) <= 5);
+    }
+}
+
+#[test]
+fn native_compile_lowers_runtime_countbits_for_binary_controls() {
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] value, output logic [31:0] zeros, binary); assign zeros = $countbits(value, 1'b0); assign binary = $countbits(value, 1'b0, 1'b1); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
+
+    assert!(matches!(
+        assignments[0].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Binary {
+            op: SlangBinaryOp::Sub,
+            ..
+        } | SlangExpressionKind::Cast { .. }
+    ));
+    assert!(matches!(
+        assignments[1].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Constant(_) | SlangExpressionKind::Cast { .. }
+    ));
+}
+
+#[test]
+fn runtime_isunknown_fails_with_profile_diagnostic() {
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] value, output logic unknown); assign unknown = $isunknown(value); endmodule\n",
+    );
+    let error = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires runtime X/Z observability")
+    );
+}
+
+#[test]
+fn native_compile_lowers_lossless_extended_equalities() {
+    fn contains_binary(expression: SlangExpression<'_>, expected: SlangBinaryOp) -> bool {
+        match expression.kind().unwrap() {
+            SlangExpressionKind::Binary { op, left, right } => {
+                op == expected
+                    || contains_binary(left, expected)
+                    || contains_binary(right, expected)
+            }
+            SlangExpressionKind::Cast { value, .. }
+            | SlangExpressionKind::Extract { value, .. } => contains_binary(value, expected),
+            _ => false,
+        }
+    }
+
+    let source = NativeTestSource::new(
+        "module top(input bit [3:0] a, b, output logic exact, different, masked, masked_different); assign exact = a === b; assign different = a !== b; assign masked = a ==? 4'b1x0z; assign masked_different = a !=? 4'b0z1x; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let expressions = module
+        .assigns()
+        .map(|assignment| assignment.rhs().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(contains_binary(expressions[0], SlangBinaryOp::Eq));
+    assert!(contains_binary(expressions[1], SlangBinaryOp::Ne));
+    assert!(contains_binary(expressions[2], SlangBinaryOp::Eq));
+    assert!(contains_binary(expressions[3], SlangBinaryOp::Ne));
+}
+
+#[test]
+fn runtime_four_state_case_equality_fails_explicitly() {
+    let source = NativeTestSource::new(
+        "module top(input logic [3:0] a, b, output logic exact); assign exact = a === b; endmodule\n",
+    );
+    let error = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires runtime X/Z observability")
+    );
 }
 
 #[test]
@@ -387,7 +623,7 @@ fn native_compile_inlines_early_function_returns() {
 }
 
 #[test]
-fn native_compile_inlines_function_returns_from_unrolled_loops() {
+fn native_compile_inlines_function_returns_from_cyclic_loops() {
     let source = NativeTestSource::new(
         "module top(input logic [3:0] value, output logic [1:0] y); function automatic logic [1:0] first_set(input logic [3:0] value); for (int i = 0; i < 4; i++) if (value[i]) return i; endfunction assign y = first_set(value); endmodule\n",
     );
@@ -395,8 +631,10 @@ fn native_compile_inlines_function_returns_from_unrolled_loops() {
     let module = first_module(&compilation);
 
     assert_eq!(module.procedures().len(), 1);
-    assert_eq!(module.nets().len(), 2);
-    assert!(procedure_effects(module.procedures().next().unwrap()).len() >= 6);
+    assert_eq!(module.nets().len(), 3);
+    let procedure = module.procedures().next().unwrap();
+    assert_eq!(procedure.loop_regions().len(), 1);
+    assert!(procedure_effects(procedure).len() >= 3);
 }
 
 #[test]
@@ -486,6 +724,131 @@ fn native_compile_inlines_synthesizable_tasks() {
             .any(|name| name.contains("_copy_"))
     );
     assert!(procedure_effects(module.procedures().next().unwrap()).len() >= 3);
+}
+
+#[test]
+fn native_compile_preserves_exact_ref_argument_aliasing() {
+    let source = NativeTestSource::new(
+        "module top(input logic [3:0] value, output logic [3:0] y); task automatic mutate(ref logic [3:0] first, ref logic [3:0] second); first = 4'hc; second = first ^ 4'h3; endtask always_comb begin y = value; mutate(y, y); end endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let effects = procedure_effects(module.procedures().next().unwrap());
+
+    assert_eq!(effects.len(), 3);
+    assert!(is_signal(effects[1].lhs().unwrap(), "y"));
+    assert!(is_signal(effects[2].lhs().unwrap(), "y"));
+    assert!(matches!(
+        effects[2].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Binary {
+            op: SlangBinaryOp::BitXor,
+            left,
+            ..
+        } if is_signal(left, "y")
+    ));
+    assert!(
+        module
+            .nets()
+            .filter_map(|net| net.name().ok())
+            .all(|name| !name.contains("_mutate_first") && !name.contains("_mutate_second"))
+    );
+}
+
+#[test]
+fn native_compile_freezes_dynamic_ref_selectors_at_call_entry() {
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] value [0:3], input logic [1:0] index, output logic [7:0] y [0:3], output logic [1:0] next); task automatic update(ref logic [7:0] item, ref logic [1:0] selector); selector = selector + 2'd1; item = 8'ha5; endtask logic [7:0] working [0:3]; logic [1:0] chosen; always_comb begin working = value; chosen = index; update(working[chosen], chosen); y = working; next = chosen; end endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let selector_name = module
+        .nets()
+        .find_map(|net| {
+            let name = net.name().ok()?;
+            name.contains("_item_ref_selector")
+                .then(|| (name.to_string(), net.is_process_local()))
+        })
+        .expect("dynamic ref argument should snapshot its selector");
+    assert!(selector_name.1);
+
+    let effects = procedure_effects(module.procedures().next().unwrap());
+    let dynamic_lhs = effects
+        .iter()
+        .find_map(|effect| match effect.lhs().ok()?.kind().ok()? {
+            SlangExpressionKind::DynamicExtract {
+                offset, width: 8, ..
+            } => Some(offset),
+            _ => None,
+        })
+        .expect("ref assignment should retain a dynamic target");
+    assert!(is_signal(dynamic_lhs, &selector_name.0));
+    let snapshot = effects
+        .iter()
+        .position(|effect| {
+            effect
+                .lhs()
+                .is_ok_and(|lhs| is_signal(lhs, &selector_name.0))
+        })
+        .expect("selector snapshot assignment should exist");
+    let target_write = effects
+        .iter()
+        .position(|effect| {
+            matches!(
+                effect.lhs().and_then(SlangExpression::kind),
+                Ok(SlangExpressionKind::DynamicExtract { width: 8, .. })
+            )
+        })
+        .expect("dynamic ref target write should exist");
+    assert!(snapshot < target_write);
+}
+
+#[test]
+fn native_compile_rejects_packed_select_ref_actuals() {
+    let source = NativeTestSource::new(
+        "module top(input logic [3:0] value, input logic [1:0] index, output logic [3:0] y); task automatic update(ref logic item); item = ~item; endtask always_comb begin y = value; update(y[index]); end endmodule\n",
+    );
+    let SlangError::Diagnostics(diagnostics) = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions::default(),
+    )
+    .expect_err("packed select ref actual must fail language legality") else {
+        panic!("frontend error did not preserve structured diagnostics");
+    };
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == SlangDiagnosticSeverity::Error
+            && diagnostic
+                .message
+                .contains("invalid expression for pass by reference")
+    }));
+}
+
+#[test]
+fn native_compile_inlines_value_returning_functions_with_ref_arguments() {
+    let source = NativeTestSource::new(
+        "module top(input logic [3:0] value, output logic [3:0] result, output logic [3:0] updated); function automatic logic [3:0] bump(ref logic [3:0] target); target = target + 4'd1; return target; endfunction logic [3:0] working; always_comb begin working = value; result = bump(working); updated = working; end endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let effects = procedure_effects(module.procedures().next().unwrap());
+
+    assert!(effects.iter().any(|effect| {
+        is_signal(effect.lhs().unwrap(), "working")
+            && matches!(
+                effect.rhs().unwrap().kind().unwrap(),
+                SlangExpressionKind::Binary {
+                    op: SlangBinaryOp::Add,
+                    left,
+                    ..
+                } if is_signal(left, "working")
+            )
+    }));
+    assert!(
+        module
+            .nets()
+            .filter_map(|net| net.name().ok())
+            .all(|name| !name.contains("_bump_target"))
+    );
 }
 
 #[test]

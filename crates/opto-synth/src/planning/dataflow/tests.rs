@@ -182,6 +182,75 @@ fn resolves_exact_static_vector_aliases_before_region_freeze() {
 }
 
 #[test]
+fn preserves_tri_state_net_reads_as_physical_boundaries() {
+    let mut module = word::WordModule::new("tri_state_feedback");
+    let source = word::SourceSpan::default();
+    let bit = word::WordType::new(1, false, LogicStateKind::FourState).unwrap();
+    let data = module
+        .add_port("data", word::PortDirection::Input, bit, source.clone())
+        .unwrap();
+    let enable = module
+        .add_port("enable", word::PortDirection::Input, bit, source.clone())
+        .unwrap();
+    let pad = module
+        .add_port("pad", word::PortDirection::Inout, bit, source.clone())
+        .unwrap();
+    let output = module
+        .add_port("observed", word::PortDirection::Output, bit, source.clone())
+        .unwrap();
+    let data = module
+        .read_signal(module.port(data).unwrap().signal, source.clone())
+        .unwrap();
+    let enable = module
+        .read_signal(module.port(enable).unwrap().signal, source.clone())
+        .unwrap();
+    let pad = module.port(pad).unwrap().signal;
+    module
+        .set_signal_resolution(pad, word::SignalResolution::TriState)
+        .unwrap();
+    let driver = module
+        .tri_state(
+            data,
+            word::Enable {
+                value: enable,
+                active_high: true,
+            },
+            source.clone(),
+        )
+        .unwrap();
+    module
+        .connect(word::LValue::signal(pad), driver, source.clone())
+        .unwrap();
+    let pad_read = module.read_signal(pad, source.clone()).unwrap();
+    let observed = module
+        .unary(word::UnaryOp::BitNot, pad_read, source.clone())
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(module.port(output).unwrap().signal),
+            observed,
+            source,
+        )
+        .unwrap();
+
+    optimize_combinational_dataflow(&mut module).unwrap();
+
+    let word::ValueKind::Operation(observed) = module.value(observed).unwrap().kind else {
+        panic!("observed value must remain operation-backed");
+    };
+    assert!(matches!(
+        module.operation(observed).unwrap().kind,
+        word::OpKind::Unary { arg, .. } if arg == pad_read
+    ));
+    assert!(
+        module
+            .connects()
+            .iter()
+            .any(|connect| connect.target.signal == pad && connect.value == driver)
+    );
+}
+
+#[test]
 fn exact_vector_aliases_reject_reverse_and_multiple_drivers() {
     let mut module = word::WordModule::new("top");
     let wide = word::WordType::bits(4).unwrap();

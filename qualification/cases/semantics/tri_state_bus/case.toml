@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "semantics-tri-state-bus"
+kind = "regression"
+covers = [
+  "Complementary tri-state drivers resolve an internal bus without contention or an undriven state.",
+  "Active-high and active-low data/enable paths remain equivalent after Liberty tri-state-cell binding.",
+]
+category = "semantics"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 4
+min_cells = 6

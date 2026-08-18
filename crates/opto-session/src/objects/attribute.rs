@@ -277,6 +277,7 @@ fn direction_value(direction: Direction) -> &'static str {
         Direction::Input => "in",
         Direction::Output => "out",
         Direction::Inout => "inout",
+        Direction::Ref => "ref",
     }
 }
 

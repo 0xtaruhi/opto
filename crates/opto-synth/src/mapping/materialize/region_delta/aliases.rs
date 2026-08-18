@@ -42,11 +42,16 @@ impl WordMappedSignals {
                 "mapped substrate observations have inconsistent lengths",
             ));
         }
+        let mut facts = word::KnownBitsAnalysis::new(module);
         let mut signals = BTreeMap::new();
         for (value, net) in values.iter().copied().zip(nets.iter().copied()) {
-            let signal = match net {
-                Some(net) => MappedValueSignal::Net(net),
-                None => MappedValueSignal::Constant(scalar_constant(module, value)?),
+            let signal = match facts.bit(module, value, 0) {
+                word::KnownBit::Zero => MappedValueSignal::Constant(false),
+                word::KnownBit::One => MappedValueSignal::Constant(true),
+                word::KnownBit::Unknown => match net {
+                    Some(net) => MappedValueSignal::Net(net),
+                    None => MappedValueSignal::Constant(scalar_constant(module, value)?),
+                },
             };
             if signals
                 .insert(value, signal)

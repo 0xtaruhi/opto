@@ -45,6 +45,25 @@ behavior reports an explicit error.
 change deterministic budgets, but they do not select a different
 implementation architecture.
 
+### HDL support claims
+
+SystemVerilog support is stated against a versioned Opto ASIC synthesis
+profile, never as an unqualified percentage of the complete language grammar
+or an upstream repository's file count. A reviewed feature or independently
+observable design unit is classified as supported and proved, supported but
+target-dependent, intentionally rejected, invalid or non-hardware, or a known
+capability gap. The exact required inventory and its evidence are hashed by the
+qualification baseline. [RFC 0012](rfcs/0012-synthesizable-systemverilog-profile.md)
+records the proposed profile design and rollout; its proposed status does not
+claim that the pending feature inventory is implemented.
+
+Language acceptance and target realization are separate contracts. The HDL
+and synthesis frontend may publish a valid technology-independent memory,
+sequential, resolved-net, or bidirectional interface whose implementation
+requires an exactly compatible Liberty macro or cell. Absence of that target
+resource produces an explicit planning or mapping diagnostic rather than being
+reported as a syntax failure or triggering an alternate implementation path.
+
 ## Non-Negotiable Rules
 
 - There is no fallback, legacy, shadow, or environment-selected synthesis path.
@@ -276,22 +295,250 @@ The frontend publishes one `RtlModule` containing structural Word IR and sealed
 Proc IR. Each procedure follows one explicit lowering pipeline:
 
 ```text
-Proc CFG
+Slang procedural tree
+  -> native semantic adapter
+  -> owned transient Proc graph
+       (procedural expressions + activation locals + ordinary CFG backedges)
+  -> structural validation and LoopRegion validation
+  -> CFG loop-state promotion and live-out placement
+  -> deterministic boundedness proof certificate
+  -> certified loop elimination
+  -> path-sensitive exact-local specialization and dead-local-effect removal
+  -> activation-local publication as typed process-local signals
+  -> sealed acyclic ProcModule
   -> CFG canonicalization
-  -> per-target sparse state propagation
+  -> joint source-order state propagation for module and process-local signals
   -> typed event-aware reset/enable extraction
   -> canonical Predicate DAG
+  -> mandatory process-local removal
   -> Word IR
   -> validated Word IR
 ```
 
-CFG canonicalization removes unreachable blocks, folds constant decisions,
-threads empty jumps, coalesces equal successors, creates a virtual common exit,
-and computes topological, dominator, and post-dominator structure. Unsupported
-procedural loops are diagnosed explicitly. State propagation is per target: an
-effect that changes another signal cannot manufacture a mux or guard for the
-target being lowered. Sensitivity events remain typed controls instead of being
+The final `ProcModule` contract is acyclic. Its validator owns that invariant;
+downstream synthesis does not serve as the first cycle check. The construction
+core is shared with a separate, non-persistent transient graph whose value
+domain is `ProcExprId` and whose assignment domain includes `ProcLocalId`.
+Transient local reads are place reads at their CFG use sites rather than
+referentially transparent module values. Loop syntax remains metadata:
+ordinary edges carry control semantics, while validated `LoopRegion` records
+header, body entry, latch, exit, lexical parent, and condition placement.
+
+The Rust boundedness analyzer is the only constructor of an opaque proof
+certificate. A certificate borrows its exact semantic graph and referenced
+Word module and records the region, proof method, explored-state count, and
+maximum header visits. Ownership and lifetimes prevent consumption against a
+different graph without a debug-format or serialization fingerprint. The
+eliminator requires innermost-first order, clones the natural region, and
+redirects only the final certified-unreachable backedge. After loop analysis,
+activation locals are published as explicitly typed `SignalKind::ProcessLocal`
+signals. The existing procedure normalizer then versions those values jointly
+with module signals, so a local capture cannot move across an intervening
+blocking assignment. The process-local signals are mandatory transient state
+and are removed before normalized Word IR leaves the synthesis frontend.
+Exact-state enumeration is implemented as the first abstract domain;
+module-level runtime values fork control
+conservatively, repeated reachable local states reject the proof, and all work
+uses deterministic limits. The source-profile limit is expanded transient
+block count; state and transfer-step guards are implementation protection and
+their exhaustion is an analysis capability gap rather than a language-profile
+boundary. Before state traversal, the analyzer
+removes the declared latch-to-header edge and requires the remaining natural
+region to be acyclic; identical states reaching a CFG join are therefore
+merged without being confused with an undeclared internal cycle.
+
+Persistent signal-backed variables enter the transient graph without an AST-
+side induction-variable classification. Before proof, Rust intersects blocking
+signal writes with signal reads in each top-level natural region, promotes the
+resulting recurrence state to `ProcLocalId`, and rewrites nested regions to use
+the same local. Copy-in values come from unique CFG reaching definitions when
+available, otherwise from the visible signal value. Copy-back is emitted only
+for state observed outside the natural region or through a structural module
+root. This pass owns recurrence discovery, entry-value flow, and live-out
+policy; the Slang adapter retains only lexical local allocation for `for`
+declarations and `foreach` indices.
+
+When distinct procedures use the same otherwise unobserved module-scope
+variable solely as classic loop induction state, each procedure receives an
+independent activation local. Reads after that procedure's loop retain its
+local final value, while no persistent multi-driver copy-back is created.
+
+Transient procedures own explicit block-ID lists rather than the final IR's
+contiguous block ranges. Loop elimination can therefore retain iteration zero,
+append only additional natural-loop copies, and update only the affected
+procedure and loop-region table. Unrelated procedures and block IDs remain
+stable. The complete graph is validated once when the combined loop pipeline
+finishes; an independently exposed proof operation remains read-only and
+cannot trigger a whole-module clone.
+
+After the final backedge is removed, a bounded exact-state traversal
+specializes local-dependent expressions separately at each reachable CFG
+occurrence. Static loop addresses and conditions therefore become constants
+without folding a runtime-dependent branch. Local assignments with no
+remaining reachable read are removed before process-local publication;
+exact-infeasible clones do not keep otherwise dead activation state alive.
+Final publication materializes only the expression closure referenced by
+exact-reachable blocks. This is required for memory reads: an unreachable
+owned read must not create a physical read port merely because its old
+expression remains in the transient arena after specialization.
+
+The Slang adapter publishes every nontrivial `for`, `repeat`, `foreach`,
+`while`, `do-while`, and `forever` loop through this transient cyclic path.
+The source body is lowered exactly once. Syntax determines only graph shape:
+pre-test loops branch in the header, post-test loops branch in the latch,
+`repeat` snapshots its count at entry, and `foreach` carries an ordinal local
+that is translated to declared indices. `break` targets the region exit,
+`continue` targets the common continue funnel, and return and lexical-disable
+predicates are part of the loop continuation semantics. Nested regions retain
+their lexical parent. There is no native iteration interpreter, trace
+materializer, `_broken`/`_continued` flag protocol, or second boundedness
+implementation.
+
+The native procedure builder owns a temporary block, edge, terminator, local,
+expression, and region arena and does not write the published FFI
+representation while source lowering is in progress. It may remove wholly
+unreachable source fragments, but a reachable loop whose structural exit is
+unreachable is rejected rather than silently losing its region record. The
+Rust HDL boundary imports the resulting graph without interpreting loop
+syntax, proves and eliminates innermost regions before their parents, and then
+requires an acyclic graph before local substitution.
+
+Exact enumeration models SystemVerilog widths, signedness, truncation, casts,
+blocking local updates, and branch forks. Known-bit extrema conservatively
+prove relational predicates that hold across the complete finite type domain,
+including termination at the maximum of a runtime signed or unsigned bound.
+Other runtime module values remain unknown unless Boolean short-circuit
+information decides a path. A finite proof may
+therefore depend on exact local induction state while allowing runtime inputs
+to cause an earlier exit. A state that reaches the header twice, a `continue`
+path with no progress, an undeclared internal cycle, or a runtime-only exit
+without a finite local bound fails explicitly. Runtime `repeat` uses both its
+captured count and the finite type-domain bound; negative signed counts enter
+no iteration. The source-profile boundary is at most 1,048,576 transient
+blocks after expansion, so the permitted header visits are derived from the
+actual natural-loop size. Analysis guards are reported separately as
+capability gaps. Neither category depends on host memory, time, or scheduling.
+
+`for` may omit initializer, condition, or step clauses. Initializers and steps
+remain ordered procedural effects, and `continue` reaches the step path.
+Conditionless `for` and `forever` require an exit that the same graph analysis
+can prove. Classic module-scope induction variables are promoted to fresh
+activation locals from their CFG reaching definitions. Copy-back occurs only
+when the value is live later in the process, in another non-peer process or
+continuous expression, at an instance connection, or through an output/inout
+port. Independent classic induction peers use the isolation rule above.
+Nested loops explicitly bind outer induction state so inner updates participate
+in the outer proof.
+
+After elimination, exact procedural expressions are folded before Word
+materialization. Constant branches are converted to jumps and newly
+unreachable blocks are omitted. Constant dynamic target offsets become static
+bit ranges. These canonicalizations are semantically required for downstream
+event/reset and memory recognition; for example, a reset loop over a flattened
+register bank publishes disjoint static reset slices while retaining a dynamic
+runtime write port.
+A lexical `disable` of an active named sequential block
+or of the current inlined task activation uses the same acyclic completion
+model: one activation-local predicate guards the remainder of that scope and,
+when an outer scope is exited from a loop body, the loop continuation
+predicate. Task argument copy-out remains after the task scope exit.
+Hierarchical, cross-process, and cross-activation task disable are diagnosed
+explicitly instead of being approximated. State
+propagation is per target: an effect that changes another signal cannot
+manufacture a mux or guard for the target being lowered. Sensitivity events
+remain typed controls instead of being
 rediscovered from an arbitrary Boolean expression.
+
+A scalar `iff` qualifier on a single positive- or negative-edge event becomes
+an entry guard on the acyclic procedure CFG. With one qualified clock and
+unqualified events, the active levels of the unqualified events bypass that
+guard; reset-template validation must then prove that those events are exact
+asynchronous controls. Normalization therefore sees the same typed clock,
+reset, and conditional hold as explicit control flow and can infer an ordinary
+register enable. Compile-time true qualifiers canonicalize to unqualified
+events and compile-time false events are removed before CFG construction. The
+guaranteed post-edge signal level similarly proves direct or inverted
+self-qualifiers true or false; an empty resulting event list is rejected.
+Multiple independently runtime-qualified events retain event-identity
+semantics and are not merged into one shared guard, except that opposite edges
+of the same scalar signal are distinguished exactly by the post-edge clock
+level and may carry independent qualifiers.
+
+Subroutine `ref` arguments are also eliminated before Proc publication. An
+inlined formal is a scoped binding to the actual canonical writable place, so
+formals that share one actual observe blocking writes immediately. Dynamic
+unpacked-array element aliases snapshot their flattened selector into a
+process-local value at call entry. Automatic-body formal clones resolve through
+their common originating syntax identity; no name-based alias lookup, copy-out
+approximation, or source-level reference node survives into Proc or Word IR.
+This contract applies to tasks and void or value-returning functions.
+
+Module `ref` ports and `ref` modport members retain a typed `Ref` direction
+only in definition-local Word IR. They are not resolved `inout` nets. Linked
+RTL elaboration binds the child port signal directly to the parent variable
+actual before cloning structural values or Proc effects. Whole variables and
+static flattened members reuse the exact parent signal range; runtime-selected
+unpacked-array actuals retain their canonical dynamic offset, so child reads
+become extracts and child writes compose into the same dynamic target. The
+occurrence remap is applied to both Word values and Proc targets before
+synthesis, and no reference port survives in the linked root. A root `ref`
+port or a hierarchy-preservation directive around a reference-port instance is
+rejected because it has no enclosing variable binding at that boundary.
+
+Side-effecting procedural expressions lower through an expression prelude that
+is part of the enclosing acyclic Proc CFG. A blocking or compound assignment
+expression first snapshots any dynamic target address, evaluates and converts
+its right-hand side into a process-local result, writes the target from that
+result, and returns the same result. Prefix and postfix `++` / `--` use the same
+address snapshot and separately materialize the specified new or old result.
+This prevents a later sibling expression from changing the earlier
+expression's value. Conditional-expression branches
+own separate prelude fragments, and the right operand of `&&` or `||` is placed
+only on the reachable CFG edge; side effects are therefore neither hoisted out
+of `?:` nor executed across a short-circuit boundary. Timing-controlled and
+nonblocking assignments remain statements rather than value-producing
+expressions.
+
+Simple, structured, and replicated assignment-pattern elements are evaluated
+in source order into ordinary expression values. Only after evaluation does
+lowering reorder those values into the canonical unpacked-array storage order;
+packed structures retain declaration order. Replication repeats evaluation as
+specified rather than cloning one previously evaluated value. Expansion is
+deterministically limited to 65,536 elements.
+
+Pattern conditions use that same prelude-backed CFG contract. A structure
+pattern recursively slices the canonical synthesis aggregate and builds one
+predicate from constant, wildcard, variable, structure, and tagged-union
+fields. Packed and unpacked tagged unions share one storage contract: an upper
+discriminant, care-free padding, and the active payload in the low bits. The
+discriminant width is the minimum number of bits required for every declared
+member, and nested tagged payloads recursively use the same layout. A pattern
+variable is a scoped binding to a process-local snapshot taken when its pattern
+is evaluated; it is not an alias of the source expression. Subsequent `&&&`
+conditions and a pattern-case item filter are reachable only after the earlier
+predicate succeeds. Pattern-case selectors are also snapshotted once before
+source-ordered priority dispatch, so filter side effects cannot redirect later
+items. No pattern object, tagged value, or binding survives into Proc or Word
+IR. Exact runtime X/Z matching remains an explicit profile gap.
+
+Validated UDP tables are likewise eliminated before Word publication.
+Binary-reachable combinational rows become bounded predicates in source order;
+wildcard rows share the ordinary Boolean network, while uncovered and `x`
+output rows remain care-free. Level-sensitive sequential rows become guarded
+`CombinationalOrLatch` assignments, with `-` and unmatched rows retaining
+state. For edge-sensitive tables, binary-reachable `r`, `p`, and `(01)`
+transitions become positive-edge events; `f`, `n`, and `(10)` become
+negative-edge events; and `*` can request both. Hold-only transitions do not
+create hardware events. One transition input may be proved as the unique data
+clock because its reachable rows produce both binary states. Distinct
+transition inputs are then admitted only when every such input writes one
+fixed binary state; their active post-edge levels remain explicit predicates,
+and ordinary reset-template analysis must prove them as exact asynchronous
+controls. A table with no unique data clock or with multiple data-update event
+inputs remains explicitly unsupported instead of being approximated. A mixed
+level row becomes an asynchronous control only when its binary predicate
+constrains exactly one input level, is independent of current state, and writes
+a constant state; other mixed level-sensitive updates remain unsupported.
 
 Linked elaboration completes the SSA value domain before regional ownership is
 established. An omitted input of an expanded definition receives a type-correct
@@ -303,6 +550,40 @@ binding as part of its structural interface. After procedures and resolved nets
 are lowered, otherwise-undefined bits of source-observable output ports are
 sealed with the same type-correct completion rule. This step does not add
 drivers to missing internal or generated logic.
+
+Built-in `and`, `or`, `xor`, `nand`, `nor`, `xnor`, `buf`, and `not` instances
+lower to ordinary structural Word operations. `pullup` and `pulldown` lower to
+one-bit constant network drivers; an explicit strength annotation is still
+rejected. Verilog switch-level primitives (`cmos`, `nmos`, `pmos`, their
+resistive variants, and the `tran` families) remain outside the synthesis
+profile because transistor strength and bidirectional pass-network semantics
+do not have an exact target-independent Boolean lowering.
+
+High-impedance source drivers enter Word IR as an explicit `TriState` operation
+containing data and a polarized scalar enable; `Z` is not smuggled through an
+ordinary mux. Wired-AND and wired-OR normalization consume that operation by
+substituting their exact disabled-driver identity before Boolean planning.
+Ordinary resolved `wire` / `tri` nets and public `inout` ports retain the typed
+resolution boundary. Frontend normalization scalarizes each contribution into
+one `TriState(data, enable)` operation per target bit. The region graph owns the
+data and enable cones but deliberately excludes the physical driver shell, so
+ordinary Boolean lowering cannot reinterpret `Z`. Global materialization keeps
+the resolved target as a shared mapped net and binds every contribution to a
+polarity-compatible Liberty three-state cell. Selection excludes `dont_use`,
+special-purpose, sequential, memory, and structurally incompatible cells, then
+orders compatible choices by normalized area, cell name, and library index.
+Missing active-high or active-low target support is a mapping diagnostic rather
+than a frontend syntax failure.
+
+Observable outputs normally require one physical driver. An output sharing a
+mapped net with an `inout` boundary or a Liberty three-state output instead uses
+resolved connectivity: it must have at least one potential driver and may have
+multiple physical contributors. Top-level `inout` qualification exercises the
+published boundary directly. Resolved-driver CEC uses Yosys `tribuf -formal`
+normalization on both designs, which replaces every `$tribuf` with Boolean
+logic and asserts the binary-domain requirement that at most one contribution
+is enabled. This includes resolved top-level outputs without pretending to
+model the external electrical environment of an `inout` port.
 
 Four-state `X` is the Word representation of a care-free SSA bit, not an early
 choice of Boolean zero. Fixed combinational dataflow supplies value facts in
@@ -414,7 +695,44 @@ design-wide normalization factor.
 For memories, compatible characterized macros and an exact register-bank
 implementation are normal candidates. There is no memory admission gate. An
 unsupported port, mask, collision, clock, or reset contract is reported
-explicitly.
+explicitly. Register-bank feasibility is checked per word: conservative
+address bounds may assign disjoint words to different write clocks, while any
+word reachable from multiple clock domains requires an exact memory macro and
+is never implemented by combining clocks. Exact multi-write-port macro binding
+matches every address, data, enable, mask, edge, and read-timing contract.
+Write clocks may be distinct, or same-clock logical ports may bind separate
+physical ports when their effective enables are conservatively proven mutually
+exclusive. Other same-clock ports are rejected unless the target format can
+represent their priority and collision semantics.
+Widened addresses are narrowed to a macro's physical address width only after
+unsigned range analysis proves the discarded high bits are zero. Timing arcs
+declared on Liberty buses are expanded to their scalar pins before regional
+timing analysis.
+
+First-class memory inference consumes only contiguous leading fixed unpacked
+dimensions. Fully assigned automatic unpacked arrays remain process-local
+temporary signals. Stateful layouts whose unpacked dimensions are separated
+by aggregate fields lower to flattened register state, with unpacked-struct
+fields assigned deterministic declaration-order bitstream offsets. Nested
+member and element selections then use the ordinary canonical signal
+extract/insert path, including composed runtime selectors; no synthetic
+rectangular memory shape or alternate aggregate IR is introduced.
+An unpacked array written by a multi-event process also remains flattened
+register state. This preserves statically bounded whole-array asynchronous
+reset loops together with dynamic clocked element writes: ordinary register
+reset semantics apply to every flattened lane, while dynamic selection uses
+the same extract/insert path. It does not pretend that a resettable register
+bank is a reset-free first-class RAM macro.
+
+A procedure sensitive to both edges of one scalar clock is not classified as
+an asynchronous-reset template. Its state lowers to positive- and
+negative-edge phase banks whose data input is the complete next-state
+function, including synchronous resets and explicit old-state feedback for a
+conditional hold. The current clock level selects the bank written by the most
+recent edge. Each bank has a named internal state boundary, so both operations
+remain owned by the ordinary sequential shell through regional mapping and
+publication. This construction neither ORs edges into a synthetic clock nor
+assumes that a disabled bank already contains the other phase's current value.
 
 ### 4. Optimize And Map Private Regions
 

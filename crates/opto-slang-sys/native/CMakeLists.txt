@@ -35,6 +35,7 @@ add_library(
   opto_slang_bridge.cpp
   opto_slang_lower_support.cpp
   opto_slang_lower_expr.cpp
+  opto_slang_procedure_cfg.cpp
   opto_slang_lower_process.cpp
   opto_slang_lower_hierarchy.cpp
   opto_slang_views.cpp)

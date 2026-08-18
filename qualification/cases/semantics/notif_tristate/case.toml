@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "semantics-notif-tristate"
+kind = "regression"
+covers = ["Complementary notif0 and notif1 drivers preserve inverted data and enable polarity through tri-state resolution."]
+category = "semantics"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = true
+
+[assertions]
+min_ports = 4
+min_cells = 1

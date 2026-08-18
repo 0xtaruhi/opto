@@ -265,6 +265,46 @@ fn speculative_rollback_is_atomic_when_a_memory_port_retains_the_suffix() {
 }
 
 #[test]
+fn speculative_rollback_removes_generated_signals_and_memory_reads() {
+    let mut module = WordModule::new("top");
+    let memory = module
+        .add_memory(
+            "mem",
+            bits(1),
+            NonZeroU32::new(2).unwrap(),
+            SourceSpan::default(),
+        )
+        .unwrap();
+    let address = constant(&mut module, "0");
+    let signal_count = module.signals().len();
+    let value_count = module.values().len();
+    let checkpoint = module.speculation_checkpoint();
+    let data = module
+        .add_generated_wire(bits(1), SourceSpan::default())
+        .unwrap();
+    module
+        .add_memory_read_port(MemoryReadPort {
+            memory,
+            address,
+            data,
+            timing: MemoryReadTiming::Asynchronous,
+            read_during_write: ReadDuringWrite::OldData,
+            source: SourceSpan::default(),
+        })
+        .unwrap();
+    let read = module.read_signal(data, SourceSpan::default()).unwrap();
+
+    module.rollback_speculation(checkpoint).unwrap();
+
+    assert_eq!(module.signals().len(), signal_count);
+    assert_eq!(module.values().len(), value_count);
+    assert!(module.memory_read_ports().is_empty());
+    assert!(module.signal(data).is_none());
+    assert!(module.value(read).is_none());
+    module.validate().unwrap();
+}
+
+#[test]
 fn speculative_rollback_rejects_a_checkpoint_from_another_module() {
     let source = WordModule::new("source");
     let checkpoint = source.speculation_checkpoint();
@@ -707,6 +747,61 @@ fn mux_requires_one_bit_condition_and_matching_branch_types() {
         .mux(cond, wide, zero, SourceSpan::default())
         .unwrap_err();
     assert!(err.to_string().contains("mux branch types differ"));
+}
+
+#[test]
+fn tri_state_preserves_data_type_enable_polarity_and_validation() {
+    let mut module = WordModule::new("top");
+    let data = constant(&mut module, "1010");
+    let enable = constant(&mut module, "1");
+    let driver = module
+        .tri_state(
+            data,
+            Enable {
+                value: enable,
+                active_high: false,
+            },
+            SourceSpan::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        module.value(driver).unwrap().ty,
+        module.value(data).unwrap().ty
+    );
+    assert!(matches!(
+        module
+            .operation(match module.value(driver).unwrap().kind {
+                ValueKind::Operation(operation) => operation,
+                _ => unreachable!(),
+            })
+            .unwrap()
+            .kind,
+        OpKind::TriState {
+            data: stored,
+            enable: Enable {
+                value: stored_enable,
+                active_high: false,
+            },
+        } if stored == data && stored_enable == enable
+    ));
+    module.validate().unwrap();
+
+    let wide_enable = constant(&mut module, "11");
+    let error = module
+        .tri_state(
+            data,
+            Enable {
+                value: wide_enable,
+                active_high: true,
+            },
+            SourceSpan::default(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "tri-state enable must be 1 bit wide, got 2"
+    );
 }
 
 #[test]

@@ -104,7 +104,9 @@ impl RegionalMapper<'_> {
                     .config
                     .source_instances
                     .is_source_instance(state.module, *instance)?,
-                MappedCellSource::Value { .. } | MappedCellSource::Region { .. } => true,
+                MappedCellSource::StructuralValue(_)
+                | MappedCellSource::Value { .. }
+                | MappedCellSource::Region { .. } => true,
             };
             if managed {
                 let cell = Self::implementation_cell(&mapped.netlist, cell_id)?;

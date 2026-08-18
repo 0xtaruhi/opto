@@ -4,6 +4,378 @@
 #include "opto_slang_lower_internal.h"
 
 namespace opto::slang_lower {
+constexpr size_t UDP_TABLE_ROW_LIMIT = 65536;
+constexpr size_t UDP_INPUT_LIMIT = 1024;
+
+struct UdpBinaryPredicate {
+    const OptoSlangExpr* expression = nullptr;
+    bool reachable = true;
+};
+
+struct UdpInputField {
+    std::string_view symbols;
+    bool is_edge = false;
+};
+
+struct UdpBinaryEdges {
+    bool pos = false;
+    bool neg = false;
+};
+
+struct UdpEdgePredicate {
+    UdpBinaryPredicate predicate;
+    size_t event_port = 0;
+    UdpBinaryEdges edges;
+};
+
+struct UdpRowEdge {
+    size_t event_port = 0;
+    UdpBinaryEdges edges;
+};
+
+struct UdpAsyncControl {
+    bool reachable = true;
+    size_t event_port = 0;
+    bool active_high = false;
+};
+
+bool is_udp_edge_symbol(char symbol) {
+    return symbol == '*' || symbol == 'r' || symbol == 'f' || symbol == 'p' || symbol == 'n';
+}
+
+std::vector<UdpInputField> parse_udp_input_fields(
+    const PrimitiveInstanceSymbol& instance, const PrimitiveSymbol::TableEntry& row) {
+    std::vector<UdpInputField> fields;
+    for (size_t offset = 0; offset < row.inputs.size();) {
+        const auto symbol = row.inputs[offset];
+        if (symbol != '(') {
+            fields.push_back({row.inputs.substr(offset, 1), is_udp_edge_symbol(symbol)});
+            ++offset;
+            continue;
+        }
+        if (offset + 3 >= row.inputs.size() || row.inputs[offset + 3] != ')') {
+            throw std::runtime_error(
+                "UDP '" + copy_string(instance.primitiveType.name) +
+                "' has malformed normalized transition field");
+        }
+        fields.push_back({row.inputs.substr(offset + 1, 2), true});
+        offset += 4;
+    }
+    return fields;
+}
+
+bool udp_level_symbol_matches_binary(char symbol, bool value) {
+    switch (symbol) {
+    case '0':
+        return !value;
+    case '1':
+        return value;
+    case '?':
+    case 'b':
+        return true;
+    case 'x':
+        return false;
+    default:
+        return false;
+    }
+}
+
+UdpBinaryEdges lower_udp_binary_edges(
+    const PrimitiveInstanceSymbol& instance, const UdpInputField& field) {
+    if (field.symbols.size() == 1) {
+        switch (field.symbols[0]) {
+        case 'r':
+        case 'p':
+            return {true, false};
+        case 'f':
+        case 'n':
+            return {false, true};
+        case '*':
+            return {true, true};
+        default:
+            throw std::runtime_error(
+                "UDP '" + copy_string(instance.primitiveType.name) +
+                "' has unsupported transition symbol '" + copy_string(field.symbols) + "'");
+        }
+    }
+    if (field.symbols.size() != 2) {
+        throw std::runtime_error(
+            "UDP '" + copy_string(instance.primitiveType.name) +
+            "' has malformed normalized transition field");
+    }
+    return {
+        udp_level_symbol_matches_binary(field.symbols[0], false) &&
+            udp_level_symbol_matches_binary(field.symbols[1], true),
+        udp_level_symbol_matches_binary(field.symbols[0], true) &&
+            udp_level_symbol_matches_binary(field.symbols[1], false),
+    };
+}
+
+UdpRowEdge inspect_udp_row_edge(
+    const PrimitiveInstanceSymbol& instance,
+    const PrimitiveSymbol::TableEntry& row,
+    size_t input_count) {
+    UdpRowEdge result;
+    bool saw_edge = false;
+    const auto fields = parse_udp_input_fields(instance, row);
+    if (fields.size() != input_count) {
+        throw std::runtime_error(
+            "UDP '" + copy_string(instance.primitiveType.name) +
+            "' normalized table row has the wrong input count");
+    }
+    for (size_t index = 0; index < fields.size(); ++index) {
+        if (!fields[index].is_edge) {
+            continue;
+        }
+        if (saw_edge) {
+            throw std::runtime_error(
+                "UDP '" + copy_string(instance.primitiveType.name) +
+                "' table row has multiple transition inputs");
+        }
+        saw_edge = true;
+        result.event_port = index + 1;
+        result.edges = lower_udp_binary_edges(instance, fields[index]);
+    }
+    if (!saw_edge) {
+        throw std::runtime_error(
+            "edge-sensitive UDP '" + copy_string(instance.primitiveType.name) +
+            "' has a level-sensitive update row");
+    }
+    return result;
+}
+
+UdpAsyncControl inspect_udp_async_control(
+    const PrimitiveInstanceSymbol& instance,
+    const PrimitiveSymbol::TableEntry& row,
+    size_t input_count) {
+    UdpAsyncControl result;
+    if (row.state == 'x') {
+        result.reachable = false;
+        return result;
+    }
+    if (row.state != '?' && row.state != 'b') {
+        throw std::runtime_error(
+            "edge-sensitive UDP '" + copy_string(instance.primitiveType.name) +
+            "' level-sensitive update depends on current state");
+    }
+    const auto fields = parse_udp_input_fields(instance, row);
+    if (fields.size() != input_count) {
+        throw std::runtime_error(
+            "UDP '" + copy_string(instance.primitiveType.name) +
+            "' normalized table row has the wrong input count");
+    }
+    size_t constrained_inputs = 0;
+    for (size_t index = 0; index < fields.size(); ++index) {
+        const auto& field = fields[index];
+        if (field.is_edge || field.symbols.size() != 1) {
+            throw std::runtime_error(
+                "edge-sensitive UDP '" + copy_string(instance.primitiveType.name) +
+                "' async-control row contains a transition field");
+        }
+        switch (field.symbols[0]) {
+        case 'x':
+            result.reachable = false;
+            return result;
+        case '?':
+        case 'b':
+            break;
+        case '0':
+        case '1':
+            ++constrained_inputs;
+            result.event_port = index + 1;
+            result.active_high = field.symbols[0] == '1';
+            break;
+        default:
+            throw std::runtime_error(
+                "edge-sensitive UDP '" + copy_string(instance.primitiveType.name) +
+                "' has an unsupported async-control level symbol");
+        }
+    }
+    if (constrained_inputs != 1) {
+        throw std::runtime_error(
+            "edge-sensitive UDP '" + copy_string(instance.primitiveType.name) +
+            "' level-sensitive update is not one asynchronous control");
+    }
+    return result;
+}
+
+void append_udp_binary_match(
+    ModuleLoweringContext& design,
+    UdpBinaryPredicate& predicate,
+    char symbol,
+    const OptoSlangExpr* value,
+    const Expression& source,
+    std::string_view primitive) {
+    const OptoSlangExpr* term = nullptr;
+    switch (symbol) {
+    case '0':
+        term = make_unary_expr(design, OPTO_SLANG_UNARY_BIT_NOT, value, source);
+        break;
+    case '1':
+        term = value;
+        break;
+    case '?':
+    case 'b':
+        return;
+    case 'x':
+        predicate.reachable = false;
+        return;
+    default:
+        throw std::runtime_error(
+            "UDP '" + copy_string(primitive) + "' has unsupported level symbol '" +
+            std::string(1, symbol) + "'");
+    }
+    predicate.expression =
+        predicate.expression
+            ? make_binary_expr(
+                  design,
+                  OPTO_SLANG_BINARY_BIT_AND,
+                  predicate.expression,
+                  term,
+                  source)
+            : term;
+}
+
+UdpBinaryPredicate lower_udp_level_predicate(
+    ModuleLoweringContext& design,
+    const PrimitiveInstanceSymbol& instance,
+    std::span<const Expression* const> ports,
+    const PrimitiveSymbol::TableEntry& row,
+    const Expression* current_state) {
+    UdpBinaryPredicate predicate;
+    size_t input_index = 1;
+    for (const auto& field : parse_udp_input_fields(instance, row)) {
+        if (input_index >= ports.size()) {
+            throw std::runtime_error(
+                "UDP '" + copy_string(instance.primitiveType.name) +
+                "' table row has too many inputs");
+        }
+        if (field.is_edge || field.symbols.size() != 1) {
+            throw std::runtime_error(
+                "UDP '" + copy_string(instance.primitiveType.name) +
+                "' edge row reached level-sensitive lowering");
+        }
+        const auto& input = require_primitive_port(instance, ports, input_index++);
+        append_udp_binary_match(
+            design,
+            predicate,
+            field.symbols[0],
+            lower_expr(design, input),
+            input,
+            instance.primitiveType.name);
+    }
+    if (input_index != ports.size()) {
+        throw std::runtime_error(
+            "UDP '" + copy_string(instance.primitiveType.name) +
+            "' table row has too few inputs");
+    }
+    if (current_state) {
+        if (!row.state) {
+            throw std::runtime_error(
+                "sequential UDP '" + copy_string(instance.primitiveType.name) +
+                "' table row has no current state");
+        }
+        append_udp_binary_match(
+            design,
+            predicate,
+            row.state,
+            lower_expr(design, *current_state),
+            *current_state,
+            instance.primitiveType.name);
+    } else if (row.state) {
+        throw std::runtime_error(
+            "combinational UDP '" + copy_string(instance.primitiveType.name) +
+            "' table row has a current state");
+    }
+    return predicate;
+}
+
+UdpEdgePredicate lower_udp_edge_predicate(
+    ModuleLoweringContext& design,
+    const PrimitiveInstanceSymbol& instance,
+    std::span<const Expression* const> ports,
+    const PrimitiveSymbol::TableEntry& row,
+    const Expression& current_state,
+    std::optional<size_t> implicit_event_port) {
+    UdpEdgePredicate lowered;
+    const auto inspected = inspect_udp_row_edge(instance, row, ports.size() - 1);
+    lowered.event_port = inspected.event_port;
+    lowered.edges = inspected.edges;
+    size_t input_index = 1;
+    for (const auto& field : parse_udp_input_fields(instance, row)) {
+        if (input_index >= ports.size()) {
+            throw std::runtime_error(
+                "UDP '" + copy_string(instance.primitiveType.name) +
+                "' table row has too many inputs");
+        }
+        const auto& input = require_primitive_port(instance, ports, input_index);
+        auto* value = lower_expr(design, input);
+        if (!field.is_edge) {
+            if (field.symbols.size() != 1) {
+                throw std::runtime_error(
+                    "UDP '" + copy_string(instance.primitiveType.name) +
+                    "' has malformed normalized level field");
+            }
+            append_udp_binary_match(
+                design,
+                lowered.predicate,
+                field.symbols[0],
+                value,
+                input,
+                instance.primitiveType.name);
+        } else {
+            if (!lowered.edges.pos && !lowered.edges.neg) {
+                lowered.predicate.reachable = false;
+            } else if (lowered.edges.pos != lowered.edges.neg &&
+                       (!implicit_event_port || lowered.event_port != *implicit_event_port)) {
+                append_udp_binary_match(
+                    design,
+                    lowered.predicate,
+                    lowered.edges.pos ? '1' : '0',
+                    value,
+                    input,
+                    instance.primitiveType.name);
+            }
+        }
+        ++input_index;
+    }
+    if (input_index != ports.size()) {
+        throw std::runtime_error(
+            "UDP '" + copy_string(instance.primitiveType.name) +
+            "' table row has too few inputs");
+    }
+    if (!row.state) {
+        throw std::runtime_error(
+            "sequential UDP '" + copy_string(instance.primitiveType.name) +
+            "' table row has no current state");
+    }
+    append_udp_binary_match(
+        design,
+        lowered.predicate,
+        row.state,
+        lower_expr(design, current_state),
+        current_state,
+        instance.primitiveType.name);
+    return lowered;
+}
+
+OptoSlangExpr* make_udp_logic_value(
+    ModuleLoweringContext& design, char value, const Expression& source) {
+    if (value == '0' || value == '1') {
+        return make_unsigned_constant_expr(design, value == '1' ? 1 : 0, 1, source);
+    }
+    if (value != 'x') {
+        throw std::runtime_error(
+            "UDP table has unsupported next-state symbol '" + std::string(1, value) + "'");
+    }
+    OptoSlangExpr unknown;
+    unknown.kind = OPTO_SLANG_EXPR_CONSTANT;
+    unknown.constant_has_width = true;
+    unknown.constant_width = 1;
+    unknown.constant_bits = "x";
+    return make_expr(design, std::move(unknown), source);
+}
+
 
 OptoSlangAttributeData lower_attribute(
     ModuleLoweringContext& design,
@@ -107,7 +479,7 @@ void add_value_as_net(
     existing.insert(name);
     OptoSlangNetData net{
         std::move(name),
-        checked_width(symbol.getType().getBitstreamWidth(), symbol.name),
+        checked_width(lowered_type_width(symbol.getType()), symbol.name),
         symbol.getType().isSigned(),
         unpacked_element_is_signed(symbol.getType()),
         false,
@@ -192,6 +564,248 @@ void lower_primitive_instance(
             });
     };
 
+    if (instance.primitiveType.primitiveKind == PrimitiveSymbol::UserDefined) {
+        const auto& udp = instance.primitiveType;
+        require_count(2, udp.ports.size());
+        if (udp.ports.size() - 1 > UDP_INPUT_LIMIT) {
+            throw std::runtime_error(
+                "UDP '" + primitive + "' exceeds the deterministic input limit of " +
+                std::to_string(UDP_INPUT_LIMIT));
+        }
+        if (udp.table.size() > UDP_TABLE_ROW_LIMIT) {
+            throw std::runtime_error(
+                "UDP '" + primitive + "' exceeds the deterministic table-row limit of " +
+                std::to_string(UDP_TABLE_ROW_LIMIT));
+        }
+
+        const auto& output = require_primitive_port(instance, ports, 0);
+        const Expression* output_lvalue = &output;
+        if (output.kind == ExpressionKind::Assignment) {
+            output_lvalue = &output.as<AssignmentExpression>().left();
+        }
+        if (udp.isSequential) {
+            if (udp.initVal) {
+                throw std::runtime_error(
+                    "initial state on sequential UDP '" + primitive +
+                    "' is outside the explicit-reset synthesis profile");
+            }
+            if (udp.isEdgeSensitive) {
+                std::vector<GuardedEffectData> updates;
+                std::vector<OptoSlangEventData> events;
+                std::map<size_t, uint8_t> event_port_outputs;
+                std::vector<std::pair<size_t, OptoSlangEdge>> async_controls;
+                updates.reserve(udp.table.size());
+                for (const auto& row : udp.table) {
+                    if (row.output == '-' || row.output == 'x') {
+                        continue;
+                    }
+                    if (!row.isEdgeSensitive) {
+                        const auto control =
+                            inspect_udp_async_control(instance, row, ports.size() - 1);
+                        if (control.reachable) {
+                            async_controls.emplace_back(
+                                control.event_port,
+                                control.active_high ? OPTO_SLANG_EDGE_POS : OPTO_SLANG_EDGE_NEG);
+                        }
+                        continue;
+                    }
+                    const auto inspected =
+                        inspect_udp_row_edge(instance, row, ports.size() - 1);
+                    if (!inspected.edges.pos && !inspected.edges.neg) {
+                        continue;
+                    }
+                    event_port_outputs[inspected.event_port] |=
+                        row.output == '0' ? uint8_t{1} : uint8_t{2};
+                }
+                if (event_port_outputs.empty()) {
+                    throw std::runtime_error(
+                        "edge-sensitive UDP '" + primitive +
+                        "' has no binary-reachable update row");
+                }
+                std::optional<size_t> primary_event_port;
+                if (event_port_outputs.size() == 1) {
+                    primary_event_port = event_port_outputs.begin()->first;
+                } else {
+                    for (const auto& [port, outputs] : event_port_outputs) {
+                        if (outputs != 3) {
+                            continue;
+                        }
+                        if (primary_event_port) {
+                            throw std::runtime_error(
+                                "edge-sensitive UDP '" + primitive + "' instance '" +
+                                copy_string(instance.name) +
+                                "' has multiple data-update transition inputs");
+                        }
+                        primary_event_port = port;
+                    }
+                    if (!primary_event_port) {
+                        throw std::runtime_error(
+                            "edge-sensitive UDP '" + primitive + "' instance '" +
+                            copy_string(instance.name) +
+                            "' has no unique data-update transition input");
+                    }
+                }
+                std::vector<std::pair<size_t, OptoSlangEdge>> event_keys;
+                auto append_event = [&](size_t port, OptoSlangEdge edge) {
+                    if (std::ranges::find(event_keys, std::pair{port, edge}) != event_keys.end()) {
+                        return;
+                    }
+                    event_keys.emplace_back(port, edge);
+                    const auto& input = require_primitive_port(instance, ports, port);
+                    events.push_back(
+                        OptoSlangEventData{
+                            edge,
+                            lower_signal_expr(design, input),
+                            source_span(design, input),
+                        });
+                };
+                auto append_row_events = [&](size_t required_port) {
+                    for (const auto& row : udp.table) {
+                        if (!row.isEdgeSensitive || row.output == '-' || row.output == 'x') {
+                            continue;
+                        }
+                        const auto inspected =
+                            inspect_udp_row_edge(instance, row, ports.size() - 1);
+                        if (inspected.event_port != required_port) {
+                            continue;
+                        }
+                        if (inspected.edges.pos) {
+                            append_event(required_port, OPTO_SLANG_EDGE_POS);
+                        }
+                        if (inspected.edges.neg) {
+                            append_event(required_port, OPTO_SLANG_EDGE_NEG);
+                        }
+                    }
+                };
+                append_row_events(*primary_event_port);
+                for (const auto& [port, _] : event_port_outputs) {
+                    if (port != *primary_event_port) {
+                        append_row_events(port);
+                    }
+                }
+                for (const auto& [port, edge] : async_controls) {
+                    append_event(port, edge);
+                }
+                const bool primary_has_pos = std::ranges::find(
+                    event_keys,
+                    std::pair{*primary_event_port, OPTO_SLANG_EDGE_POS}) != event_keys.end();
+                const bool primary_has_neg = std::ranges::find(
+                    event_keys,
+                    std::pair{*primary_event_port, OPTO_SLANG_EDGE_NEG}) != event_keys.end();
+                const auto implicit_event_port = primary_has_pos && primary_has_neg
+                                                     ? std::optional<size_t>{}
+                                                     : primary_event_port;
+                for (const auto& row : udp.table) {
+                    if (row.output == '-' || row.output == 'x') {
+                        continue;
+                    }
+                    UdpBinaryPredicate predicate;
+                    if (row.isEdgeSensitive) {
+                        predicate =
+                            lower_udp_edge_predicate(
+                                design,
+                                instance,
+                                ports,
+                                row,
+                                *output_lvalue,
+                                implicit_event_port)
+                                .predicate;
+                    } else {
+                        const auto control =
+                            inspect_udp_async_control(instance, row, ports.size() - 1);
+                        if (!control.reachable) {
+                            continue;
+                        }
+                        predicate = lower_udp_level_predicate(
+                            design, instance, ports, row, output_lvalue);
+                    }
+                    if (!predicate.reachable) {
+                        continue;
+                    }
+                    updates.push_back(
+                        GuardedEffectData{
+                            predicate.expression,
+                            {
+                                lower_signal_expr(design, *output_lvalue),
+                                make_udp_logic_value(design, row.output, output),
+                                false,
+                                source_span(design, output),
+                            },
+                        });
+                }
+                if (updates.empty()) {
+                    throw std::runtime_error(
+                        "edge-sensitive UDP '" + primitive +
+                        "' has no binary-reachable update row");
+                }
+                module.procedures.push_back(
+                    make_guarded_procedure(
+                        std::move(updates),
+                        OPTO_SLANG_PROCEDURE_FLOP,
+                        std::move(events),
+                        source_span(design, output)));
+                return;
+            }
+            std::vector<GuardedEffectData> updates;
+            updates.reserve(udp.table.size());
+            for (const auto& row : udp.table) {
+                if (row.output == '-') {
+                    continue;
+                }
+                auto predicate =
+                    lower_udp_level_predicate(design, instance, ports, row, output_lvalue);
+                if (!predicate.reachable) {
+                    continue;
+                }
+                updates.push_back(
+                    GuardedEffectData{
+                        predicate.expression,
+                        {
+                            lower_signal_expr(design, *output_lvalue),
+                            make_udp_logic_value(design, row.output, output),
+                            true,
+                            source_span(design, output),
+                        },
+                    });
+            }
+            if (updates.empty()) {
+                throw std::runtime_error(
+                    "sequential UDP '" + primitive + "' has no binary-reachable update row");
+            }
+            module.procedures.push_back(
+                make_guarded_procedure(
+                    std::move(updates),
+                    OPTO_SLANG_PROCEDURE_COMB_OR_LATCH,
+                    {},
+                    source_span(design, output)));
+            return;
+        }
+
+        auto* result = make_udp_logic_value(design, 'x', output);
+
+        for (auto row = udp.table.rbegin(); row != udp.table.rend(); ++row) {
+            if (row->output == 'x') {
+                continue;
+            }
+            if (row->output != '0' && row->output != '1') {
+                throw std::runtime_error(
+                    "combinational UDP '" + primitive + "' has unsupported output symbol '" +
+                    std::string(1, row->output) + "'");
+            }
+
+            auto predicate = lower_udp_level_predicate(design, instance, ports, *row, nullptr);
+            if (!predicate.reachable) {
+                continue;
+            }
+            auto* row_value = make_udp_logic_value(design, row->output, output);
+            result = predicate.expression
+                         ? make_mux_expr(design, predicate.expression, row_value, result, output)
+                         : row_value;
+        }
+        append_assign(0, result);
+        return;
+    }
+
     if (primitive == "buf" || primitive == "not") {
         require_count(2);
         const auto& input = require_primitive_port(instance, ports, ports.size() - 1);
@@ -203,6 +817,19 @@ void lower_primitive_instance(
             }
             append_assign(output_index, result);
         }
+        return;
+    }
+
+    if (primitive == "pullup" || primitive == "pulldown") {
+        require_count(1, 1);
+        const auto& output = require_primitive_port(instance, ports, 0);
+        append_assign(
+            0,
+            make_unsigned_constant_expr(
+                design,
+                primitive == "pullup" ? 1 : 0,
+                1,
+                output));
         return;
     }
 
@@ -231,14 +858,19 @@ void lower_primitive_instance(
         return;
     }
 
-    if (primitive == "bufif0" || primitive == "bufif1") {
+    if (primitive == "bufif0" || primitive == "bufif1" || primitive == "notif0" ||
+        primitive == "notif1") {
         require_count(3, 3);
         const auto& data_expr = require_primitive_port(instance, ports, 1);
         const auto& control_expr = require_primitive_port(instance, ports, 2);
         auto* data = lower_expr(design, data_expr);
+        if (primitive == "notif0" || primitive == "notif1") {
+            data = make_unary_expr(design, OPTO_SLANG_UNARY_BIT_NOT, data, data_expr);
+        }
         auto* control = lower_expr(design, control_expr);
         auto* high_impedance = make_high_impedance_expr(design, control_expr);
-        auto* result = primitive == "bufif1"
+        const bool active_high = primitive == "bufif1" || primitive == "notif1";
+        auto* result = active_high
                            ? make_mux_expr(design, control, data, high_impedance, control_expr)
                            : make_mux_expr(design, control, high_impedance, data, control_expr);
         append_assign(0, result);
@@ -428,7 +1060,7 @@ void lower_body(
                     OptoSlangPortData lowered{
                         std::move(name),
                         lower_direction(signal.direction),
-                        checked_width(type.getBitstreamWidth(), signal.name),
+                        checked_width(lowered_type_width(type), signal.name),
                         type.isSigned(),
                         signal.value->kind == SymbolKind::Net
                             ? net_resolution(signal.value->as<NetSymbol>())
@@ -460,7 +1092,7 @@ void lower_body(
         OptoSlangPortData lowered{
             std::move(name),
             lower_direction(port.direction),
-            checked_width(port.getType().getBitstreamWidth(), port.name),
+            checked_width(lowered_type_width(port.getType()), port.name),
             port.getType().isSigned(),
             port.internalSymbol && port.internalSymbol->kind == SymbolKind::Net
                 ? net_resolution(port.internalSymbol->as<NetSymbol>())
@@ -520,7 +1152,7 @@ void lower_body(
         design.value_names.emplace(net, name);
         OptoSlangNetData lowered{
             std::move(name),
-            checked_width(net->getType().getBitstreamWidth(), net->name),
+            checked_width(lowered_type_width(net->getType()), net->name),
             net->getType().isSigned(),
             unpacked_element_is_signed(net->getType()),
             true,
@@ -539,7 +1171,7 @@ void lower_body(
         design.value_names.emplace(var, name);
         OptoSlangNetData lowered{
             std::move(name),
-            checked_width(var->getType().getBitstreamWidth(), var->name),
+            checked_width(lowered_type_width(var->getType()), var->name),
             var->getType().isSigned(),
             unpacked_element_is_signed(var->getType()),
             var->lifetime == VariableLifetime::Automatic,
@@ -898,6 +1530,21 @@ void opto_slang_collect_modules(
         std::move(driver), std::move(compilation), std::move(jobs));
 }
 
+void set_lowering_failure_source(
+    OptoSlangLoweringFailure& failure,
+    const OptoSlangSnapshot& design,
+    SourceLocation location) {
+    if (!location.valid() || !design.source_manager) {
+        return;
+    }
+    location = design.source_manager->getFullyOriginalLoc(location);
+    failure.file = design.source_manager->getFullPath(location.buffer()).string();
+    failure.line = static_cast<uint32_t>(std::min<size_t>(
+        design.source_manager->getLineNumber(location), UINT32_MAX));
+    failure.column = static_cast<uint32_t>(std::min<size_t>(
+        design.source_manager->getColumnNumber(location), UINT32_MAX));
+}
+
 OptoSlangStatus opto_slang_materialize_module(OptoSlangSnapshot& design, size_t module_index) {
     if (!design.compilation_state || module_index >= design.modules.size()) {
         return OPTO_SLANG_ERROR;
@@ -910,7 +1557,7 @@ OptoSlangStatus opto_slang_materialize_module(OptoSlangSnapshot& design, size_t 
                 ++target.materialize_users;
                 return OPTO_SLANG_OK;
             }
-            if (!target.materialize_error.empty()) {
+            if (target.materialize_failure) {
                 return OPTO_SLANG_ERROR;
             }
             // Slang supports parallel visitation of a frozen AST only when the
@@ -922,18 +1569,66 @@ OptoSlangStatus opto_slang_materialize_module(OptoSlangSnapshot& design, size_t 
             target.payload = lower_module_job(design, job);
             target.materialize_users = 1;
             return OPTO_SLANG_OK;
+        } catch (const LoweringFailure& error) {
+            try {
+                OptoSlangLoweringFailure failure;
+                failure.category = error.category;
+                failure.code = error.code;
+                failure.message = error.what();
+                set_lowering_failure_source(failure, design, error.location);
+                target.materialize_failure = std::move(failure);
+            } catch (...) {
+                target.materialize_failure.reset();
+            }
+            return OPTO_SLANG_ERROR;
+        } catch (const std::bad_alloc& error) {
+            try {
+                target.materialize_failure = OptoSlangLoweringFailure{
+                    OPTO_SLANG_LOWERING_CAPACITY, 1, error.what()};
+                set_lowering_failure_source(
+                    *target.materialize_failure,
+                    design,
+                    design.compilation_state->jobs[module_index].body->getDefinition().location);
+            } catch (...) {
+                target.materialize_failure.reset();
+            }
+            return OPTO_SLANG_ERROR;
+        } catch (const std::logic_error& error) {
+            try {
+                target.materialize_failure = OptoSlangLoweringFailure{
+                    OPTO_SLANG_LOWERING_INVARIANT, 1, error.what()};
+                set_lowering_failure_source(
+                    *target.materialize_failure,
+                    design,
+                    design.compilation_state->jobs[module_index].body->getDefinition().location);
+            } catch (...) {
+                target.materialize_failure.reset();
+            }
+            return OPTO_SLANG_ERROR;
         } catch (const std::exception& error) {
             try {
-                target.materialize_error = error.what();
+                target.materialize_failure = OptoSlangLoweringFailure{
+                    OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE, 1, error.what()};
+                set_lowering_failure_source(
+                    *target.materialize_failure,
+                    design,
+                    design.compilation_state->jobs[module_index].body->getDefinition().location);
             } catch (...) {
-                target.materialize_error.clear();
+                target.materialize_failure.reset();
             }
             return OPTO_SLANG_ERROR;
         } catch (...) {
             try {
-                target.materialize_error = "unknown slang module materialization failure";
+                target.materialize_failure = OptoSlangLoweringFailure{
+                    OPTO_SLANG_LOWERING_NATIVE,
+                    1,
+                    "unknown slang module materialization failure"};
+                set_lowering_failure_source(
+                    *target.materialize_failure,
+                    design,
+                    design.compilation_state->jobs[module_index].body->getDefinition().location);
             } catch (...) {
-                target.materialize_error.clear();
+                target.materialize_failure.reset();
             }
             return OPTO_SLANG_ERROR;
         }

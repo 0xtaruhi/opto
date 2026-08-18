@@ -193,6 +193,9 @@ impl<'a> ValueSignals<'a> {
                             then_value,
                             else_value,
                         } => self.pending.extend([*else_value, *then_value, *cond]),
+                        OpKind::TriState { data, enable } => {
+                            self.pending.extend([enable.value, *data]);
+                        }
                         OpKind::DynamicExtract { value, offset, .. } => {
                             self.pending.extend([*offset, *value]);
                         }
@@ -245,6 +248,7 @@ fn direction(direction: word::PortDirection) -> Direction {
         word::PortDirection::Input => Direction::Input,
         word::PortDirection::Output => Direction::Output,
         word::PortDirection::Inout => Direction::Inout,
+        word::PortDirection::Ref => Direction::Ref,
     }
 }
 

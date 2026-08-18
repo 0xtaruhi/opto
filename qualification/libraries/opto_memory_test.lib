@@ -1,0 +1,63 @@
+/* SPDX-FileCopyrightText: 2026 Zhengyi Zhang */
+/* SPDX-License-Identifier: GPL-3.0-only */
+
+library (opto_memory_test) {
+  /* This focused library isolates memory-macro contracts from logic-cell CEC. */
+  delay_model : table_lookup;
+  time_unit : "1ns";
+  voltage_unit : "1V";
+  nom_voltage : 1.0;
+  current_unit : "1mA";
+  leakage_power_unit : "1nW";
+  capacitive_load_unit (1, pf);
+  bus_naming_style : "%s[%d]";
+
+  type (opto_addr2) {
+    base_type : array;
+    data_type : bit;
+    bit_width : 2;
+    bit_from : 1;
+    bit_to : 0;
+  }
+  type (opto_data8) {
+    base_type : array;
+    data_type : bit;
+    bit_width : 8;
+    bit_from : 7;
+    bit_to : 0;
+  }
+
+  cell (RAM4X8_2W) {
+    area : 20.0;
+    memory () { type : ram; address_width : 2; word_width : 8; }
+    bus (RA) { bus_type : opto_addr2; direction : input; }
+    bus (W0A) { bus_type : opto_addr2; direction : input; }
+    bus (W1A) { bus_type : opto_addr2; direction : input; }
+    bus (W0D) {
+      bus_type : opto_data8;
+      direction : input;
+      memory_write () { address : W0A; clocked_on : CLK0; enable : WE0; }
+    }
+    bus (W1D) {
+      bus_type : opto_data8;
+      direction : input;
+      memory_write () { address : W1A; clocked_on : CLK1; enable : !WE1; }
+    }
+    bus (Q) {
+      bus_type : opto_data8;
+      direction : output;
+      memory_read () { address : RA; }
+      timing () {
+        related_pin : "RA[0]";
+        cell_rise (scalar) { values ("1.0"); }
+        cell_fall (scalar) { values ("1.0"); }
+        rise_transition (scalar) { values ("0.1"); }
+        fall_transition (scalar) { values ("0.1"); }
+      }
+    }
+    pin (CLK0) { direction : input; clock : true; }
+    pin (CLK1) { direction : input; clock : true; }
+    pin (WE0) { direction : input; capacitance : 0.01; }
+    pin (WE1) { direction : input; capacitance : 0.01; }
+  }
+}

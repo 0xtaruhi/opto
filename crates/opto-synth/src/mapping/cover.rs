@@ -305,7 +305,7 @@ fn select_subject_cover(
         module,
         request,
     };
-    let Some(outputs) = analyzed_outputs(request.roots, |value| subject.node(value))? else {
+    let Some(outputs) = analyzed_outputs(request.roots, subject)? else {
         return Ok(None);
     };
     let cover = selector
@@ -322,19 +322,26 @@ fn select_subject_cover(
 
 fn analyzed_outputs(
     roots: &[MappingRoot],
-    mut node: impl FnMut(word::ValueId) -> Option<LogicNodeId>,
+    subject: &RegionLogicGraph,
 ) -> Result<Option<Box<[AnalyzedRegionOutput]>>, crate::SynthError> {
     let mut outputs = Vec::new();
     for &root in roots {
         if !root.requires_combinational_cover {
             continue;
         }
-        let Some(node) = node(root.value) else {
+        let Some(node) = subject.node(root.value) else {
             return Err(crate::SynthError::invariant(format!(
                 "combinational regional root {:?} has no Boolean subject node",
                 root.value
             )));
         };
+        if subject.is_dont_care(root.value)
+            && node != crate::boolean::logic::network::LogicGraph::constant(false)
+        {
+            return Err(crate::SynthError::invariant(
+                "care-free regional root has no deterministic publication constant",
+            ));
+        }
         outputs.push(AnalyzedRegionOutput {
             node,
             values: Box::new([root.value]),

@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "sequential-level-sensitive-udp"
+kind = "regression"
+covers = ["A level-sensitive sequential UDP lowers current-state and hold rows through ordinary latch inference."]
+category = "sequential"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+sequential = true
+equivalence = true
+
+[assertions]
+min_ports = 3
+min_cells = 1

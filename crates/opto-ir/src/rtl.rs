@@ -18,10 +18,12 @@ use crate::proc::{
     SensitivityEvent, SwitchArmSpec, TargetSelect, TerminatorKind,
 };
 use crate::word::{
-    AnnotationTarget, InstId, Memory, MemoryId, ModuleRemap, Signal, SourceSpan,
-    SynthesisDirectiveKind, ValueId, WordModule, elaborate_linked_root_with,
+    AnnotationTarget, BinaryOp, BitRange, CastKind, InstId, Memory, MemoryId, ModuleRemap, Signal,
+    SignalBindingOffset, SourceSpan, SynthesisDirectiveKind, ValueId, WordModule,
+    elaborate_linked_root_with,
 };
 use crate::word::{WordError, WordType};
+use crate::{BitVal, ConstBits};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -473,17 +475,22 @@ pub fn elaborate_linked_root<'a>(
         insert_definition(&mut by_name, definition)?;
     }
 
-    let mut procedures = ProcBuilder::new();
-    let word = elaborate_linked_root_with(
+    let mut occurrences = Vec::new();
+    let mut word = elaborate_linked_root_with(
         root.word(),
         definitions.iter().map(|definition| definition.word()),
         |source, remap| {
             let definition = by_name
                 .get(source.name())
                 .expect("word hierarchy occurrences originate from the definition index");
-            append_procedures(&mut procedures, definition.procedures(), remap)
+            occurrences.push((definition.procedures(), remap.clone()));
+            Ok::<(), RtlError>(())
         },
     )?;
+    let mut procedures = ProcBuilder::new();
+    for (source, remap) in occurrences {
+        append_procedures(&mut procedures, &mut word, source, &remap)?;
+    }
     RtlModule::new(word, procedures.seal()?)
 }
 
@@ -507,6 +514,7 @@ fn insert_definition<'a>(
 )]
 fn append_procedures(
     target: &mut ProcBuilder,
+    word: &mut WordModule,
     source: &ProcModule,
     remap: &ModuleRemap,
 ) -> Result<(), RtlError> {
@@ -574,7 +582,7 @@ fn append_procedures(
                 target.assign(
                     new_block,
                     effect.mode,
-                    remap_target(effect.target, remap)?,
+                    remap_target(effect.target, remap, word, &effect.source)?,
                     remap.value(effect.value)?,
                     effect.source.clone(),
                 )?;
@@ -663,25 +671,77 @@ fn edge_target(source: &ProcModule, edge: crate::proc::EdgeId) -> Result<BlockId
         .ok_or_else(|| RtlError::new(format!("unknown procedural edge {edge:?}")))
 }
 
-fn remap_target(target: ProcTarget, remap: &ModuleRemap) -> Result<ProcTarget, RtlError> {
-    let select = |select| -> Result<TargetSelect, WordError> {
-        Ok(match select {
-            TargetSelect::Whole => TargetSelect::Whole,
-            TargetSelect::Static(range) => TargetSelect::Static(range),
-            TargetSelect::Dynamic { offset, width } => TargetSelect::Dynamic {
-                offset: remap.value(offset)?,
-                width,
-            },
-        })
-    };
+fn remap_target(
+    target: ProcTarget,
+    remap: &ModuleRemap,
+    word: &mut WordModule,
+    source: &SourceSpan,
+) -> Result<ProcTarget, RtlError> {
     Ok(match target {
         ProcTarget::Signal {
             signal,
             select: old,
-        } => ProcTarget::Signal {
-            signal: remap.signal(signal)?,
-            select: select(old)?,
-        },
+        } => {
+            let (signal, binding, binding_width) = remap.signal_range(signal)?;
+            let signal_width = word
+                .signal(signal)
+                .ok_or_else(|| RtlError::new("reference-port actual signal disappeared"))?
+                .ty
+                .width();
+            let select = match binding {
+                SignalBindingOffset::Static(base) => match old {
+                    TargetSelect::Whole if base == 0 && binding_width == signal_width => {
+                        TargetSelect::Whole
+                    }
+                    TargetSelect::Whole => TargetSelect::Static(BitRange {
+                        msb: base.checked_add(binding_width - 1).ok_or_else(|| {
+                            RtlError::new("reference-port target range exceeds 32-bit capacity")
+                        })?,
+                        lsb: base,
+                    }),
+                    TargetSelect::Static(range) => TargetSelect::Static(BitRange {
+                        msb: base.checked_add(range.msb).ok_or_else(|| {
+                            RtlError::new("reference-port target range exceeds 32-bit capacity")
+                        })?,
+                        lsb: base.checked_add(range.lsb).ok_or_else(|| {
+                            RtlError::new("reference-port target range exceeds 32-bit capacity")
+                        })?,
+                    }),
+                    TargetSelect::Dynamic { offset, width } => TargetSelect::Dynamic {
+                        offset: add_reference_offset(word, remap.value(offset)?, base, source)?,
+                        width,
+                    },
+                },
+                SignalBindingOffset::Dynamic { offset, base } => {
+                    let offset = add_reference_offset(word, offset, base, source)?;
+                    match old {
+                        TargetSelect::Whole => TargetSelect::Dynamic {
+                            offset,
+                            width: std::num::NonZeroU32::new(binding_width)
+                                .expect("reference-port binding width is nonzero"),
+                        },
+                        TargetSelect::Static(range) => TargetSelect::Dynamic {
+                            offset: add_reference_offset(word, offset, range.lsb, source)?,
+                            width: std::num::NonZeroU32::new(range.width())
+                                .expect("static target range is nonzero"),
+                        },
+                        TargetSelect::Dynamic {
+                            offset: relative,
+                            width,
+                        } => TargetSelect::Dynamic {
+                            offset: add_reference_offsets(
+                                word,
+                                offset,
+                                remap.value(relative)?,
+                                source,
+                            )?,
+                            width,
+                        },
+                    }
+                }
+            };
+            ProcTarget::Signal { signal, select }
+        }
         ProcTarget::Memory {
             memory,
             address,
@@ -689,9 +749,88 @@ fn remap_target(target: ProcTarget, remap: &ModuleRemap) -> Result<ProcTarget, R
         } => ProcTarget::Memory {
             memory: remap.memory(memory)?,
             address: remap.value(address)?,
-            select: select(old)?,
+            select: match old {
+                TargetSelect::Whole => TargetSelect::Whole,
+                TargetSelect::Static(range) => TargetSelect::Static(range),
+                TargetSelect::Dynamic { offset, width } => TargetSelect::Dynamic {
+                    offset: remap.value(offset)?,
+                    width,
+                },
+            },
         },
     })
+}
+
+fn add_reference_offset(
+    word: &mut WordModule,
+    offset: ValueId,
+    base: u32,
+    source: &SourceSpan,
+) -> Result<ValueId, RtlError> {
+    if base == 0 {
+        return Ok(offset);
+    }
+    let offset_ty = word
+        .value(offset)
+        .ok_or_else(|| RtlError::new("reference-port dynamic offset disappeared"))?
+        .ty;
+    let base_width = u32::BITS - base.leading_zeros();
+    let width = offset_ty
+        .width()
+        .max(base_width)
+        .checked_add(1)
+        .ok_or_else(|| RtlError::new("reference-port dynamic offset is too wide"))?;
+    let ty = WordType::new(width, false, offset_ty.state())?;
+    let offset = word.cast(CastKind::ZeroExtend, offset, ty, source.clone())?;
+    let bits = ConstBits::from_bits(
+        (0..width)
+            .rev()
+            .map(|bit| {
+                if bit < u32::BITS && base & (1_u32 << bit) != 0 {
+                    BitVal::One
+                } else {
+                    BitVal::Zero
+                }
+            })
+            .collect(),
+    )
+    .map_err(|error| RtlError::new(error.to_string()))?;
+    let base = word.constant(bits, ty, source.clone())?;
+    word.binary(BinaryOp::Add, offset, base, source.clone())
+        .map_err(Into::into)
+}
+
+fn add_reference_offsets(
+    word: &mut WordModule,
+    left: ValueId,
+    right: ValueId,
+    source: &SourceSpan,
+) -> Result<ValueId, RtlError> {
+    let left_ty = word
+        .value(left)
+        .ok_or_else(|| RtlError::new("reference-port dynamic offset disappeared"))?
+        .ty;
+    let right_ty = word
+        .value(right)
+        .ok_or_else(|| RtlError::new("reference-port dynamic offset disappeared"))?
+        .ty;
+    let width = left_ty
+        .width()
+        .max(right_ty.width())
+        .checked_add(1)
+        .ok_or_else(|| RtlError::new("reference-port dynamic offset is too wide"))?;
+    let state = if left_ty.state() == crate::word::LogicStateKind::FourState
+        || right_ty.state() == crate::word::LogicStateKind::FourState
+    {
+        crate::word::LogicStateKind::FourState
+    } else {
+        crate::word::LogicStateKind::TwoState
+    };
+    let ty = WordType::new(width, false, state)?;
+    let left = word.cast(CastKind::ZeroExtend, left, ty, source.clone())?;
+    let right = word.cast(CastKind::ZeroExtend, right, ty, source.clone())?;
+    word.binary(BinaryOp::Add, left, right, source.clone())
+        .map_err(Into::into)
 }
 
 fn selected_word_type(base: WordType, width: u32) -> Result<WordType, RtlError> {

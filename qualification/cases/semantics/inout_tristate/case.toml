@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "semantics-inout-tristate"
+kind = "regression"
+covers = [
+  "Top-level inout nets remain shared physical boundaries for internal reads and tri-state output drivers.",
+  "Active-high and active-low tri-state controls bind to polarity-compatible Liberty cells.",
+]
+category = "semantics"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+equivalence = false
+
+[assertions]
+min_ports = 4
+min_cells = 2

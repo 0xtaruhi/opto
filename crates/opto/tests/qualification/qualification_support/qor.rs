@@ -592,6 +592,8 @@ mod tests {
             "NAND2_X1".to_string(),
             "NOR2_X1".to_string(),
             "OR2_X1".to_string(),
+            "TBUFN_X1".to_string(),
+            "TBUF_X1".to_string(),
             "XNOR2_X1".to_string(),
             "XOR2_X1".to_string(),
         ]);
@@ -607,7 +609,19 @@ mod tests {
             .copied()
             .filter(|arc| arc.timing_type() == TargetTimingType::Combinational)
             .collect::<Vec<_>>();
-        assert_eq!(combinational.len(), 17);
+        assert_eq!(combinational.len(), 19);
+        assert_eq!(
+            arcs.iter()
+                .filter(|arc| arc.timing_type() == TargetTimingType::ThreeStateEnable)
+                .count(),
+            2
+        );
+        assert_eq!(
+            arcs.iter()
+                .filter(|arc| arc.timing_type() == TargetTimingType::ThreeStateDisable)
+                .count(),
+            2
+        );
         assert_eq!(
             arcs.iter()
                 .filter(|arc| matches!(arc.timing_type(), TargetTimingType::ClockToQ(_)))

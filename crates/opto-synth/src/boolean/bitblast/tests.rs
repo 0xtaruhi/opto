@@ -133,6 +133,64 @@ fn regional_boolean_lowering_builds_axm_without_scalar_boolean_word_ops() {
 }
 
 #[test]
+fn regional_boolean_lowering_resolves_dont_care_at_publication_boundary() {
+    let mut module = word::WordModule::new("regional_dont_care_root");
+    let root = module
+        .constant(
+            ConstBits::from_bits(vec![BitVal::X]).unwrap(),
+            word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let plan = crate::planning::operator::ArchitectureDecisions::for_private_region(
+        &module,
+        implementation_providers().into(),
+    )
+    .unwrap();
+    let operators = crate::DurableOperatorArena::capture(&module, &plan, &[], |_| {
+        Err(crate::SynthError::invariant(
+            "unexpected arithmetic operator",
+        ))
+    })
+    .unwrap();
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::for_regional_candidate(&module);
+    let owner = crate::RegionRowId::from_index(0).unwrap();
+
+    let lowered = lower_local_region_boolean(
+        &mut module,
+        LocalRegionBooleanRequest {
+            plan: &plan,
+            operators: &operators,
+            provenance: &mut provenance,
+            owner,
+            boundary_inputs: &[],
+            roots: &[root],
+            tracked_values: &[],
+        },
+    )
+    .unwrap();
+
+    let [published] = lowered.ownership.lowered_bits(root).unwrap() else {
+        panic!("one-bit don't-care root must retain one physical binding");
+    };
+    let value = module.value(*published).unwrap();
+    assert!(matches!(
+        &value.kind,
+        word::ValueKind::Constant(bits) if bits.bit_lsb(0) == Some(BitVal::Zero)
+    ));
+    assert_eq!(lowered.subject.value_nodes.len(), 1);
+    assert_eq!(
+        lowered.subject.value_nodes[0],
+        (
+            *published,
+            crate::boolean::logic::network::LogicGraph::constant(false)
+        )
+    );
+    assert_eq!(lowered.subject.dont_care_values.as_ref(), &[*published]);
+}
+
+#[test]
 fn frozen_ownership_follows_static_signal_drivers() {
     let mut module = word::WordModule::new("owned_connectivity");
     let bit = word::WordType::bits(1).unwrap();
@@ -227,6 +285,103 @@ fn rejects_tri_state_constants_during_bitblast() {
 
     assert!(error.to_string().contains("tri-state constant"));
     assert!(error.to_string().contains("z_constant.sv"));
+}
+
+#[test]
+fn rejects_unresolved_tri_state_driver_at_boolean_boundary() {
+    let mut module = word::WordModule::new("unresolved_tri_state");
+    let data = add_input(&mut module, "data", 1);
+    let enable = add_input(&mut module, "enable", 1);
+    let data = read_port(&mut module, data);
+    let enable = read_port(&mut module, enable);
+    let source = word::SourceSpan::located("tri_state.sv", Some(11), Some(7), "tri-state");
+    let driver = module
+        .tri_state(
+            data,
+            word::Enable {
+                value: enable,
+                active_high: true,
+            },
+            source,
+        )
+        .unwrap();
+    add_output(&mut module, "y", 1, driver);
+
+    let error = bitblast_area(&mut module).unwrap_err();
+
+    assert!(error.to_string().contains("tri-state driver"));
+    assert!(error.to_string().contains("physical tri-state lowering"));
+    assert!(error.to_string().contains("tri_state.sv"));
+}
+
+#[test]
+fn regional_shell_preserves_a_validated_physical_tri_state_connect() {
+    let mut module = word::WordModule::new("regional_tri_state_shell");
+    let data_port = add_input(&mut module, "data", 1);
+    let enable_port = add_input(&mut module, "enable", 1);
+    let data = read_port(&mut module, data_port);
+    let enable = read_port(&mut module, enable_port);
+    let pad_port = module
+        .add_port(
+            "pad",
+            word::PortDirection::Inout,
+            word::WordType::bits(1).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let pad = module.port(pad_port).unwrap().signal;
+    module
+        .set_signal_resolution(pad, word::SignalResolution::TriState)
+        .unwrap();
+    let driver = module
+        .tri_state(
+            data,
+            word::Enable {
+                value: enable,
+                active_high: true,
+            },
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(pad),
+            driver,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let plan = crate::planning::operator::ArchitectureDecisions::for_regional_shell(&module);
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::new(&module, &plan).unwrap();
+
+    bitblast_module_with_regions(
+        &mut module,
+        &plan,
+        &mut provenance,
+        &[None],
+        &[],
+        &[],
+        GlobalBitblastScope::RegionalShell,
+    )
+    .unwrap();
+
+    assert_eq!(module.connects().len(), 1);
+    assert_ne!(module.connects()[0].value, driver);
+    assert_eq!(module.connects()[0].target.signal, pad);
+    let lowered = module.value(module.connects()[0].value).unwrap();
+    let word::ValueKind::Operation(lowered) = lowered.kind else {
+        panic!("lowered tri-state driver is not an operation");
+    };
+    assert!(matches!(
+        module.operation(lowered).unwrap().kind,
+        word::OpKind::TriState {
+            data: lowered_data,
+            enable: word::Enable {
+                value: lowered_enable,
+                active_high: true,
+            },
+        } if lowered_data == data && lowered_enable == enable
+    ));
 }
 
 #[test]

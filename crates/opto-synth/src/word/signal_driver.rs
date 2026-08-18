@@ -53,6 +53,13 @@ impl SignalDriverIndex {
                     connect.target.signal
                 )));
             }
+            if module.signals()[row].resolution == word::SignalResolution::TriState {
+                // A resolved tri-state signal is a physical boundary net. Its
+                // local contributions are materialized as driver cells and
+                // must never replace reads that can also observe an external
+                // or another enabled driver.
+                continue;
+            }
             let span = driver_span(module, connect);
             entries.push((row, connect.value));
             let signal_bits = resolved.get_mut(row).ok_or_else(|| {

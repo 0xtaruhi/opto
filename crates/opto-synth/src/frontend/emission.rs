@@ -3,7 +3,7 @@
 
 use super::{
     Assignment, ExecutionState, MaterializedPredicate, Predicate, PredicateArena,
-    ProcedureNormalizer, Slot, events, normalized_enable, predicate_enable, proc,
+    ProcedureNormalizer, Slot, derived_source, events, normalized_enable, predicate_enable, proc,
     whole_target_name, word,
 };
 
@@ -59,9 +59,14 @@ impl ProcedureNormalizer<'_> {
                 self.incomplete_comb.push(assignment);
                 continue;
             }
+            let target_name = assignment.target_name(self.module).to_owned();
             self.module
                 .connect(assignment.target, assignment.value, assignment.source)
-                .map_err(crate::SynthError::from)?;
+                .map_err(|error| {
+                    crate::SynthError::invariant(format!(
+                        "failed to commit combinational assignment to '{target_name}': {error}"
+                    ))
+                })?;
         }
         Ok(())
     }
@@ -131,6 +136,9 @@ impl ProcedureNormalizer<'_> {
                 self.module.name_str(memory.name)
             )));
         }
+        if let Some(clock) = events::dual_edge_clock(&events) {
+            return self.emit_dual_edge_flops(assignments, clock);
+        }
         let clock = if assignments.is_empty() {
             *events
                 .first()
@@ -184,6 +192,7 @@ impl ProcedureNormalizer<'_> {
             if write.guard == MaterializedPredicate::Never {
                 continue;
             }
+            let enable = predicate_enable(self.module, write.guard, &write.source)?;
             self.module
                 .add_memory_write_port(word::MemoryWritePort {
                     memory: write.memory,
@@ -193,7 +202,7 @@ impl ProcedureNormalizer<'_> {
                         value: clock_value,
                         edge: clock.edge,
                     },
-                    enable: predicate_enable(write.guard),
+                    enable,
                     mask: write.mask,
                     priority,
                     source: write.source,
@@ -204,6 +213,210 @@ impl ProcedureNormalizer<'_> {
             })?;
         }
         Ok(())
+    }
+
+    fn emit_dual_edge_flops(
+        &mut self,
+        assignments: Vec<Assignment>,
+        clock: word::SignalId,
+    ) -> Result<(), crate::SynthError> {
+        let clock_value = self
+            .module
+            .read_signal(clock, self.procedure.source.clone())
+            .map_err(crate::SynthError::from)?;
+        for assignment in assignments {
+            if assignment
+                .resets
+                .iter()
+                .any(|reset| reset.kind != word::ResetKind::Sync)
+            {
+                return Err(crate::SynthError::invariant(
+                    "dual-edge state carries an asynchronous reset",
+                ));
+            }
+            let current = self.read_assignment_target(&assignment)?;
+            let mut update = match assignment.coverage {
+                super::Coverage::Never => continue,
+                super::Coverage::Always => assignment.value,
+                super::Coverage::When(enable) => self
+                    .module
+                    .mux(enable, assignment.value, current, assignment.source.clone())
+                    .map_err(crate::SynthError::from)?,
+            };
+            for reset in assignment.resets.iter().rev() {
+                let asserted = if reset.active_high {
+                    reset.value
+                } else {
+                    self.module
+                        .unary(
+                            word::UnaryOp::BitNot,
+                            reset.value,
+                            assignment.source.clone(),
+                        )
+                        .map_err(crate::SynthError::from)?
+                };
+                update = self
+                    .module
+                    .mux(
+                        asserted,
+                        reset.reset_value,
+                        update,
+                        assignment.source.clone(),
+                    )
+                    .map_err(crate::SynthError::from)?;
+            }
+            let (rising_signal, rising_name, rising_source) =
+                self.add_dual_edge_bank_signal(&assignment, update, word::Edge::Pos)?;
+            let rising = self
+                .module
+                .register(
+                    word::RegisterOp {
+                        name: Some(rising_name),
+                        d: update,
+                        clock: clock_value,
+                        edge: word::Edge::Pos,
+                        enable: None,
+                        resets: Vec::new(),
+                    },
+                    rising_source.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+            self.module
+                .connect(
+                    word::LValue::signal(rising_signal),
+                    rising,
+                    rising_source.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+            let rising = self
+                .module
+                .read_signal(rising_signal, rising_source)
+                .map_err(crate::SynthError::from)?;
+            let (falling_signal, falling_name, falling_source) =
+                self.add_dual_edge_bank_signal(&assignment, update, word::Edge::Neg)?;
+            let falling = self
+                .module
+                .register(
+                    word::RegisterOp {
+                        name: Some(falling_name),
+                        d: update,
+                        clock: clock_value,
+                        edge: word::Edge::Neg,
+                        enable: None,
+                        resets: Vec::new(),
+                    },
+                    falling_source.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+            self.module
+                .connect(
+                    word::LValue::signal(falling_signal),
+                    falling,
+                    falling_source.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+            let falling = self
+                .module
+                .read_signal(falling_signal, falling_source)
+                .map_err(crate::SynthError::from)?;
+            let q = self
+                .module
+                .mux(
+                    clock_value,
+                    rising,
+                    falling,
+                    derived_source(&assignment.source, "dual-edge phase selection", b"phase")?,
+                )
+                .map_err(crate::SynthError::from)?;
+            self.module
+                .connect(assignment.target, q, assignment.source)
+                .map_err(crate::SynthError::from)?;
+        }
+        Ok(())
+    }
+
+    fn add_dual_edge_bank_signal(
+        &mut self,
+        assignment: &Assignment,
+        value: word::ValueId,
+        edge: word::Edge,
+    ) -> Result<(word::SignalId, opto_ir::NameId, word::SourceSpan), crate::SynthError> {
+        let (lsb, width) = assignment.target.range.map_or_else(
+            || {
+                self.module
+                    .signal(assignment.target.signal)
+                    .map(|signal| (0, signal.ty.width()))
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "dual-edge assignment target signal disappeared",
+                        )
+                    })
+            },
+            |range| Ok((range.lsb.min(range.msb), range.width())),
+        )?;
+        let edge_name = match edge {
+            word::Edge::Pos => "rise",
+            word::Edge::Neg => "fall",
+        };
+        let target_name = self
+            .module
+            .signal(assignment.target.signal)
+            .and_then(|signal| signal.name)
+            .map_or_else(
+                || "anonymous".to_string(),
+                |name| self.module.name_str(name).to_string(),
+            );
+        let base = format!("$opto$dual_edge${target_name}${lsb}${width}${edge_name}");
+        let mut name = base.clone();
+        let mut suffix = 0u32;
+        while self.module.signal_id(&name).is_some() {
+            suffix = suffix.checked_add(1).ok_or_else(|| {
+                crate::SynthError::capacity("dual-edge bank name suffix is exhausted")
+            })?;
+            name = format!("{base}${suffix}");
+        }
+        let source = derived_source(&assignment.source, "dual-edge bank state", name.as_bytes())?;
+        let ty = self
+            .module
+            .value(value)
+            .ok_or_else(|| crate::SynthError::invariant("dual-edge next-state value disappeared"))?
+            .ty;
+        let signal = self
+            .module
+            .add_wire(&name, ty, source.clone())
+            .map_err(crate::SynthError::from)?;
+        let name = self
+            .module
+            .signal(signal)
+            .and_then(|signal| signal.name)
+            .ok_or_else(|| crate::SynthError::invariant("dual-edge bank signal has no name"))?;
+        Ok((signal, name, source))
+    }
+
+    fn read_assignment_target(
+        &mut self,
+        assignment: &Assignment,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        if assignment.target.dynamic.is_some() {
+            return Err(crate::SynthError::invariant(
+                "normalized state assignment retains a dynamic target",
+            ));
+        }
+        match assignment.target.range {
+            Some(range) => self
+                .module
+                .read_signal_slice(
+                    assignment.target.signal,
+                    range.lsb.min(range.msb),
+                    range.width(),
+                    assignment.source.clone(),
+                )
+                .map_err(crate::SynthError::from),
+            None => self
+                .module
+                .read_signal(assignment.target.signal, assignment.source.clone())
+                .map_err(crate::SynthError::from),
+        }
     }
 
     pub(super) fn select(

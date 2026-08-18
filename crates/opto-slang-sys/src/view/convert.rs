@@ -8,8 +8,8 @@
 
 use crate::ffi;
 use crate::{
-    SlangBinaryOp, SlangCastKind, SlangEdge, SlangError, SlangNetResolution, SlangPortDirection,
-    SlangProcedureKind, SlangUnaryOp,
+    SlangBinaryOp, SlangCastKind, SlangEdge, SlangError, SlangLoopForm, SlangNetResolution,
+    SlangPortDirection, SlangProcedureKind, SlangUnaryOp,
 };
 use std::ffi::{CStr, c_char, c_int};
 
@@ -18,6 +18,7 @@ pub(super) fn map_port_direction(raw: c_int) -> Result<SlangPortDirection, Slang
         ffi::PORT_INPUT => Ok(SlangPortDirection::Input),
         ffi::PORT_OUTPUT => Ok(SlangPortDirection::Output),
         ffi::PORT_INOUT => Ok(SlangPortDirection::Inout),
+        ffi::PORT_REF => Ok(SlangPortDirection::Ref),
         _ => Err(unknown_enum("port direction", raw)),
     }
 }
@@ -83,6 +84,15 @@ pub(super) fn map_procedure_kind(raw: c_int) -> Result<SlangProcedureKind, Slang
         ffi::PROCEDURE_FLOP => Ok(SlangProcedureKind::Flop),
         ffi::PROCEDURE_COMB_OR_LATCH => Ok(SlangProcedureKind::CombOrLatch),
         _ => Err(unknown_enum("procedure kind", raw)),
+    }
+}
+
+pub(super) fn map_loop_form(raw: c_int) -> Result<SlangLoopForm, SlangError> {
+    match raw {
+        ffi::LOOP_PRE_TEST => Ok(SlangLoopForm::PreTest),
+        ffi::LOOP_POST_TEST => Ok(SlangLoopForm::PostTest),
+        ffi::LOOP_UNCONDITIONAL => Ok(SlangLoopForm::Unconditional),
+        _ => Err(unknown_enum("loop form", raw)),
     }
 }
 

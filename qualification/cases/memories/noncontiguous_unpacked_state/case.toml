@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "memories-noncontiguous-unpacked-state"
+kind = "regression"
+covers = ["Unpacked dimensions separated by an unpacked struct lower to canonical flattened register state with composed dynamic write and read selectors."]
+category = "memories"
+language = "sverilog"
+top = "top"
+sources = ["top.sv"]
+equivalence_sources = ["reference.v"]
+flow = "synth"
+library = "../../../libraries/opto_test.lib"
+sequential = true
+equivalence = true
+equivalence_initial_state = "zero"
+
+[assertions]
+min_ports = 9
+min_cells = 1

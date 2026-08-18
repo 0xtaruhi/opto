@@ -33,6 +33,82 @@ uint32_t checked_width(uint64_t width, std::string_view object_name) {
     return static_cast<uint32_t>(width);
 }
 
+uint64_t lowered_type_width(const Type& source_type) {
+    const auto& type = source_type.getCanonicalType();
+    if (type.kind == SymbolKind::VoidType) {
+        return 0;
+    }
+    if (type.kind == SymbolKind::FixedSizeUnpackedArrayType) {
+        const auto& array = type.as<FixedSizeUnpackedArrayType>();
+        const auto elements = array.range.width();
+        const auto element_width = lowered_type_width(array.elementType);
+        if (element_width != 0 && elements > UINT64_MAX / element_width) {
+            throw std::runtime_error("unpacked array synthesis width exceeds 64-bit capacity");
+        }
+        return elements * element_width;
+    }
+    if (type.kind == SymbolKind::UnpackedStructType) {
+        uint64_t width = 0;
+        for (const auto* field : type.as<UnpackedStructType>().fields) {
+            const auto field_width = lowered_type_width(field->getType());
+            if (field_width > UINT64_MAX - width) {
+                throw std::runtime_error("unpacked struct synthesis width exceeds 64-bit capacity");
+            }
+            width += field_width;
+        }
+        return width;
+    }
+    if (type.kind == SymbolKind::UnpackedUnionType) {
+        const auto& union_type = type.as<UnpackedUnionType>();
+        uint64_t payload_width = 0;
+        for (const auto* field : union_type.fields) {
+            payload_width = std::max(payload_width, lowered_type_width(field->getType()));
+        }
+        if (!union_type.isTagged) {
+            return payload_width;
+        }
+        const auto tag_width = union_type.fields.empty()
+                                   ? 0u
+                                   : static_cast<uint32_t>(
+                                         std::bit_width(union_type.fields.size() - 1));
+        if (payload_width > UINT64_MAX - tag_width) {
+            throw std::runtime_error("tagged union synthesis width exceeds 64-bit capacity");
+        }
+        return payload_width + tag_width;
+    }
+    return type.getBitstreamWidth();
+}
+
+TaggedUnionLayout tagged_union_layout(const Type& source_type) {
+    const auto& type = source_type.getCanonicalType();
+    TaggedUnionLayout layout;
+    if (type.kind == SymbolKind::PackedUnionType) {
+        const auto& union_type = type.as<PackedUnionType>();
+        if (!union_type.isTagged) {
+            throw std::runtime_error("tagged union layout requested for an untagged packed union");
+        }
+        layout.tag_width = union_type.tagBits;
+        layout.total_width = checked_width(lowered_type_width(type), "packed tagged union");
+        layout.payload_width = layout.total_width - layout.tag_width;
+        return layout;
+    }
+    if (type.kind == SymbolKind::UnpackedUnionType) {
+        const auto& union_type = type.as<UnpackedUnionType>();
+        if (!union_type.isTagged) {
+            throw std::runtime_error(
+                "tagged union layout requested for an untagged unpacked union");
+        }
+        layout.tag_width = union_type.fields.empty()
+                               ? 0u
+                               : static_cast<uint32_t>(
+                                     std::bit_width(union_type.fields.size() - 1));
+        layout.total_width = checked_width(lowered_type_width(type), "unpacked tagged union");
+        layout.payload_width = layout.total_width - layout.tag_width;
+        return layout;
+    }
+    throw std::runtime_error("tagged union layout requested for a non-union type");
+}
+
 const OptoSlangTypeLayout*
 store_type_layout(ModuleLoweringContext& design, OptoSlangTypeLayout layout) {
     auto owned = std::make_unique<OptoSlangTypeLayout>(std::move(layout));
@@ -51,6 +127,45 @@ const OptoSlangTypeLayout* scalar_type_layout(ModuleLoweringContext& design) {
     return design.scalar_type_layout;
 }
 
+uint32_t aggregate_field_storage_offset(const Type& aggregate_type, const FieldSymbol& field) {
+    const auto& type = aggregate_type.getCanonicalType();
+    if (type.kind == SymbolKind::PackedStructType ||
+        type.kind == SymbolKind::PackedUnionType) {
+        if (field.bitOffset > UINT32_MAX) {
+            throw std::runtime_error("packed aggregate field offset exceeds 32-bit capacity");
+        }
+        return static_cast<uint32_t>(field.bitOffset);
+    }
+    if (type.kind == SymbolKind::UnpackedUnionType) {
+        for (const auto* candidate : type.as<UnpackedUnionType>().fields) {
+            if (candidate == &field) {
+                return 0;
+            }
+        }
+        throw std::runtime_error("member field does not belong to its unpacked union type");
+    }
+    if (type.kind != SymbolKind::UnpackedStructType) {
+        throw std::runtime_error("aggregate member access requires a fixed-size struct or union");
+    }
+
+    uint64_t offset = lowered_type_width(type);
+    for (const auto* candidate : type.as<UnpackedStructType>().fields) {
+        const auto width = lowered_type_width(candidate->getType());
+        if (width > offset) {
+            throw std::runtime_error("unpacked struct field layout exceeds aggregate width");
+        }
+        offset -= width;
+        if (candidate == &field) {
+            if (offset > UINT32_MAX) {
+                throw std::runtime_error(
+                    "unpacked struct field offset exceeds 32-bit capacity");
+            }
+            return static_cast<uint32_t>(offset);
+        }
+    }
+    throw std::runtime_error("member field does not belong to its aggregate type");
+}
+
 const OptoSlangTypeLayout*
 intern_type_layout(ModuleLoweringContext& design, const Type& source_type) {
     const auto& type = source_type.getCanonicalType();
@@ -59,7 +174,7 @@ intern_type_layout(ModuleLoweringContext& design, const Type& source_type) {
         return found->second;
     }
 
-    const auto width = checked_width(type.getBitstreamWidth(), "type layout");
+    const auto width = checked_width(lowered_type_width(type), "type layout");
     if (width == 1 && !type.isArray() && !type.isStruct()) {
         const auto* layout = scalar_type_layout(design);
         design.type_layout_by_type.emplace(&type, layout);
@@ -85,16 +200,33 @@ intern_type_layout(ModuleLoweringContext& design, const Type& source_type) {
     } else if (type.kind == SymbolKind::PackedStructType) {
         layout.kind = OPTO_SLANG_TYPE_STRUCT;
         for (const auto& field : type.as<PackedStructType>().membersOfType<FieldSymbol>()) {
-            if (field.bitOffset > UINT32_MAX) {
-                throw std::runtime_error("packed struct field offset exceeds 32-bit capacity");
-            }
             layout.fields.push_back(
                 OptoSlangTypeLayoutField{
                     copy_string(field.name),
-                    static_cast<uint32_t>(field.bitOffset),
+                    aggregate_field_storage_offset(type, field),
                     intern_type_layout(design, field.getType()),
                 });
         }
+    } else if (type.kind == SymbolKind::UnpackedStructType) {
+        layout.kind = OPTO_SLANG_TYPE_STRUCT;
+        for (const auto* field : type.as<UnpackedStructType>().fields) {
+            layout.fields.push_back(
+                OptoSlangTypeLayoutField{
+                    copy_string(field->name),
+                    aggregate_field_storage_offset(type, *field),
+                    intern_type_layout(design, field->getType()),
+                });
+        }
+    } else if (type.kind == SymbolKind::UnpackedUnionType) {
+        if (width > static_cast<uint32_t>(INT32_MAX) + 1u) {
+            throw std::runtime_error(
+                "unpacked union type layout exceeds signed index capacity");
+        }
+        layout.kind = OPTO_SLANG_TYPE_ARRAY;
+        layout.array_left = static_cast<int32_t>(width - 1);
+        layout.array_right = 0;
+        layout.array_is_packed = true;
+        layout.array_element = scalar_type_layout(design);
     } else {
         const auto range = type.getFixedRange();
         layout.kind = OPTO_SLANG_TYPE_ARRAY;
@@ -118,7 +250,7 @@ OptoSlangPortDirection lower_direction(ArgumentDirection direction) {
     case ArgumentDirection::InOut:
         return OPTO_SLANG_PORT_INOUT;
     case ArgumentDirection::Ref:
-        throw std::runtime_error("ref ports are not supported by opto-hdl");
+        return OPTO_SLANG_PORT_REF;
     }
     throw std::runtime_error("unknown port direction");
 }
@@ -411,6 +543,8 @@ void collect_elaborated_members(
         case SymbolKind::TypeAlias:
         case SymbolKind::NetType:
         case SymbolKind::Genvar:
+        case SymbolKind::Iterator:
+        case SymbolKind::PatternVar:
         case SymbolKind::ExplicitImport:
         case SymbolKind::WildcardImport:
         case SymbolKind::Subroutine:
@@ -512,11 +646,11 @@ interface_signals(const InstanceSymbol& instance, std::string_view modport_name)
 
 std::optional<ArgumentDirection>
 merge_interface_direction(std::optional<ArgumentDirection> current, ArgumentDirection next) {
-    if (next == ArgumentDirection::Ref) {
-        throw std::runtime_error("ref modport signals are not supported for synthesis");
-    }
     if (!current || *current == next) {
         return next;
+    }
+    if (*current == ArgumentDirection::Ref || next == ArgumentDirection::Ref) {
+        return ArgumentDirection::Ref;
     }
     return ArgumentDirection::InOut;
 }
@@ -861,6 +995,33 @@ std::string registered_value_name(const ModuleLoweringContext& design, const Val
     return found->second;
 }
 
+const OptoSlangExpr*
+find_function_lvalue(const ModuleLoweringContext& design, const ValueSymbol& symbol) {
+    if (auto found = design.function_lvalues.find(&symbol);
+        found != design.function_lvalues.end()) {
+        return found->second;
+    }
+    // Slang clones automatic subroutine formals when materializing a body. The
+    // clone retains originating syntax identity, which is the stable alias key
+    // for nested calls; hierarchical names are not used as semantic identity.
+    const auto* syntax = symbol.getSyntax();
+    if (!syntax) {
+        return nullptr;
+    }
+    const OptoSlangExpr* matched = nullptr;
+    for (const auto& [bound_symbol, value] : design.function_lvalues) {
+        if (bound_symbol->getSyntax() == syntax) {
+            if (matched && matched != value) {
+                throw std::runtime_error(
+                    "ambiguous subroutine ref binding for '" +
+                    symbol.getHierarchicalPath() + "'");
+            }
+            matched = value;
+        }
+    }
+    return matched;
+}
+
 bool has_registered_value(const ModuleLoweringContext& design, const ValueSymbol& symbol) {
     const ValueSymbol* canonical = &symbol;
     if (symbol.kind == SymbolKind::ModportPort) {
@@ -987,7 +1148,12 @@ OptoSlangExpr* make_unsigned_constant_expr(
     for (uint32_t bit = 0; bit < width; ++bit) {
         lowered.constant_bits[width - bit - 1] = bit < 32 && ((value >> bit) & 1u) ? '1' : '0';
     }
-    return make_expr(design, std::move(lowered), source);
+    auto* result = make_expr(design, std::move(lowered), source);
+    // Synthetic constants have an explicit semantic type independent of the
+    // source node used only for attribution. `make_expr` normally inherits a
+    // source constant's signedness, so restore the helper's contract here.
+    result->constant_signed = false;
+    return result;
 }
 
 OptoSlangExpr* make_signed_constant_expr(
@@ -1003,7 +1169,9 @@ OptoSlangExpr* make_signed_constant_expr(
         const bool one = bit < 64 ? ((bits >> bit) & 1u) != 0 : value < 0;
         lowered.constant_bits[width - bit - 1] = one ? '1' : '0';
     }
-    return make_expr(design, std::move(lowered), source);
+    auto* result = make_expr(design, std::move(lowered), source);
+    result->constant_signed = true;
+    return result;
 }
 
 OptoSlangExpr* make_unsigned_cast_expr(
@@ -1177,7 +1345,7 @@ OptoSlangExpr* cast_to_type(
     return cast_to_shape(
         design,
         value,
-        checked_width(result_type.getBitstreamWidth(), "conversion result"),
+        checked_width(lowered_type_width(result_type), "conversion result"),
         result_type.isSigned(),
         source,
         force);
@@ -1187,6 +1355,9 @@ ValueShape lvalue_shape(const ModuleLoweringContext& design, const Expression& e
     switch (expression.kind) {
     case ExpressionKind::NamedValue: {
         const auto& symbol = expression.as<NamedValueExpression>().symbol;
+        if (auto* alias = find_function_lvalue(design, symbol)) {
+            return lowered_value_shape(design, *alias);
+        }
         const auto name = registered_value_name(design, symbol);
         auto found = design.value_shapes.find(name);
         if (found == design.value_shapes.end()) {
@@ -1208,7 +1379,7 @@ ValueShape lvalue_shape(const ModuleLoweringContext& design, const Expression& e
     case ExpressionKind::MemberAccess: {
         const auto& field = expression.as<MemberAccessExpression>().member.as<FieldSymbol>();
         return ValueShape{
-            checked_width(field.getType().getBitstreamWidth(), field.name),
+            checked_width(lowered_type_width(field.getType()), field.name),
             field.getType().isSigned(),
         };
     }
@@ -1216,7 +1387,7 @@ ValueShape lvalue_shape(const ModuleLoweringContext& design, const Expression& e
     case ExpressionKind::RangeSelect:
     case ExpressionKind::Concatenation:
         return ValueShape{
-            checked_width(expression.type->getBitstreamWidth(), "assignment selection"),
+            checked_width(lowered_type_width(*expression.type), "assignment selection"),
             false,
         };
     default:
@@ -1267,7 +1438,7 @@ OptoSlangExpr* lower_boolean_context(ModuleLoweringContext& design, const Expres
         const auto* child = expression.as<InvalidExpression>().child;
         if (child && child->type->isIntegral()) {
             auto* value = lower_expr(design, *child);
-            if (child->type->getBitstreamWidth() == 1) {
+            if (lowered_type_width(*child->type) == 1) {
                 return value;
             }
             return make_unary_expr(
@@ -1290,7 +1461,7 @@ OptoSlangExpr* lower_boolean_context(ModuleLoweringContext& design, const Expres
             ") at " + expression_location(design, *diagnostic));
     }
     auto* value = lower_expr(design, expression);
-    if (expression.type->getBitstreamWidth() == 1) {
+    if (lowered_type_width(*expression.type) == 1) {
         return value;
     }
     return make_unary_expr(design, OPTO_SLANG_UNARY_REDUCTION_OR, value, expression);

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Flat procedural control flow with source-ordered effects.
+//! Final acyclic procedural control flow with source-ordered effects.
 //!
 //! [`ProcBuilder`] is intentionally transient. Sealing it sorts nothing and
 //! flattens blocks in insertion order, so every final arena is compact and
@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 
 mod builder;
 
-pub use builder::{ProcBuilder, SwitchArmSpec};
+pub use builder::{ProcBuilder, ProcGraphBuilder, SwitchArmSpec};
 use std::num::NonZeroU32;
 use thiserror::Error;
 
@@ -35,7 +35,7 @@ macro_rules! define_id {
     ($name:ident, $tag:ident, $kind:literal) => {
         enum $tag {}
 
-        #[doc = concat!("Dense ", $kind, " identifier local to one [`ProcModule`].")]
+        #[doc = concat!("Dense ", $kind, " identifier local to one procedural arena.")]
         #[derive(
             Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
         )]
@@ -76,6 +76,23 @@ define_id!(EffectId, EffectTag, "procedural effect");
 define_id!(EdgeId, EdgeTag, "procedural edge");
 define_id!(SwitchArmId, SwitchArmTag, "switch arm");
 define_id!(EventId, EventTag, "sensitivity event");
+define_id!(ProcExprId, ProcExprTag, "transient procedural expression");
+define_id!(ProcLocalId, ProcLocalTag, "transient procedural local");
+define_id!(LoopRegionId, LoopRegionTag, "transient loop region");
+define_id!(
+    TransientEffectId,
+    TransientEffectTag,
+    "transient procedural effect"
+);
+
+mod transient;
+
+pub use transient::{
+    LoopAnalysisLimits, LoopBoundednessAnalysis, LoopForm, LoopProof, LoopProofMethod, LoopRegion,
+    ProcExpr, ProcExprKind, ProcLocal, TransientBlock, TransientProcBuilder, TransientProcModule,
+    TransientSwitchArm, TransientTarget, TransientTargetSelect, TransientTerminator,
+    TransientTerminatorKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 /// Contiguous slice of a typed procedural arena.
@@ -345,7 +362,7 @@ impl Block {
     }
 }
 
-/// Immutable, sealed procedural IR. All collections are single dense arenas.
+/// Immutable, sealed acyclic procedural IR. All collections are single dense arenas.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProcModule {
     procedures: Box<[Procedure]>,
@@ -490,12 +507,12 @@ impl ProcModule {
         }))
     }
 
-    /// Validates arena ownership, ID ranges, edge use, and reachability.
+    /// Validates arena ownership, ID ranges, edge use, reachability, and acyclicity.
     ///
     /// # Errors
     ///
     /// Returns [`ProcError`] on the first violated range, ownership,
-    /// terminator, edge, or reachability invariant.
+    /// terminator, edge, reachability, or acyclicity invariant.
     pub fn validate(&self) -> Result<(), ProcError> {
         let mut next_block = 0usize;
         let mut next_event = 0usize;
@@ -569,7 +586,8 @@ impl ProcModule {
             return Err(ProcError::new("procedural arenas contain unowned records"));
         }
         drop(edge_uses);
-        self.validate_reachability()
+        self.validate_reachability()?;
+        self.validate_acyclic()
     }
 
     /// Deterministic upper bound for temporary arenas used by
@@ -577,11 +595,10 @@ impl ProcModule {
     #[must_use]
     pub fn validation_memory_bytes(&self) -> usize {
         let edges = opto_core::resident::slice_bytes::<u8>(self.edges.len());
-        let reachability = opto_core::resident::slice_bytes::<u8>(self.blocks.len())
-            .saturating_add(opto_core::resident::slice_bytes::<BlockId>(
-                self.blocks.len(),
-            ));
-        edges.max(reachability)
+        let graph_walk = opto_core::resident::slice_bytes::<u32>(self.blocks.len()).saturating_add(
+            opto_core::resident::slice_bytes::<BlockId>(self.blocks.len()),
+        );
+        edges.max(graph_walk)
     }
 
     fn validate_terminator(
@@ -675,6 +692,70 @@ impl ProcModule {
             if procedure.blocks.indices().any(|index| reached[index] == 0) {
                 return Err(ProcError::new(
                     "procedure contains a block unreachable from its entry",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_acyclic(&self) -> Result<(), ProcError> {
+        let mut indegree = vec![0u32; self.blocks.len()];
+        for edge in &self.edges {
+            indegree[edge.target.index()] = indegree[edge.target.index()]
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ProcError::new("procedural block indegree exceeds 32-bit capacity")
+                })?;
+        }
+
+        let mut ready = Vec::with_capacity(self.blocks.len());
+        for procedure in &self.procedures {
+            ready.extend(
+                procedure
+                    .blocks
+                    .indices()
+                    .filter(|&block| indegree[block] == 0)
+                    .map(|block| {
+                        BlockId::from_index(block)
+                            .expect("validated procedure ranges contain valid block IDs")
+                    }),
+            );
+            let mut visited = 0usize;
+            while let Some(block) = ready.pop() {
+                visited += 1;
+                let mut release = |edge: EdgeId| -> Result<(), ProcError> {
+                    let target = self.edges[edge.index()].target;
+                    let degree = &mut indegree[target.index()];
+                    *degree = degree
+                        .checked_sub(1)
+                        .ok_or_else(|| ProcError::new("procedural CFG indegree is inconsistent"))?;
+                    if *degree == 0 {
+                        ready.push(target);
+                    }
+                    Ok(())
+                };
+                match self.blocks[block.index()].terminator.kind {
+                    TerminatorKind::Return => {}
+                    TerminatorKind::Jump { edge } => release(edge)?,
+                    TerminatorKind::Branch {
+                        then_edge,
+                        else_edge,
+                        ..
+                    } => {
+                        release(then_edge)?;
+                        release(else_edge)?;
+                    }
+                    TerminatorKind::Switch { arms, default, .. } => {
+                        for arm in arms.indices() {
+                            release(self.switch_arms[arm].edge)?;
+                        }
+                        release(default)?;
+                    }
+                }
+            }
+            if visited != procedure.blocks.len() {
+                return Err(ProcError::new(
+                    "sealed procedure contains a control-flow cycle",
                 ));
             }
         }
@@ -825,6 +906,30 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("crosses procedure")
+        );
+    }
+
+    #[test]
+    fn seal_rejects_a_reachable_control_flow_cycle() {
+        let mut builder = ProcBuilder::new();
+        let procedure = builder
+            .add_combinational_procedure(ProcedureKind::Combinational, SourceSpan::default())
+            .unwrap();
+        let entry = builder.add_block(procedure, SourceSpan::default()).unwrap();
+        let loop_block = builder.add_block(procedure, SourceSpan::default()).unwrap();
+        builder
+            .terminate_jump(entry, loop_block, SourceSpan::default())
+            .unwrap();
+        builder
+            .terminate_jump(loop_block, loop_block, SourceSpan::default())
+            .unwrap();
+
+        assert!(
+            builder
+                .seal()
+                .unwrap_err()
+                .to_string()
+                .contains("control-flow cycle")
         );
     }
 

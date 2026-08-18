@@ -550,6 +550,8 @@ pub enum PortDirection {
     Output,
     /// May be driven from either side using resolved-net semantics.
     Inout,
+    /// Exact variable alias bound to an enclosing signal during linked elaboration.
+    Ref,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -586,6 +588,8 @@ pub enum SignalKind {
 pub enum SignalResolution {
     /// Exactly one driver is permitted.
     SingleDriver,
+    /// Drivers remain explicit physical tri-state contributions.
+    TriState,
     /// Driver values are combined by bitwise AND.
     WiredAnd,
     /// Driver values are combined by bitwise OR.
@@ -965,6 +969,17 @@ pub enum OpKind {
         /// Value selected when `cond` is false.
         else_value: ValueId,
     },
+    /// Conditionally enabled high-impedance driver.
+    ///
+    /// The result is `data` while `enable` is active and high impedance while
+    /// it is inactive. Resolved-net normalization or physical tri-state
+    /// mapping must consume this operation before ordinary Boolean lowering.
+    TriState {
+        /// Value driven while enabled.
+        data: ValueId,
+        /// Driver enable and its active polarity.
+        enable: Enable,
+    },
     /// Most-significant-first concatenation of values.
     Concat {
         /// Ordered concatenation operands.
@@ -1051,6 +1066,10 @@ impl OpKind {
                 visit(*then_value)?;
                 visit(*else_value)?;
             }
+            Self::TriState { data, enable } => {
+                visit(*data)?;
+                visit(enable.value)?;
+            }
             Self::Concat { parts } => {
                 for &part in parts {
                     visit(part)?;
@@ -1131,6 +1150,10 @@ impl OpKind {
                 visit(cond)?;
                 visit(then_value)?;
                 visit(else_value)?;
+            }
+            Self::TriState { data, enable } => {
+                visit(data)?;
+                visit(&mut enable.value)?;
             }
             Self::Concat { parts } => {
                 for part in parts {

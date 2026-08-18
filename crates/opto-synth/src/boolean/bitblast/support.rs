@@ -42,7 +42,8 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             } => scalar(*cond)? && scalar(*then_value)? && scalar(*else_value)?,
             word::OpKind::Register(register) => scalar(register.d)?,
             word::OpKind::Latch(latch) => scalar(latch.d)?,
-            word::OpKind::Concat { .. }
+            word::OpKind::TriState { .. }
+            | word::OpKind::Concat { .. }
             | word::OpKind::Extract { .. }
             | word::OpKind::DynamicExtract { .. }
             | word::OpKind::DynamicInsert { .. }

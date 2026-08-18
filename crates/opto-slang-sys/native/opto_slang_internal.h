@@ -169,10 +169,21 @@ struct OptoSlangEventData {
     OptoSlangSourceSpanView source{};
 };
 
+struct OptoSlangLoopRegionData {
+    uint32_t header = 0;
+    uint32_t body = 0;
+    uint32_t latch = 0;
+    uint32_t exit = 0;
+    OptoSlangLoopForm form = OPTO_SLANG_LOOP_PRE_TEST;
+    std::optional<uint32_t> parent;
+    OptoSlangSourceSpanView source{};
+};
+
 struct OptoSlangProcedureData {
     OptoSlangProcedureKind kind = OPTO_SLANG_PROCEDURE_COMB;
     std::vector<OptoSlangEventData> events;
     std::vector<OptoSlangBlockData> blocks;
+    std::vector<OptoSlangLoopRegionData> loop_regions;
     uint32_t entry_block = 0;
     OptoSlangSourceSpanView source{};
 };
@@ -192,6 +203,22 @@ struct OptoSlangModulePayload {
     std::vector<std::unique_ptr<OptoSlangTypeLayout>> type_layouts;
 };
 
+struct OptoSlangLoweringFailure {
+    OptoSlangLoweringFailure() = default;
+    OptoSlangLoweringFailure(
+        OptoSlangLoweringFailureCategory category,
+        uint16_t code,
+        std::string message)
+        : category(category), code(code), message(std::move(message)) {}
+
+    OptoSlangLoweringFailureCategory category = OPTO_SLANG_LOWERING_NATIVE;
+    uint16_t code = 1;
+    std::string message;
+    std::string file;
+    uint32_t line = 0;
+    uint32_t column = 0;
+};
+
 struct OptoSlangModuleData {
     std::string name;
     uint64_t source_order = UINT64_MAX;
@@ -200,7 +227,7 @@ struct OptoSlangModuleData {
     std::unique_ptr<OptoSlangModulePayload> payload;
     std::mutex materialize_mutex;
     size_t materialize_users = 0;
-    std::string materialize_error;
+    std::optional<OptoSlangLoweringFailure> materialize_failure;
 };
 
 struct OptoSlangCompilationState;

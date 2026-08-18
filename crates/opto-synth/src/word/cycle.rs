@@ -293,6 +293,16 @@ fn operation_dependencies(
                 )?;
             }
         },
+        word::OpKind::TriState { data, enable } => {
+            push_slice(
+                module,
+                &mut dependencies,
+                *data,
+                selection.lsb,
+                selection.width,
+            )?;
+            push_full(module, &mut dependencies, enable.value)?;
+        }
         word::OpKind::Concat { parts } => {
             let mut part_lsb = 0u32;
             for &part in parts.iter().rev() {
@@ -519,6 +529,7 @@ fn operation_description(operation: &word::OpKind) -> &'static str {
             word::BinaryOp::Ashr => "an arithmetic right-shift expression",
         },
         word::OpKind::Mux { .. } => "a conditional selection",
+        word::OpKind::TriState { .. } => "a tri-state driver",
         word::OpKind::Concat { .. } => "a concatenation",
         word::OpKind::Extract { .. } => "a static bit selection",
         word::OpKind::DynamicExtract { .. } => "a dynamic bit selection",

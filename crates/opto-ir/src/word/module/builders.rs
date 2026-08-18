@@ -7,6 +7,7 @@ use super::{
     BinaryOp, BitVal, CastKind, ConstBits, LatchOp, LogicStateKind, NonZeroU32, OpKind, RegisterOp,
     ResetKind, SourceSpan, UnaryOp, ValueId, ValueKind, WordError, WordModule, WordType,
 };
+use crate::word::Enable;
 
 impl WordModule {
     /// Adds a typed four-state constant value.
@@ -130,6 +131,23 @@ impl WordModule {
             else_value,
         };
         self.push_operation(kind, then_ty, source)
+    }
+
+    /// Adds a conditionally enabled high-impedance driver.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WordError`] unless the enable is one bit, or when an operand
+    /// ID or arena capacity is invalid.
+    pub fn tri_state(
+        &mut self,
+        data: ValueId,
+        enable: Enable,
+        source: SourceSpan,
+    ) -> Result<ValueId, WordError> {
+        self.require_value_width(enable.value, 1, "tri-state enable")?;
+        let ty = self.value_ty(data)?;
+        self.push_operation(OpKind::TriState { data, enable }, ty, source)
     }
 
     /// Concatenates one or more values, most-significant part first.

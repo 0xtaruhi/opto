@@ -262,7 +262,9 @@ fn canonical_operation(
                 AliasOrKey::Key(scope, ValueKey::Cast(*kind, input, *target, result_ty))
             }
         }
-        word::OpKind::Register(_) | word::OpKind::Latch(_) => AliasOrKey::Unique,
+        word::OpKind::TriState { .. } | word::OpKind::Register(_) | word::OpKind::Latch(_) => {
+            AliasOrKey::Unique
+        }
     })
 }
 
@@ -517,6 +519,7 @@ fn fold_operation(
             Some(selected.as_slice().to_vec())
         }
         word::OpKind::Binary { .. }
+        | word::OpKind::TriState { .. }
         | word::OpKind::DynamicExtract { .. }
         | word::OpKind::DynamicInsert { .. }
         | word::OpKind::Register(_)
