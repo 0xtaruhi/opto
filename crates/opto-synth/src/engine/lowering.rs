@@ -55,6 +55,7 @@ pub(super) fn lower_logic(
     }
     let regional_publication = aggregate_regional_publication(
         &source,
+        operation_regions,
         prepared_regions
             .iter()
             .flat_map(|prepared| prepared.publication.iter().copied()),
@@ -165,22 +166,48 @@ pub(super) fn lower_logic(
 
 fn aggregate_regional_publication(
     source: &opto_ir::word::WordModule,
+    operation_regions: &[Option<crate::RegionRowId>],
     entries: impl IntoIterator<Item = crate::boolean::bitblast::RegionalPublicationBit>,
 ) -> Result<Vec<crate::boolean::bitblast::RegionalPublicationBit>, crate::SynthError> {
     let mut publication_by_bit =
         std::collections::BTreeMap::<(opto_ir::word::ValueId, u32), crate::RegionRowId>::new();
+    let mut claimed_bits = std::collections::BTreeSet::new();
     for entry in entries {
-        if let Some(current) = publication_by_bit.get(&(entry.target, entry.bit)).copied() {
-            if current != entry.producer {
-                let target_kind = source.value(entry.target).map(|stored| &stored.kind);
-                return Err(crate::SynthError::invariant(format!(
-                    "regional publication {:?}[{}] ({target_kind:?}) has distinct producers {:?} and {:?}",
-                    entry.target, entry.bit, current, entry.producer,
-                )));
-            }
-        } else {
-            publication_by_bit.insert((entry.target, entry.bit), entry.producer);
+        let key = (entry.target, entry.bit);
+        claimed_bits.insert(key);
+        let operation = source
+            .value(entry.target)
+            .and_then(|stored| match stored.kind {
+                opto_ir::word::ValueKind::Operation(operation) => Some(operation),
+                opto_ir::word::ValueKind::Signal(_) | opto_ir::word::ValueKind::Constant(_) => None,
+            })
+            .ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "regional publication {:?}[{}] is not produced by an operation",
+                    entry.target, entry.bit,
+                ))
+            })?;
+        let authoritative = operation_regions
+            .get(operation.index())
+            .copied()
+            .flatten()
+            .ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "regional publication {:?}[{}] has no authoritative operation owner",
+                    entry.target, entry.bit,
+                ))
+            })?;
+        if entry.producer == authoritative {
+            publication_by_bit.insert(key, authoritative);
         }
+    }
+    if let Some((target, bit)) = claimed_bits
+        .into_iter()
+        .find(|key| !publication_by_bit.contains_key(key))
+    {
+        return Err(crate::SynthError::invariant(format!(
+            "regional publication {target:?}[{bit}] was not claimed by its authoritative owner",
+        )));
     }
     Ok(publication_by_bit
         .into_iter()
@@ -199,23 +226,50 @@ mod publication_tests {
     use super::*;
 
     #[test]
-    fn publication_aggregation_is_order_independent_and_rejects_distinct_producers() {
-        let source = opto_ir::word::WordModule::new("publication_test");
-        let target = opto_ir::word::ValueId::from_index(0).unwrap();
+    fn publication_aggregation_selects_only_the_authoritative_owner() {
+        let mut source = opto_ir::word::WordModule::new("publication_test");
+        let input = source
+            .add_port(
+                "input",
+                opto_ir::word::PortDirection::Input,
+                opto_ir::word::WordType::bits(1).unwrap(),
+                opto_ir::word::SourceSpan::default(),
+            )
+            .unwrap();
+        let input = source
+            .read_signal(
+                source.port(input).unwrap().signal,
+                opto_ir::word::SourceSpan::default(),
+            )
+            .unwrap();
+        let target = source
+            .unary(
+                opto_ir::word::UnaryOp::BitNot,
+                input,
+                opto_ir::word::SourceSpan::default(),
+            )
+            .unwrap();
         let first = crate::RegionRowId::from_index(0).unwrap();
         let second = crate::RegionRowId::from_index(1).unwrap();
+        let owners = [Some(first)];
         let claim = |producer| crate::boolean::bitblast::RegionalPublicationBit {
             target,
             bit: 0,
             producer,
         };
 
-        let duplicate =
-            aggregate_regional_publication(&source, [claim(first), claim(first)]).unwrap();
+        let duplicate = aggregate_regional_publication(
+            &source,
+            &owners,
+            [claim(second), claim(first), claim(second), claim(first)],
+        )
+        .unwrap();
         assert_eq!(duplicate, [claim(first)]);
-        for claims in [[claim(first), claim(second)], [claim(second), claim(first)]] {
-            let error = aggregate_regional_publication(&source, claims).unwrap_err();
-            assert!(error.to_string().contains("has distinct producers"));
-        }
+        let error = aggregate_regional_publication(&source, &owners, [claim(second)]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("was not claimed by its authoritative owner")
+        );
     }
 }

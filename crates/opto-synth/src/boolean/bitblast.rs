@@ -602,6 +602,7 @@ pub(super) struct BitBlaster<'a, B: BitBackend = WordBackend> {
     operation_regions: &'a [Option<crate::RegionRowId>],
     boundary_inputs: BTreeSet<word::ValueId>,
     signal_drivers: crate::word::signal_driver::SignalDriverIndex,
+    known_bits: word::KnownBitsAnalysis,
     active_values: BTreeSet<word::ValueId>,
     lowered_owners: LoweredRegionOwnership,
     arena: Vec<ScalarBit>,
@@ -650,6 +651,7 @@ impl<'a, B: BitBackend> BitBlaster<'a, B> {
         } = request;
         let value_count = module.values().len();
         let signal_drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
+        let known_bits = word::KnownBitsAnalysis::new(module);
         Ok(Self {
             module,
             plan,
@@ -660,6 +662,7 @@ impl<'a, B: BitBackend> BitBlaster<'a, B> {
             operation_regions,
             boundary_inputs: boundary_inputs.iter().copied().collect(),
             signal_drivers,
+            known_bits,
             active_values: BTreeSet::new(),
             lowered_owners: LoweredRegionOwnership::new(value_count),
             arena: Vec::new(),
