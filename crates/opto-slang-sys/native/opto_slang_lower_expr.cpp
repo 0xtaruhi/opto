@@ -6,6 +6,7 @@
 namespace opto::slang_lower {
 constexpr uint64_t RUNTIME_POWER_MULTIPLICATION_LIMIT = 1024;
 constexpr uint64_t ASSIGNMENT_PATTERN_ELEMENT_LIMIT = 65536;
+constexpr uint64_t STREAMING_SELECTION_ELEMENT_LIMIT = 65536;
 
 uint32_t dynamic_offset_sum_width(uint32_t left_width, uint32_t right_width) {
   const auto operand_width = std::max(left_width, right_width);
@@ -268,6 +269,158 @@ OptoSlangExpr *make_dynamic_indexed_part_select(
   }
   return make_dynamic_extract(design, value, offset,
                               static_cast<uint32_t>(selected_width), select);
+}
+
+std::optional<int32_t> lowering_constant_i32(ModuleLoweringContext &design,
+                                             const Expression &expression) {
+  auto value = evaluate_lowering_constant(design, expression);
+  if (!value || !value.isInteger() || value.integer().hasUnknown()) {
+    return std::nullopt;
+  }
+  return value.integer().as<int32_t>();
+}
+
+[[noreturn]] void throw_streaming_profile_failure(ModuleLoweringContext &design,
+                                                  const Expression &source,
+                                                  std::string message) {
+  message += " at " + expression_location(design, source);
+  throw LoweringFailure(OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE, 1,
+                        source.sourceRange.start(), std::move(message));
+}
+
+[[noreturn]] void
+throw_streaming_capacity_failure(ModuleLoweringContext &design,
+                                 const Expression &source,
+                                 std::string message) {
+  message += " at " + expression_location(design, source);
+  throw LoweringFailure(OPTO_SLANG_LOWERING_CAPACITY, 1,
+                        source.sourceRange.start(), std::move(message));
+}
+
+void validate_streaming_storage_type(ModuleLoweringContext &design,
+                                     const Type &source_type,
+                                     const Expression &source) {
+  const auto &type = source_type.getCanonicalType();
+  if (type.kind == SymbolKind::FixedSizeUnpackedArrayType) {
+    validate_streaming_storage_type(
+        design, type.as<FixedSizeUnpackedArrayType>().elementType, source);
+    return;
+  }
+  if (type.kind == SymbolKind::UnpackedStructType) {
+    for (const auto *field : type.as<UnpackedStructType>().fields) {
+      validate_streaming_storage_type(design, field->getType(), source);
+    }
+    return;
+  }
+  if (!type.isIntegral()) {
+    throw_streaming_profile_failure(design, source,
+                                    "streaming aggregate form '" +
+                                        copy_string(toString(type.kind)) +
+                                        "' is not supported for synthesis");
+  }
+}
+
+uint32_t streaming_selection_elements(
+    ModuleLoweringContext &design,
+    const StreamingConcatenationExpression::StreamExpression &stream) {
+  if (!stream.withExpr) {
+    throw std::logic_error(
+        "streaming selection width requested without a with-clause");
+  }
+  const auto &operand_type = stream.operand->type->getCanonicalType();
+  if (operand_type.kind != SymbolKind::FixedSizeUnpackedArrayType) {
+    throw_streaming_profile_failure(
+        design, *stream.withExpr,
+        "streaming with-clause requires a fixed-size unpacked array operand");
+  }
+
+  uint64_t elements = 0;
+  if (stream.withExpr->kind == ExpressionKind::ElementSelect) {
+    elements = 1;
+  } else if (stream.withExpr->kind == ExpressionKind::RangeSelect) {
+    const auto &select = stream.withExpr->as<RangeSelectExpression>();
+    const auto right = lowering_constant_i32(design, select.right());
+    if (select.getSelectionKind() == RangeSelectionKind::Simple) {
+      const auto left = lowering_constant_i32(design, select.left());
+      if (!left || !right) {
+        throw_streaming_profile_failure(
+            design, *stream.withExpr,
+            "streaming simple with-range requires constant bounds and a static "
+            "result shape");
+      }
+      elements = ConstantRange{*left, *right}.width();
+    } else {
+      if (!right || *right <= 0) {
+        throw_streaming_profile_failure(
+            design, *stream.withExpr,
+            "streaming indexed with-range requires a positive constant width");
+      }
+      elements = static_cast<uint32_t>(*right);
+    }
+  } else {
+    throw_streaming_profile_failure(
+        design, *stream.withExpr,
+        "streaming with-clause selector form is not supported for synthesis");
+  }
+
+  if (elements == 0 || elements > STREAMING_SELECTION_ELEMENT_LIMIT) {
+    throw_streaming_capacity_failure(
+        design, *stream.withExpr,
+        "streaming with-clause exceeds the deterministic expansion limit of " +
+            std::to_string(STREAMING_SELECTION_ELEMENT_LIMIT) + " elements");
+  }
+  return static_cast<uint32_t>(elements);
+}
+
+uint32_t
+streaming_synthesis_width(ModuleLoweringContext &design,
+                          const StreamingConcatenationExpression &streaming) {
+  uint64_t total_width = 0;
+  for (const auto &stream : streaming.streams()) {
+    uint64_t stream_width = 0;
+    if (stream.withExpr) {
+      const auto *element_type = stream.operand->type->getArrayElementType();
+      if (!element_type || !element_type->isFixedSize()) {
+        throw_streaming_profile_failure(design, *stream.withExpr,
+                                        "streaming with-clause element type "
+                                        "must have a static bitstream shape");
+      }
+      validate_streaming_storage_type(design, *element_type, *stream.withExpr);
+      const auto element_width = lowered_type_width(*element_type);
+      const auto elements = streaming_selection_elements(design, stream);
+      if (element_width == 0 || element_width > UINT32_MAX ||
+          elements > UINT32_MAX / element_width) {
+        throw_streaming_capacity_failure(
+            design, *stream.withExpr,
+            "streaming with-clause result width exceeds 32-bit capacity");
+      }
+      stream_width = element_width * elements;
+    } else if (stream.operand->kind == ExpressionKind::Streaming) {
+      stream_width = streaming_synthesis_width(
+          design, stream.operand->as<StreamingConcatenationExpression>());
+    } else {
+      if (!stream.operand->type->isFixedSize()) {
+        throw_streaming_profile_failure(
+            design, *stream.operand,
+            "streaming operand requires a static bitstream shape");
+      }
+      validate_streaming_storage_type(design, *stream.operand->type,
+                                      *stream.operand);
+      stream_width = lowered_type_width(*stream.operand->type);
+    }
+    if (stream_width == 0 || stream_width > UINT32_MAX - total_width) {
+      throw_streaming_capacity_failure(
+          design, streaming,
+          "streaming concatenation result width exceeds 32-bit capacity");
+    }
+    total_width += stream_width;
+  }
+  if (total_width == 0) {
+    throw_streaming_profile_failure(
+        design, streaming,
+        "streaming concatenation has no fixed-width operands");
+  }
+  return static_cast<uint32_t>(total_width);
 }
 
 OptoSlangExpr *
@@ -1037,23 +1190,341 @@ OptoSlangExpr *lower_constant_value(ModuleLoweringContext &design,
   return make_expr(design, std::move(lowered), source);
 }
 
+OptoSlangExpr *make_streaming_concat(ModuleLoweringContext &design,
+                                     std::vector<const OptoSlangExpr *> parts,
+                                     const Expression &source) {
+  if (parts.empty()) {
+    throw std::logic_error("streaming bitstream has no lowered parts");
+  }
+  if (parts.size() == 1) {
+    return const_cast<OptoSlangExpr *>(parts.front());
+  }
+  OptoSlangExpr lowered;
+  lowered.kind = OPTO_SLANG_EXPR_CONCAT;
+  lowered.concat_parts = std::move(parts);
+  return make_expr(design, std::move(lowered), source);
+}
+
+void append_streaming_bitstream_parts(
+    ModuleLoweringContext &design, const OptoSlangExpr *storage,
+    const Type &source_type, uint64_t storage_offset, const Expression &source,
+    std::vector<const OptoSlangExpr *> &parts) {
+  const auto &type = source_type.getCanonicalType();
+  if (type.kind == SymbolKind::FixedSizeUnpackedArrayType) {
+    const auto &array = type.as<FixedSizeUnpackedArrayType>();
+    const auto element_width = lowered_type_width(array.elementType);
+    if (element_width == 0) {
+      throw_streaming_profile_failure(
+          design, source,
+          "streaming unpacked array element has no bitstream storage");
+    }
+    for (uint64_t index = 0; index < array.range.width(); ++index) {
+      append_streaming_bitstream_parts(design, storage, array.elementType,
+                                       storage_offset + index * element_width,
+                                       source, parts);
+    }
+    return;
+  }
+  if (type.kind == SymbolKind::UnpackedStructType) {
+    for (const auto *field : type.as<UnpackedStructType>().fields) {
+      append_streaming_bitstream_parts(
+          design, storage, field->getType(),
+          storage_offset + aggregate_field_storage_offset(type, *field), source,
+          parts);
+    }
+    return;
+  }
+  if (!type.isIntegral()) {
+    throw_streaming_profile_failure(design, source,
+                                    "streaming aggregate form '" +
+                                        copy_string(toString(type.kind)) +
+                                        "' is not supported for synthesis");
+  }
+
+  const auto width =
+      checked_width(lowered_type_width(type), "streaming bitstream leaf");
+  if (storage_offset == 0 &&
+      lowered_value_shape(design, *storage).width == width) {
+    parts.push_back(storage);
+    return;
+  }
+  parts.push_back(
+      apply_rvalue_slice(design, storage, storage_offset, width, source));
+}
+
+OptoSlangExpr *lower_streaming_storage_value(ModuleLoweringContext &design,
+                                             const OptoSlangExpr *storage,
+                                             const Type &source_type,
+                                             const Expression &source) {
+  std::vector<const OptoSlangExpr *> parts;
+  append_streaming_bitstream_parts(design, storage, source_type, 0, source,
+                                   parts);
+  return make_streaming_concat(design, std::move(parts), source);
+}
+
+OptoSlangExpr *make_streaming_default_value(ModuleLoweringContext &design,
+                                            const Type &type,
+                                            const Expression &source) {
+  auto value = type.getDefaultValue();
+  EvalContext context(design.body);
+  value = Bitstream::convertToBitVector(std::move(value), source.sourceRange,
+                                        context);
+  if (!value || !value.isInteger()) {
+    throw_streaming_profile_failure(design, source,
+                                    "streaming selected element default cannot "
+                                    "be represented as a fixed bitstream");
+  }
+  const auto &bits = value.integer();
+  const auto expected_width =
+      checked_width(lowered_type_width(type), "streaming default value");
+  if (bits.getBitWidth() != expected_width) {
+    throw std::logic_error(
+        "streaming default bitstream width does not match element storage");
+  }
+  OptoSlangExpr lowered;
+  lowered.kind = OPTO_SLANG_EXPR_CONSTANT;
+  lowered.constant_has_width = true;
+  lowered.constant_width = expected_width;
+  lowered.constant_bits = exact_binary_string(bits);
+  return make_expr(design, std::move(lowered), source);
+}
+
+ConstantRange static_streaming_selection_range(
+    ModuleLoweringContext &design,
+    const StreamingConcatenationExpression::StreamExpression &stream) {
+  if (stream.withExpr->kind == ExpressionKind::ElementSelect) {
+    const auto &select = stream.withExpr->as<ElementSelectExpression>();
+    const auto index = lowering_constant_i32(design, select.selector());
+    if (!index) {
+      throw std::logic_error(
+          "dynamic streaming element selection requested as static");
+    }
+    return {*index, *index};
+  }
+  const auto &select = stream.withExpr->as<RangeSelectExpression>();
+  const auto left = lowering_constant_i32(design, select.left());
+  const auto right = lowering_constant_i32(design, select.right());
+  if (!left || !right) {
+    throw std::logic_error(
+        "dynamic streaming range selection requested as static");
+  }
+  if (select.getSelectionKind() == RangeSelectionKind::Simple) {
+    return {*left, *right};
+  }
+  auto range = ConstantRange::getIndexedRange(
+      *left, *right, stream.operand->type->getFixedRange().isDescending(),
+      select.getSelectionKind() == RangeSelectionKind::IndexedUp);
+  if (!range) {
+    throw_streaming_capacity_failure(
+        design, *stream.withExpr,
+        "streaming indexed with-range overflows signed index capacity");
+  }
+  return *range;
+}
+
+bool streaming_selection_has_constant_base(
+    ModuleLoweringContext &design,
+    const StreamingConcatenationExpression::StreamExpression &stream) {
+  if (stream.withExpr->kind == ExpressionKind::ElementSelect) {
+    return lowering_constant_i32(
+               design,
+               stream.withExpr->as<ElementSelectExpression>().selector())
+        .has_value();
+  }
+  const auto &select = stream.withExpr->as<RangeSelectExpression>();
+  return lowering_constant_i32(design, select.left()).has_value();
+}
+
+OptoSlangExpr *lower_static_streaming_selection(
+    ModuleLoweringContext &design,
+    const StreamingConcatenationExpression::StreamExpression &stream) {
+  const auto &array_type = *stream.operand->type;
+  const auto &element_type = *array_type.getArrayElementType();
+  const auto element_width = checked_width(lowered_type_width(element_type),
+                                           "streaming selected element");
+  const auto declared = array_type.getFixedRange();
+  const auto storage_range = selection_storage_range(array_type);
+  const auto selected = static_streaming_selection_range(design, stream);
+  auto *storage = lower_expr(design, *stream.operand);
+  auto *default_value =
+      make_streaming_default_value(design, element_type, *stream.withExpr);
+  std::vector<const OptoSlangExpr *> parts;
+  parts.reserve(static_cast<size_t>(selected.width()));
+  for (uint64_t position = 0; position < selected.width(); ++position) {
+    const auto index = selected.isDescending()
+                           ? static_cast<int64_t>(selected.left) -
+                                 static_cast<int64_t>(position)
+                           : static_cast<int64_t>(selected.left) +
+                                 static_cast<int64_t>(position);
+    if (index < INT32_MIN || index > INT32_MAX ||
+        !declared.containsPoint(static_cast<int32_t>(index))) {
+      parts.push_back(default_value);
+      continue;
+    }
+    const auto translated =
+        storage_range.translateIndex(static_cast<int32_t>(index));
+    if (translated < 0) {
+      throw std::logic_error(
+          "in-range streaming selection has a negative storage offset");
+    }
+    auto *selected_storage = apply_rvalue_slice(
+        design, storage, static_cast<uint64_t>(translated) * element_width,
+        element_width, *stream.withExpr);
+    parts.push_back(lower_streaming_storage_value(
+        design, selected_storage, element_type, *stream.withExpr));
+  }
+  return make_streaming_concat(design, std::move(parts), *stream.withExpr);
+}
+
+OptoSlangExpr *lower_dynamic_streaming_selection(
+    ModuleLoweringContext &design,
+    const StreamingConcatenationExpression::StreamExpression &stream,
+    uint32_t selected_elements) {
+  const Expression *selector_expression = nullptr;
+  RangeSelectionKind selection_kind = RangeSelectionKind::Simple;
+  if (stream.withExpr->kind == ExpressionKind::ElementSelect) {
+    selector_expression =
+        &stream.withExpr->as<ElementSelectExpression>().selector();
+  } else {
+    const auto &select = stream.withExpr->as<RangeSelectExpression>();
+    selection_kind = select.getSelectionKind();
+    if (selection_kind == RangeSelectionKind::Simple) {
+      throw_streaming_profile_failure(
+          design, *stream.withExpr,
+          "streaming simple with-range requires constant bounds and a static "
+          "result shape");
+    }
+    selector_expression = &select.left();
+  }
+
+  const auto &array_type = *stream.operand->type;
+  const auto &element_type = *array_type.getArrayElementType();
+  const auto element_width = checked_width(lowered_type_width(element_type),
+                                           "streaming selected element");
+  const auto declared = array_type.getFixedRange();
+  const auto storage_range = selection_storage_range(array_type);
+  const auto selector_width =
+      checked_width(lowered_type_width(*selector_expression->type),
+                    "streaming dynamic selector");
+  const auto arithmetic_width = dynamic_offset_sum_width(selector_width, 33);
+  auto *selector_value = lower_expr(design, *selector_expression);
+  const OptoSlangExpr *base_index = nullptr;
+  if (selector_expression->type->isSigned()) {
+    base_index = make_signed_cast_expr(design, selector_value, arithmetic_width,
+                                       *selector_expression);
+  } else {
+    base_index = make_signed_cast_expr(
+        design,
+        make_unsigned_cast_expr(design, selector_value, arithmetic_width,
+                                *selector_expression),
+        arithmetic_width, *selector_expression);
+  }
+
+  auto *lower_bound = make_signed_constant_expr(
+      design, declared.lower(), arithmetic_width, *selector_expression);
+  auto *upper_bound = make_signed_constant_expr(
+      design, declared.upper(), arithmetic_width, *selector_expression);
+  auto *storage_origin = make_signed_constant_expr(
+      design,
+      storage_range.isDescending() ? storage_range.lower()
+                                   : storage_range.upper(),
+      arithmetic_width, *selector_expression);
+  auto *storage = lower_expr(design, *stream.operand);
+  auto *default_value =
+      make_streaming_default_value(design, element_type, *stream.withExpr);
+
+  std::vector<const OptoSlangExpr *> parts;
+  parts.reserve(selected_elements);
+  for (uint32_t position = 0; position < selected_elements; ++position) {
+    int64_t delta = 0;
+    if (stream.withExpr->kind == ExpressionKind::RangeSelect) {
+      const auto remainder =
+          static_cast<int64_t>(selected_elements - position - 1);
+      if (declared.isDescending()) {
+        delta = selection_kind == RangeSelectionKind::IndexedUp
+                    ? remainder
+                    : -static_cast<int64_t>(position);
+      } else {
+        delta = selection_kind == RangeSelectionKind::IndexedUp
+                    ? static_cast<int64_t>(position)
+                    : -remainder;
+      }
+    }
+
+    const OptoSlangExpr *index = base_index;
+    if (delta != 0) {
+      index = make_binary_expr(design, OPTO_SLANG_BINARY_ADD, base_index,
+                               make_signed_constant_expr(design, delta,
+                                                         arithmetic_width,
+                                                         *selector_expression),
+                               *selector_expression);
+    }
+    auto *in_range =
+        make_binary_expr(design, OPTO_SLANG_BINARY_LOGICAL_AND,
+                         make_binary_expr(design, OPTO_SLANG_BINARY_GE, index,
+                                          lower_bound, *selector_expression),
+                         make_binary_expr(design, OPTO_SLANG_BINARY_LE, index,
+                                          upper_bound, *selector_expression),
+                         *selector_expression);
+    const auto *element_offset =
+        storage_range.isDescending()
+            ? make_binary_expr(design, OPTO_SLANG_BINARY_SUB, index,
+                               storage_origin, *selector_expression)
+            : make_binary_expr(design, OPTO_SLANG_BINARY_SUB, storage_origin,
+                               index, *selector_expression);
+    DynamicOffset bit_offset{
+        make_unsigned_cast_expr(design, element_offset, arithmetic_width,
+                                *selector_expression),
+        arithmetic_width,
+    };
+    if (element_width > 1) {
+      bit_offset.width =
+          scaled_dynamic_offset_width(arithmetic_width, element_width);
+      bit_offset.expression = make_binary_expr(
+          design, OPTO_SLANG_BINARY_MUL,
+          make_unsigned_cast_expr(design, bit_offset.expression,
+                                  bit_offset.width, *selector_expression),
+          make_unsigned_constant_expr(design, element_width, bit_offset.width,
+                                      *selector_expression),
+          *selector_expression);
+    }
+    auto *selected_storage = make_dynamic_extract(
+        design, storage, bit_offset, element_width, *stream.withExpr);
+    auto *selected_value = lower_streaming_storage_value(
+        design, selected_storage, element_type, *stream.withExpr);
+    parts.push_back(make_mux_expr(design, in_range, selected_value,
+                                  default_value, *stream.withExpr));
+  }
+  return make_streaming_concat(design, std::move(parts), *stream.withExpr);
+}
+
+OptoSlangExpr *lower_streaming_selection(
+    ModuleLoweringContext &design,
+    const StreamingConcatenationExpression::StreamExpression &stream) {
+  const auto selected_elements = streaming_selection_elements(design, stream);
+  return streaming_selection_has_constant_base(design, stream)
+             ? lower_static_streaming_selection(design, stream)
+             : lower_dynamic_streaming_selection(design, stream,
+                                                 selected_elements);
+}
+
 OptoSlangExpr *lower_streaming_concatenation(
     ModuleLoweringContext &design,
     const StreamingConcatenationExpression &streaming) {
-  if (!streaming.isFixedSize() || streaming.getBitstreamWidth() == 0 ||
-      streaming.getBitstreamWidth() > UINT32_MAX) {
-    throw std::runtime_error(
-        "streaming concatenation requires a fixed nonzero 32-bit width");
-  }
+  const auto total_width = streaming_synthesis_width(design, streaming);
   OptoSlangExpr normal;
   normal.kind = OPTO_SLANG_EXPR_CONCAT;
   OptoSlangExpr *single_operand = nullptr;
   for (const auto &stream : streaming.streams()) {
-    if (stream.withExpr) {
-      throw std::runtime_error("streaming concatenation with-clauses are not "
-                               "supported for synthesis");
-    }
-    auto *operand = lower_expr(design, *stream.operand);
+    auto *operand =
+        stream.withExpr ? lower_streaming_selection(design, stream)
+        : stream.operand->kind == ExpressionKind::Streaming
+            ? lower_streaming_concatenation(
+                  design,
+                  stream.operand->as<StreamingConcatenationExpression>())
+            : lower_streaming_storage_value(
+                  design, lower_expr(design, *stream.operand),
+                  *stream.operand->type, *stream.operand);
     single_operand = normal.concat_parts.empty() ? operand : nullptr;
     normal.concat_parts.push_back(operand);
   }
@@ -1064,7 +1535,6 @@ OptoSlangExpr *lower_streaming_concatenation(
                              ? single_operand
                              : make_expr(design, std::move(normal), streaming);
   const auto slice_size = streaming.getSliceSize();
-  const auto total_width = static_cast<uint32_t>(streaming.getBitstreamWidth());
   if (slice_size == 0 || slice_size >= total_width) {
     return value;
   }
@@ -1566,9 +2036,8 @@ OptoSlangExpr *lower_expr(ModuleLoweringContext &design,
     const auto &operand = conversion.operand();
     const auto streaming_width =
         operand.kind == ExpressionKind::Streaming
-            ? std::optional<uint64_t>(
-                  operand.as<StreamingConcatenationExpression>()
-                      .getBitstreamWidth())
+            ? std::optional<uint64_t>(streaming_synthesis_width(
+                  design, operand.as<StreamingConcatenationExpression>()))
             : std::nullopt;
     if (!expr.type->isIntegral() ||
         (!streaming_width &&
@@ -1583,6 +2052,24 @@ OptoSlangExpr *lower_expr(ModuleLoweringContext &design,
         checked_width(source_bit_width, "conversion source");
     const auto target_width =
         checked_width(lowered_type_width(*expr.type), "conversion target");
+    if (conversion.conversionKind == ConversionKind::StreamingConcat) {
+      if (!streaming_width || target_width < source_width) {
+        throw std::logic_error("streaming conversion target is narrower than "
+                               "its statically shaped source");
+      }
+      auto *value = lower_expr(design, operand);
+      if (target_width > source_width) {
+        OptoSlangExpr aligned;
+        aligned.kind = OPTO_SLANG_EXPR_CONCAT;
+        aligned.concat_parts.push_back(value);
+        aligned.concat_parts.push_back(make_unsigned_constant_expr(
+            design, 0, static_cast<uint32_t>(target_width - source_width),
+            expr));
+        value = make_expr(design, std::move(aligned), expr);
+      }
+      return cast_to_shape(design, value, target_width, expr.type->isSigned(),
+                           expr, true);
+    }
     OptoSlangExpr lowered;
     lowered.kind = OPTO_SLANG_EXPR_CAST;
     lowered.cast_value = lower_expr(design, operand);

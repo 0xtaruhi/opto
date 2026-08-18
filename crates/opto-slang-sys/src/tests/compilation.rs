@@ -1115,6 +1115,263 @@ fn native_compile_lowers_fixed_streaming_concatenations() {
 }
 
 #[test]
+fn native_compile_lowers_constant_streaming_with_ranges_in_declared_order() {
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] descending [3:0], input logic [7:0] ascending [0:3], output logic [23:0] desc_right, asc_right, desc_left); assign desc_right = {>>{descending with [2:0]}}; assign asc_right = {>>{ascending with [1:3]}}; assign desc_left = {<<10{descending with [2:0]}}; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
+
+    for assignment in &assignments[..2] {
+        let SlangExpressionKind::Cast {
+            value,
+            width: 24,
+            signed: false,
+            ..
+        } = assignment.rhs().unwrap().kind().unwrap()
+        else {
+            panic!("expected unsigned streaming result conversion");
+        };
+        let SlangExpressionKind::Concat(parts) = value.kind().unwrap() else {
+            panic!("expected selected streaming elements");
+        };
+        let ranges = parts
+            .parts()
+            .map(|part| {
+                let SlangExpressionKind::Signal(signal) = part.unwrap().kind().unwrap() else {
+                    panic!("expected a statically selected array element");
+                };
+                signal.range.unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranges,
+            [
+                SlangBitRange { msb: 15, lsb: 8 },
+                SlangBitRange { msb: 23, lsb: 16 },
+                SlangBitRange { msb: 31, lsb: 24 },
+            ]
+        );
+    }
+
+    let SlangExpressionKind::Cast {
+        value, width: 24, ..
+    } = assignments[2].rhs().unwrap().kind().unwrap()
+    else {
+        panic!("expected left-streaming result conversion");
+    };
+    let SlangExpressionKind::Concat(parts) = value.kind().unwrap() else {
+        panic!("expected slice-size reordering");
+    };
+    let slices = parts
+        .parts()
+        .map(|part| match part.unwrap().kind().unwrap() {
+            SlangExpressionKind::Extract { lsb, width, .. } => (lsb, width),
+            other => panic!("expected a reordered slice, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(slices, [(0, 10), (10, 10), (20, 4)]);
+}
+
+#[test]
+fn native_compile_streams_constant_indexed_unpacked_struct_elements() {
+    let source = NativeTestSource::new(
+        "typedef struct { logic [3:0] high; bit [3:0] low; } item_t; module top(input item_t values [0:2], output logic [15:0] y); assign y = {>>{values with [0 +: 2]}}; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let rhs = module.assigns().next().unwrap().rhs().unwrap();
+    let SlangExpressionKind::Cast {
+        value, width: 16, ..
+    } = rhs.kind().unwrap()
+    else {
+        panic!("expected unpacked-element streaming conversion");
+    };
+    let SlangExpressionKind::Concat(parts) = value.kind().unwrap() else {
+        panic!("expected flattened unpacked struct elements");
+    };
+    let mut ranges = Vec::new();
+    for element in parts.parts() {
+        let SlangExpressionKind::Concat(fields) = element.unwrap().kind().unwrap() else {
+            panic!("expected one bitstream concatenation per unpacked struct element");
+        };
+        for field in fields.parts() {
+            let SlangExpressionKind::Signal(signal) = field.unwrap().kind().unwrap() else {
+                panic!("expected an unpacked struct field slice");
+            };
+            ranges.push(signal.range.unwrap());
+        }
+    }
+    assert_eq!(
+        ranges,
+        [
+            SlangBitRange { msb: 7, lsb: 4 },
+            SlangBitRange { msb: 3, lsb: 0 },
+            SlangBitRange { msb: 15, lsb: 12 },
+            SlangBitRange { msb: 11, lsb: 8 },
+        ]
+    );
+}
+
+#[test]
+fn native_compile_fills_streaming_with_oob_elements_and_left_aligns_widening() {
+    let source = NativeTestSource::new(
+        "module top(input logic [7:0] four [3:0], input bit [7:0] two [0:3], output logic [15:0] four_fill, output logic signed [31:0] two_fill); assign four_fill = {>>{four with [4:3]}}; assign two_fill = {>>{two with [3:4]}}; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
+
+    let SlangExpressionKind::Cast {
+        value, width: 16, ..
+    } = assignments[0].rhs().unwrap().kind().unwrap()
+    else {
+        panic!("expected four-state streaming conversion");
+    };
+    let SlangExpressionKind::Concat(parts) = value.kind().unwrap() else {
+        panic!("expected four-state fill concatenation");
+    };
+    let parts = parts.parts().map(Result::unwrap).collect::<Vec<_>>();
+    assert!(matches!(
+        parts[0].kind().unwrap(),
+        SlangExpressionKind::Constant(SlangLogicConstant {
+            width: Some(8),
+            bits: "xxxxxxxx",
+            ..
+        })
+    ));
+    assert!(matches!(
+        parts[1].kind().unwrap(),
+        SlangExpressionKind::Signal(SlangSignalRef {
+            range: Some(SlangBitRange { msb: 7, lsb: 0 }),
+            ..
+        })
+    ));
+
+    let SlangExpressionKind::Cast {
+        value,
+        width: 32,
+        signed: true,
+        ..
+    } = assignments[1].rhs().unwrap().kind().unwrap()
+    else {
+        panic!("expected signed widened streaming conversion");
+    };
+    let SlangExpressionKind::Concat(aligned) = value.kind().unwrap() else {
+        panic!("expected a left-aligned widened stream");
+    };
+    let aligned = aligned.parts().map(Result::unwrap).collect::<Vec<_>>();
+    assert!(matches!(
+        aligned[1].kind().unwrap(),
+        SlangExpressionKind::Constant(SlangLogicConstant {
+            width: Some(16),
+            bits: "0000000000000000",
+            ..
+        })
+    ));
+    let SlangExpressionKind::Concat(selected) = aligned[0].kind().unwrap() else {
+        panic!("expected selected two-state elements");
+    };
+    let selected = selected.parts().map(Result::unwrap).collect::<Vec<_>>();
+    assert!(matches!(
+        selected[1].kind().unwrap(),
+        SlangExpressionKind::Constant(SlangLogicConstant {
+            width: Some(8),
+            bits: "00000000",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn native_compile_lowers_runtime_streaming_with_bases_for_all_orientations() {
+    let source = NativeTestSource::new(
+        "module top(input logic signed [2:0] base, input logic [7:0] ascending [-1:2], input logic [7:0] descending [2:-1], output logic [15:0] asc_up, asc_down, desc_up, desc_down); assign asc_up = {>>{ascending with [base +: 2]}}; assign asc_down = {>>{ascending with [base -: 2]}}; assign desc_up = {>>{descending with [base +: 2]}}; assign desc_down = {>>{descending with [base -: 2]}}; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+
+    for assignment in module.assigns() {
+        let SlangExpressionKind::Cast {
+            value, width: 16, ..
+        } = assignment.rhs().unwrap().kind().unwrap()
+        else {
+            panic!("expected runtime streaming conversion");
+        };
+        let SlangExpressionKind::Concat(parts) = value.kind().unwrap() else {
+            panic!("expected two runtime-selected elements");
+        };
+        let parts = parts.parts().map(Result::unwrap).collect::<Vec<_>>();
+        assert_eq!(parts.len(), 2);
+        for part in parts {
+            let SlangExpressionKind::Mux {
+                condition,
+                then_value,
+                else_value,
+            } = part.kind().unwrap()
+            else {
+                panic!("expected out-of-range fill mux");
+            };
+            assert!(matches!(
+                condition.kind().unwrap(),
+                SlangExpressionKind::Binary {
+                    op: SlangBinaryOp::LogicalAnd,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                then_value.kind().unwrap(),
+                SlangExpressionKind::DynamicExtract { width: 8, .. }
+            ));
+            assert!(matches!(
+                else_value.kind().unwrap(),
+                SlangExpressionKind::Constant(SlangLogicConstant {
+                    width: Some(8),
+                    bits: "xxxxxxxx",
+                    ..
+                })
+            ));
+        }
+    }
+}
+
+#[test]
+fn native_compile_reports_structured_streaming_with_profile_failures() {
+    for (text, expected) in [
+        (
+            "module top(input logic [7:0] values [0:3], input logic [1:0] left, right, output logic [31:0] y); assign y = {>>{values with [left:right]}}; endmodule\n",
+            "streaming simple with-range requires constant bounds",
+        ),
+        (
+            "typedef union { logic [7:0] first; logic [7:0] second; } item_t; module top(input item_t value, output logic [7:0] y); assign y = {>>{value}}; endmodule\n",
+            "streaming aggregate form 'UnpackedUnionType'",
+        ),
+    ] {
+        let source = NativeTestSource::new(text);
+        let error = compile(
+            std::slice::from_ref(&source.path),
+            &SlangCompileOptions::default(),
+        )
+        .expect_err("unsupported streaming shape should fail during lowering");
+        let SlangError::LoweringFailed(failure) = error else {
+            panic!("expected a structured lowering failure, got {error}");
+        };
+        assert_eq!(
+            failure.category,
+            SlangLoweringFailureCategory::UnsupportedProfile
+        );
+        assert!(failure.message.contains(expected), "{failure:?}");
+        let location = failure
+            .location
+            .expect("with-clause failure has a source span");
+        assert_eq!(location.path, source.path);
+        assert_eq!(location.line, 1);
+        assert!(location.column > 0);
+    }
+}
+
+#[test]
 fn native_compile_elides_zero_count_replication_in_concatenation() {
     let source = NativeTestSource::new(
         "module top(input logic a, output logic y); assign y = {{0{1'b0}}, a}; endmodule\n",
