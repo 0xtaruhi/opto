@@ -20,9 +20,10 @@ impl TimingContext {
     ///
     /// # Errors
     ///
-    /// Returns [`ConstraintError::UnresolvedSdcObject`] when `resolve` cannot
-    /// name a referenced live object, or [`ConstraintError::ClockNotFound`]
-    /// when constraint storage refers to a clock that is no longer live.
+    /// Returns [`crate::ConstraintError::UnresolvedSdcObject`] when `resolve`
+    /// cannot name a referenced live object, or
+    /// [`crate::ConstraintError::ClockNotFound`] when constraint storage refers
+    /// to a clock that is no longer live.
     pub fn write_sdc(
         &self,
         mut resolve: impl FnMut(opto_db::AnyObjectId) -> Option<String>,
