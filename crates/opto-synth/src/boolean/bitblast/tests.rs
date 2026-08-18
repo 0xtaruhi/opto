@@ -506,6 +506,45 @@ fn regional_shell_rejects_a_producer_claim_for_a_full_domain_constant() {
 }
 
 #[test]
+fn regional_shell_freezes_unowned_proven_constant_operations() {
+    let mut module = word::WordModule::new("unowned_proven_constant");
+    let zero = module
+        .constant(
+            ConstBits::from_bits(vec![BitVal::Zero; 8]).unwrap(),
+            word::WordType::bits(8).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let offset = add_input(&mut module, "offset", 3);
+    let offset = read_port(&mut module, offset);
+    let result = module
+        .dynamic_extract(zero, offset, 1, word::SourceSpan::default())
+        .unwrap();
+    let shell = crate::planning::operator::ArchitectureDecisions::for_regional_shell(&module);
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::new(&module, &shell).unwrap();
+
+    let ownership = bitblast_module_with_regions(
+        &mut module,
+        &shell,
+        &mut provenance,
+        &[None],
+        &[result],
+        &[],
+        GlobalBitblastScope::RegionalShell,
+    )
+    .unwrap();
+
+    let [lowered] = ownership.lowered_bits(result).unwrap() else {
+        panic!("scalar result must retain one lowered value");
+    };
+    let word::ValueKind::Constant(bits) = &module.value(*lowered).unwrap().kind else {
+        panic!("proven unowned result was not frozen as a constant");
+    };
+    assert_eq!(bits.bit_lsb(0), Some(BitVal::Zero));
+}
+
+#[test]
 fn regional_shell_freezes_constants_reached_through_connects() {
     let mut module = word::WordModule::new("regional_connected_constant");
     let bit = word::WordType::bits(1).unwrap();
