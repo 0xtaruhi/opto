@@ -599,22 +599,28 @@ fn packed_struct_case() -> GeneratedCase {
 
 fn streaming_case(rng: &mut DeterministicRng) -> GeneratedCase {
     let width = 8;
-    let slices = [1u32, 2, 4];
-    let slice = slices[rng.index(slices.len())];
-    let parts = (0..width)
-        .step_by(slice as usize)
-        .map(|offset| format!("a[{}:{}]", offset + slice - 1, offset))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let value = format!("({{{parts}}} ^ b)");
+    let ascending = rng.next() & 1 == 0;
+    let indexed_up = rng.next() & 1 == 0;
+    let range = if ascending { "[0:3]" } else { "[3:0]" };
+    let operator = if indexed_up { "+:" } else { "-:" };
+    let (first_delta, second_delta) = match (ascending, indexed_up) {
+        (true, true) => ("", "+ 1"),
+        (true, false) => ("- 1", ""),
+        (false, true) => ("+ 1", ""),
+        (false, false) => ("", "- 1"),
+    };
+    let reference = format!(
+        "{}function automatic [7:0] lane(input integer index);\n    case (index)\n        0: lane = a;\n        1: lane = b;\n        2: lane = c;\n        3: lane = a ^ b ^ c;\n        default: lane = 8'b0;\n    endcase\nendfunction\nwire [7:0] first = lane($signed({{1'b0, sel}}) {first_delta});\nwire [7:0] second = lane($signed({{1'b0, sel}}) {second_delta});\nassign y = {{first[6:0], first[7]}} ^ second;\nassign flag = ^y;\nendmodule\n",
+        continuous_header(width)
+    );
     let candidate = format!(
-        "{}wire [7:0] streamed = {{<<{slice}{{a}}}};\nassign y = streamed ^ b;\nassign flag = ^y;\nendmodule\n",
+        "{}bit [7:0] values {range};\nassign values[0] = a;\nassign values[1] = b;\nassign values[2] = c;\nassign values[3] = a ^ b ^ c;\nwire [15:0] streamed = {{>>{{values with [sel {operator} 2]}}}};\nassign y = {{streamed[14:8], streamed[15]}} ^ streamed[7:0];\nassign flag = ^y;\nendmodule\n",
         continuous_header(width)
     );
     GeneratedCase {
-        family: "streaming",
+        family: "streaming_with",
         width,
-        reference: reference(width, &value, &format!("^({value})")),
+        reference,
         candidate,
     }
 }

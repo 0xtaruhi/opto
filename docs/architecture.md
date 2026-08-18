@@ -64,6 +64,15 @@ requires an exactly compatible Liberty macro or cell. Absence of that target
 resource produces an explicit planning or mapping diagnostic rather than being
 reported as a syntax failure or triggering an alternate implementation path.
 
+Fixed-shape streaming concatenations include constant and runtime-base `with`
+selections over fixed unpacked arrays. Indexed selections retain declared range
+orientation, stream direction, slice ordering, left-aligned conversion fill,
+and per-element out-of-range defaults. A dynamic simple range, dynamically
+sized operand or element, or aggregate without Opto's canonical flattened
+bitstream layout is outside the synthesis profile and fails with a structured,
+source-located diagnostic. Lowering deterministically caps selected elements and
+flattened bitstream parts at 65,536 each.
+
 ## Non-Negotiable Rules
 
 - There is no fallback, legacy, shadow, or environment-selected synthesis path.
