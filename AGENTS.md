@@ -13,6 +13,8 @@ the more specific repository document or maintainer direction takes priority.
 
 - Use English for first-party production code, comments, documentation,
   diagnostics, commit messages, and pull-request text.
+- Prefix every commit subject and pull-request title with exactly one category
+  defined in `CONTRIBUTING.md`, such as `[synth]`, `[db]`, `[docs]`, or `[misc]`.
 - Chinese text is acceptable in tests and fixtures when it directly exercises
   Unicode decoding, source locations, terminal width, rendering, or another
   language-sensitive behavior. Keep such samples minimal and explain their
