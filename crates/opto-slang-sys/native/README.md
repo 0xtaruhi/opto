@@ -15,6 +15,10 @@ Rules:
 - Configure CMake with a compiler and standard library that implement C++20.
   Set `CXX` explicitly when the system default is older; for example, this
   development machine uses `CXX=/usr/bin/clang++` instead of GCC 8.
+- Format this first-party bridge with clang-format 18 by running
+  `python3 tools/check_cpp_format.py --fix` from the repository root. The
+  corresponding command without `--fix` checks formatting without modifying
+  files; vendored slang sources are outside its scope.
 - Do not add a secondary Verilog parser here. If vendored slang is unavailable,
   the build must fail instead of leaving a runtime fallback path.
 

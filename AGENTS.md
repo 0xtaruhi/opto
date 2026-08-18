@@ -48,8 +48,9 @@ the more specific repository document or maintainer direction takes priority.
   git submodule update --init --recursive
   ```
 
-- The native frontend requires CMake 3.20 or newer, a C++20 compiler, and Git.
-  Unix builds require `make`; Windows builds require MSVC and `nmake`.
+- The native frontend requires CMake 3.20 or newer, a C++20 compiler,
+  clang-format 18, and Git. Unix builds require `make`; Windows builds require
+  MSVC and `nmake`.
 - Repository policy scripts require Python 3.11 or newer.
 - Prefer locked dependency resolution for reproducible validation:
 
@@ -195,6 +196,7 @@ python3 tools/check_test_policy.py
 python3 tools/check_rust_documentation.py
 python3 tools/check_real_benchmarks.py benchmarks/real/medium.toml
 python3 tools/check_real_benchmarks.py benchmarks/real/gate.toml
+python3 tools/check_cpp_format.py
 cargo fmt --all -- --check
 cargo fmt --manifest-path fuzz/Cargo.toml --all --check
 cargo check --workspace --all-targets --all-features --locked

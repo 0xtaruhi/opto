@@ -137,6 +137,7 @@ jobs:
       - name: Check formatting
         if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: |
+          python3 tools/check_cpp_format.py
           cargo fmt --all --check
           cargo fmt --manifest-path fuzz/Cargo.toml --all --check
 

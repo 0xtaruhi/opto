@@ -11,8 +11,8 @@ large patch. Small bug fixes may go directly to a pull request.
 
 Clone with recursive submodules and use the latest stable Rust toolchain. Opto
 does not maintain a fixed minimum Rust version. CMake 3.20+, a C++20 compiler,
-Git, and `make` (or MSVC and `nmake` on Windows) are also required. Repository
-policy scripts require Python 3.11 or newer.
+clang-format 18, Git, and `make` (or MSVC and `nmake` on Windows) are also
+required. Repository policy scripts require Python 3.11 or newer.
 
 ```sh
 git clone --recurse-submodules https://github.com/0xtaruhi/opto.git
@@ -55,11 +55,16 @@ python3 tools/check_license_headers.py
 python3 tools/check_public_repository.py
 python3 tools/check_architecture.py
 python3 tools/check_test_policy.py
+python3 tools/check_cpp_format.py
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 ```
+
+The C++ check covers the first-party native slang bridge and deliberately
+excludes vendored sources. To apply the repository's `.clang-format` rules,
+run `python3 tools/check_cpp_format.py --fix` with clang-format 18.
 
 Every fixed bug needs the smallest stable regression test that would have
 caught it. Synthesis behavior changes also need equivalence coverage. QoR
