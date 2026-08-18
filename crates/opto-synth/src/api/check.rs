@@ -226,7 +226,33 @@ pub fn check_design_with_references(
     module: &word::WordModule,
     reference_ports: &ReferencePortMap,
 ) -> Result<(), CheckDesignError> {
-    if module.ports().is_empty() {
+    check_module_with_references(module, reference_ports, true)
+}
+
+/// Validate a reachable design definition against known design-unit and
+/// target-cell ports.
+///
+/// Unlike [`check_design_with_references`], this permits an empty external
+/// interface because a reachable child may exist only for hierarchy,
+/// assertions removed by preprocessing, or other internal structure. All
+/// remaining structural checks are identical.
+///
+/// # Errors
+///
+/// Returns the first structural inconsistency in deterministic arena order.
+pub fn check_definition_with_references(
+    module: &word::WordModule,
+    reference_ports: &ReferencePortMap,
+) -> Result<(), CheckDesignError> {
+    check_module_with_references(module, reference_ports, false)
+}
+
+fn check_module_with_references(
+    module: &word::WordModule,
+    reference_ports: &ReferencePortMap,
+    require_ports: bool,
+) -> Result<(), CheckDesignError> {
+    if require_ports && module.ports().is_empty() {
         return Err(CheckDesignError::NoPorts {
             design: module.name().to_string(),
         });
@@ -482,6 +508,13 @@ mod tests {
             }
         );
         assert_eq!(error.to_string(), "design 'empty' has no ports");
+    }
+
+    #[test]
+    fn accepts_a_portless_reachable_definition() {
+        let module = word::WordModule::new("leaf");
+
+        check_definition_with_references(&module, &ReferencePortMap::new()).unwrap();
     }
 
     #[test]

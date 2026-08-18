@@ -152,6 +152,7 @@ fn target_cell_reference_ports(
 impl Session {
     /// Run structural validation on the current resolved design.
     pub fn check_design(&self) -> Result<String, SessionError> {
+        let current_name = self.current_design_name()?.to_string();
         let graph = self.definition_graph("check_design")?;
         design_graph::require_linked(&graph, "check_design")?;
         let reference_ports = reference_ports(self, &graph, "check_design")?;
@@ -163,7 +164,14 @@ impl Session {
                 ))
             })?;
             design.source.validate()?;
-            opto_synth::check_design_with_references(design.source.word(), &reference_ports)?;
+            if name == current_name {
+                opto_synth::check_design_with_references(design.source.word(), &reference_ports)?;
+            } else {
+                opto_synth::check_definition_with_references(
+                    design.source.word(),
+                    &reference_ports,
+                )?;
+            }
         }
         Ok("1".to_string())
     }
