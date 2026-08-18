@@ -55,7 +55,10 @@ pub(crate) fn build_object_index(rtl: &RtlModule) -> Result<DesignIndex, crate::
         values.collect(connect.value, &mut design.used_signals)?;
     }
     for event in rtl.procedures().events() {
-        push_signal(module, event.signal, &mut design.used_signals)?;
+        values.collect(event.value, &mut design.used_signals)?;
+        if let Some(qualifier) = event.iff {
+            values.collect(qualifier, &mut design.used_signals)?;
+        }
     }
     for effect in rtl.procedures().effects() {
         match effect.target {
@@ -416,11 +419,6 @@ mod tests {
                 SourceSpan::default(),
             )
             .unwrap();
-        let clock_signal = match &word.value(clock).unwrap().kind {
-            ValueKind::Signal(reference) => reference.signal,
-            _ => unreachable!("a port read is always a signal value"),
-        };
-
         let mut procedures = ProcBuilder::new();
         let procedure = procedures
             .add_combinational_procedure(ProcedureKind::Combinational, SourceSpan::default())
@@ -474,8 +472,9 @@ mod tests {
         let clocked = procedures
             .add_clocked_procedure(
                 [SensitivityEvent {
-                    signal: clock_signal,
+                    value: clock,
                     edge: Edge::Neg,
+                    iff: None,
                 }],
                 SourceSpan::default(),
             )

@@ -177,7 +177,7 @@ pub(crate) fn target_cell(
 }
 
 pub(crate) fn single_assignment(
-    module: WordModule,
+    mut module: WordModule,
     kind: ProcedureKind,
     clock: Option<word::SignalId>,
     target: word::SignalId,
@@ -185,11 +185,13 @@ pub(crate) fn single_assignment(
     mode: AssignmentMode,
 ) -> TestModule {
     let mut cfg = ProcBuilder::new();
+    let clock = clock.map(|signal| module.read_signal(signal, test_span()).unwrap());
     let procedure = match clock {
-        Some(signal) => cfg.add_clocked_procedure(
+        Some(value) => cfg.add_clocked_procedure(
             [SensitivityEvent {
-                signal,
+                value,
                 edge: Edge::Pos,
+                iff: None,
             }],
             test_span(),
         ),
@@ -204,7 +206,7 @@ pub(crate) fn single_assignment(
 }
 
 pub(crate) fn conditional_assignment(
-    module: WordModule,
+    mut module: WordModule,
     kind: ProcedureKind,
     clock: Option<word::SignalId>,
     condition: word::ValueId,
@@ -213,11 +215,13 @@ pub(crate) fn conditional_assignment(
     mode: AssignmentMode,
 ) -> TestModule {
     let mut cfg = ProcBuilder::new();
+    let clock = clock.map(|signal| module.read_signal(signal, test_span()).unwrap());
     let procedure = match clock {
-        Some(signal) => cfg.add_clocked_procedure(
+        Some(value) => cfg.add_clocked_procedure(
             [SensitivityEvent {
-                signal,
+                value,
                 edge: Edge::Pos,
+                iff: None,
             }],
             test_span(),
         ),
@@ -249,7 +253,7 @@ struct ResetEnableFixture {
     data: word::ValueId,
 }
 
-fn reset_enable_module(module: WordModule, fixture: ResetEnableFixture) -> TestModule {
+fn reset_enable_module(mut module: WordModule, fixture: ResetEnableFixture) -> TestModule {
     let ResetEnableFixture {
         kind,
         clock,
@@ -260,11 +264,13 @@ fn reset_enable_module(module: WordModule, fixture: ResetEnableFixture) -> TestM
         data,
     } = fixture;
     let mut cfg = ProcBuilder::new();
+    let clock = clock.map(|signal| module.read_signal(signal, test_span()).unwrap());
     let procedure = match clock {
-        Some(signal) => cfg.add_clocked_procedure(
+        Some(value) => cfg.add_clocked_procedure(
             [SensitivityEvent {
-                signal,
+                value,
                 edge: Edge::Pos,
+                iff: None,
             }],
             test_span(),
         ),
@@ -563,13 +569,15 @@ pub(crate) fn module_with_prioritized_constant_updates() -> TestModule {
         .unwrap();
     let target = module.port(q).unwrap().signal;
     let clock = module.port(clk).unwrap().signal;
+    let clock = module.read_signal(clock, test_span()).unwrap();
 
     let mut cfg = ProcBuilder::new();
     let procedure = cfg
         .add_clocked_procedure(
             [SensitivityEvent {
-                signal: clock,
+                value: clock,
                 edge: Edge::Pos,
+                iff: None,
             }],
             test_span(),
         )

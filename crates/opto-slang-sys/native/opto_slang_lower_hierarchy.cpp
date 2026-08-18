@@ -656,6 +656,7 @@ void lower_primitive_instance(
                         OptoSlangEventData{
                             edge,
                             lower_signal_expr(design, input),
+                            nullptr,
                             source_span(design, input),
                         });
                 };

@@ -1322,10 +1322,7 @@ fn lower_procedure(
         SlangProcedureKind::Flop => (ProcedureKind::FlipFlop, "always_ff"),
         SlangProcedureKind::CombOrLatch => (ProcedureKind::CombinationalOrLatch, "always"),
     };
-    let events = procedure
-        .events()
-        .map(|event| lower_sensitivity_event(module, event))
-        .collect::<Result<Vec<_>, _>>()?;
+    let source_events = procedure.events().collect::<Vec<_>>();
     let blocks = procedure.blocks().collect::<Vec<_>>();
     if blocks.is_empty() {
         return Err(HdlError::invalid(
@@ -1341,16 +1338,14 @@ fn lower_procedure(
     let mut procedure_key = Vec::new();
     procedure_key.extend_from_slice(&(construct.len() as u64).to_le_bytes());
     procedure_key.extend_from_slice(construct.as_bytes());
-    for event in &events {
-        let signal = module.signal(event.signal).ok_or_else(|| {
-            HdlError::invalid("verilog frontend: procedure event references an unknown signal")
-        })?;
-        let name = signal.name.map_or("", |name| module.name_str(name));
-        procedure_key.extend_from_slice(&(name.len() as u64).to_le_bytes());
-        procedure_key.extend_from_slice(name.as_bytes());
-        procedure_key.push(match event.edge {
-            Edge::Pos => 0,
-            Edge::Neg => 1,
+    for event in &source_events {
+        let expression = event.expression().map_err(frontend_error)?;
+        let identity = target_identity(expression)?;
+        procedure_key.extend_from_slice(&(identity.len() as u64).to_le_bytes());
+        procedure_key.extend_from_slice(&identity);
+        procedure_key.push(match event.edge().map_err(frontend_error)? {
+            SlangEdge::Pos => 0,
+            SlangEdge::Neg => 1,
         });
     }
     for target in &targets {
@@ -1363,6 +1358,20 @@ fn lower_procedure(
         construct,
         procedure_path,
     );
+    let events = source_events
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let ordinal = u64::try_from(index).map_err(|_| {
+                HdlError::invalid("sensitivity event count exceeds 64-bit capacity")
+            })?;
+            lower_sensitivity_event(
+                module,
+                event,
+                procedure_path.named_child(b"event", &[], ordinal),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let procedure_id = if kind == ProcedureKind::FlipFlop {
         module.procedures.add_clocked_procedure(events, source)?
     } else {
@@ -1545,40 +1554,48 @@ fn assign_owned_procedural_target(
 }
 
 fn lower_sensitivity_event(
-    module: &WordModule,
+    module: &mut ModuleLowerer,
     event: SlangSensitivityEvent<'_>,
+    path: SyntaxPath,
 ) -> Result<SensitivityEvent, HdlError> {
-    let signal_ref = event.signal().map_err(frontend_error)?;
-    if signal_ref.range.is_some() {
-        return Err(HdlError::unsupported(
-            "verilog frontend: always_ff event signal cannot be a range select",
-        ));
-    }
-    let signal = module.signal_id(signal_ref.name).ok_or_else(|| {
-        HdlError::invalid(format!(
-            "verilog frontend: unknown always_ff event signal '{}'",
-            signal_ref.name
-        ))
-    })?;
+    let expression = lower_expression(
+        module,
+        event.expression().map_err(frontend_error)?,
+        path.child(0),
+    )?;
     let ty = module
-        .signal(signal)
+        .value(expression)
+        .map(|value| value.ty)
         .ok_or_else(|| {
-            HdlError::invalid(format!("verilog frontend: unknown RTL signal {signal:?}"))
-        })?
-        .ty;
+            HdlError::invalid("verilog frontend: sensitivity event expression disappeared")
+        })?;
     if ty.width() != 1 {
         return Err(HdlError::invalid(format!(
-            "verilog frontend: always_ff event signal '{}' must be 1 bit wide, got {}",
-            signal_ref.name,
+            "verilog frontend: always_ff event expression must be 1 bit wide, got {}",
             ty.width()
         )));
     }
+    let qualifier = event
+        .qualifier()
+        .map_err(frontend_error)?
+        .map(|qualifier| lower_expression(module, qualifier, path.child(1)))
+        .transpose()?;
+    if qualifier.is_some_and(|value| {
+        module
+            .value(value)
+            .is_none_or(|stored| stored.ty.width() != 1)
+    }) {
+        return Err(HdlError::invalid(
+            "verilog frontend: sensitivity event iff qualifier must be 1 bit wide",
+        ));
+    }
     Ok(SensitivityEvent {
-        signal,
+        value: expression,
         edge: match event.edge().map_err(frontend_error)? {
             SlangEdge::Pos => Edge::Pos,
             SlangEdge::Neg => Edge::Neg,
         },
+        iff: qualifier,
     })
 }
 

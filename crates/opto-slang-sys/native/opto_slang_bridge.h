@@ -270,7 +270,8 @@ typedef struct OptoSlangLoopRegionView {
 
 typedef struct OptoSlangEventView {
     OptoSlangEdge edge;
-    const OptoSlangExpr *signal;
+    const OptoSlangExpr *expression;
+    const OptoSlangExpr *qualifier;
     OptoSlangSourceSpanView source;
 } OptoSlangEventView;
 

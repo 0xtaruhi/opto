@@ -176,9 +176,10 @@ struct PendingWrite {
 
 #[derive(Debug, Clone, Copy)]
 struct EventControl {
+    id: proc::EventId,
     event: proc::SensitivityEvent,
-    value: word::ValueId,
     asserted: Predicate,
+    qualified: Predicate,
 }
 
 #[derive(Debug, Clone)]

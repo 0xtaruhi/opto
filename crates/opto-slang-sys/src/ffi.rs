@@ -252,7 +252,8 @@ pub(crate) struct LoopRegionView {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EventView {
     pub(crate) edge: c_int,
-    pub(crate) signal: *const Expr,
+    pub(crate) expression: *const Expr,
+    pub(crate) qualifier: *const Expr,
     pub(crate) source: SourceSpanView,
 }
 

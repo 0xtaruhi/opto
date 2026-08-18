@@ -48,7 +48,7 @@ pub(super) struct Assignment {
     pub(super) value: word::ValueId,
     pub(super) coverage: Coverage,
     pub(super) resets: ResetList,
-    pub(super) held_events: SmallVec<[proc::SensitivityEvent; 2]>,
+    pub(super) held_events: SmallVec<[proc::EventId; 2]>,
     pub(super) source: word::SourceSpan,
 }
 
@@ -71,7 +71,7 @@ impl Assignment {
             .map_or("<unnamed>", |name| module.name_str(name))
     }
 
-    pub(super) fn holds_on(&self, event: proc::SensitivityEvent) -> bool {
+    pub(super) fn holds_on(&self, event: proc::EventId) -> bool {
         self.held_events.contains(&event)
     }
 }

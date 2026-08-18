@@ -32,6 +32,18 @@ fn read(module: &mut WordModule, signal: word::SignalId) -> word::ValueId {
     module.read_signal(signal, span()).unwrap()
 }
 
+fn sensitivity(
+    module: &mut WordModule,
+    signal: word::SignalId,
+    edge: word::Edge,
+) -> SensitivityEvent {
+    SensitivityEvent {
+        value: read(module, signal),
+        edge,
+        iff: None,
+    }
+}
+
 fn reads_signal(module: &WordModule, value: word::ValueId, signal: word::SignalId) -> bool {
     matches!(
         module.value(value).map(|value| &value.kind),
@@ -482,6 +494,170 @@ fn deep_cfg_is_iterative_and_final_seal_rejects_cycles() {
 }
 
 #[test]
+fn selected_clock_values_reach_register_operations() {
+    let mut module = WordModule::new("selected_clocks");
+    let clocks_port = module
+        .add_port(
+            "clocks",
+            PortDirection::Input,
+            WordType::bits(4).unwrap(),
+            span(),
+        )
+        .unwrap();
+    let index_port = module
+        .add_port(
+            "index",
+            PortDirection::Input,
+            WordType::bits(2).unwrap(),
+            span(),
+        )
+        .unwrap();
+    let clocks = module.port(clocks_port).unwrap().signal;
+    let index = module.port(index_port).unwrap().signal;
+    let d = input(&mut module, "d");
+    let q_static = output(&mut module, "q_static");
+    let q_dynamic = output(&mut module, "q_dynamic");
+    let static_clock = module.read_signal_slice(clocks, 2, 1, span()).unwrap();
+    let clocks_value = read(&mut module, clocks);
+    let index_value = read(&mut module, index);
+    let dynamic_clock = module
+        .dynamic_extract(clocks_value, index_value, 1, span())
+        .unwrap();
+    let data = read(&mut module, d);
+    let mut cfg = ProcBuilder::new();
+    for (clock, edge, target) in [
+        (static_clock, word::Edge::Pos, q_static),
+        (dynamic_clock, word::Edge::Neg, q_dynamic),
+    ] {
+        let procedure = cfg
+            .add_clocked_procedure(
+                [SensitivityEvent {
+                    value: clock,
+                    edge,
+                    iff: None,
+                }],
+                span(),
+            )
+            .unwrap();
+        let block = cfg.add_block(procedure, span()).unwrap();
+        cfg.assign(
+            block,
+            AssignmentMode::Nonblocking,
+            ProcTarget::signal(target),
+            data,
+            span(),
+        )
+        .unwrap();
+        cfg.terminate_return(block, span()).unwrap();
+    }
+
+    let lowered = lower(module, cfg).unwrap();
+    let registers = lowered
+        .operations()
+        .iter()
+        .filter_map(|operation| match &operation.kind {
+            word::OpKind::Register(register) => Some(register),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(registers.len(), 2);
+    assert!(registers.iter().any(|register| {
+        register.edge == word::Edge::Pos
+            && matches!(
+                lowered.value(register.clock).map(|value| &value.kind),
+                Some(word::ValueKind::Signal(reference))
+                    if reference.signal == clocks && reference.lsb == 2 && reference.width() == 1
+            )
+    }));
+    assert!(registers.iter().any(|register| {
+        register.edge == word::Edge::Neg
+            && matches!(
+                lowered.value(register.clock).map(|value| &value.kind),
+                Some(word::ValueKind::Operation(operation))
+                    if matches!(
+                        lowered.operation(*operation).map(|operation| &operation.kind),
+                        Some(word::OpKind::DynamicExtract { width, .. }) if width.get() == 1
+                    )
+            )
+    }));
+}
+
+#[test]
+fn duplicate_clock_events_or_their_independent_iff_qualifiers() {
+    let mut module = WordModule::new("qualified_clock");
+    let clocks_port = module
+        .add_port(
+            "clocks",
+            PortDirection::Input,
+            WordType::bits(4).unwrap(),
+            span(),
+        )
+        .unwrap();
+    let index_port = module
+        .add_port(
+            "index",
+            PortDirection::Input,
+            WordType::bits(2).unwrap(),
+            span(),
+        )
+        .unwrap();
+    let clocks = module.port(clocks_port).unwrap().signal;
+    let index = module.port(index_port).unwrap().signal;
+    let enable_a = input(&mut module, "enable_a");
+    let enable_b = input(&mut module, "enable_b");
+    let data_signal = input(&mut module, "data");
+    let q = output(&mut module, "q");
+    let clock_a = {
+        let value = read(&mut module, clocks);
+        let offset = read(&mut module, index);
+        module.dynamic_extract(value, offset, 1, span()).unwrap()
+    };
+    let clock_b = {
+        let value = read(&mut module, clocks);
+        let offset = read(&mut module, index);
+        module.dynamic_extract(value, offset, 1, span()).unwrap()
+    };
+    let qualifier_a = read(&mut module, enable_a);
+    let qualifier_b = read(&mut module, enable_b);
+    let data = read(&mut module, data_signal);
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_clocked_procedure(
+            [(clock_a, qualifier_a), (clock_b, qualifier_b)].map(|(value, iff)| SensitivityEvent {
+                value,
+                edge: word::Edge::Pos,
+                iff: Some(iff),
+            }),
+            span(),
+        )
+        .unwrap();
+    let block = cfg.add_block(procedure, span()).unwrap();
+    cfg.assign(
+        block,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(q),
+        data,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_return(block, span()).unwrap();
+
+    let lowered = lower(module, cfg).unwrap();
+    let register = lowered
+        .operations()
+        .iter()
+        .find_map(|operation| match &operation.kind {
+            word::OpKind::Register(register) => Some(register),
+            _ => None,
+        })
+        .unwrap();
+    let enable = register.enable.unwrap();
+    assert!(enable.active_high);
+    assert!(depends_on_signal(&lowered, enable.value, enable_a));
+    assert!(depends_on_signal(&lowered, enable.value, enable_b));
+}
+
+#[test]
 fn blocking_is_visible_but_nonblocking_is_only_scheduled() {
     let mut module = WordModule::new("top");
     let clock = input(&mut module, "clk");
@@ -492,13 +668,7 @@ fn blocking_is_visible_but_nonblocking_is_only_scheduled() {
     let q_old = read(&mut module, q);
     let mut cfg = ProcBuilder::new();
     let procedure = cfg
-        .add_clocked_procedure(
-            [SensitivityEvent {
-                signal: clock,
-                edge: word::Edge::Pos,
-            }],
-            span(),
-        )
+        .add_clocked_procedure([sensitivity(&mut module, clock, word::Edge::Pos)], span())
         .unwrap();
     let block = cfg.add_block(procedure, span()).unwrap();
     cfg.assign(
@@ -562,18 +732,9 @@ fn prioritized_async_set_clear_matches_every_sensitivity_event() {
     let procedure = cfg
         .add_clocked_procedure(
             [
-                SensitivityEvent {
-                    signal: clock,
-                    edge: word::Edge::Pos,
-                },
-                SensitivityEvent {
-                    signal: preset_signal,
-                    edge: word::Edge::Pos,
-                },
-                SensitivityEvent {
-                    signal: clear_signal,
-                    edge: word::Edge::Pos,
-                },
+                sensitivity(&mut module, clock, word::Edge::Pos),
+                sensitivity(&mut module, preset_signal, word::Edge::Pos),
+                sensitivity(&mut module, clear_signal, word::Edge::Pos),
             ],
             span(),
         )
@@ -674,14 +835,8 @@ fn factors_async_reset_through_an_implied_outer_enable_guard() {
     let procedure = cfg
         .add_clocked_procedure(
             [
-                SensitivityEvent {
-                    signal: clock,
-                    edge: word::Edge::Pos,
-                },
-                SensitivityEvent {
-                    signal: reset_signal,
-                    edge: word::Edge::Neg,
-                },
+                sensitivity(&mut module, clock, word::Edge::Pos),
+                sensitivity(&mut module, reset_signal, word::Edge::Neg),
             ],
             span(),
         )
@@ -759,14 +914,8 @@ fn dual_edge_state_uses_phase_banks_with_explicit_hold_feedback() {
     let procedure = cfg
         .add_clocked_procedure(
             [
-                SensitivityEvent {
-                    signal: clock,
-                    edge: word::Edge::Pos,
-                },
-                SensitivityEvent {
-                    signal: clock,
-                    edge: word::Edge::Neg,
-                },
+                sensitivity(&mut module, clock, word::Edge::Pos),
+                sensitivity(&mut module, clock, word::Edge::Neg),
             ],
             span(),
         )
@@ -866,14 +1015,8 @@ fn unknown_value_is_still_a_constant_async_reset() {
     let procedure = cfg
         .add_clocked_procedure(
             [
-                SensitivityEvent {
-                    signal: clock,
-                    edge: word::Edge::Pos,
-                },
-                SensitivityEvent {
-                    signal: reset_signal,
-                    edge: word::Edge::Pos,
-                },
+                sensitivity(&mut module, clock, word::Edge::Pos),
+                sensitivity(&mut module, reset_signal, word::Edge::Pos),
             ],
             span(),
         )
@@ -959,14 +1102,8 @@ fn typed_event_fact_proves_unreset_target_holds_during_async_reset() {
     let procedure = cfg
         .add_clocked_procedure(
             [
-                SensitivityEvent {
-                    signal: clock,
-                    edge: word::Edge::Pos,
-                },
-                SensitivityEvent {
-                    signal: reset_signal,
-                    edge: word::Edge::Pos,
-                },
+                sensitivity(&mut module, clock, word::Edge::Pos),
+                sensitivity(&mut module, reset_signal, word::Edge::Pos),
             ],
             span(),
         )
@@ -1269,13 +1406,7 @@ fn blocking_memory_write_forwards_and_ports_keep_source_priority() {
     let read_value = read(&mut module, read_data);
     let mut cfg = ProcBuilder::new();
     let procedure = cfg
-        .add_clocked_procedure(
-            [SensitivityEvent {
-                signal: clock,
-                edge: word::Edge::Pos,
-            }],
-            span(),
-        )
+        .add_clocked_procedure([sensitivity(&mut module, clock, word::Edge::Pos)], span())
         .unwrap();
     let block = cfg.add_block(procedure, span()).unwrap();
     cfg.assign(
@@ -1358,13 +1489,7 @@ fn same_clock_procedures_form_deterministic_memory_write_ports() {
     let mut cfg = ProcBuilder::new();
     for (address, data) in [(address_a, data_a), (address_b, data_b)] {
         let procedure = cfg
-            .add_clocked_procedure(
-                [SensitivityEvent {
-                    signal: clock,
-                    edge: word::Edge::Pos,
-                }],
-                span(),
-            )
+            .add_clocked_procedure([sensitivity(&mut module, clock, word::Edge::Pos)], span())
             .unwrap();
         let block = cfg.add_block(procedure, span()).unwrap();
         cfg.assign(

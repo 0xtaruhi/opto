@@ -197,14 +197,39 @@ impl<'a> SlangSensitivityEvent<'a> {
         }
     }
 
-    /// Returns the signal selected by the event expression.
+    /// Returns the scalar expression observed by the event control.
     ///
     /// # Errors
     ///
-    /// Returns [`SlangError::BridgeInvariant`] if the event has no signal
-    /// expression or the native expression is not a signal reference.
+    /// Returns [`SlangError::BridgeInvariant`] if the native event expression is absent.
+    pub fn expression(self) -> Result<SlangExpression<'a>, SlangError> {
+        SlangExpression::from_raw(self.view.expression, "sensitivity event expression")
+    }
+
+    /// Returns the event expression as a direct signal selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SlangError::BridgeInvariant`] when the event expression is not
+    /// representable as a static signal reference.
     pub fn signal(self) -> Result<SlangSignalRef<'a>, SlangError> {
-        SlangExpression::from_raw(self.view.signal, "sensitivity event signal")?.signal_ref()
+        self.expression()?.signal_ref()
+    }
+
+    /// Returns the event-local `iff` qualifier after native canonicalization.
+    ///
+    /// A missing value denotes an unqualified event. Compile-time true qualifiers
+    /// are removed and compile-time false events are omitted by the native adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SlangError::BridgeInvariant`] if a present native qualifier is malformed.
+    pub fn qualifier(self) -> Result<Option<SlangExpression<'a>>, SlangError> {
+        if self.view.qualifier.is_null() {
+            Ok(None)
+        } else {
+            SlangExpression::from_raw(self.view.qualifier, "sensitivity event qualifier").map(Some)
+        }
     }
 
     /// Returns the active event edge.

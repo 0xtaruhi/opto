@@ -548,8 +548,15 @@ fn visit_boundary_fingerprints(rtl: &RtlModule, values: &[u64], mut emit: impl F
                         .expect("sealed edge-sensitive procedure owns its events");
                     events.len().hash(fingerprint);
                     for (_, event) in events {
-                        fingerprint.id(event.signal.raw());
+                        hash_value(event.value, values, fingerprint);
                         fingerprint.tag(event.edge as u8);
+                        match event.iff {
+                            Some(qualifier) => {
+                                fingerprint.tag(1);
+                                hash_value(qualifier, values, fingerprint);
+                            }
+                            None => fingerprint.tag(0),
+                        }
                     }
                 }
             }

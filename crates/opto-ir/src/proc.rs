@@ -148,12 +148,14 @@ pub enum ProcedureKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-/// One signal edge in an explicit sensitivity list.
+/// One scalar-value edge in an explicit sensitivity list.
 pub struct SensitivityEvent {
-    /// Scalar signal sampled by the event.
-    pub signal: SignalId,
+    /// Scalar value sampled for edge detection.
+    pub value: ValueId,
     /// Active edge polarity.
     pub edge: Edge,
+    /// Event-local activation condition evaluated when the edge occurs.
+    pub iff: Option<ValueId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

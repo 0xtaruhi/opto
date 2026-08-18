@@ -1797,9 +1797,12 @@ fn verilog_frontend_lowers_always_ff_clock_enable() {
     assert_eq!(events.len(), 1);
     for (_, event) in events {
         assert_eq!(event.edge, Edge::Neg);
+        let ValueKind::Signal(reference) = &rtl.word().value(event.value).unwrap().kind else {
+            panic!("clock event is not a signal read");
+        };
         assert_eq!(
             rtl.word()
-                .resolve_name(rtl.word().signal(event.signal).unwrap().name.unwrap()),
+                .resolve_name(rtl.word().signal(reference.signal).unwrap().name.unwrap()),
             Some("clk")
         );
     }
@@ -1816,7 +1819,7 @@ fn verilog_frontend_lowers_always_ff_clock_enable() {
 }
 
 #[test]
-fn verilog_frontend_lowers_single_event_iff_as_register_enable() {
+fn verilog_frontend_preserves_single_event_iff_with_event_identity() {
     let source = TestSource::new(
         "event-iff.sv",
         "module top(input logic clk, en, d, output logic q); always_ff @(posedge clk iff en) q <= d; endmodule\n",
@@ -1834,11 +1837,78 @@ fn verilog_frontend_lowers_single_event_iff_as_register_enable() {
 
     assert_eq!(process.kind, ProcedureKind::FlipFlop);
     assert_eq!(events.len(), 1);
-    assert!(
-        cfg.blocks()
-            .iter()
-            .any(|block| matches!(block.terminator.kind, TerminatorKind::Branch { .. }))
+    let (_, event) = events.into_iter().next().unwrap();
+    let qualifier = event.iff.unwrap();
+    let ValueKind::Signal(reference) = &rtl.word().value(qualifier).unwrap().kind else {
+        panic!("event iff qualifier is not a signal read");
+    };
+    assert_eq!(
+        rtl.word()
+            .resolve_name(rtl.word().signal(reference.signal).unwrap().name.unwrap()),
+        Some("en")
     );
+}
+
+#[test]
+fn verilog_frontend_lowers_selected_clock_expressions_to_word_values() {
+    let source = TestSource::new(
+        "selected-clocks.sv",
+        "module top(input logic [3:0] clocks, input logic [1:0] index, d, output logic q_static, q_dynamic); always_ff @(posedge clocks[2]) q_static <= d; always_ff @(negedge clocks[index]) q_dynamic <= d; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let rtl = &update.modules[0];
+    let procedures = rtl.procedures();
+    let clocks = rtl.word().signal_id("clocks").unwrap();
+    let index = rtl.word().signal_id("index").unwrap();
+    let static_event = procedures
+        .sensitivity_events(ProcedureId::FIRST)
+        .unwrap()
+        .next()
+        .unwrap()
+        .1;
+    let dynamic_event = procedures
+        .sensitivity_events(ProcedureId::from_index(1).unwrap())
+        .unwrap()
+        .next()
+        .unwrap()
+        .1;
+
+    assert!(matches!(
+        rtl.word().value(static_event.value).map(|value| &value.kind),
+        Some(ValueKind::Signal(reference))
+            if reference.signal == clocks && reference.lsb == 2 && reference.width() == 1
+    ));
+    assert!(matches!(
+        rtl.word().value(dynamic_event.value).map(|value| &value.kind),
+        Some(ValueKind::Operation(operation))
+            if matches!(
+                rtl.word().operation(*operation).map(|operation| &operation.kind),
+                Some(OpKind::DynamicExtract { value, offset, width })
+                    if width.get() == 1
+                        && matches!(
+                            rtl.word().value(*value).map(|value| &value.kind),
+                            Some(ValueKind::Signal(reference)) if reference.signal == clocks
+                        )
+                        && matches!(
+                            rtl.word().value(*offset).map(|value| &value.kind),
+                            Some(ValueKind::Operation(operation))
+                                if matches!(
+                                    rtl.word().operation(*operation).map(|operation| &operation.kind),
+                                    Some(OpKind::Cast { value, .. })
+                                        if matches!(
+                                            rtl.word().value(*value).map(|value| &value.kind),
+                                            Some(ValueKind::Signal(reference))
+                                                if reference.signal == index
+                                        )
+                                )
+                        )
+            )
+    ));
 }
 
 #[test]
