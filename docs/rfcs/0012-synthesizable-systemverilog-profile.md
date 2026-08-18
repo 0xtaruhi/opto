@@ -137,8 +137,9 @@ nor loop metadata.
 The proof portfolio first applies monotone induction to relational pre-test and
 post-test loops. Its sparse affine domain follows blocking temporary values
 across blocks and merges the delta range from every backedge path. A proof
-requires a loop-invariant bound, exact entry and bound extrema, strict progress
-in one comparison direction, and a fixed-width no-wrap argument. This proves
+requires a loop-invariant bound, exact entry extrema, conservative known-bit
+bound extrema, strict progress in one comparison direction, and a fixed-width
+no-wrap argument. This proves
 wide induction variables and path-dependent steps such as `+1` or `+2` without
 enumerating every reachable value. Exact finite-state enumeration remains the
 fallback and models SystemVerilog width, sign, truncation, cast, selection, and

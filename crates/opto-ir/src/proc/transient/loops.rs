@@ -213,6 +213,7 @@ struct SymbolicEvaluation<'a, 'graph> {
     ty: crate::word::WordType,
     evaluator: &'a ExactEvaluator<'graph>,
     state: &'a ExactState,
+    reads_local: &'a [bool],
 }
 
 #[derive(Clone, Copy)]
@@ -221,6 +222,7 @@ struct SymbolicExpressionContext<'a, 'graph> {
     evaluator: &'a ExactEvaluator<'graph>,
     state: &'a ExactState,
     locals: &'a BTreeMap<ProcLocalId, SymbolicValue>,
+    reads_local: &'a [bool],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -361,7 +363,12 @@ impl<'a> LoopBoundednessAnalysis<'a> {
         let Some(condition) = self.induction_condition(condition_expression, negate) else {
             return Ok(None);
         };
-        if self.expression_reads_any_local(condition.bound) {
+        let reads_local = self.expression_local_reads();
+        if reads_local
+            .get(condition.bound.index())
+            .copied()
+            .unwrap_or(true)
+        {
             return Ok(None);
         }
         if self
@@ -441,6 +448,7 @@ impl<'a> LoopBoundednessAnalysis<'a> {
                 state: initial
                     .first()
                     .expect("non-empty induction entry-state set has a first state"),
+                reads_local: &reads_local,
             },
         )?;
         let Some(delta) = delta else {
@@ -683,24 +691,16 @@ impl<'a> LoopBoundednessAnalysis<'a> {
         })
     }
 
-    fn expression_reads_any_local(&self, root: ProcExprId) -> bool {
-        let mut pending = vec![root];
-        let mut visited = vec![false; self.graph.expressions.len()];
-        while let Some(expression) = pending.pop() {
-            let Some(stored) = self.graph.expressions.get(expression.index()) else {
-                return true;
-            };
-            if std::mem::replace(&mut visited[expression.index()], true) {
-                continue;
-            }
-            if matches!(stored.kind, ProcExprKind::LocalRead(_)) {
-                return true;
-            }
-            stored
-                .kind
-                .for_each_operand(|operand| pending.push(operand));
+    fn expression_local_reads(&self) -> Vec<bool> {
+        let mut reads_local = Vec::with_capacity(self.graph.expressions.len());
+        for expression in &self.graph.expressions {
+            let mut reads = matches!(expression.kind, ProcExprKind::LocalRead(_));
+            expression.kind.for_each_operand(|operand| {
+                reads |= reads_local.get(operand.index()).copied().unwrap_or(true);
+            });
+            reads_local.push(reads);
         }
-        false
+        reads_local
     }
 
     fn block_writes_local(&self, block: BlockId, local: ProcLocalId) -> bool {
@@ -756,6 +756,7 @@ impl<'a> LoopBoundednessAnalysis<'a> {
                         evaluator: evaluation.evaluator,
                         state: evaluation.state,
                         locals: &symbolic.values,
+                        reads_local: evaluation.reads_local,
                     },
                 );
                 match value {
@@ -818,7 +819,12 @@ impl<'a> LoopBoundednessAnalysis<'a> {
                     _ => None,
                 }
             }
-            _ if !self.expression_reads_any_local(expression) => {
+            _ if !context
+                .reads_local
+                .get(expression.index())
+                .copied()
+                .unwrap_or(true) =>
+            {
                 Some(SymbolicValue::Numeric(self.numeric_delta_bounds(
                     expression,
                     context.ty,
@@ -2177,7 +2183,7 @@ mod tests {
 
     #[test]
     fn monotone_bounds_reject_a_fixed_width_wraparound_path() {
-        let visits = LoopBoundednessAnalysis::monotone_header_visits(
+        let increasing = LoopBoundednessAnalysis::monotone_header_visits(
             LoopForm::PreTest,
             BinaryOp::Le,
             unsigned(8),
@@ -2192,7 +2198,55 @@ mod tests {
                 },
             },
         );
+        let post_test = LoopBoundednessAnalysis::monotone_header_visits(
+            LoopForm::PostTest,
+            BinaryOp::Lt,
+            unsigned(8),
+            InductionExtrema {
+                initial_minimum: NumericValue::Unsigned(255),
+                initial_maximum: NumericValue::Unsigned(255),
+                bound_minimum: NumericValue::Unsigned(10),
+                bound_maximum: NumericValue::Unsigned(10),
+                delta: DeltaRange {
+                    minimum: 1,
+                    maximum: 1,
+                },
+            },
+        );
+        let decreasing = LoopBoundednessAnalysis::monotone_header_visits(
+            LoopForm::PreTest,
+            BinaryOp::Ge,
+            unsigned(8),
+            InductionExtrema {
+                initial_minimum: NumericValue::Unsigned(0),
+                initial_maximum: NumericValue::Unsigned(0),
+                bound_minimum: NumericValue::Unsigned(0),
+                bound_maximum: NumericValue::Unsigned(0),
+                delta: DeltaRange {
+                    minimum: -1,
+                    maximum: -1,
+                },
+            },
+        );
+        let inactive_maximum_bound = LoopBoundednessAnalysis::monotone_header_visits(
+            LoopForm::PreTest,
+            BinaryOp::Gt,
+            unsigned(8),
+            InductionExtrema {
+                initial_minimum: NumericValue::Unsigned(0),
+                initial_maximum: NumericValue::Unsigned(0),
+                bound_minimum: NumericValue::Unsigned(255),
+                bound_maximum: NumericValue::Unsigned(255),
+                delta: DeltaRange {
+                    minimum: -1,
+                    maximum: -1,
+                },
+            },
+        );
 
-        assert_eq!(visits, None);
+        assert_eq!(increasing, None);
+        assert_eq!(post_test, None);
+        assert_eq!(decreasing, None);
+        assert_eq!(inactive_maximum_bound, Some(1));
     }
 }
