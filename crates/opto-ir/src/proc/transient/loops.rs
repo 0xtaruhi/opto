@@ -3,13 +3,14 @@
 
 //! Language-independent bounded-loop proof and structural loop elimination.
 
-use super::exact::{ExactEvaluator, ExactState, local_slot, unknown_state};
+use super::exact::{ExactEvaluator, ExactState, ExactValue, local_slot, unknown_state};
 use super::{
     LoopRegion, ProcExprKind, TransientProcModule, TransientTarget, TransientTargetSelect,
     TransientTerminatorKind,
 };
-use crate::proc::{BlockId, LoopRegionId, ProcError, ProcExprId};
+use crate::proc::{BlockId, LoopRegionId, ProcError, ProcExprId, ProcLocalId};
 use crate::word::{BitRange, SourceSpan, WordModule};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Deterministic work limits for boundedness proof and structural expansion.
@@ -41,9 +42,194 @@ impl Default for LoopAnalysisLimits {
 /// Algorithm that established a finite loop bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopProofMethod {
+    /// A monotone integral induction variable decreases a well-founded
+    /// distance to a loop-invariant bound on every reachable backedge path.
+    MonotoneInduction,
     /// Exhaustive traversal of exact two-state procedural-local values,
     /// augmented by conservative known-bit extrema for runtime comparisons.
     ExactStateEnumeration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumericValue {
+    Signed(i128),
+    Unsigned(u128),
+}
+
+impl NumericValue {
+    fn from_exact(value: &ExactValue, signed: bool) -> Option<Self> {
+        if signed {
+            value.signed_i128().map(Self::Signed)
+        } else {
+            value.unsigned_u128().map(Self::Unsigned)
+        }
+    }
+
+    fn compare(self, other: Self) -> Option<Ordering> {
+        match (self, other) {
+            (Self::Signed(left), Self::Signed(right)) => Some(left.cmp(&right)),
+            (Self::Unsigned(left), Self::Unsigned(right)) => Some(left.cmp(&right)),
+            (Self::Signed(_), Self::Unsigned(_)) | (Self::Unsigned(_), Self::Signed(_)) => None,
+        }
+    }
+
+    fn checked_add(self, delta: i128) -> Option<Self> {
+        match self {
+            Self::Signed(value) => value.checked_add(delta).map(Self::Signed),
+            Self::Unsigned(value) if delta >= 0 => value
+                .checked_add(u128::try_from(delta).ok()?)
+                .map(Self::Unsigned),
+            Self::Unsigned(value) => value.checked_sub(delta.unsigned_abs()).map(Self::Unsigned),
+        }
+    }
+
+    fn increasing_distance(self, bound: Self, inclusive: bool) -> Option<u128> {
+        let distance = match (self, bound) {
+            (Self::Signed(start), Self::Signed(bound)) if start < bound => bound.abs_diff(start),
+            (Self::Signed(start), Self::Signed(bound)) if inclusive && start == bound => 0,
+            (Self::Unsigned(start), Self::Unsigned(bound)) if start < bound => bound - start,
+            (Self::Unsigned(start), Self::Unsigned(bound)) if inclusive && start == bound => 0,
+            (Self::Signed(_), Self::Signed(_)) | (Self::Unsigned(_), Self::Unsigned(_)) => {
+                return Some(0);
+            }
+            (Self::Signed(_), Self::Unsigned(_)) | (Self::Unsigned(_), Self::Signed(_)) => {
+                return None;
+            }
+        };
+        if inclusive {
+            distance.checked_add(1)
+        } else {
+            Some(distance)
+        }
+    }
+
+    fn decreasing_distance(self, bound: Self, inclusive: bool) -> Option<u128> {
+        bound.increasing_distance(self, inclusive)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeltaRange {
+    minimum: i128,
+    maximum: i128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymbolicValue {
+    Induction(DeltaRange),
+    Numeric(DeltaRange),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolicState {
+    values: BTreeMap<crate::proc::ProcLocalId, SymbolicValue>,
+}
+
+impl SymbolicState {
+    fn induction(local: crate::proc::ProcLocalId, delta: DeltaRange) -> Self {
+        Self {
+            values: BTreeMap::from([(local, SymbolicValue::Induction(delta))]),
+        }
+    }
+
+    fn merge(&self, other: &Self) -> Self {
+        let values = self
+            .values
+            .iter()
+            .filter_map(|(&local, &left)| {
+                left.merge(*other.values.get(&local)?)
+                    .map(|value| (local, value))
+            })
+            .collect();
+        Self { values }
+    }
+
+    fn induction_delta(&self, local: crate::proc::ProcLocalId) -> Option<DeltaRange> {
+        match self.values.get(&local) {
+            Some(SymbolicValue::Induction(delta)) => Some(*delta),
+            Some(SymbolicValue::Numeric(_)) | None => None,
+        }
+    }
+}
+
+impl SymbolicValue {
+    fn merge(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Induction(left), Self::Induction(right)) => {
+                Some(Self::Induction(left.merge(right)))
+            }
+            (Self::Numeric(left), Self::Numeric(right)) => Some(Self::Numeric(left.merge(right))),
+            (Self::Induction(_), Self::Numeric(_)) | (Self::Numeric(_), Self::Induction(_)) => None,
+        }
+    }
+}
+
+impl DeltaRange {
+    const ZERO: Self = Self {
+        minimum: 0,
+        maximum: 0,
+    };
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            minimum: self.minimum.min(other.minimum),
+            maximum: self.maximum.max(other.maximum),
+        }
+    }
+
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(Self {
+            minimum: self.minimum.checked_add(other.minimum)?,
+            maximum: self.maximum.checked_add(other.maximum)?,
+        })
+    }
+
+    fn checked_neg(self) -> Option<Self> {
+        Some(Self {
+            minimum: self.maximum.checked_neg()?,
+            maximum: self.minimum.checked_neg()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InductionCondition {
+    local: ProcLocalId,
+    op: crate::word::BinaryOp,
+    bound: ProcExprId,
+    ty: crate::word::WordType,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IterationPath<'a> {
+    region: &'a LoopRegion,
+    natural: &'a BTreeSet<usize>,
+    order: &'a [BlockId],
+    start: BlockId,
+}
+
+#[derive(Clone, Copy)]
+struct SymbolicEvaluation<'a, 'graph> {
+    ty: crate::word::WordType,
+    evaluator: &'a ExactEvaluator<'graph>,
+    state: &'a ExactState,
+}
+
+#[derive(Clone, Copy)]
+struct SymbolicExpressionContext<'a, 'graph> {
+    ty: crate::word::WordType,
+    evaluator: &'a ExactEvaluator<'graph>,
+    state: &'a ExactState,
+    locals: &'a BTreeMap<ProcLocalId, SymbolicValue>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InductionExtrema {
+    initial_minimum: NumericValue,
+    initial_maximum: NumericValue,
+    bound_minimum: NumericValue,
+    bound_maximum: NumericValue,
+    delta: DeltaRange,
 }
 
 /// Opaque certificate authorizing removal of one specific loop backedge.
@@ -125,6 +311,175 @@ impl<'a> LoopBoundednessAnalysis<'a> {
             word,
             limits,
         }
+    }
+
+    /// Proves one innermost loop with the strongest applicable sound domain.
+    ///
+    /// Monotone induction is attempted before exact-state enumeration so the
+    /// result does not depend on enumerating every value of a wide induction
+    /// local. The exact domain remains the conservative fallback for loops
+    /// whose transition relation is not affine and monotone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcError`] when the region is malformed, no available domain
+    /// proves a finite bound, or a deterministic analysis or expansion limit
+    /// is exhausted.
+    pub fn prove(&self, region: LoopRegionId) -> Result<LoopProof<'a>, ProcError> {
+        if let Some(proof) = self.prove_monotone_induction(region)? {
+            return Ok(proof);
+        }
+        self.prove_exact(region)
+    }
+
+    fn prove_monotone_induction(
+        &self,
+        region: LoopRegionId,
+    ) -> Result<Option<LoopProof<'a>>, ProcError> {
+        let region_data =
+            self.graph.loop_regions.get(region.index()).ok_or_else(|| {
+                ProcError::new(format!("unknown transient loop region {region:?}"))
+            })?;
+        if self
+            .graph
+            .loop_regions
+            .iter()
+            .any(|candidate| candidate.parent == Some(region))
+        {
+            return Err(ProcError::new(
+                "boundedness analysis requires innermost loops first",
+            ));
+        }
+
+        let natural = self.graph.natural_loop_blocks(region_data)?;
+        let order = self.iteration_order(region_data, &natural)?;
+        let Some((condition_expression, negate, path_start)) =
+            self.continuation_condition(region_data)
+        else {
+            return Ok(None);
+        };
+        let Some(condition) = self.induction_condition(condition_expression, negate) else {
+            return Ok(None);
+        };
+        if self.expression_reads_any_local(condition.bound) {
+            return Ok(None);
+        }
+        if self
+            .graph
+            .locals
+            .get(condition.local.index())
+            .map(|local| local.ty)
+            != Some(condition.ty)
+        {
+            return Ok(None);
+        }
+
+        if region_data.form == super::LoopForm::PreTest
+            && self.block_writes_local(region_data.header, condition.local)
+        {
+            return Ok(None);
+        }
+
+        let evaluator = ExactEvaluator::new(self.graph, self.word);
+        let mut relevant = vec![false; self.graph.locals.len()];
+        relevant[condition.local.index()] = true;
+        let mut transfer_steps = 0usize;
+        let initial =
+            self.initial_states(region_data, &relevant, &evaluator, &mut transfer_steps)?;
+        if initial.is_empty() {
+            return Ok(None);
+        }
+
+        let mut initial_minimum = None;
+        let mut initial_maximum = None;
+        for state in &initial {
+            let Some(value) = state
+                .get(condition.local.index())
+                .and_then(Option::as_ref)
+                .and_then(|value| NumericValue::from_exact(value, condition.ty.is_signed()))
+            else {
+                return Ok(None);
+            };
+            initial_minimum = Self::minimum_numeric(initial_minimum, value);
+            initial_maximum = Self::maximum_numeric(initial_maximum, value);
+        }
+        let (Some(initial_minimum), Some(initial_maximum)) = (initial_minimum, initial_maximum)
+        else {
+            return Ok(None);
+        };
+
+        let Some(bounds) = evaluator.expression_bounds(
+            condition.bound,
+            initial
+                .first()
+                .expect("non-empty induction entry-state set has a first state"),
+        ) else {
+            return Ok(None);
+        };
+        let Some(bound_minimum) =
+            NumericValue::from_exact(&bounds.minimum, condition.ty.is_signed())
+        else {
+            return Ok(None);
+        };
+        let Some(bound_maximum) =
+            NumericValue::from_exact(&bounds.maximum, condition.ty.is_signed())
+        else {
+            return Ok(None);
+        };
+
+        let delta = self.backedge_delta_range(
+            IterationPath {
+                region: region_data,
+                natural: &natural,
+                order: &order,
+                start: path_start,
+            },
+            condition.local,
+            SymbolicEvaluation {
+                ty: condition.ty,
+                evaluator: &evaluator,
+                state: initial
+                    .first()
+                    .expect("non-empty induction entry-state set has a first state"),
+            },
+        )?;
+        let Some(delta) = delta else {
+            return Ok(None);
+        };
+
+        let Some(max_header_visits) = Self::monotone_header_visits(
+            region_data.form,
+            condition.op,
+            condition.ty,
+            InductionExtrema {
+                initial_minimum,
+                initial_maximum,
+                bound_minimum,
+                bound_maximum,
+                delta,
+            },
+        ) else {
+            return Ok(None);
+        };
+        let structural_limit = self.structural_header_visit_limit(&natural)?;
+        if max_header_visits > u128::from(structural_limit) {
+            let location = loop_source_location(region_data);
+            return Err(ProcError::new(format!(
+                "loop expansion would exceed the {}-block source-profile structural limit{location}",
+                self.limits.max_expanded_blocks,
+            )));
+        }
+        let max_header_visits = u32::try_from(max_header_visits)
+            .map_err(|_| ProcError::new("monotone loop bound exceeds 32-bit storage"))?;
+
+        Ok(Some(LoopProof {
+            _graph: self.graph,
+            _word: self.word,
+            region,
+            max_header_visits,
+            explored_states: initial.len(),
+            method: LoopProofMethod::MonotoneInduction,
+        }))
     }
 
     /// Proves one innermost loop by exact-local-state traversal plus conservative
@@ -224,6 +579,506 @@ impl<'a> LoopBoundednessAnalysis<'a> {
         }
     }
 
+    fn continuation_condition(&self, region: &LoopRegion) -> Option<(ProcExprId, bool, BlockId)> {
+        let (block, continue_target, path_start) = match region.form {
+            super::LoopForm::PreTest => (region.header, region.body, region.body),
+            super::LoopForm::PostTest => (region.latch, region.header, region.header),
+            super::LoopForm::Unconditional => return None,
+        };
+        let TransientTerminatorKind::Branch {
+            condition,
+            then_target,
+            else_target,
+        } = self.graph.blocks.get(block.index())?.terminator.kind
+        else {
+            return None;
+        };
+        if then_target == continue_target && else_target == region.exit {
+            Some((condition, false, path_start))
+        } else if else_target == continue_target && then_target == region.exit {
+            Some((condition, true, path_start))
+        } else {
+            None
+        }
+    }
+
+    fn induction_condition(
+        &self,
+        expression: ProcExprId,
+        negate: bool,
+    ) -> Option<InductionCondition> {
+        let stored = self.graph.expressions.get(expression.index())?;
+        if let ProcExprKind::Unary {
+            op: crate::word::UnaryOp::LogicalNot,
+            arg,
+        } = stored.kind
+        {
+            return self.induction_condition(arg, !negate);
+        }
+        let ProcExprKind::Binary {
+            mut op,
+            left,
+            right,
+        } = stored.kind
+        else {
+            return None;
+        };
+        if negate {
+            op = Self::negated_comparison(op)?;
+        }
+        let (local, bound) = if let Some(local) = self.direct_local_read(left) {
+            (local, right)
+        } else {
+            let local = self.direct_local_read(right)?;
+            op = Self::reversed_comparison(op)?;
+            (local, left)
+        };
+        let ty = self.graph.locals.get(local.index())?.ty;
+        if self.graph.expressions.get(bound.index())?.ty != ty {
+            return None;
+        }
+        Some(InductionCondition {
+            local,
+            op,
+            bound,
+            ty,
+        })
+    }
+
+    fn direct_local_read(&self, expression: ProcExprId) -> Option<ProcLocalId> {
+        let stored = self.graph.expressions.get(expression.index())?;
+        match stored.kind {
+            ProcExprKind::LocalRead(local) => Some(local),
+            ProcExprKind::Cast { value, .. }
+                if self.graph.expressions.get(value.index())?.ty == stored.ty =>
+            {
+                self.direct_local_read(value)
+            }
+            _ => None,
+        }
+    }
+
+    fn negated_comparison(op: crate::word::BinaryOp) -> Option<crate::word::BinaryOp> {
+        use crate::word::BinaryOp;
+        Some(match op {
+            BinaryOp::Eq => BinaryOp::Ne,
+            BinaryOp::Ne => BinaryOp::Eq,
+            BinaryOp::Lt => BinaryOp::Ge,
+            BinaryOp::Le => BinaryOp::Gt,
+            BinaryOp::Gt => BinaryOp::Le,
+            BinaryOp::Ge => BinaryOp::Lt,
+            _ => return None,
+        })
+    }
+
+    fn reversed_comparison(op: crate::word::BinaryOp) -> Option<crate::word::BinaryOp> {
+        use crate::word::BinaryOp;
+        Some(match op {
+            BinaryOp::Eq | BinaryOp::Ne => op,
+            BinaryOp::Lt => BinaryOp::Gt,
+            BinaryOp::Le => BinaryOp::Ge,
+            BinaryOp::Gt => BinaryOp::Lt,
+            BinaryOp::Ge => BinaryOp::Le,
+            _ => return None,
+        })
+    }
+
+    fn expression_reads_any_local(&self, root: ProcExprId) -> bool {
+        let mut pending = vec![root];
+        let mut visited = vec![false; self.graph.expressions.len()];
+        while let Some(expression) = pending.pop() {
+            let Some(stored) = self.graph.expressions.get(expression.index()) else {
+                return true;
+            };
+            if std::mem::replace(&mut visited[expression.index()], true) {
+                continue;
+            }
+            if matches!(stored.kind, ProcExprKind::LocalRead(_)) {
+                return true;
+            }
+            stored
+                .kind
+                .for_each_operand(|operand| pending.push(operand));
+        }
+        false
+    }
+
+    fn block_writes_local(&self, block: BlockId, local: ProcLocalId) -> bool {
+        self.graph.block_effects(block).is_none_or(|effects| {
+            effects.into_iter().any(|effect| {
+                matches!(effect.target, TransientTarget::Local { local: found, .. } if found == local)
+            })
+        })
+    }
+
+    fn backedge_delta_range(
+        &self,
+        path: IterationPath<'_>,
+        local: ProcLocalId,
+        evaluation: SymbolicEvaluation<'_, '_>,
+    ) -> Result<Option<DeltaRange>, ProcError> {
+        let mut incoming = BTreeMap::new();
+        incoming.insert(
+            path.start.index(),
+            SymbolicState::induction(local, DeltaRange::ZERO),
+        );
+        let mut backedge = None;
+        for &block in path.order {
+            let Some(mut symbolic) = incoming.get(&block.index()).cloned() else {
+                continue;
+            };
+            let Some(effects) = self.graph.block_effects(block) else {
+                return Err(ProcError::new(
+                    "monotone loop proof found an unknown transient block",
+                ));
+            };
+            for effect in effects {
+                let TransientTarget::Local {
+                    local: target,
+                    select,
+                } = effect.target
+                else {
+                    continue;
+                };
+                if effect.mode != crate::proc::AssignmentMode::Blocking
+                    || select != TransientTargetSelect::Whole
+                {
+                    if target == local {
+                        return Ok(None);
+                    }
+                    symbolic.values.remove(&target);
+                    continue;
+                }
+                let value = self.symbolic_expression(
+                    effect.value,
+                    SymbolicExpressionContext {
+                        ty: evaluation.ty,
+                        evaluator: evaluation.evaluator,
+                        state: evaluation.state,
+                        locals: &symbolic.values,
+                    },
+                );
+                match value {
+                    Some(value) => {
+                        symbolic.values.insert(target, value);
+                    }
+                    None if target == local => return Ok(None),
+                    None => {
+                        symbolic.values.remove(&target);
+                    }
+                }
+            }
+            for successor in self.block_successors(block) {
+                if successor == path.region.header {
+                    let Some(delta) = symbolic.induction_delta(local) else {
+                        return Ok(None);
+                    };
+                    backedge = Some(backedge.map_or(delta, |found: DeltaRange| found.merge(delta)));
+                } else if path.natural.contains(&successor.index()) {
+                    incoming
+                        .entry(successor.index())
+                        .and_modify(|found| *found = found.merge(&symbolic))
+                        .or_insert_with(|| symbolic.clone());
+                }
+            }
+        }
+        Ok(backedge)
+    }
+
+    fn symbolic_expression(
+        &self,
+        expression: ProcExprId,
+        context: SymbolicExpressionContext<'_, '_>,
+    ) -> Option<SymbolicValue> {
+        let stored = self.graph.expressions.get(expression.index())?;
+        if stored.ty != context.ty {
+            return None;
+        }
+        match stored.kind {
+            ProcExprKind::LocalRead(found) => context.locals.get(&found).copied(),
+            ProcExprKind::Mux {
+                then_value,
+                else_value,
+                ..
+            } => self
+                .symbolic_expression(then_value, context)?
+                .merge(self.symbolic_expression(else_value, context)?),
+            ProcExprKind::Cast { value, .. }
+                if self.graph.expressions.get(value.index())?.ty == context.ty =>
+            {
+                self.symbolic_expression(value, context)
+            }
+            ProcExprKind::Binary { op, left, right } => {
+                use crate::word::BinaryOp;
+                let left = self.symbolic_expression(left, context)?;
+                let right = self.symbolic_expression(right, context)?;
+                match op {
+                    BinaryOp::Add => Self::symbolic_add(left, right),
+                    BinaryOp::Sub => Self::symbolic_subtract(left, right),
+                    _ => None,
+                }
+            }
+            _ if !self.expression_reads_any_local(expression) => {
+                Some(SymbolicValue::Numeric(self.numeric_delta_bounds(
+                    expression,
+                    context.ty,
+                    context.evaluator,
+                    context.state,
+                )?))
+            }
+            _ => None,
+        }
+    }
+
+    fn symbolic_add(left: SymbolicValue, right: SymbolicValue) -> Option<SymbolicValue> {
+        match (left, right) {
+            (SymbolicValue::Induction(offset), SymbolicValue::Numeric(value))
+            | (SymbolicValue::Numeric(value), SymbolicValue::Induction(offset)) => {
+                offset.checked_add(value).map(SymbolicValue::Induction)
+            }
+            (SymbolicValue::Numeric(left), SymbolicValue::Numeric(right)) => {
+                left.checked_add(right).map(SymbolicValue::Numeric)
+            }
+            (SymbolicValue::Induction(_), SymbolicValue::Induction(_)) => None,
+        }
+    }
+
+    fn symbolic_subtract(left: SymbolicValue, right: SymbolicValue) -> Option<SymbolicValue> {
+        match (left, right) {
+            (SymbolicValue::Induction(offset), SymbolicValue::Numeric(value)) => offset
+                .checked_add(value.checked_neg()?)
+                .map(SymbolicValue::Induction),
+            (SymbolicValue::Numeric(left), SymbolicValue::Numeric(right)) => left
+                .checked_add(right.checked_neg()?)
+                .map(SymbolicValue::Numeric),
+            (SymbolicValue::Induction(left), SymbolicValue::Induction(right)) => {
+                Some(SymbolicValue::Numeric(DeltaRange {
+                    minimum: left.minimum.checked_sub(right.maximum)?,
+                    maximum: left.maximum.checked_sub(right.minimum)?,
+                }))
+            }
+            (SymbolicValue::Numeric(_), SymbolicValue::Induction(_)) => None,
+        }
+    }
+
+    fn numeric_delta_bounds(
+        &self,
+        expression: ProcExprId,
+        ty: crate::word::WordType,
+        evaluator: &ExactEvaluator<'_>,
+        state: &ExactState,
+    ) -> Option<DeltaRange> {
+        let stored = self.graph.expressions.get(expression.index())?;
+        if stored.ty != ty {
+            return None;
+        }
+        if let ProcExprKind::Mux {
+            then_value,
+            else_value,
+            ..
+        } = stored.kind
+        {
+            return Some(
+                self.numeric_delta_bounds(then_value, ty, evaluator, state)?
+                    .merge(self.numeric_delta_bounds(else_value, ty, evaluator, state)?),
+            );
+        }
+        let bounds = evaluator.expression_bounds(expression, state)?;
+        let minimum = NumericValue::from_exact(&bounds.minimum, ty.is_signed())?;
+        let maximum = NumericValue::from_exact(&bounds.maximum, ty.is_signed())?;
+        Some(DeltaRange {
+            minimum: Self::numeric_as_delta(minimum)?,
+            maximum: Self::numeric_as_delta(maximum)?,
+        })
+    }
+
+    fn numeric_as_delta(value: NumericValue) -> Option<i128> {
+        match value {
+            NumericValue::Signed(value) => Some(value),
+            NumericValue::Unsigned(value) => i128::try_from(value).ok(),
+        }
+    }
+
+    fn block_successors(&self, block: BlockId) -> Vec<BlockId> {
+        match &self.graph.blocks[block.index()].terminator.kind {
+            TransientTerminatorKind::Return => Vec::new(),
+            TransientTerminatorKind::Jump(target) => vec![*target],
+            TransientTerminatorKind::Branch {
+                then_target,
+                else_target,
+                ..
+            } => vec![*then_target, *else_target],
+            TransientTerminatorKind::Switch { arms, default, .. } => arms
+                .iter()
+                .map(|arm| arm.target)
+                .chain(std::iter::once(*default))
+                .collect(),
+        }
+    }
+
+    fn monotone_header_visits(
+        form: super::LoopForm,
+        op: crate::word::BinaryOp,
+        ty: crate::word::WordType,
+        extrema: InductionExtrema,
+    ) -> Option<u128> {
+        use crate::word::BinaryOp;
+        let InductionExtrema {
+            initial_minimum,
+            initial_maximum,
+            bound_minimum,
+            bound_maximum,
+            delta,
+        } = extrema;
+        let (type_minimum, type_maximum) = Self::numeric_type_bounds(ty)?;
+        let iterations = if delta.minimum > 0 && matches!(op, BinaryOp::Lt | BinaryOp::Le) {
+            let inclusive = op == BinaryOp::Le;
+            if !Self::increasing_updates_do_not_wrap(
+                form,
+                inclusive,
+                initial_maximum,
+                bound_maximum,
+                delta.maximum,
+                type_minimum,
+                type_maximum,
+            )? {
+                return None;
+            }
+            let distance = initial_minimum.increasing_distance(bound_maximum, inclusive)?;
+            Self::ceil_div(distance, u128::try_from(delta.minimum).ok()?)?
+        } else if delta.maximum < 0 && matches!(op, BinaryOp::Gt | BinaryOp::Ge) {
+            let inclusive = op == BinaryOp::Ge;
+            if !Self::decreasing_updates_do_not_wrap(
+                form,
+                inclusive,
+                initial_minimum,
+                bound_minimum,
+                delta.minimum,
+                type_minimum,
+                type_maximum,
+            )? {
+                return None;
+            }
+            let distance = initial_maximum.decreasing_distance(bound_minimum, inclusive)?;
+            Self::ceil_div(distance, delta.maximum.unsigned_abs())?
+        } else {
+            return None;
+        };
+
+        let visits = match form {
+            super::LoopForm::PreTest => iterations.checked_add(1)?,
+            super::LoopForm::PostTest => iterations.max(1),
+            super::LoopForm::Unconditional => return None,
+        };
+        Some(visits)
+    }
+
+    fn increasing_updates_do_not_wrap(
+        form: super::LoopForm,
+        inclusive: bool,
+        initial_maximum: NumericValue,
+        bound_maximum: NumericValue,
+        maximum_delta: i128,
+        type_minimum: NumericValue,
+        type_maximum: NumericValue,
+    ) -> Option<bool> {
+        if form == super::LoopForm::PostTest
+            && initial_maximum
+                .checked_add(maximum_delta)?
+                .compare(type_maximum)?
+                == Ordering::Greater
+        {
+            return Some(false);
+        }
+        let active_maximum = if inclusive {
+            Some(bound_maximum)
+        } else if bound_maximum.compare(type_minimum)? == Ordering::Equal {
+            None
+        } else {
+            bound_maximum.checked_add(-1)
+        };
+        active_maximum.map_or(Some(true), |active| {
+            Some(active.checked_add(maximum_delta)?.compare(type_maximum)? != Ordering::Greater)
+        })
+    }
+
+    fn decreasing_updates_do_not_wrap(
+        form: super::LoopForm,
+        inclusive: bool,
+        initial_minimum: NumericValue,
+        bound_minimum: NumericValue,
+        minimum_delta: i128,
+        type_minimum: NumericValue,
+        type_maximum: NumericValue,
+    ) -> Option<bool> {
+        if form == super::LoopForm::PostTest
+            && initial_minimum
+                .checked_add(minimum_delta)?
+                .compare(type_minimum)?
+                == Ordering::Less
+        {
+            return Some(false);
+        }
+        let active_minimum = if inclusive {
+            Some(bound_minimum)
+        } else if bound_minimum.compare(type_maximum)? == Ordering::Equal {
+            None
+        } else {
+            bound_minimum.checked_add(1)
+        };
+        active_minimum.map_or(Some(true), |active| {
+            Some(active.checked_add(minimum_delta)?.compare(type_minimum)? != Ordering::Less)
+        })
+    }
+
+    fn numeric_type_bounds(ty: crate::word::WordType) -> Option<(NumericValue, NumericValue)> {
+        let width = ty.width();
+        if width == 0 || width > u128::BITS {
+            return None;
+        }
+        if ty.is_signed() {
+            let (minimum, maximum) = if width == i128::BITS {
+                (i128::MIN, i128::MAX)
+            } else {
+                let magnitude = 1i128.checked_shl(width - 1)?;
+                (-magnitude, magnitude - 1)
+            };
+            Some((NumericValue::Signed(minimum), NumericValue::Signed(maximum)))
+        } else {
+            let maximum = if width == u128::BITS {
+                u128::MAX
+            } else {
+                1u128.checked_shl(width)?.checked_sub(1)?
+            };
+            Some((NumericValue::Unsigned(0), NumericValue::Unsigned(maximum)))
+        }
+    }
+
+    fn ceil_div(dividend: u128, divisor: u128) -> Option<u128> {
+        if dividend == 0 {
+            Some(0)
+        } else {
+            dividend
+                .checked_sub(1)?
+                .checked_div(divisor)?
+                .checked_add(1)
+        }
+    }
+
+    fn minimum_numeric(current: Option<NumericValue>, value: NumericValue) -> Option<NumericValue> {
+        match current {
+            Some(current) if current.compare(value)? != Ordering::Greater => Some(current),
+            Some(_) | None => Some(value),
+        }
+    }
+
+    fn maximum_numeric(current: Option<NumericValue>, value: NumericValue) -> Option<NumericValue> {
+        match current {
+            Some(current) if current.compare(value)? != Ordering::Less => Some(current),
+            Some(_) | None => Some(value),
+        }
+    }
+
     fn structural_header_visit_limit(&self, natural: &BTreeSet<usize>) -> Result<u32, ProcError> {
         let outside = self
             .graph
@@ -319,6 +1174,14 @@ impl<'a> LoopBoundednessAnalysis<'a> {
         region: &LoopRegion,
         natural: &BTreeSet<usize>,
     ) -> Result<(), ProcError> {
+        self.iteration_order(region, natural).map(drop)
+    }
+
+    fn iteration_order(
+        &self,
+        region: &LoopRegion,
+        natural: &BTreeSet<usize>,
+    ) -> Result<Vec<BlockId>, ProcError> {
         let mut indegree = natural
             .iter()
             .copied()
@@ -351,9 +1214,9 @@ impl<'a> LoopBoundednessAnalysis<'a> {
             .copied()
             .filter(|&block| indegree[&block] == 0)
             .collect::<Vec<_>>();
-        let mut visited = 0usize;
+        let mut order = Vec::with_capacity(natural.len());
         while let Some(block_index) = ready.pop() {
-            visited += 1;
+            order.push(BlockId::from_index(block_index)?);
             self.graph.blocks[block_index]
                 .terminator
                 .kind
@@ -372,12 +1235,12 @@ impl<'a> LoopBoundednessAnalysis<'a> {
                     }
                 });
         }
-        if visited != natural.len() {
+        if order.len() != natural.len() {
             return Err(ProcError::new(
                 "loop contains an internal cycle besides its declared latch-to-header backedge",
             ));
         }
-        Ok(())
+        Ok(order)
     }
 
     fn consume_step(&self, transfer_steps: &mut usize) -> Result<(), ProcError> {
@@ -636,8 +1499,7 @@ impl TransientProcModule {
                 .ok_or_else(|| ProcError::new("transient loop-region parent graph is cyclic"))?;
             let region = LoopRegionId::from_index(region_index)?;
             let max_header_visits = {
-                let proof =
-                    LoopBoundednessAnalysis::new(&self, word, limits).prove_exact(region)?;
+                let proof = LoopBoundednessAnalysis::new(&self, word, limits).prove(region)?;
                 proof.max_header_visits()
             };
             self = self.eliminate_proved_loop(region, max_header_visits, limits)?;
@@ -1239,4 +2101,98 @@ fn cloned_source(source: &SourceSpan, iteration: usize) -> SourceSpan {
     source
         .derived("unrolled loop iteration", iteration.to_le_bytes())
         .unwrap_or_else(|| source.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeltaRange, InductionExtrema, LoopBoundednessAnalysis, NumericValue};
+    use crate::proc::LoopForm;
+    use crate::word::{BinaryOp, LogicStateKind, WordType};
+
+    fn signed(width: u32) -> WordType {
+        WordType::new(width, true, LogicStateKind::FourState).unwrap()
+    }
+
+    fn unsigned(width: u32) -> WordType {
+        WordType::new(width, false, LogicStateKind::FourState).unwrap()
+    }
+
+    #[test]
+    fn monotone_bounds_use_the_slowest_progress_from_all_paths() {
+        let visits = LoopBoundednessAnalysis::monotone_header_visits(
+            LoopForm::PreTest,
+            BinaryOp::Lt,
+            unsigned(32),
+            InductionExtrema {
+                initial_minimum: NumericValue::Unsigned(0),
+                initial_maximum: NumericValue::Unsigned(0),
+                bound_minimum: NumericValue::Unsigned(1_000),
+                bound_maximum: NumericValue::Unsigned(1_000),
+                delta: DeltaRange {
+                    minimum: 1,
+                    maximum: 2,
+                },
+            },
+        );
+
+        assert_eq!(visits, Some(1_001));
+    }
+
+    #[test]
+    fn monotone_bounds_cover_inclusive_decreasing_and_post_test_loops() {
+        let inclusive = LoopBoundednessAnalysis::monotone_header_visits(
+            LoopForm::PreTest,
+            BinaryOp::Ge,
+            signed(32),
+            InductionExtrema {
+                initial_minimum: NumericValue::Signed(10),
+                initial_maximum: NumericValue::Signed(10),
+                bound_minimum: NumericValue::Signed(-10),
+                bound_maximum: NumericValue::Signed(-10),
+                delta: DeltaRange {
+                    minimum: -3,
+                    maximum: -1,
+                },
+            },
+        );
+        let post_test = LoopBoundednessAnalysis::monotone_header_visits(
+            LoopForm::PostTest,
+            BinaryOp::Lt,
+            unsigned(32),
+            InductionExtrema {
+                initial_minimum: NumericValue::Unsigned(100),
+                initial_maximum: NumericValue::Unsigned(100),
+                bound_minimum: NumericValue::Unsigned(10),
+                bound_maximum: NumericValue::Unsigned(10),
+                delta: DeltaRange {
+                    minimum: 1,
+                    maximum: 1,
+                },
+            },
+        );
+
+        assert_eq!(inclusive, Some(22));
+        assert_eq!(post_test, Some(1));
+    }
+
+    #[test]
+    fn monotone_bounds_reject_a_fixed_width_wraparound_path() {
+        let visits = LoopBoundednessAnalysis::monotone_header_visits(
+            LoopForm::PreTest,
+            BinaryOp::Le,
+            unsigned(8),
+            InductionExtrema {
+                initial_minimum: NumericValue::Unsigned(0),
+                initial_maximum: NumericValue::Unsigned(0),
+                bound_minimum: NumericValue::Unsigned(255),
+                bound_maximum: NumericValue::Unsigned(255),
+                delta: DeltaRange {
+                    minimum: 1,
+                    maximum: 1,
+                },
+            },
+        );
+
+        assert_eq!(visits, None);
+    }
 }

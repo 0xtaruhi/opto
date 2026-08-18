@@ -2243,6 +2243,10 @@ mod tests {
         WordType::new(32, true, LogicStateKind::FourState).unwrap()
     }
 
+    fn unsigned_integer() -> WordType {
+        WordType::new(32, false, LogicStateKind::FourState).unwrap()
+    }
+
     fn span() -> SourceSpan {
         SourceSpan::stable("transient procedure test")
     }
@@ -2332,6 +2336,121 @@ mod tests {
                 span(),
             )
             .unwrap();
+        builder.terminate_jump(latch, header, span()).unwrap();
+        builder.terminate_return(exit, span()).unwrap();
+        let region = builder
+            .add_loop_region(LoopRegion {
+                procedure,
+                header,
+                body,
+                latch,
+                exit,
+                form: LoopForm::PreTest,
+                parent: None,
+                source: span(),
+            })
+            .unwrap();
+        (word, builder.seal().unwrap(), region)
+    }
+
+    fn branch_step_loop() -> (WordModule, TransientProcModule, LoopRegionId) {
+        let mut word = WordModule::new("top");
+        let mode_port = word
+            .add_port("step_two", PortDirection::Input, bit(), span())
+            .unwrap();
+        let mode_signal = word.port(mode_port).unwrap().signal;
+        let mode_value = word.read_signal(mode_signal, span()).unwrap();
+        let ty = unsigned_integer();
+        let mut builder = TransientProcBuilder::new();
+        let local = builder
+            .add_local(ProcLocal {
+                name: "induction".into(),
+                ty,
+                source: span(),
+            })
+            .unwrap();
+        let constant = |builder: &mut TransientProcBuilder, value: u32| {
+            builder
+                .constant(
+                    ConstBits::from_bits(
+                        (0..ty.width())
+                            .rev()
+                            .map(|bit| {
+                                if value & (1u32 << bit) == 0 {
+                                    BitVal::Zero
+                                } else {
+                                    BitVal::One
+                                }
+                            })
+                            .collect(),
+                    )
+                    .unwrap(),
+                    ty,
+                    span(),
+                )
+                .unwrap()
+        };
+        let zero = constant(&mut builder, 0);
+        let one = constant(&mut builder, 1);
+        let two = constant(&mut builder, 2);
+        let limit = constant(&mut builder, 1_000);
+        let local_read = builder.read_local(local, span()).unwrap();
+        let mode = builder.add_module_value(mode_value, bit(), span()).unwrap();
+        let condition = builder
+            .binary(BinaryOp::Lt, local_read, limit, span())
+            .unwrap();
+        let increment_one = builder
+            .binary(BinaryOp::Add, local_read, one, span())
+            .unwrap();
+        let increment_two = builder
+            .binary(BinaryOp::Add, local_read, two, span())
+            .unwrap();
+        let procedure = builder
+            .add_combinational_procedure(ProcedureKind::Combinational, span())
+            .unwrap();
+        let entry = builder.add_block(procedure, span()).unwrap();
+        let header = builder.add_block(procedure, span()).unwrap();
+        let body = builder.add_block(procedure, span()).unwrap();
+        let step_one = builder.add_block(procedure, span()).unwrap();
+        let step_two = builder.add_block(procedure, span()).unwrap();
+        let latch = builder.add_block(procedure, span()).unwrap();
+        let exit = builder.add_block(procedure, span()).unwrap();
+        builder
+            .assign(
+                entry,
+                AssignmentMode::Blocking,
+                TransientTarget::local(local),
+                zero,
+                span(),
+            )
+            .unwrap();
+        builder.terminate_jump(entry, header, span()).unwrap();
+        builder
+            .terminate_branch(header, condition, body, exit, span())
+            .unwrap();
+        builder
+            .terminate_branch(body, mode, step_two, step_one, span())
+            .unwrap();
+        builder
+            .assign(
+                step_one,
+                AssignmentMode::Blocking,
+                TransientTarget::local(local),
+                increment_one,
+                span(),
+            )
+            .unwrap();
+        builder.terminate_jump(step_one, latch, span()).unwrap();
+        builder
+            .assign(
+                step_two,
+                AssignmentMode::Blocking,
+                TransientTarget::local(local),
+                increment_two,
+                span(),
+            )
+            .unwrap();
+        builder.terminate_jump(step_two, latch, span()).unwrap();
         builder.terminate_jump(latch, header, span()).unwrap();
         builder.terminate_return(exit, span()).unwrap();
         let region = builder
@@ -2884,6 +3003,32 @@ mod tests {
     }
 
     #[test]
+    fn monotone_induction_proves_wide_branch_dependent_progress_without_enumeration() {
+        let (word, graph, region) = branch_step_loop();
+        let limits = LoopAnalysisLimits {
+            max_expanded_blocks: 8_000,
+            max_analysis_states: 1,
+            ..LoopAnalysisLimits::default()
+        };
+
+        let exact_error = LoopBoundednessAnalysis::new(&graph, &word, limits)
+            .prove_exact(region)
+            .unwrap_err();
+        assert!(
+            exact_error
+                .to_string()
+                .contains("boundedness-analysis capability gap")
+        );
+
+        let proof = LoopBoundednessAnalysis::new(&graph, &word, limits)
+            .prove(region)
+            .unwrap();
+        assert_eq!(proof.method(), LoopProofMethod::MonotoneInduction);
+        assert_eq!(proof.max_header_visits(), 1_001);
+        assert_eq!(proof.explored_states(), 1);
+    }
+
+    #[test]
     fn loop_limits_distinguish_profile_structure_from_analysis_exhaustion() {
         let (word, graph, region) = runtime_bound_loop(BinaryOp::Lt);
         let structural = LoopBoundednessAnalysis::new(
@@ -2932,10 +3077,38 @@ mod tests {
                 ..LoopAnalysisLimits::default()
             },
         )
-        .prove_exact(region)
+        .prove(region)
         .unwrap_err();
 
         assert!(error.to_string().contains("reaches the header twice"));
+    }
+
+    #[test]
+    fn symbolic_proof_reports_expansion_not_solver_exhaustion_for_a_wide_runtime_bound() {
+        let (word, graph, region) = runtime_bound_loop_with_types(
+            BinaryOp::Lt,
+            unsigned_integer(),
+            unsigned_integer(),
+            None,
+        );
+        let error = LoopBoundednessAnalysis::new(
+            &graph,
+            &word,
+            LoopAnalysisLimits {
+                max_expanded_blocks: 128,
+                max_analysis_states: 1,
+                ..LoopAnalysisLimits::default()
+            },
+        )
+        .prove(region)
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("source-profile structural limit")
+        );
+        assert!(!error.to_string().contains("analysis capability gap"));
     }
 
     #[test]

@@ -134,16 +134,21 @@ and removes only the final unreachable latch-to-header edge. The final
 persistent `ProcModule` remains acyclic and contains neither procedural locals
 nor loop metadata.
 
-The initial proof domain is exact finite-state enumeration with SystemVerilog
-width, sign, truncation, cast, selection, and blocking-assignment semantics.
-Conservative known-bit extrema additionally decide comparisons that hold for
-every value of a runtime integral operand. An induction value reaching the
-maximum of a finite unsigned or signed runtime bound can therefore prove the
-exit without enumerating the input domain. Unknown module inputs otherwise
-fork reachable control unless short-circuit Boolean facts decide the path. A
-repeated header state, a `continue` path without progress,
-an internal cycle other than the declared backedge, or a runtime-only exit with
-no finite local bound is rejected.
+The proof portfolio first applies monotone induction to relational pre-test and
+post-test loops. Its sparse affine domain follows blocking temporary values
+across blocks and merges the delta range from every backedge path. A proof
+requires a loop-invariant bound, exact entry and bound extrema, strict progress
+in one comparison direction, and a fixed-width no-wrap argument. This proves
+wide induction variables and path-dependent steps such as `+1` or `+2` without
+enumerating every reachable value. Exact finite-state enumeration remains the
+fallback and models SystemVerilog width, sign, truncation, cast, selection, and
+blocking-assignment semantics. Conservative known-bit extrema additionally
+decide comparisons that hold for every value of a runtime integral operand.
+Unknown module inputs otherwise fork reachable control unless short-circuit
+Boolean facts decide the path. A repeated header state in the fallback domain,
+a backedge path without proven progress, an internal cycle other than the
+declared backedge, or a runtime-only exit with no finite local bound is
+rejected.
 
 The source-profile size boundary is the number of transient blocks after
 structural expansion, currently 1,048,576 for one module. The maximum permitted
