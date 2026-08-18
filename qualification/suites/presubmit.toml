@@ -42,6 +42,7 @@ cases = [
   "qualification/cases/hierarchy/reference_modport/case.toml",
   "qualification/cases/sequential/dff_enable/case.toml",
   "qualification/cases/sequential/event_iff_enable/case.toml",
+  "qualification/cases/sequential/selected_clock_events/case.toml",
   "qualification/cases/sequential/async_set_clear/case.toml",
   "qualification/cases/sequential/dual_edge_state/case.toml",
   "qualification/cases/sequential/dual_edge_iff/case.toml",

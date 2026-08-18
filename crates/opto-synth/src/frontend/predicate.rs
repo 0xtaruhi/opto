@@ -55,7 +55,7 @@ pub(super) enum MaterializedPredicate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Atom {
-    Signal(word::SignalId),
+    Signal(word::SignalRef),
     Value(word::ValueId),
 }
 
@@ -110,10 +110,10 @@ impl PredicateArena {
                 BitVal::X | BitVal::Z => self.variable(Atom::Value(value), value, true)?,
             });
         }
-        if let Some((signal, active_high)) =
+        if let Some((reference, active_high)) =
             super::events::normalize_boolean_value(module, value, true)
         {
-            return self.variable(Atom::Signal(signal), value, active_high);
+            return self.variable(Atom::Signal(reference), value, active_high);
         }
         let boolean_binary = module.value(value).and_then(|stored| {
             (stored.ty.width() == 1).then_some(())?;
@@ -167,12 +167,12 @@ impl PredicateArena {
                 BitVal::X | BitVal::Z => self.variable(Atom::Value(value), value, true)?,
             }));
         }
-        let Some((signal, active_high)) =
+        let Some((reference, active_high)) =
             super::events::normalize_boolean_value(module, value, true)
         else {
             return Ok(None);
         };
-        self.variable(Atom::Signal(signal), value, active_high)
+        self.variable(Atom::Signal(reference), value, active_high)
             .map(Some)
     }
 

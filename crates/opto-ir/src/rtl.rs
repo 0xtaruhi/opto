@@ -236,8 +236,18 @@ impl RtlModule {
                     .sensitivity_events(procedure_id)
                     .expect("edge-sensitive procedure has an event range")
                 {
-                    let signal = self.signal(event.signal, "sensitivity event")?;
-                    require_width(signal.ty, 1, "sensitivity event signal")?;
+                    require_width(
+                        self.value_type(event.value, "sensitivity event expression")?,
+                        1,
+                        "sensitivity event expression",
+                    )?;
+                    if let Some(qualifier) = event.iff {
+                        require_width(
+                            self.value_type(qualifier, "sensitivity event iff qualifier")?,
+                            1,
+                            "sensitivity event iff qualifier",
+                        )?;
+                    }
                 }
             }
         }
@@ -530,8 +540,9 @@ fn append_procedures(
                     .expect("validated edge-sensitive procedure owns events")
                     .map(|(_, event)| {
                         Ok(SensitivityEvent {
-                            signal: remap.signal(event.signal)?,
+                            value: remap.value(event.value)?,
                             edge: event.edge,
+                            iff: event.iff.map(|value| remap.value(value)).transpose()?,
                         })
                     })
                     .collect::<Result<Vec<_>, WordError>>()?,

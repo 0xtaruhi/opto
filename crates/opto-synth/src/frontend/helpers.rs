@@ -596,6 +596,7 @@ pub(super) fn predicate_enable(
 }
 
 pub(super) fn inferred_reset_kind(
+    module: &word::WordModule,
     procedure: &proc::Procedure,
     event_controls: &[EventControl],
 ) -> Option<word::ResetKind> {
@@ -605,6 +606,7 @@ pub(super) fn inferred_reset_kind(
             proc::Sensitivity::Edges(events)
                 if events.len() > 1
                     && events::dual_edge_clock(
+                        module,
                         event_controls.iter().map(|control| &control.event),
                     )
                     .is_none() =>
@@ -701,9 +703,14 @@ pub(super) fn normalized_enable(
     value: word::ValueId,
     source: &word::SourceSpan,
 ) -> Result<word::Enable, crate::SynthError> {
-    if let Some((signal, active_high)) = events::normalize_boolean_value(module, value, true) {
+    if let Some((reference, active_high)) = events::normalize_boolean_value(module, value, true) {
         let value = module
-            .read_signal(signal, source.clone())
+            .read_signal_slice(
+                reference.signal,
+                reference.lsb,
+                reference.width(),
+                source.clone(),
+            )
             .map_err(crate::SynthError::from)?;
         Ok(word::Enable { value, active_high })
     } else {

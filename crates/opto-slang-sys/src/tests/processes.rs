@@ -775,19 +775,70 @@ fn native_compile_lowers_clock_enable_control_flow() {
 }
 
 #[test]
-fn native_compile_lowers_single_event_iff_to_clock_enable_control_flow() {
+fn native_compile_preserves_single_event_iff_on_its_event_identity() {
     let source = NativeTestSource::new(
         "module top(input logic clk, en, d, output logic q); always_ff @(posedge clk iff en) q <= d; endmodule\n",
     );
     let compilation = compile_source(&source);
     let module = first_module(&compilation);
     let procedure = module.procedures().next().unwrap();
-    let (condition, then_edge, else_edge) = first_branch(procedure);
+    let events = procedure.events().collect::<Vec<_>>();
 
-    assert!(is_signal(condition, "en"));
-    assert_eq!(procedure.events().len(), 1);
-    assert_eq!(procedure.block(then_edge.block).unwrap().effects().len(), 1);
-    assert_eq!(procedure.block(else_edge.block).unwrap().effects().len(), 0);
+    assert_eq!(events.len(), 1);
+    assert!(is_signal(events[0].qualifier().unwrap().unwrap(), "en"));
+    assert_eq!(
+        procedure
+            .blocks()
+            .map(|block| block.effects().len())
+            .sum::<usize>(),
+        1
+    );
+}
+
+#[test]
+fn native_compile_preserves_static_and_dynamic_selected_clock_expressions() {
+    let source = NativeTestSource::new(
+        "module top(input logic [3:0] clocks, input logic [1:0] index, d, output logic q_static, q_dynamic); always_ff @(posedge clocks[2]) q_static <= d; always_ff @(negedge clocks[index]) q_dynamic <= d; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let procedures = module.procedures().collect::<Vec<_>>();
+    let static_event = procedures[0].events().next().unwrap();
+    let dynamic_event = procedures[1].events().next().unwrap();
+
+    assert!(matches!(
+        static_event.expression().unwrap().kind().unwrap(),
+        SlangExpressionKind::Signal(signal)
+            if signal.name == "clocks"
+                && signal.range.is_some_and(|range| range.msb == 2 && range.lsb == 2)
+    ));
+    assert!(matches!(
+        dynamic_event.expression().unwrap().kind().unwrap(),
+        SlangExpressionKind::DynamicExtract { value, offset, width }
+            if width == 1
+                && is_signal(value, "clocks")
+                && matches!(
+                    offset.kind().unwrap(),
+                    SlangExpressionKind::Cast { value, .. } if is_signal(value, "index")
+                )
+    ));
+}
+
+#[test]
+fn native_compile_does_not_fold_a_different_bit_as_a_selected_clock_self_qualifier() {
+    let source = NativeTestSource::new(
+        "module top(input logic [3:0] clocks, d, output logic q); always_ff @(posedge clocks[2] iff clocks[1]) q <= d; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let event = module.procedures().next().unwrap().events().next().unwrap();
+
+    assert!(matches!(
+        event.qualifier().unwrap().unwrap().kind().unwrap(),
+        SlangExpressionKind::Signal(signal)
+            if signal.name == "clocks"
+                && signal.range.is_some_and(|range| range.msb == 1 && range.lsb == 1)
+    ));
 }
 
 #[test]
@@ -798,8 +849,11 @@ fn native_compile_lowers_clock_iff_with_unqualified_async_reset() {
     let compilation = compile_source(&source);
     let module = first_module(&compilation);
     let procedure = module.procedures().next().unwrap();
+    let events = procedure.events().collect::<Vec<_>>();
 
-    assert_eq!(procedure.events().len(), 2);
+    assert_eq!(events.len(), 2);
+    assert!(is_signal(events[0].qualifier().unwrap().unwrap(), "en"));
+    assert!(events[1].qualifier().unwrap().is_none());
     let _ = first_branch(procedure);
 }
 
@@ -816,6 +870,8 @@ fn native_compile_canonicalizes_constant_event_iff_qualifiers() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].signal().unwrap().name, "clk");
     assert_eq!(events[1].signal().unwrap().name, "rst_n");
+    assert!(is_signal(events[0].qualifier().unwrap().unwrap(), "en"));
+    assert!(events[1].qualifier().unwrap().is_none());
     let _ = first_branch(procedure);
 }
 
@@ -832,6 +888,8 @@ fn native_compile_canonicalizes_post_edge_event_iff_qualifiers() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].signal().unwrap().name, "clk");
     assert_eq!(events[1].signal().unwrap().name, "rst_n");
+    assert!(is_signal(events[0].qualifier().unwrap().unwrap(), "en"));
+    assert!(events[1].qualifier().unwrap().is_none());
     let _ = first_branch(procedure);
 }
 
@@ -855,21 +913,24 @@ fn native_compile_rejects_an_event_list_eliminated_by_constant_iff() {
 }
 
 #[test]
-fn native_compile_rejects_multiple_event_specific_iff_qualifiers() {
+fn native_compile_preserves_multiple_event_specific_iff_qualifiers() {
     let source = NativeTestSource::new(
         "module top(input logic clk_a, clk_b, en_a, en_b, d, output logic q); always_ff @(posedge clk_a iff en_a or negedge clk_b iff en_b) q <= d; endmodule\n",
     );
-    let error = compile(
-        std::slice::from_ref(&source.path),
-        &SlangCompileOptions::default(),
-    )
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("multiple iff-qualified events require event-identity lowering"),
-        "{error}"
-    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let events = module
+        .procedures()
+        .next()
+        .unwrap()
+        .events()
+        .collect::<Vec<_>>();
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].signal().unwrap().name, "clk_a");
+    assert!(is_signal(events[0].qualifier().unwrap().unwrap(), "en_a"));
+    assert_eq!(events[1].signal().unwrap().name, "clk_b");
+    assert!(is_signal(events[1].qualifier().unwrap().unwrap(), "en_b"));
 }
 
 #[test]
@@ -880,9 +941,17 @@ fn native_compile_lowers_independently_qualified_dual_edges() {
     let compilation = compile_source(&source);
     let module = first_module(&compilation);
     let procedure = module.procedures().next().unwrap();
+    let events = procedure.events().collect::<Vec<_>>();
 
-    assert_eq!(procedure.events().len(), 2);
-    let _ = first_branch(procedure);
+    assert_eq!(events.len(), 2);
+    assert!(is_signal(
+        events[0].qualifier().unwrap().unwrap(),
+        "pos_enable"
+    ));
+    assert!(is_signal(
+        events[1].qualifier().unwrap().unwrap(),
+        "neg_enable"
+    ));
 }
 
 #[test]

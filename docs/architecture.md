@@ -446,23 +446,28 @@ Hierarchical, cross-process, and cross-activation task disable are diagnosed
 explicitly instead of being approximated. State
 propagation is per target: an effect that changes another signal cannot
 manufacture a mux or guard for the target being lowered. Sensitivity events
-remain typed controls instead of being
-rediscovered from an arbitrary Boolean expression.
+remain typed controls instead of being rediscovered from an arbitrary Boolean
+expression. Each persistent event row has its own `EventId`, scalar Word
+`ValueId`, edge, and optional scalar `iff` value. Consequently a static bit
+selection remains a one-bit `SignalRef`, a runtime bit selection remains a
+`DynamicExtract`, and an event-local qualifier cannot be confused with a
+qualifier on another sensitivity-list member.
 
-A scalar `iff` qualifier on a single positive- or negative-edge event becomes
-an entry guard on the acyclic procedure CFG. With one qualified clock and
-unqualified events, the active levels of the unqualified events bypass that
-guard; reset-template validation must then prove that those events are exact
-asynchronous controls. Normalization therefore sees the same typed clock,
-reset, and conditional hold as explicit control flow and can infer an ordinary
-register enable. Compile-time true qualifiers canonicalize to unqualified
-events and compile-time false events are removed before CFG construction. The
-guaranteed post-edge signal level similarly proves direct or inverted
-self-qualifiers true or false; an empty resulting event list is rejected.
-Multiple independently runtime-qualified events retain event-identity
-semantics and are not merged into one shared guard, except that opposite edges
-of the same scalar signal are distinguished exactly by the post-edge clock
-level and may carry independent qualifiers.
+A scalar `iff` qualifier on a positive- or negative-edge clock becomes a
+conditional hold after event/reset classification and therefore an ordinary
+register or memory-write enable. With one qualified clock and unqualified
+events, the active levels of the unqualified events bypass that enable;
+reset-template validation must prove that those events are exact asynchronous
+controls. Compile-time true qualifiers canonicalize to unqualified events and
+compile-time false events are removed before CFG construction. The guaranteed
+post-edge signal level similarly proves direct or inverted self-qualifiers true
+or false; an empty resulting event list is rejected. Duplicate members for the
+same value and edge combine their independent qualifiers with OR, while an
+unqualified duplicate dominates. Opposite edges of the same value retain
+independent qualifiers and use the post-edge clock level in the exact dual-edge
+phase-bank template. Unrelated clocks are never combined into a synthetic
+clock; a multi-clock state pattern without an exact sequential implementation
+contract is rejected after preserving its event identities for diagnosis.
 
 Subroutine `ref` arguments are also eliminated before Proc publication. An
 inlined formal is a scoped binding to the actual canonical writable place, so

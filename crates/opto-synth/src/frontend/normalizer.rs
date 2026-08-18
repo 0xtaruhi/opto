@@ -79,33 +79,26 @@ impl<'a> ProcedureNormalizer<'a> {
         let mut predicates = PredicateArena::new();
         let mut event_controls = Vec::new();
         if procedure.kind == proc::ProcedureKind::FlipFlop {
-            for (_, event) in procedures.sensitivity_events(procedure_id).ok_or_else(|| {
-                crate::SynthError::invariant("edge-sensitive procedure lost its sensitivity events")
-            })? {
-                let mut role = Vec::with_capacity(33);
-                let signal = module.signal(event.signal).ok_or_else(|| {
-                    crate::SynthError::invariant("sensitivity signal disappeared")
-                })?;
-                let identity = signal.source.identity().ok_or_else(|| {
+            for (event_id, event) in
+                procedures.sensitivity_events(procedure_id).ok_or_else(|| {
                     crate::SynthError::invariant(
-                        "sensitivity signal declaration has no stable source identity",
+                        "edge-sensitive procedure lost its sensitivity events",
                     )
+                })?
+            {
+                let predicate = predicates.value(module, event.value)?;
+                let qualified = event.iff.map_or(Ok(Predicate::Always), |qualifier| {
+                    predicates.value(module, qualifier)
                 })?;
-                role.extend_from_slice(&identity.bytes());
-                role.push(u8::from(event.edge == word::Edge::Neg));
-                let source = derived_source(&procedure.source, "sensitivity read", &role)?;
-                let value = module
-                    .read_signal(event.signal, source)
-                    .map_err(crate::SynthError::from)?;
-                let predicate = predicates.value(module, value)?;
                 event_controls.push(EventControl {
+                    id: event_id,
                     event: *event,
-                    value,
                     asserted: if event.edge == word::Edge::Pos {
                         predicate
                     } else {
                         PredicateArena::not(predicate)
                     },
+                    qualified,
                 });
             }
         }

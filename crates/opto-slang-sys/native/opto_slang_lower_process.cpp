@@ -2977,6 +2977,7 @@ OptoSlangEventData lower_flop_event(ModuleLoweringContext& design, const TimingC
     return OptoSlangEventData{
         edge,
         lower_signal_expr(design, event.expr),
+        nullptr,
         source_span(design, event.expr),
     };
 }
@@ -3030,9 +3031,7 @@ std::optional<bool> event_level_qualifier_value(
             expression = &expression->as<ConversionExpression>().operand();
         }
     }
-    const auto* event_value = expression_root_value(*event_operand);
-    const auto* qualifier_value = expression_root_value(*expression);
-    if (!event_value || event_value != qualifier_value) {
+    if (!event_operand->isEquivalentTo(*expression)) {
         return std::nullopt;
     }
     const bool post_edge_level = event.edge == OPTO_SLANG_EDGE_POS;
@@ -3166,90 +3165,24 @@ OptoSlangProcedureData lower_procedure(
                 "edge-triggered procedural block has no reachable event after constant iff qualification");
         }
     }
-    const auto source = source_span(design, *statement);
-    const auto qualified_event_count = static_cast<size_t>(std::ranges::count_if(
-        event_qualifiers, [](const Expression* qualifier) { return qualifier != nullptr; }));
-    const auto same_event_signal = [](const OptoSlangExpr* left, const OptoSlangExpr* right) {
-        return left && right && left->kind == OPTO_SLANG_EXPR_SIGNAL &&
-               right->kind == OPTO_SLANG_EXPR_SIGNAL && left->signal_name && right->signal_name &&
-               *left->signal_name == *right->signal_name &&
-               left->signal_has_range == right->signal_has_range &&
-               (!left->signal_has_range ||
-                (left->signal_msb == right->signal_msb && left->signal_lsb == right->signal_lsb));
-    };
-    const bool qualified_dual_edge =
-        events.size() == 2 && qualified_event_count == 2 &&
-        events[0].edge != events[1].edge &&
-        same_event_signal(events[0].signal, events[1].signal);
-    if (events.size() > 1 && qualified_event_count > 1 && !qualified_dual_edge) {
-        throw std::runtime_error(
-            "multiple iff-qualified events require event-identity lowering");
-    }
-
-    auto lowered = lower_statement(builder, design, *statement, kind);
-    if (qualified_event_count != 0 && !lowered.empty()) {
+    for (size_t index = 0; index < events.size(); ++index) {
+        const auto* qualifier = event_qualifiers[index];
+        if (!qualifier) {
+            continue;
+        }
         CfgFragment prelude;
-        const OptoSlangExpr* condition = nullptr;
-        const Expression* condition_source = nullptr;
         {
             ScopedValue expression_prelude(design.active_expression_prelude, &prelude);
             ScopedValue active_builder(design.active_procedure_builder, &builder);
-            for (size_t index = 0; index < events.size(); ++index) {
-                const OptoSlangExpr* term = nullptr;
-                if (event_qualifiers[index]) {
-                    condition_source = event_qualifiers[index];
-                    term = lower_boolean_context(design, *event_qualifiers[index]);
-                    if (qualified_dual_edge) {
-                        const OptoSlangExpr* active_level = events[index].signal;
-                        if (events[index].edge == OPTO_SLANG_EDGE_NEG) {
-                            active_level = make_unary_expr(
-                                design,
-                                OPTO_SLANG_UNARY_LOGICAL_NOT,
-                                active_level,
-                                *event_expressions[index]);
-                        }
-                        term = make_binary_expr(
-                            design,
-                            OPTO_SLANG_BINARY_LOGICAL_AND,
-                            active_level,
-                            term,
-                            *event_qualifiers[index]);
-                    }
-                } else if (events.size() > 1) {
-                    condition_source = event_expressions[index];
-                    term = events[index].signal;
-                    if (events[index].edge == OPTO_SLANG_EDGE_NEG) {
-                        term = make_unary_expr(
-                            design,
-                            OPTO_SLANG_UNARY_LOGICAL_NOT,
-                            term,
-                            *event_expressions[index]);
-                    }
-                }
-                if (!term) {
-                    continue;
-                }
-                condition = condition
-                                ? make_binary_expr(
-                                      design,
-                                      OPTO_SLANG_BINARY_LOGICAL_OR,
-                                      condition,
-                                      term,
-                                      *condition_source)
-                                : term;
-            }
+            events[index].qualifier = lower_boolean_context(design, *qualifier);
         }
-        if (!condition || !condition_source) {
-            throw std::runtime_error("iff event qualifier lowering lost its guard expression");
+        if (!prelude.empty()) {
+            throw std::runtime_error(
+                "side-effecting event iff qualifier is not supported for synthesis");
         }
-        lowered = builder.sequence(
-            std::move(prelude),
-            builder.guard(
-                condition,
-                std::move(lowered),
-                source_span(design, *condition_source)),
-            source_span(design, *condition_source));
     }
+    const auto source = source_span(design, *statement);
+    auto lowered = lower_statement(builder, design, *statement, kind);
     return builder.finish(std::move(lowered), kind, std::move(events), source);
 }
 void collect_function_locals(const Scope& scope, std::vector<const VariableSymbol*>& locals) {

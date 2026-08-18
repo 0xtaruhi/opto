@@ -342,7 +342,12 @@ OptoSlangStatus opto_slang_event_view(
         return OPTO_SLANG_ERROR;
     }
     const auto* event = &procedure->events[event_index];
-    *view = OptoSlangEventView{event->edge, event->signal, event->source};
+    *view = OptoSlangEventView{
+        event->edge,
+        event->expression,
+        event->qualifier,
+        event->source,
+    };
     return OPTO_SLANG_OK;
 }
 

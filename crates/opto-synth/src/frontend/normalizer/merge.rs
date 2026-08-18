@@ -58,7 +58,7 @@ impl ProcedureNormalizer<'_> {
             scheduled: self.merge_frames(
                 &inputs,
                 |state| state.scheduled,
-                inferred_reset_kind(self.procedure, &self.event_controls),
+                inferred_reset_kind(self.module, self.procedure, &self.event_controls),
                 MergeSite::Block(block),
             )?,
         })
@@ -95,7 +95,7 @@ impl ProcedureNormalizer<'_> {
             scheduled: self.merge_frames(
                 &inputs,
                 |state| state.scheduled,
-                inferred_reset_kind(self.procedure, &self.event_controls),
+                inferred_reset_kind(self.module, self.procedure, &self.event_controls),
                 MergeSite::Exit,
             )?,
         })
@@ -605,7 +605,7 @@ impl ProcedureNormalizer<'_> {
                 materialize_synthesis_constant(self.module, reset_value, &self.procedure.source)?;
             resets.push(word::Reset {
                 kind: word::ResetKind::Async,
-                value: event.value,
+                value: event.event.value,
                 active_high: event.event.edge == word::Edge::Pos,
                 reset_value,
             });
@@ -650,13 +650,29 @@ impl ProcedureNormalizer<'_> {
     pub(in crate::frontend) fn held_events(
         &mut self,
         coverage: Predicate,
-    ) -> Result<smallvec::SmallVec<[proc::SensitivityEvent; 2]>, crate::SynthError> {
+    ) -> Result<smallvec::SmallVec<[proc::EventId; 2]>, crate::SynthError> {
         let controls = self.event_controls.clone();
         let mut held = smallvec::SmallVec::new();
         for control in controls {
-            let mut asserted = self.predicates.restriction(control.asserted, true)?;
-            if self.restrict_coverage(coverage, &mut asserted)? == Predicate::Never {
-                held.push(control.event);
+            if control.qualified == Predicate::Never {
+                continue;
+            }
+            let mut restricted = coverage;
+            for assumption in [control.asserted, control.qualified] {
+                match assumption {
+                    Predicate::Never => {
+                        restricted = Predicate::Never;
+                        break;
+                    }
+                    Predicate::Always => {}
+                    Predicate::Value { .. } => {
+                        let mut restriction = self.predicates.restriction(assumption, true)?;
+                        restricted = self.predicates.restrict(restricted, &mut restriction)?;
+                    }
+                }
+            }
+            if restricted == Predicate::Never {
+                held.push(control.id);
             }
         }
         Ok(held)

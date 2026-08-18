@@ -165,7 +165,8 @@ struct OptoSlangBlockData {
 
 struct OptoSlangEventData {
     OptoSlangEdge edge = OPTO_SLANG_EDGE_POS;
-    const OptoSlangExpr* signal = nullptr;
+    const OptoSlangExpr* expression = nullptr;
+    const OptoSlangExpr* qualifier = nullptr;
     OptoSlangSourceSpanView source{};
 };
 

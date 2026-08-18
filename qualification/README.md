@@ -10,7 +10,7 @@ all pass.
 | Tier | Corpus | Current scale | Gate |
 | --- | --- | ---: | --- |
 | Unit | Rust tests beside each domain | domain-local cases and invariants | every pull request |
-| Static integration | focused RTL, Tcl shell behavior, SDC, hierarchy, memory and sequential cases | 60 cases | every pull request |
+| Static integration | focused RTL, Tcl shell behavior, SDC, hierarchy, memory and sequential cases | 61 cases | every pull request |
 | Generated semantics | operator × width × signedness × context | 238 synthesis points on pull requests; the same points are CEC-proved nightly | pull request and nightly |
 | Generated differential | deterministic RTL generator | 512 fixed-seed, CEC-proved designs as a regression sentinel | nightly |
 | Mapping-fixture determinism | presubmit mapping cases without Yosys | 5 zero-tolerance local-mechanism baselines | every Linux pull request |
@@ -84,6 +84,7 @@ Every static case declares its unique dimension in the checked `covers` field:
 | `sequential-async-set-clear` | preset-over-clear priority composed with enable | sequential mapped synthesis; CEC nightly |
 | `sequential-dff-enable` | vector inferred clock-enable register | sequential mapped synthesis; CEC nightly |
 | `sequential-event-iff-enable` | runtime clock `iff` qualification composes with canonicalized post-edge-true reset and constant-false discarded events | sequential mapped synthesis against explicit reset and enable control; CEC nightly |
+| `sequential-selected-clock-events` | static and runtime bit-selected clocks plus independently qualified duplicate dynamic events | sequential mapped synthesis against explicit selected clocks and enables; CEC nightly |
 | `sequential-fsm-equivalent-states` | equivalent-state merge from reviewed zero initial state | sequential mapped synthesis; CEC nightly |
 | `sequential-fsm-sparse-timing` | sparse FSM under an explicit timing clock | timing-aware synthesis; CEC nightly |
 | `tcl-collections` | collection length/filtering plus redirect and reports | script-owned exact assertions |

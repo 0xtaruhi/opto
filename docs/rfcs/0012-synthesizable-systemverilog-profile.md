@@ -4,7 +4,7 @@
 # RFC 0012: Versioned synthesizable SystemVerilog profile
 
 - Status: proposed
-- Implementation: transient cyclic Proc lowering for every procedural loop form, side-effecting procedural expressions, canonical writable ranges, reviewed operators, exact subroutine and hierarchical reference aliases, combinational, level-sensitive, and single-update-input edge-sensitive UDP tables, target-backed tri-state/inout mapping, and exact independent-clock or mutually-exclusive same-clock memory-macro binding implemented; profile inventory and remaining capability work pending
+- Implementation: transient cyclic Proc lowering for every procedural loop form, side-effecting procedural expressions, canonical writable ranges, scalar selected-clock expressions with event-local `iff` identity, reviewed operators, exact subroutine and hierarchical reference aliases, combinational, level-sensitive, and single-update-input edge-sensitive UDP tables, target-backed tri-state/inout mapping, and exact independent-clock or mutually-exclusive same-clock memory-macro binding implemented; profile inventory and remaining capability work pending
 - Author: Opto project
 - Date: 2026-08-17
 
@@ -428,12 +428,16 @@ idempotent reset actions. Compile-time true qualifiers are removed before this
 analysis, while compile-time false events are discarded. The same
 canonicalization uses the guaranteed post-edge signal level, so `posedge s iff
 s` and `negedge s iff !s` become unqualified and their opposite-polarity forms
-are discarded; eliminating every event is an explicit error. An event list
-with multiple independently runtime-qualified members requires event identity
-at the normalization boundary and remains a separate gap rather than being
-approximated by one common guard. The exact exception is the two opposite
-edges of one scalar clock: its post-edge level selects the matching qualifier
-and feeds the existing dual-edge phase-bank template.
+are discarded; eliminating every event is an explicit error. Every event-list
+member retains a typed event identity, scalar expression, edge, and optional
+runtime qualifier through the Proc normalization boundary. Static and runtime
+bit-selected clocks therefore reach the sequential operation as their exact
+Word value. Duplicate events for the same value and edge OR their qualifiers,
+and the two opposite edges of one scalar value use its post-edge level to
+select the matching qualifier in the dual-edge phase-bank template. Independent
+unrelated clocks remain distinct; they are not approximated by a common guard
+or synthetic clock and require an exact sequential implementation contract to
+be accepted.
 
 ## Determinism, scalability, and QoR impact
 

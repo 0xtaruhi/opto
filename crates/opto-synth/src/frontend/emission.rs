@@ -125,9 +125,10 @@ impl ProcedureNormalizer<'_> {
             .ok_or_else(|| {
                 crate::SynthError::invariant("flip-flop procedure has no sensitivity-event row")
             })?
-            .map(|(_, event)| *event)
+            .map(|(event_id, event)| (event_id, *event))
             .collect::<Vec<_>>();
-        if !self.writes.is_empty() && events.len() != 1 {
+        let coalesced_clock = self.coalesce_same_edge_clock(&events)?;
+        if !self.writes.is_empty() && events.len() != 1 && coalesced_clock.is_none() {
             let memory = self.module.memory(self.writes[0].memory).ok_or_else(|| {
                 crate::SynthError::invariant("procedural memory write references a missing memory")
             })?;
@@ -136,25 +137,32 @@ impl ProcedureNormalizer<'_> {
                 self.module.name_str(memory.name)
             )));
         }
-        if let Some(clock) = events::dual_edge_clock(&events) {
+        if let Some(clock) =
+            events::dual_edge_clock(self.module, events.iter().map(|(_, event)| event))
+        {
+            if let Some(qualifier) = self.dual_edge_qualifier(&events, clock)? {
+                for assignment in &mut assignments {
+                    self.qualify_assignment(assignment, qualifier)?;
+                }
+            }
             return self.emit_dual_edge_flops(assignments, clock);
         }
-        let clock = if assignments.is_empty() {
-            *events
+        let clock = if let Some(clock) = coalesced_clock {
+            clock
+        } else if assignments.is_empty() {
+            events
                 .first()
+                .map(|(_, event)| *event)
                 .ok_or_else(|| crate::SynthError::invariant("always_ff has no sensitivity event"))?
         } else {
-            events::resolve_flop_events(
-                self.module,
-                &events,
-                &mut assignments,
-                &self.procedure.source,
-            )?
+            events::resolve_flop_events(self.module, &events, &mut assignments)?.1
         };
-        let clock_value = self
-            .module
-            .read_signal(clock.signal, self.procedure.source.clone())
-            .map_err(crate::SynthError::from)?;
+        if let Some(qualifier) = clock.iff {
+            for assignment in &mut assignments {
+                self.qualify_assignment(assignment, qualifier)?;
+            }
+        }
+        let clock_value = clock.value;
         for assignment in assignments {
             let name = whole_target_name(self.module, &assignment.target);
             let q = self
@@ -189,10 +197,11 @@ impl ProcedureNormalizer<'_> {
             crate::SynthError::capacity("memory write priority space is exhausted")
         })?;
         for write in std::mem::take(&mut self.writes) {
-            if write.guard == MaterializedPredicate::Never {
+            let guard = self.qualify_materialized(write.guard, clock.iff, &write.source)?;
+            if guard == MaterializedPredicate::Never {
                 continue;
             }
-            let enable = predicate_enable(self.module, write.guard, &write.source)?;
+            let enable = predicate_enable(self.module, guard, &write.source)?;
             self.module
                 .add_memory_write_port(word::MemoryWritePort {
                     memory: write.memory,
@@ -215,15 +224,50 @@ impl ProcedureNormalizer<'_> {
         Ok(())
     }
 
+    fn coalesce_same_edge_clock(
+        &mut self,
+        events: &[(proc::EventId, proc::SensitivityEvent)],
+    ) -> Result<Option<proc::SensitivityEvent>, crate::SynthError> {
+        let Some((_, first)) = events.first().copied() else {
+            return Ok(None);
+        };
+        if events.len() == 1
+            || events.iter().skip(1).any(|(_, event)| {
+                event.edge != first.edge
+                    || !events::same_value(self.module, event.value, first.value)
+            })
+        {
+            return Ok(None);
+        }
+        let mut qualifiers = events.iter().map(|(_, event)| event.iff);
+        let Some(mut qualifier) = qualifiers.next().flatten() else {
+            return Ok(Some(proc::SensitivityEvent { iff: None, ..first }));
+        };
+        for next in qualifiers {
+            let Some(next) = next else {
+                return Ok(Some(proc::SensitivityEvent { iff: None, ..first }));
+            };
+            qualifier = self
+                .module
+                .binary(
+                    word::BinaryOp::LogicalOr,
+                    qualifier,
+                    next,
+                    self.procedure.source.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+        }
+        Ok(Some(proc::SensitivityEvent {
+            iff: Some(qualifier),
+            ..first
+        }))
+    }
+
     fn emit_dual_edge_flops(
         &mut self,
         assignments: Vec<Assignment>,
-        clock: word::SignalId,
+        clock_value: word::ValueId,
     ) -> Result<(), crate::SynthError> {
-        let clock_value = self
-            .module
-            .read_signal(clock, self.procedure.source.clone())
-            .map_err(crate::SynthError::from)?;
         for assignment in assignments {
             if assignment
                 .resets
@@ -333,6 +377,109 @@ impl ProcedureNormalizer<'_> {
                 .map_err(crate::SynthError::from)?;
         }
         Ok(())
+    }
+
+    fn qualify_assignment(
+        &mut self,
+        assignment: &mut Assignment,
+        qualifier: word::ValueId,
+    ) -> Result<(), crate::SynthError> {
+        assignment.coverage = match assignment.coverage {
+            super::Coverage::Never => super::Coverage::Never,
+            super::Coverage::Always => super::Coverage::When(qualifier),
+            super::Coverage::When(value) => super::Coverage::When(
+                self.module
+                    .binary(
+                        word::BinaryOp::LogicalAnd,
+                        value,
+                        qualifier,
+                        assignment.source.clone(),
+                    )
+                    .map_err(crate::SynthError::from)?,
+            ),
+        };
+        for reset in &mut assignment.resets {
+            if reset.kind != word::ResetKind::Sync {
+                continue;
+            }
+            let asserted = if reset.active_high {
+                reset.value
+            } else {
+                self.module
+                    .unary(
+                        word::UnaryOp::LogicalNot,
+                        reset.value,
+                        assignment.source.clone(),
+                    )
+                    .map_err(crate::SynthError::from)?
+            };
+            reset.value = self
+                .module
+                .binary(
+                    word::BinaryOp::LogicalAnd,
+                    asserted,
+                    qualifier,
+                    assignment.source.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+            reset.active_high = true;
+        }
+        Ok(())
+    }
+
+    fn qualify_materialized(
+        &mut self,
+        predicate: MaterializedPredicate,
+        qualifier: Option<word::ValueId>,
+        source: &word::SourceSpan,
+    ) -> Result<MaterializedPredicate, crate::SynthError> {
+        let Some(qualifier) = qualifier else {
+            return Ok(predicate);
+        };
+        Ok(match predicate {
+            MaterializedPredicate::Never => MaterializedPredicate::Never,
+            MaterializedPredicate::Always => MaterializedPredicate::Value(qualifier),
+            MaterializedPredicate::Value(value) => MaterializedPredicate::Value(
+                self.module
+                    .binary(word::BinaryOp::LogicalAnd, value, qualifier, source.clone())
+                    .map_err(crate::SynthError::from)?,
+            ),
+        })
+    }
+
+    fn dual_edge_qualifier(
+        &mut self,
+        events: &[(proc::EventId, proc::SensitivityEvent)],
+        clock: word::ValueId,
+    ) -> Result<Option<word::ValueId>, crate::SynthError> {
+        if events.iter().all(|(_, event)| event.iff.is_none()) {
+            return Ok(None);
+        }
+        let source = self.procedure.source.clone();
+        let inverted_clock = self
+            .module
+            .unary(word::UnaryOp::LogicalNot, clock, source.clone())
+            .map_err(crate::SynthError::from)?;
+        let mut terms = Vec::with_capacity(events.len());
+        for (_, event) in events {
+            let phase = if event.edge == word::Edge::Pos {
+                clock
+            } else {
+                inverted_clock
+            };
+            terms.push(if let Some(qualifier) = event.iff {
+                self.module
+                    .binary(word::BinaryOp::LogicalAnd, phase, qualifier, source.clone())
+                    .map_err(crate::SynthError::from)?
+            } else {
+                phase
+            });
+        }
+        let qualifier = self
+            .module
+            .binary(word::BinaryOp::LogicalOr, terms[0], terms[1], source)
+            .map_err(crate::SynthError::from)?;
+        Ok(Some(qualifier))
     }
 
     fn add_dual_edge_bank_signal(
