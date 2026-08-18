@@ -148,6 +148,12 @@ jobs:
         if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: cargo check --workspace --all-targets --all-features --locked
 
+      - name: Build API documentation
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked --document-private-items
+
       - name: Run Clippy
         if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
