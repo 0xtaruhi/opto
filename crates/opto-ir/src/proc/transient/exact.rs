@@ -119,6 +119,29 @@ impl ExactValue {
         Some(value)
     }
 
+    pub(super) fn unsigned_u128(&self) -> Option<u128> {
+        if self.width > u128::BITS as usize {
+            return None;
+        }
+        let mut value = 0u128;
+        for (index, bit) in self.bits().enumerate() {
+            if bit {
+                value |= 1u128.checked_shl(u32::try_from(index).ok()?)?;
+            }
+        }
+        Some(value)
+    }
+
+    pub(super) fn signed_i128(&self) -> Option<i128> {
+        let width = u32::try_from(self.width).ok()?;
+        if width == 0 || width > i128::BITS {
+            return None;
+        }
+        let unsigned = self.unsigned_u128()?;
+        let shift = i128::BITS - width;
+        Some((unsigned << shift).cast_signed() >> shift)
+    }
+
     pub(super) fn assign_slice(
         &mut self,
         offset: usize,
@@ -267,7 +290,7 @@ impl ExactValue {
 pub(super) struct ExactState(Arc<[Option<ExactValue>]>);
 
 impl ExactState {
-    fn get(&self, index: usize) -> Option<&Option<ExactValue>> {
+    pub(super) fn get(&self, index: usize) -> Option<&Option<ExactValue>> {
         self.0.get(index)
     }
 
@@ -515,6 +538,15 @@ impl<'a> ExactEvaluator<'a> {
             },
             _ => self.truth_from_facts(expression, state),
         }
+    }
+
+    pub(super) fn expression_bounds(
+        &self,
+        expression: ProcExprId,
+        state: &ExactState,
+    ) -> Option<ValueBounds> {
+        let ty = self.graph.expressions.get(expression.index())?.ty;
+        self.bounds(expression, state, ty.width() as usize, ty.is_signed())
     }
 
     fn truth_from_facts(&self, expression: ProcExprId, state: &ExactState) -> Option<bool> {
@@ -894,9 +926,9 @@ impl<'a> ExactEvaluator<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ValueBounds {
-    minimum: ExactValue,
-    maximum: ExactValue,
+pub(super) struct ValueBounds {
+    pub(super) minimum: ExactValue,
+    pub(super) maximum: ExactValue,
 }
 
 pub(super) fn unknown_state(local_count: usize) -> ExactState {

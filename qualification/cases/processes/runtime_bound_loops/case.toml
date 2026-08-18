@@ -4,7 +4,7 @@
 format = 1
 id = "processes-runtime-bound-loops"
 kind = "regression"
-covers = ["Finite signed and unsigned runtime values bound for, while, and do-while expansion through conservative ProcGraph range facts."]
+covers = ["Finite signed and unsigned runtime values bound for, while, and do-while expansion through conservative ProcGraph range facts, plus symbolic runtime-dependent monotone progress."]
 category = "processes"
 language = "sverilog"
 top = "top"
@@ -15,5 +15,5 @@ library = "../../../libraries/opto_test.lib"
 equivalence = true
 
 [assertions]
-min_ports = 7
+min_ports = 11
 min_cells = 1

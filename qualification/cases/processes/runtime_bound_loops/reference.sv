@@ -3,6 +3,7 @@
 
 module top(
   input  logic        data,
+  input  logic        step_two,
   input  logic [3:0]  limit,
   input  logic signed [3:0] signed_limit,
   output logic [15:0] while_mask,
@@ -10,7 +11,8 @@ module top(
   output logic [4:0]  while_count,
   output logic [4:0]  do_count,
   output logic [4:0]  for_count,
-  output logic [4:0]  signed_count
+  output logic [4:0]  signed_count,
+  output logic [7:0]  branch_count
 );
   logic [4:0] effective_do_count;
 
@@ -20,6 +22,7 @@ module top(
     do_count = effective_do_count;
     for_count = {1'b0, limit};
     signed_count = signed_limit > 0 ? {{1{1'b0}}, signed_limit} : 5'd0;
+    branch_count = step_two ? 8'd8 : 8'd7;
     while_mask = data ? ((16'h0001 << limit) - 1'b1) : 16'd0;
     do_mask = data ? ((16'h0001 << effective_do_count) - 1'b1) : 16'd0;
   end

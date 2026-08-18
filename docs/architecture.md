@@ -336,16 +336,23 @@ signals. The existing procedure normalizer then versions those values jointly
 with module signals, so a local capture cannot move across an intervening
 blocking assignment. The process-local signals are mandatory transient state
 and are removed before normalized Word IR leaves the synthesis frontend.
-Exact-state enumeration is implemented as the first abstract domain;
-module-level runtime values fork control
-conservatively, repeated reachable local states reject the proof, and all work
-uses deterministic limits. The source-profile limit is expanded transient
-block count; state and transfer-step guards are implementation protection and
-their exhaustion is an analysis capability gap rather than a language-profile
-boundary. Before state traversal, the analyzer
-removes the declared latch-to-header edge and requires the remaining natural
-region to be acyclic; identical states reaching a CFG join are therefore
-merged without being confused with an undeclared internal cycle.
+The proof portfolio first applies monotone induction to relational pre-test and
+post-test loops. It tracks an induction local as an affine delta, follows
+blocking temporary assignments across CFG blocks, intersects facts at joins,
+and merges the minimum and maximum delta from every reachable backedge path.
+A certificate is issued only when every path makes progress in the comparison
+direction, the bound is loop invariant, entry and bound extrema are known, and
+the complete fixed-width update range cannot wrap. The resulting arithmetic
+header-visit bound is checked directly against the expanded-block profile
+limit, without enumerating each induction value. Exact-state enumeration is the
+conservative fallback for transition relations outside that domain;
+module-level runtime values fork control conservatively, repeated reachable
+local states reject that proof, and all work uses deterministic limits. State
+and transfer-step guards are implementation protection and their exhaustion is
+an analysis capability gap rather than a language-profile boundary. Before
+either traversal, the analyzer removes the declared latch-to-header edge and
+requires the remaining natural region to be acyclic; CFG joins can therefore
+be merged without being confused with an undeclared internal cycle.
 
 Persistent signal-backed variables enter the transient graph without an AST-
 side induction-variable classification. Before proof, Rust intersects blocking
@@ -403,21 +410,26 @@ Rust HDL boundary imports the resulting graph without interpreting loop
 syntax, proves and eliminates innermost regions before their parents, and then
 requires an acyclic graph before local substitution.
 
-Exact enumeration models SystemVerilog widths, signedness, truncation, casts,
+Monotone induction models fixed-width signed and unsigned comparison semantics,
+path-dependent positive or negative affine steps, loop-invariant runtime-bound
+extrema, and pre-test versus post-test condition placement. It refuses a proof
+when an update path can stall, reverse direction, or wrap. Exact enumeration
+models the remaining SystemVerilog widths, signedness, truncation, casts,
 blocking local updates, and branch forks. Known-bit extrema conservatively
 prove relational predicates that hold across the complete finite type domain,
 including termination at the maximum of a runtime signed or unsigned bound.
 Other runtime module values remain unknown unless Boolean short-circuit
-information decides a path. A finite proof may
-therefore depend on exact local induction state while allowing runtime inputs
-to cause an earlier exit. A state that reaches the header twice, a `continue`
-path with no progress, an undeclared internal cycle, or a runtime-only exit
-without a finite local bound fails explicitly. Runtime `repeat` uses both its
-captured count and the finite type-domain bound; negative signed counts enter
-no iteration. The source-profile boundary is at most 1,048,576 transient
-blocks after expansion, so the permitted header visits are derived from the
-actual natural-loop size. Analysis guards are reported separately as
-capability gaps. Neither category depends on host memory, time, or scheduling.
+information decides a path. A finite proof may therefore use an arithmetic
+induction invariant or exact local state while allowing runtime inputs to cause
+an earlier exit. A state that reaches the header twice in the fallback domain,
+a backedge path with no proven progress, an undeclared internal cycle, or a
+runtime-only exit without a finite local bound fails explicitly. Runtime
+`repeat` uses both its captured count and the finite type-domain bound; negative
+signed counts enter no iteration. The source-profile boundary is at most
+1,048,576 transient blocks after expansion, so the permitted header visits are
+derived from the actual natural-loop size. Analysis guards are reported
+separately as capability gaps. Neither category depends on host memory, time,
+or scheduling.
 
 `for` may omit initializer, condition, or step clauses. Initializers and steps
 remain ordered procedural effects, and `continue` reaches the step path.
