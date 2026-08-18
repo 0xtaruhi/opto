@@ -43,7 +43,7 @@ impl<'a> FullDomainRootSemantics<'a> {
         &self,
         value: word::ValueId,
     ) -> Result<bool, crate::SynthError> {
-        self.prove(value, &mut BTreeSet::new())
+        self.prove(value, &mut BTreeSet::new(), &mut BTreeMap::new())
     }
 
     /// Return the frozen publication obligation for one bit of a Word value.
@@ -261,7 +261,11 @@ impl<'a> FullDomainRootSemantics<'a> {
         &self,
         value: word::ValueId,
         active: &mut BTreeSet<word::ValueId>,
+        proven: &mut BTreeMap<word::ValueId, bool>,
     ) -> Result<bool, crate::SynthError> {
+        if let Some(&result) = proven.get(&value) {
+            return Ok(result);
+        }
         if !active.insert(value) {
             return Err(crate::SynthError::invariant(
                 "publication connectivity contains a cycle",
@@ -276,7 +280,7 @@ impl<'a> FullDomainRootSemantics<'a> {
                 Some(drivers) if !drivers.is_empty() => {
                     let mut required = false;
                     for driver in drivers {
-                        required |= self.prove(driver, active)?;
+                        required |= self.prove(driver, active, proven)?;
                     }
                     required
                 }
@@ -289,12 +293,12 @@ impl<'a> FullDomainRootSemantics<'a> {
                 match &operation.kind {
                     word::OpKind::Register(_) | word::OpKind::Latch(_) => false,
                     word::OpKind::Cast { value, .. } | word::OpKind::Extract { value, .. } => {
-                        self.prove(*value, active)?
+                        self.prove(*value, active, proven)?
                     }
                     word::OpKind::Concat { parts } => {
                         let mut required = false;
                         for &part in parts {
-                            required |= self.prove(part, active)?;
+                            required |= self.prove(part, active, proven)?;
                         }
                         required
                     }
@@ -308,6 +312,7 @@ impl<'a> FullDomainRootSemantics<'a> {
             }
         };
         active.remove(&value);
+        proven.insert(value, result);
         Ok(result)
     }
 }
@@ -668,6 +673,30 @@ mod tests {
         let undriven = module.read_signal(undriven, SourceSpan::default()).unwrap();
         let full_domain = FullDomainRootSemantics::new(&module).unwrap();
         assert!(full_domain.requires_artifact(undriven).unwrap());
+    }
+
+    #[test]
+    fn publication_artifact_proof_memoizes_reconvergent_aliases() {
+        let mut module = WordModule::new("reconvergent_aliases");
+        let input = module
+            .add_port(
+                "input",
+                PortDirection::Input,
+                WordType::bits(1).unwrap(),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let mut value = module
+            .read_signal(module.port(input).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        for _ in 0..28 {
+            value = module
+                .concat(vec![value, value], SourceSpan::default())
+                .unwrap();
+        }
+
+        let full_domain = FullDomainRootSemantics::new(&module).unwrap();
+        assert!(!full_domain.requires_artifact(value).unwrap());
     }
 
     #[test]
