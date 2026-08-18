@@ -1,6 +1,8 @@
 <!-- SPDX-FileCopyrightText: 2026 Zhengyi Zhang -->
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 
+<!-- Title: [synth|db|cli|docs|test|build|deps|misc] Summary -->
+
 ## Summary
 
 Describe the problem and the resulting behavior.
@@ -15,6 +17,7 @@ Describe the problem and the resulting behavior.
 - [ ] Synthesis changes include equivalence evidence.
 - [ ] QoR-affecting changes include representative results and baseline updates.
 - [ ] No proprietary inputs, reports, paths, or license configuration are included.
+- [ ] The pull-request title and every commit subject use an allowed change prefix.
 
 ## Interface and design
 

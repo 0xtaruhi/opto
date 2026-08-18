@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+name: Change title policy
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: change-title-policy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Change title policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Test and enforce change title policy
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PULL_REQUEST_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 tools/test_check_change_titles.py
+          python3 tools/check_change_titles.py \
+            --pull-request-title "$PULL_REQUEST_TITLE" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA"

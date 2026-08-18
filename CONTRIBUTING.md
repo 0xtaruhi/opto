@@ -25,6 +25,27 @@ cannot use the host's default Python. Opto's first-party native C++ bridge is
 built with compiler warnings enabled and treated as errors; do not weaken that
 gate to accept a change.
 
+## Change titles
+
+Every commit subject and pull-request title must use the form
+`[prefix] Summary`, with exactly one of these lowercase prefixes:
+
+- `[synth]`: HDL frontends, IR, synthesis, formal verification, mapping, timing,
+  or QoR;
+- `[db]`: design databases, persistence, session state, or runtime storage;
+- `[cli]`: the executable, Tcl commands, reports, or other user interfaces;
+- `[docs]`: documentation-only changes;
+- `[test]`: tests, qualification, benchmarks, or fixtures without a product
+  behavior change;
+- `[build]`: build logic, CI, developer tooling, packaging, or releases;
+- `[deps]`: dependency and pinned third-party updates;
+- `[misc]`: repository maintenance that fits none of the categories above.
+
+Choose the most specific prefix and use `[misc]` only as the fallback. Examples
+include `[synth] Lower bounded procedural loops` and
+`[docs] Explain memory inference limits`. Opto uses squash merges, so the
+validated pull-request title also becomes the subject published on `main`.
+
 ## Required checks
 
 Run these checks before submitting a pull request:

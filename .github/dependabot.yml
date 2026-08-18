@@ -7,6 +7,9 @@ multi-ecosystem-groups:
   dependency-updates:
     schedule:
       interval: weekly
+    commit-message:
+      # Trailing space prevents Dependabot from inserting a colon.
+      prefix: "[deps] "
 
 updates:
   - package-ecosystem: cargo
