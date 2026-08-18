@@ -1657,6 +1657,7 @@ void lower_body(
   for (auto *process : members.processes) {
     if (process->procedureKind == ProceduralBlockKind::Initial) {
       validate_initial_process(design, body, *process);
+      continue;
     }
     auto lowered = lower_procedure(design, body, *process);
     if (!lowered.blocks.empty()) {
