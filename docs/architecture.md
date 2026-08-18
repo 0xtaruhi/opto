@@ -70,7 +70,8 @@ orientation, stream direction, slice ordering, left-aligned conversion fill,
 and per-element out-of-range defaults. A dynamic simple range, dynamically
 sized operand or element, or aggregate without Opto's canonical flattened
 bitstream layout is outside the synthesis profile and fails with a structured,
-source-located diagnostic.
+source-located diagnostic. Lowering deterministically caps selected elements and
+flattened bitstream parts at 65,536 each.
 
 ## Non-Negotiable Rules
 

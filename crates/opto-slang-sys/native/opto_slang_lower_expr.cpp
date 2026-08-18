@@ -7,6 +7,7 @@ namespace opto::slang_lower {
 constexpr uint64_t RUNTIME_POWER_MULTIPLICATION_LIMIT = 1024;
 constexpr uint64_t ASSIGNMENT_PATTERN_ELEMENT_LIMIT = 65536;
 constexpr uint64_t STREAMING_SELECTION_ELEMENT_LIMIT = 65536;
+constexpr uint64_t STREAMING_BITSTREAM_PART_LIMIT = 65536;
 
 uint32_t dynamic_offset_sum_width(uint32_t left_width, uint32_t right_width) {
   const auto operand_width = std::max(left_width, right_width);
@@ -297,20 +298,39 @@ throw_streaming_capacity_failure(ModuleLoweringContext &design,
                         source.sourceRange.start(), std::move(message));
 }
 
-void validate_streaming_storage_type(ModuleLoweringContext &design,
-                                     const Type &source_type,
-                                     const Expression &source) {
+uint32_t streaming_storage_parts(ModuleLoweringContext &design,
+                                 const Type &source_type,
+                                 const Expression &source) {
   const auto &type = source_type.getCanonicalType();
   if (type.kind == SymbolKind::FixedSizeUnpackedArrayType) {
-    validate_streaming_storage_type(
-        design, type.as<FixedSizeUnpackedArrayType>().elementType, source);
-    return;
+    const auto &array = type.as<FixedSizeUnpackedArrayType>();
+    const auto element_parts =
+        streaming_storage_parts(design, array.elementType, source);
+    if (array.range.width() > STREAMING_BITSTREAM_PART_LIMIT / element_parts) {
+      throw_streaming_capacity_failure(
+          design, source,
+          "streaming bitstream exceeds the deterministic expansion limit of " +
+              std::to_string(STREAMING_BITSTREAM_PART_LIMIT) + " parts");
+    }
+    return static_cast<uint32_t>(array.range.width() * element_parts);
   }
   if (type.kind == SymbolKind::UnpackedStructType) {
+    uint64_t parts = 0;
     for (const auto *field : type.as<UnpackedStructType>().fields) {
-      validate_streaming_storage_type(design, field->getType(), source);
+      parts += streaming_storage_parts(design, field->getType(), source);
+      if (parts > STREAMING_BITSTREAM_PART_LIMIT) {
+        throw_streaming_capacity_failure(
+            design, source,
+            "streaming bitstream exceeds the deterministic expansion limit "
+            "of " +
+                std::to_string(STREAMING_BITSTREAM_PART_LIMIT) + " parts");
+      }
     }
-    return;
+    if (parts == 0) {
+      throw_streaming_profile_failure(
+          design, source, "streaming unpacked struct has no bitstream storage");
+    }
+    return static_cast<uint32_t>(parts);
   }
   if (!type.isIntegral()) {
     throw_streaming_profile_failure(design, source,
@@ -318,6 +338,7 @@ void validate_streaming_storage_type(ModuleLoweringContext &design,
                                         copy_string(toString(type.kind)) +
                                         "' is not supported for synthesis");
   }
+  return 1;
 }
 
 uint32_t streaming_selection_elements(
@@ -372,12 +393,19 @@ uint32_t streaming_selection_elements(
   return static_cast<uint32_t>(elements);
 }
 
-uint32_t
-streaming_synthesis_width(ModuleLoweringContext &design,
+struct StreamingSynthesisShape {
+  uint32_t width;
+  uint32_t parts;
+};
+
+StreamingSynthesisShape
+streaming_synthesis_shape(ModuleLoweringContext &design,
                           const StreamingConcatenationExpression &streaming) {
   uint64_t total_width = 0;
+  uint64_t total_parts = 0;
   for (const auto &stream : streaming.streams()) {
     uint64_t stream_width = 0;
+    uint64_t stream_parts = 0;
     if (stream.withExpr) {
       const auto *element_type = stream.operand->type->getArrayElementType();
       if (!element_type || !element_type->isFixedSize()) {
@@ -385,42 +413,75 @@ streaming_synthesis_width(ModuleLoweringContext &design,
                                         "streaming with-clause element type "
                                         "must have a static bitstream shape");
       }
-      validate_streaming_storage_type(design, *element_type, *stream.withExpr);
+      const auto element_parts =
+          streaming_storage_parts(design, *element_type, *stream.withExpr);
       const auto element_width = lowered_type_width(*element_type);
       const auto elements = streaming_selection_elements(design, stream);
-      if (element_width == 0 || element_width > UINT32_MAX ||
-          elements > UINT32_MAX / element_width) {
+      if (element_width == 0) {
+        throw_streaming_profile_failure(
+            design, *stream.withExpr,
+            "streaming selected element has no bitstream storage");
+      }
+      if (element_width > UINT32_MAX || elements > UINT32_MAX / element_width) {
         throw_streaming_capacity_failure(
             design, *stream.withExpr,
             "streaming with-clause result width exceeds 32-bit capacity");
       }
       stream_width = element_width * elements;
+      stream_parts = static_cast<uint64_t>(element_parts) * elements;
     } else if (stream.operand->kind == ExpressionKind::Streaming) {
-      stream_width = streaming_synthesis_width(
+      const auto nested = streaming_synthesis_shape(
           design, stream.operand->as<StreamingConcatenationExpression>());
+      stream_width = nested.width;
+      stream_parts = nested.parts;
     } else {
       if (!stream.operand->type->isFixedSize()) {
         throw_streaming_profile_failure(
             design, *stream.operand,
             "streaming operand requires a static bitstream shape");
       }
-      validate_streaming_storage_type(design, *stream.operand->type,
-                                      *stream.operand);
+      stream_parts = streaming_storage_parts(design, *stream.operand->type,
+                                             *stream.operand);
       stream_width = lowered_type_width(*stream.operand->type);
     }
-    if (stream_width == 0 || stream_width > UINT32_MAX - total_width) {
+    if (stream_width == 0) {
+      throw_streaming_profile_failure(
+          design, streaming, "streaming operand has no bitstream storage");
+    }
+    if (stream_width > UINT32_MAX - total_width) {
       throw_streaming_capacity_failure(
           design, streaming,
           "streaming concatenation result width exceeds 32-bit capacity");
     }
+    if (stream_parts > STREAMING_BITSTREAM_PART_LIMIT - total_parts) {
+      throw_streaming_capacity_failure(
+          design, streaming,
+          "streaming bitstream exceeds the deterministic expansion limit of " +
+              std::to_string(STREAMING_BITSTREAM_PART_LIMIT) + " parts");
+    }
     total_width += stream_width;
+    total_parts += stream_parts;
   }
   if (total_width == 0) {
     throw_streaming_profile_failure(
         design, streaming,
         "streaming concatenation has no fixed-width operands");
   }
-  return static_cast<uint32_t>(total_width);
+  const auto slice_size = streaming.getSliceSize();
+  if (slice_size > 0 && slice_size < total_width) {
+    const auto reordered_parts = (total_width + slice_size - 1) / slice_size;
+    if (reordered_parts > STREAMING_BITSTREAM_PART_LIMIT - total_parts) {
+      throw_streaming_capacity_failure(
+          design, streaming,
+          "streaming bitstream exceeds the deterministic expansion limit of " +
+              std::to_string(STREAMING_BITSTREAM_PART_LIMIT) + " parts");
+    }
+    total_parts += reordered_parts;
+  }
+  return {
+      static_cast<uint32_t>(total_width),
+      static_cast<uint32_t>(total_parts),
+  };
 }
 
 OptoSlangExpr *
@@ -1511,7 +1572,7 @@ OptoSlangExpr *lower_streaming_selection(
 OptoSlangExpr *lower_streaming_concatenation(
     ModuleLoweringContext &design,
     const StreamingConcatenationExpression &streaming) {
-  const auto total_width = streaming_synthesis_width(design, streaming);
+  const auto total_width = streaming_synthesis_shape(design, streaming).width;
   OptoSlangExpr normal;
   normal.kind = OPTO_SLANG_EXPR_CONCAT;
   OptoSlangExpr *single_operand = nullptr;
@@ -2036,8 +2097,10 @@ OptoSlangExpr *lower_expr(ModuleLoweringContext &design,
     const auto &operand = conversion.operand();
     const auto streaming_width =
         operand.kind == ExpressionKind::Streaming
-            ? std::optional<uint64_t>(streaming_synthesis_width(
-                  design, operand.as<StreamingConcatenationExpression>()))
+            ? std::optional<uint64_t>(
+                  streaming_synthesis_shape(
+                      design, operand.as<StreamingConcatenationExpression>())
+                      .width)
             : std::nullopt;
     if (!expr.type->isIntegral() ||
         (!streaming_width &&
@@ -2053,9 +2116,15 @@ OptoSlangExpr *lower_expr(ModuleLoweringContext &design,
     const auto target_width =
         checked_width(lowered_type_width(*expr.type), "conversion target");
     if (conversion.conversionKind == ConversionKind::StreamingConcat) {
-      if (!streaming_width || target_width < source_width) {
-        throw std::logic_error("streaming conversion target is narrower than "
-                               "its statically shaped source");
+      if (!streaming_width) {
+        throw_streaming_profile_failure(
+            design, expr, "streaming conversion requires a streaming operand");
+      }
+      if (target_width < source_width) {
+        throw_streaming_profile_failure(
+            design, expr,
+            "streaming conversion target is narrower than its statically "
+            "shaped source");
       }
       auto *value = lower_expr(design, operand);
       if (target_width > source_width) {

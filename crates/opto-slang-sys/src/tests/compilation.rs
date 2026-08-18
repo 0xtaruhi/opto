@@ -1286,13 +1286,38 @@ fn native_compile_fills_streaming_with_oob_elements_and_left_aligns_widening() {
 
 #[test]
 fn native_compile_lowers_runtime_streaming_with_bases_for_all_orientations() {
+    fn contains_signed_unit_constant(expression: SlangExpression<'_>, negative: bool) -> bool {
+        match expression.kind().unwrap() {
+            SlangExpressionKind::Constant(constant) if constant.signed => {
+                if negative {
+                    constant.bits.bytes().all(|bit| bit == b'1')
+                } else {
+                    !constant.bits.is_empty()
+                        && constant.bits.ends_with('1')
+                        && constant.bits[..constant.bits.len() - 1]
+                            .bytes()
+                            .all(|bit| bit == b'0')
+                }
+            }
+            SlangExpressionKind::Binary { left, right, .. } => {
+                contains_signed_unit_constant(left, negative)
+                    || contains_signed_unit_constant(right, negative)
+            }
+            SlangExpressionKind::Cast { value, .. } => {
+                contains_signed_unit_constant(value, negative)
+            }
+            _ => false,
+        }
+    }
+
     let source = NativeTestSource::new(
-        "module top(input logic signed [2:0] base, input logic [7:0] ascending [-1:2], input logic [7:0] descending [2:-1], output logic [15:0] asc_up, asc_down, desc_up, desc_down); assign asc_up = {>>{ascending with [base +: 2]}}; assign asc_down = {>>{ascending with [base -: 2]}}; assign desc_up = {>>{descending with [base +: 2]}}; assign desc_down = {>>{descending with [base -: 2]}}; endmodule\n",
+        "module top(input logic signed [4:0] base, input logic [7:0] ascending [10:13], input logic [7:0] descending [13:10], output logic [15:0] asc_up, asc_down, desc_up, desc_down); assign asc_up = {>>{ascending with [base +: 2]}}; assign asc_down = {>>{ascending with [base -: 2]}}; assign desc_up = {>>{descending with [base +: 2]}}; assign desc_down = {>>{descending with [base -: 2]}}; endmodule\n",
     );
     let compilation = compile_source(&source);
     let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
 
-    for assignment in module.assigns() {
+    for assignment in &assignments {
         let SlangExpressionKind::Cast {
             value, width: 16, ..
         } = assignment.rhs().unwrap().kind().unwrap()
@@ -1334,6 +1359,27 @@ fn native_compile_lowers_runtime_streaming_with_bases_for_all_orientations() {
             ));
         }
     }
+
+    for (assignment_index, part_index, negative) in
+        [(0, 1, false), (1, 0, true), (2, 0, false), (3, 1, true)]
+    {
+        let SlangExpressionKind::Cast { value, .. } =
+            assignments[assignment_index].rhs().unwrap().kind().unwrap()
+        else {
+            unreachable!();
+        };
+        let SlangExpressionKind::Concat(parts) = value.kind().unwrap() else {
+            unreachable!();
+        };
+        let part = parts.parts().nth(part_index).unwrap().unwrap();
+        let SlangExpressionKind::Mux { then_value, .. } = part.kind().unwrap() else {
+            unreachable!();
+        };
+        let SlangExpressionKind::DynamicExtract { offset, .. } = then_value.kind().unwrap() else {
+            unreachable!();
+        };
+        assert!(contains_signed_unit_constant(offset, negative));
+    }
 }
 
 #[test]
@@ -1368,6 +1414,32 @@ fn native_compile_reports_structured_streaming_with_profile_failures() {
         assert_eq!(location.path, source.path);
         assert_eq!(location.line, 1);
         assert!(location.column > 0);
+    }
+}
+
+#[test]
+fn native_compile_bounds_streaming_bitstream_expansion() {
+    for text in [
+        "module top(input bit values [0:65536], output bit [65536:0] y); assign y = {>>{values}}; endmodule\n",
+        "module top(input bit [65536:0] value, output bit [65536:0] y); assign y = {<<1{value}}; endmodule\n",
+    ] {
+        let source = NativeTestSource::new(text);
+        let error = compile(
+            std::slice::from_ref(&source.path),
+            &SlangCompileOptions::default(),
+        )
+        .expect_err("oversized streaming expansion should fail during lowering");
+        let SlangError::LoweringFailed(failure) = error else {
+            panic!("expected a structured lowering failure, got {error}");
+        };
+        assert_eq!(failure.category, SlangLoweringFailureCategory::Capacity);
+        assert!(
+            failure
+                .message
+                .contains("deterministic expansion limit of 65536 parts"),
+            "{failure:?}"
+        );
+        assert!(failure.location.is_some());
     }
 }
 
