@@ -502,6 +502,30 @@ synthesis, and no reference port survives in the linked root. A root `ref`
 port or a hierarchy-preservation directive around a reference-port instance is
 rejected because it has no enclosing variable binding at that boundary.
 
+Explicit modport ports are lowered from Slang's elaborated connection rather
+than reconstructed from source syntax. The flattened child port therefore
+retains the modport member's source identity, direction, width, signedness, and
+aggregate layout, while the parent connection retains the complete typed
+expression. Input expressions may be arbitrary synthesizable values. Output
+expressions must pass Slang's lvalue checks and lower through the ordinary
+structural lvalue path. An `inout` member must resolve to one contiguous net
+alias; linked elaboration substitutes that alias before cloning the child and
+merges its physical resolution policy into the parent net. Discontiguous
+bidirectional expressions are rejected instead of approximated as directed
+connections.
+
+Imported and exported modport functions and tasks use the same static
+subroutine-inlining contract as direct calls. Lowering follows the unique
+elaborated implementation, recursively discovers interface storage used by
+helper calls, and surfaces those dependencies as typed flattened input or
+exact-reference ports. Interface behavioral processes and scalar input/output
+constructor connections are materialized in the enclosing module so an
+exported callback executes at its declared interface site. Missing or
+ambiguous extern implementations, virtual or DPI dispatch, writes to captured
+nets, bidirectional constructor aliases, and other non-synthesizable method
+members produce structured profile failures; no dynamic callback object enters
+Proc or Word IR.
+
 Side-effecting procedural expressions lower through an expression prelude that
 is part of the enclosing acyclic Proc CFG. A blocking or compound assignment
 expression first snapshots any dynamic target address, evaluates and converts

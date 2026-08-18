@@ -1037,7 +1037,7 @@ void lower_body(
                         signal.direction = infer_interface_direction(body, *signal.value);
                     }
                     if (signal.direction == ArgumentDirection::Out &&
-                        !interface_value_is_driven(body, *signal.value)) {
+                        !interface_value_is_driven(body, *signal.reference)) {
                         continue;
                     }
                     auto name = flattened_interface_port_name(
@@ -1046,10 +1046,12 @@ void lower_body(
                         throw std::runtime_error(
                             "duplicate flattened interface port '" + name + "'");
                     }
-                    auto [found, inserted] = scoped_names.emplace(signal.value, name);
-                    if (!inserted && found->second != name) {
-                        throw std::runtime_error(
-                            "interface signal maps to conflicting flattened ports");
+                    if (signal.value) {
+                        auto [found, inserted] = scoped_names.emplace(signal.value, name);
+                        if (!inserted && found->second != name) {
+                            throw std::runtime_error(
+                                "interface signal maps to conflicting flattened ports");
+                        }
                     }
                     auto [reference, reference_inserted] =
                         scoped_names.emplace(signal.reference, name);
@@ -1057,13 +1059,13 @@ void lower_body(
                         throw std::runtime_error(
                             "interface reference maps to conflicting flattened ports");
                     }
-                    const auto& type = signal.value->getType();
+                    const auto& type = signal.reference->getType();
                     OptoSlangPortData lowered{
                         std::move(name),
                         lower_direction(signal.direction),
                         checked_width(lowered_type_width(type), signal.name),
                         type.isSigned(),
-                        signal.value->kind == SymbolKind::Net
+                        signal.value && signal.value->kind == SymbolKind::Net
                             ? net_resolution(signal.value->as<NetSymbol>())
                             : OPTO_SLANG_NET_SINGLE_DRIVER,
                         intern_type_layout(design, type),
@@ -1192,6 +1194,53 @@ void lower_body(
         design.value_shapes.emplace(net.name, ValueShape{net.width, net.is_signed});
     }
 
+    // Interface instances are flattened into their enclosing module, so their
+    // scalar constructor ports must become ordinary connections at the same
+    // boundary. Interface-typed constructor ports are represented by the
+    // nested interface storage collected above and need no value assignment.
+    for (auto* interface_instance : members.interface_instances) {
+        for (auto* connection : interface_instance->getPortConnections()) {
+            if (!connection || connection->port.kind != SymbolKind::Port) {
+                continue;
+            }
+            const auto& port = connection->port.as<PortSymbol>();
+            const auto* actual = connection->getExpression();
+            if (!actual || is_empty_connection_expression(*actual)) {
+                continue;
+            }
+            if (!port.internalSymbol || !ValueSymbol::isKind(port.internalSymbol->kind)) {
+                throw std::runtime_error(
+                    "interface port '" + copy_string(port.name) +
+                    "' has no synthesizable internal storage");
+            }
+            const auto& internal = port.internalSymbol->as<ValueSymbol>();
+            auto* internal_value =
+                make_signal_expr(design, registered_value_name(design, internal));
+            switch (port.direction) {
+            case ArgumentDirection::In:
+                module.assigns.push_back(
+                    OptoSlangAssignData{internal_value, lower_expr(design, *actual)});
+                break;
+            case ArgumentDirection::Out:
+                module.assigns.push_back(
+                    OptoSlangAssignData{
+                        lower_signal_expr(
+                            design, instance_connection_expression(*connection)),
+                        internal_value,
+                    });
+                break;
+            case ArgumentDirection::InOut:
+            case ArgumentDirection::Ref:
+                throw LoweringFailure(
+                    OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE,
+                    5,
+                    port.location,
+                    "interface constructor port '" + copy_string(port.name) +
+                        "' requires a bidirectional alias");
+            }
+        }
+    }
+
     for (auto* child : members.instances) {
         OptoSlangInstanceData instance;
         instance.name = module_relative_name(body, *child);
@@ -1222,15 +1271,18 @@ void lower_body(
                                 infer_interface_direction(child->body, *signal.value);
                         }
                         if (signal.direction == ArgumentDirection::Out &&
-                            !interface_value_is_driven(child->body, *signal.value)) {
+                            !interface_value_is_driven(child->body, *signal.reference)) {
                             continue;
                         }
                         instance.connections.push_back(
                             OptoSlangConnectionData{
                                 flattened_interface_port_name(
                                     port.name, element, leaves.size(), signal.name),
-                                make_signal_expr(
-                                    design, registered_value_name(design, *signal.value)),
+                                signal.connection
+                                    ? lower_expr(design, *signal.connection)
+                                    : make_signal_expr(
+                                          design,
+                                          registered_value_name(design, *signal.value)),
                             });
                     }
                 }

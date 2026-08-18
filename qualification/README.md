@@ -10,7 +10,7 @@ all pass.
 | Tier | Corpus | Current scale | Gate |
 | --- | --- | ---: | --- |
 | Unit | Rust tests beside each domain | domain-local cases and invariants | every pull request |
-| Static integration | focused RTL, Tcl shell behavior, SDC, hierarchy, memory and sequential cases | 61 cases | every pull request |
+| Static integration | focused RTL, Tcl shell behavior, SDC, hierarchy, memory and sequential cases | 62 cases | every pull request |
 | Generated semantics | operator × width × signedness × context | 238 synthesis points on pull requests; the same points are CEC-proved nightly | pull request and nightly |
 | Generated differential | deterministic RTL generator | 512 fixed-seed, CEC-proved designs as a regression sentinel | nightly |
 | Mapping-fixture determinism | presubmit mapping cases without Yosys | 5 zero-tolerance local-mechanism baselines | every Linux pull request |
@@ -19,7 +19,7 @@ all pass.
 | Real designs | pinned Ibex and CVA6 configurations | complete checked manifests | weekly |
 | QoR | representative kernels and blocks | area, timing, cell mix, runtime, memory and CEC | weekly |
 
-The 60 static cases are seeds, not a claim of broad coverage. Every fixed bug
+The 62 static cases are seeds, not a claim of broad coverage. Every fixed bug
 must add the smallest stable regression case that would have caught it. Broad
 semantic spaces belong in a generator; real integration behavior belongs in a
 pinned upstream design.
@@ -34,6 +34,7 @@ Every static case declares its unique dimension in the checked `covers` field:
 | `hierarchy-parameter-generate` | indexed part-selects through generated child hierarchy | mapped synthesis; CEC nightly |
 | `hierarchy-reference-ports` | module `ref` ports, including runtime-selected unpacked-array actuals, eliminated as exact aliases of parent variables | mapped synthesis against an explicitly flattened reference; CEC nightly |
 | `hierarchy-reference-modport` | `ref` modport members flattened as exact interface-variable aliases | mapped synthesis against an explicitly flattened reference; CEC nightly |
+| `hierarchy-modport-members` | typed explicit input/output/inout expressions plus statically inlined imported and exported modport methods | mapped synthesis against an explicitly flattened reference; CEC nightly |
 | `memories-dual-port-register-bank` | two clocked ports with explicit same-address write priority | sequential mapped synthesis; CEC nightly |
 | `memories-multi-clock-partitioned-bank` | disjoint memory words owned by independent write clocks | sequential mapped synthesis; CEC nightly |
 | `memories-multi-clock-macro` | overlapping dual-clock writes bind an exact two-write-port Liberty RAM | mapped synthesis; macro boundary is not flattened for CEC |

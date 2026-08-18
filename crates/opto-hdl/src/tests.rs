@@ -8,6 +8,142 @@ use opto_ir::proc::{
 use opto_ir::word::{BinaryOp, Edge, OpKind, SignalResolution, TypeSelector, ValueKind};
 
 #[test]
+fn verilog_frontend_elaborates_explicit_modport_expression_connections() {
+    let source = TestSource::new(
+        "explicit-modport-expression.sv",
+        "interface bus_if; logic hi; logic lo; modport source(input .pair({hi, lo})); modport sink(output .pair({hi, lo})); endinterface\nmodule reader(bus_if.source bus, output logic [1:0] y); assign y = bus.pair; endmodule\nmodule writer(bus_if.sink bus, input logic [1:0] d); assign bus.pair = d; endmodule\nmodule top(input logic [1:0] d, output logic [1:0] y); bus_if link(); writer u_writer(.bus(link), .d(d)); reader u_reader(.bus(link), .y(y)); endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions {
+            top: Some("top".to_string()),
+            ..FrontendOptions::default()
+        },
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let top = update
+        .modules
+        .iter()
+        .find(|module| module.word().name() == "top")
+        .unwrap();
+    let flat = opto_ir::rtl::elaborate_linked_root(top, update.modules.iter()).unwrap();
+    assert!(flat.word().instances().is_empty());
+    assert!(flat.word().signal_id("link.hi").is_some());
+    assert!(flat.word().signal_id("link.lo").is_some());
+}
+
+#[test]
+fn verilog_frontend_elaborates_explicit_modport_inout_alias() {
+    let source = TestSource::new(
+        "explicit-modport-inout.sv",
+        "interface pad_if; wire pad; modport device(inout .pin(pad)); endinterface\nmodule transceiver(pad_if.device bus, input logic d, output logic q); assign bus.pin = d; assign q = bus.pin; endmodule\nmodule top(input logic d, output logic q); pad_if link(); transceiver u_transceiver(.bus(link), .d(d), .q(q)); endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions {
+            top: Some("top".to_string()),
+            ..FrontendOptions::default()
+        },
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let top = update
+        .modules
+        .iter()
+        .find(|module| module.word().name() == "top")
+        .unwrap();
+    let flat = opto_ir::rtl::elaborate_linked_root(top, update.modules.iter()).unwrap();
+    let pad = flat.word().signal_id("link.pad").unwrap();
+    assert!(flat.word().instances().is_empty());
+    assert_eq!(
+        flat.word().signal(pad).unwrap().resolution,
+        SignalResolution::TriState
+    );
+}
+
+#[test]
+fn verilog_frontend_elaborates_nested_interface_modport_expression() {
+    let source = TestSource::new(
+        "nested-interface-modport-expression.sv",
+        "interface leaf_if; logic value; endinterface\ninterface outer_if(leaf_if nested); modport view(input .nested_value(nested.value)); endinterface\nmodule child(outer_if.view bus, output logic y); assign y = bus.nested_value; endmodule\nmodule top(input logic value, output logic y); leaf_if leaf(); outer_if outer(leaf); assign leaf.value = value; child u_child(.bus(outer), .y(y)); endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions {
+            top: Some("top".to_string()),
+            ..FrontendOptions::default()
+        },
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let top = update
+        .modules
+        .iter()
+        .find(|module| module.word().name() == "top")
+        .unwrap();
+    let flat = opto_ir::rtl::elaborate_linked_root(top, update.modules.iter()).unwrap();
+    assert!(flat.word().instances().is_empty());
+    assert!(flat.word().signal_id("leaf.value").is_some());
+}
+
+#[test]
+fn verilog_frontend_elaborates_modport_method_state_aliases() {
+    let source = TestSource::new(
+        "modport-method-state.sv",
+        "interface state_if; logic observed; logic updated; function automatic logic read_helper(); return observed; endfunction function automatic logic read_state(); return read_helper(); endfunction task automatic write_helper(input logic value); updated = value; endtask task automatic write_state(input logic value); write_helper(value); endtask modport user(import read_state, write_state); endinterface\nmodule child(state_if.user api, input logic d, output logic y); assign y = api.read_state(); always_comb api.write_state(d); endmodule\nmodule top(input logic d, input logic observed, output logic y, output logic updated); state_if api(); assign api.observed = observed; assign updated = api.updated; child u_child(.api(api), .d(d), .y(y)); endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions {
+            top: Some("top".to_string()),
+            ..FrontendOptions::default()
+        },
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let top = update
+        .modules
+        .iter()
+        .find(|module| module.word().name() == "top")
+        .unwrap();
+    let flat = opto_ir::rtl::elaborate_linked_root(top, update.modules.iter()).unwrap();
+    let updated = flat.word().signal_id("api.updated").unwrap();
+    assert!(flat.word().instances().is_empty());
+    assert!(flat.procedures().effects().iter().any(
+        |effect| matches!(effect.target, ProcTarget::Signal { signal, .. } if signal == updated)
+    ));
+}
+
+#[test]
+fn verilog_frontend_elaborates_unambiguous_exported_modport_function() {
+    let source = TestSource::new(
+        "exported-modport-function.sv",
+        "interface callback_if(input logic value); extern function logic transform(input logic source); logic result; always_comb result = transform(value); modport implementation(input value, output result, export transform); endinterface\nmodule provider(callback_if.implementation api); function logic api.transform(input logic source); return ~source; endfunction endmodule\nmodule top(input logic value, output logic result); callback_if api(value); provider u_provider(.api(api)); assign result = api.result; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions {
+            top: Some("top".to_string()),
+            ..FrontendOptions::default()
+        },
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let top = update
+        .modules
+        .iter()
+        .find(|module| module.word().name() == "top")
+        .unwrap();
+    let flat = opto_ir::rtl::elaborate_linked_root(top, update.modules.iter()).unwrap();
+    let interface_result = flat.word().signal_id("api.result").unwrap();
+    assert!(flat.word().instances().is_empty());
+    assert!(flat.procedures().effects().iter().any(
+        |effect| matches!(effect.target, ProcTarget::Signal { signal, .. } if signal == interface_result)
+    ));
+}
+
+#[test]
 fn verilog_frontend_eliminates_reference_ports_during_linked_elaboration() {
     let source = TestSource::new(
         "reference-port.sv",

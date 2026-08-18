@@ -147,6 +147,65 @@ fn reference_port_elaboration_reuses_the_exact_parent_signal() {
 }
 
 #[test]
+fn inout_port_elaboration_reuses_parent_net_and_resolution() {
+    let mut child = WordModule::new("child");
+    let pad = child
+        .add_port("pad", PortDirection::Inout, bits(1), SourceSpan::default())
+        .unwrap();
+    child
+        .set_signal_resolution(child.port(pad).unwrap().signal, SignalResolution::TriState)
+        .unwrap();
+    let data = child
+        .add_port("data", PortDirection::Input, bits(1), SourceSpan::default())
+        .unwrap();
+    let data = child
+        .read_signal(child.port(data).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    child
+        .connect(
+            LValue::signal(child.port(pad).unwrap().signal),
+            data,
+            SourceSpan::default(),
+        )
+        .unwrap();
+
+    let mut top = WordModule::new("top");
+    let data = top
+        .add_port("data", PortDirection::Input, bits(1), SourceSpan::default())
+        .unwrap();
+    let shared = top
+        .add_wire("shared", bits(1), SourceSpan::default())
+        .unwrap();
+    let data = top
+        .read_signal(top.port(data).unwrap().signal, SourceSpan::default())
+        .unwrap();
+    let shared_value = top.read_signal(shared, SourceSpan::default()).unwrap();
+    top.add_instance(
+        "u_child",
+        "child",
+        vec![
+            ("pad".to_string(), shared_value, SourceSpan::default()),
+            ("data".to_string(), data, SourceSpan::default()),
+        ],
+        SourceSpan::default(),
+    )
+    .unwrap();
+
+    let flat = elaborate_linked_root(&top, [&top, &child]).unwrap();
+    let shared = flat.signal_id("shared").unwrap();
+    assert!(flat.signal_id("u_child/pad").is_none());
+    assert_eq!(
+        flat.signal(shared).unwrap().resolution,
+        SignalResolution::TriState
+    );
+    assert!(
+        flat.connects()
+            .iter()
+            .any(|connect| connect.target == LValue::signal(shared))
+    );
+}
+
+#[test]
 fn reference_port_slice_composes_dynamic_child_offsets() {
     let mut child = WordModule::new("child");
     let value = child

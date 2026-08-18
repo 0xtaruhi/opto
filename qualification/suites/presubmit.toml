@@ -40,6 +40,7 @@ cases = [
   "qualification/cases/hierarchy/parameter_generate/case.toml",
   "qualification/cases/hierarchy/reference_ports/case.toml",
   "qualification/cases/hierarchy/reference_modport/case.toml",
+  "qualification/cases/hierarchy/modport_members/case.toml",
   "qualification/cases/sequential/dff_enable/case.toml",
   "qualification/cases/sequential/event_iff_enable/case.toml",
   "qualification/cases/sequential/selected_clock_events/case.toml",

@@ -3210,82 +3210,53 @@ const ValueSymbol* expression_root_value(const Expression& expression) {
     }
 }
 
-bool expression_assigns_value(
-    const Expression& expression, const ValueSymbol& value) {
-    if (expression.kind == ExpressionKind::Assignment) {
-        return expression_root_value(
-                   expression.as<AssignmentExpression>().left()) == &value;
-    }
-    if (expression.kind == ExpressionKind::UnaryOp) {
-        const auto& unary = expression.as<UnaryExpression>();
-        return (unary.op == UnaryOperator::Preincrement ||
-                unary.op == UnaryOperator::Postincrement ||
-                unary.op == UnaryOperator::Predecrement ||
-                unary.op == UnaryOperator::Postdecrement) &&
-               expression_root_value(unary.operand()) == &value;
-    }
-    return false;
-}
-
 bool statement_assigns_value(const Statement& statement, const ValueSymbol& value) {
-    switch (statement.kind) {
-    case StatementKind::Block:
-        return statement_assigns_value(statement.as<BlockStatement>().body, value);
-    case StatementKind::List:
-        return std::ranges::any_of(statement.as<StatementList>().list, [&](const Statement* child) {
-            return child && statement_assigns_value(*child, value);
-        });
-    case StatementKind::Conditional: {
-        const auto& conditional = statement.as<ConditionalStatement>();
-        return statement_assigns_value(conditional.ifTrue, value) ||
-               (conditional.ifFalse && statement_assigns_value(*conditional.ifFalse, value));
-    }
-    case StatementKind::Case: {
-        const auto& case_statement = statement.as<CaseStatement>();
-        return std::ranges::any_of(
-                   case_statement.items,
-                   [&](const auto& item) {
-                       return item.stmt && statement_assigns_value(*item.stmt, value);
-                   }) ||
-               (case_statement.defaultCase &&
-                statement_assigns_value(*case_statement.defaultCase, value));
-    }
-    case StatementKind::PatternCase: {
-        const auto& case_statement = statement.as<PatternCaseStatement>();
-        return std::ranges::any_of(
-                   case_statement.items,
-                   [&](const auto& item) {
-                       return statement_assigns_value(*item.stmt, value);
-                   }) ||
-               (case_statement.defaultCase &&
-                statement_assigns_value(*case_statement.defaultCase, value));
-    }
-    case StatementKind::ForLoop: {
-        const auto& loop = statement.as<ForLoopStatement>();
-        return std::ranges::any_of(loop.initializers, [&](const Expression* expression) {
-                   return expression && expression_assigns_value(*expression, value);
-               }) ||
-               std::ranges::any_of(loop.steps, [&](const Expression* expression) {
-                   return expression && expression_assigns_value(*expression, value);
-               }) ||
-               statement_assigns_value(loop.body, value);
-    }
-    case StatementKind::RepeatLoop:
-        return statement_assigns_value(statement.as<RepeatLoopStatement>().body, value);
-    case StatementKind::ForeachLoop:
-        return statement_assigns_value(statement.as<ForeachLoopStatement>().body, value);
-    case StatementKind::WhileLoop:
-        return statement_assigns_value(statement.as<WhileLoopStatement>().body, value);
-    case StatementKind::DoWhileLoop:
-        return statement_assigns_value(statement.as<DoWhileLoopStatement>().body, value);
-    case StatementKind::ForeverLoop:
-        return statement_assigns_value(statement.as<ForeverLoopStatement>().body, value);
-    case StatementKind::ExpressionStatement:
-        return expression_assigns_value(
-            statement.as<ExpressionStatement>().expr, value);
-    default:
-        return false;
-    }
+    struct WriteVisitor : ASTVisitor<WriteVisitor, VisitFlags::AllGood> {
+        explicit WriteVisitor(const ValueSymbol& value) : value(value) {}
+
+        void handle(const AssignmentExpression& expression) {
+            found = found || expression_root_value(expression.left()) == &value;
+            if (!found) {
+                visitDefault(expression);
+            }
+        }
+
+        void handle(const UnaryExpression& expression) {
+            found = found ||
+                    ((expression.op == UnaryOperator::Preincrement ||
+                      expression.op == UnaryOperator::Postincrement ||
+                      expression.op == UnaryOperator::Predecrement ||
+                      expression.op == UnaryOperator::Postdecrement) &&
+                     expression_root_value(expression.operand()) == &value);
+            if (!found) {
+                visitDefault(expression);
+            }
+        }
+
+        void handle(const CallExpression& expression) {
+            if (const auto* selected =
+                    std::get_if<const SubroutineSymbol*>(&expression.subroutine);
+                selected && *selected) {
+                const auto arguments = (*selected)->getArguments();
+                const auto actuals = expression.arguments();
+                for (size_t index = 0;
+                     index < std::min(arguments.size(), actuals.size()); ++index) {
+                    if (arguments[index] && actuals[index] &&
+                        arguments[index]->direction != ArgumentDirection::In &&
+                        expression_root_value(call_output_lvalue(*actuals[index])) == &value) {
+                        found = true;
+                        return;
+                    }
+                }
+            }
+            visitDefault(expression);
+        }
+
+        const ValueSymbol& value;
+        bool found = false;
+    } visitor(value);
+    statement.visit(visitor);
+    return visitor.found;
 }
 
 bool module_has_value_name(const OptoSlangModulePayload& module, std::string_view name) {
@@ -3353,7 +3324,8 @@ OptoSlangExpr* lower_function_call(ModuleLoweringContext& design, const CallExpr
         throw std::runtime_error(
             "unsupported non-system call '" + copy_string(call.getSubroutineName()) + "'");
     }
-    const auto& function = **selected;
+    const auto& function =
+        resolve_synthesizable_subroutine(**selected, call.sourceRange.start());
     if (function.subroutineKind != SubroutineKind::Function || function.isVirtual() ||
         function.flags.has(MethodFlags::DPIImport | MethodFlags::BuiltIn)) {
         throw std::runtime_error(
@@ -3609,7 +3581,8 @@ CfgFragment lower_subroutine_call_statement(
             "unsupported non-system call statement '" + copy_string(call.getSubroutineName()) +
             "'");
     }
-    const auto& function = **selected;
+    const auto& function =
+        resolve_synthesizable_subroutine(**selected, call.sourceRange.start());
     const bool synthesizable_kind = function.subroutineKind == SubroutineKind::Task ||
                                     (function.subroutineKind == SubroutineKind::Function &&
                                      function.getReturnType().isVoid());

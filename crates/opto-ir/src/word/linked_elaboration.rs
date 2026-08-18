@@ -6,8 +6,8 @@ use super::{
     DefinitionKind, DynamicRange, Enable, InstId, Instance, LValue, LatchOp, MemoryClock, MemoryId,
     MemoryReadPort, MemoryReadPortId, MemoryReadTiming, MemoryWriteMask, MemoryWritePort,
     MemoryWritePortId, OpId, OpKind, Operation, PortDirection, RegisterOp, Reset, SignalId,
-    SignalKind, SignalRef, SourceSpan, SynthesisDirectiveKind, Value, ValueId, ValueKind,
-    WordError, WordModule, WordType,
+    SignalKind, SignalRef, SignalResolution, SourceSpan, SynthesisDirectiveKind, Value, ValueId,
+    ValueKind, WordError, WordModule, WordType,
 };
 use crate::{BitVal, ConstBits, NameId};
 use std::collections::BTreeMap;
@@ -867,11 +867,15 @@ impl<'a, F> HierarchyInliner<'a, F> {
             .binary(super::BinaryOp::Add, left, right, source.clone())
     }
 
-    fn reference_binding(&mut self, value: ValueId) -> Result<SignalBinding, WordError> {
+    fn port_alias_binding(
+        &mut self,
+        value: ValueId,
+        port_kind: &str,
+    ) -> Result<SignalBinding, WordError> {
         let stored = self
             .target
             .value(value)
-            .ok_or_else(|| WordError::new("reference-port actual value disappeared"))?
+            .ok_or_else(|| WordError::new(format!("{port_kind}-port actual value disappeared")))?
             .clone();
         let mut binding = match stored.kind {
             ValueKind::Signal(reference) => SignalBinding {
@@ -884,7 +888,9 @@ impl<'a, F> HierarchyInliner<'a, F> {
                 let operation = self
                     .target
                     .operation(operation)
-                    .ok_or_else(|| WordError::new("reference-port actual operation disappeared"))?
+                    .ok_or_else(|| {
+                        WordError::new(format!("{port_kind}-port actual operation disappeared"))
+                    })?
                     .clone();
                 match operation.kind {
                     OpKind::Extract {
@@ -892,22 +898,22 @@ impl<'a, F> HierarchyInliner<'a, F> {
                         lsb,
                         width,
                     } => {
-                        let mut binding = self.reference_binding(base)?;
+                        let mut binding = self.port_alias_binding(base, port_kind)?;
                         binding.offset = match binding.offset {
                             SignalBindingOffset::Static(base) => SignalBindingOffset::Static(
                                 base.checked_add(lsb).ok_or_else(|| {
-                                    WordError::new(
-                                        "reference-port actual range exceeds 32-bit capacity",
-                                    )
+                                    WordError::new(format!(
+                                        "{port_kind}-port actual range exceeds 32-bit capacity"
+                                    ))
                                 })?,
                             ),
                             SignalBindingOffset::Dynamic { offset, base } => {
                                 SignalBindingOffset::Dynamic {
                                     offset,
                                     base: base.checked_add(lsb).ok_or_else(|| {
-                                        WordError::new(
-                                            "reference-port actual range exceeds 32-bit capacity",
-                                        )
+                                        WordError::new(format!(
+                                            "{port_kind}-port actual range exceeds 32-bit capacity"
+                                        ))
                                     })?,
                                 }
                             }
@@ -920,7 +926,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
                         offset,
                         width,
                     } => {
-                        let mut binding = self.reference_binding(base)?;
+                        let mut binding = self.port_alias_binding(base, port_kind)?;
                         binding.offset = match binding.offset {
                             SignalBindingOffset::Static(base) => {
                                 SignalBindingOffset::Dynamic { offset, base }
@@ -941,20 +947,22 @@ impl<'a, F> HierarchyInliner<'a, F> {
                         binding
                     }
                     _ => {
-                        return Err(WordError::new(
-                            "reference-port actual must be a variable or unpacked aggregate member",
-                        ));
+                        return Err(WordError::new(format!(
+                            "{port_kind}-port actual must be a variable or unpacked aggregate member"
+                        )));
                     }
                 }
             }
             ValueKind::Constant(_) => {
-                return Err(WordError::new("reference-port actual cannot be a constant"));
+                return Err(WordError::new(format!(
+                    "{port_kind}-port actual cannot be a constant"
+                )));
             }
         };
         if stored.ty.width() != binding.width {
-            return Err(WordError::new(
-                "reference-port actual type width is inconsistent with its alias range",
-            ));
+            return Err(WordError::new(format!(
+                "{port_kind}-port actual type width is inconsistent with its alias range"
+            )));
         }
         binding.actual = Some(value);
         Ok(binding)
@@ -1064,20 +1072,25 @@ impl<'a, F> HierarchyInliner<'a, F> {
             return Ok(());
         };
 
-        let mut reference_bindings = BTreeMap::new();
+        let mut alias_bindings = BTreeMap::new();
         for child_port in child
             .ports()
             .iter()
-            .filter(|port| port.direction == PortDirection::Ref)
+            .filter(|port| matches!(port.direction, PortDirection::Inout | PortDirection::Ref))
         {
             let port_name = child.name_str(child_port.name);
+            let port_kind = if child_port.direction == PortDirection::Ref {
+                "reference"
+            } else {
+                "inout"
+            };
             let connection = instance
                 .connections
                 .iter()
                 .find(|connection| parent.name_str(connection.port) == port_name)
                 .ok_or_else(|| {
                     WordError::new(format!(
-                        "reference port '{reference}.{port_name}' is not connected on instance '{instance_name}'"
+                        "{port_kind} port '{reference}.{port_name}' is not connected on instance '{instance_name}'"
                     ))
                 })?;
             let value = parent_remap.value(connection.value)?;
@@ -1088,13 +1101,38 @@ impl<'a, F> HierarchyInliner<'a, F> {
                 .ty;
             if actual_ty != child_port.ty {
                 return Err(WordError::new(format!(
-                    "reference port '{reference}.{port_name}' type does not match its actual"
+                    "{port_kind} port '{reference}.{port_name}' type does not match its actual"
                 ))
                 .into());
             }
-            reference_bindings.insert(child_port.signal, self.reference_binding(value)?);
+            let binding = self.port_alias_binding(value, port_kind)?;
+            if child_port.direction == PortDirection::Inout {
+                let child_resolution = child
+                    .signal(child_port.signal)
+                    .ok_or_else(|| WordError::new("inout port signal disappeared"))?
+                    .resolution;
+                let actual_resolution = self
+                    .target
+                    .signal(binding.signal)
+                    .ok_or_else(|| WordError::new("inout actual signal disappeared"))?
+                    .resolution;
+                let resolution = match (actual_resolution, child_resolution) {
+                    (left, right) if left == right => left,
+                    (SignalResolution::SingleDriver, right) => right,
+                    (left, SignalResolution::SingleDriver) => left,
+                    _ => {
+                        return Err(WordError::new(format!(
+                            "inout port '{reference}.{port_name}' has incompatible net resolution"
+                        ))
+                        .into());
+                    }
+                };
+                self.target
+                    .set_signal_resolution(binding.signal, resolution)?;
+            }
+            alias_bindings.insert(child_port.signal, binding);
         }
-        let child_remap = self.copy_module(child, &instance_name, false, &reference_bindings)?;
+        let child_remap = self.copy_module(child, &instance_name, false, &alias_bindings)?;
         let connected_ports = instance
             .connections
             .iter()
@@ -1142,13 +1180,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
                     child_signal,
                     &connection.source,
                 )?,
-                PortDirection::Inout => {
-                    return Err(WordError::new(format!(
-                        "linked elaboration does not support inout port '{reference}.{port_name}'"
-                    ))
-                    .into());
-                }
-                PortDirection::Ref => {}
+                PortDirection::Inout | PortDirection::Ref => {}
             }
         }
         Ok(())

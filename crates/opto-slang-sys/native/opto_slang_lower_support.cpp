@@ -462,6 +462,9 @@ std::string unsupported_member_message(const InstanceBodySymbol& body, const Sym
 }
 
 
+void collect_interface_behavior(
+    const InstanceBodySymbol& body, const Scope& scope, ModuleMembers& members);
+
 void collect_instance_leaf(
     const InstanceBodySymbol& body, const Symbol& symbol, ModuleMembers& members) {
     switch (symbol.kind) {
@@ -469,6 +472,7 @@ void collect_instance_leaf(
         const auto& instance = symbol.as<InstanceSymbol>();
         if (instance.isInterface()) {
             members.interface_instances.push_back(&instance);
+            collect_interface_behavior(body, instance.body, members);
         } else {
             members.instances.push_back(&instance);
         }
@@ -486,6 +490,44 @@ void collect_instance_leaf(
         break;
     default:
         throw std::runtime_error(unsupported_member_message(body, symbol));
+    }
+}
+
+void collect_interface_behavior(
+    const InstanceBodySymbol& body, const Scope& scope, ModuleMembers& members) {
+    for (const auto& symbol : scope.members()) {
+        switch (symbol.kind) {
+        case SymbolKind::StatementBlock:
+            collect_interface_behavior(body, symbol.as<StatementBlockSymbol>(), members);
+            break;
+        case SymbolKind::GenerateBlock: {
+            const auto& block = symbol.as<GenerateBlockSymbol>();
+            if (!block.isUninstantiated) {
+                collect_interface_behavior(body, block, members);
+            }
+            break;
+        }
+        case SymbolKind::GenerateBlockArray:
+            for (auto* block : symbol.as<GenerateBlockArraySymbol>().entries) {
+                if (block && !block->isUninstantiated) {
+                    collect_interface_behavior(body, *block, members);
+                }
+            }
+            break;
+        case SymbolKind::Instance:
+        case SymbolKind::InstanceArray:
+        case SymbolKind::PrimitiveInstance:
+            collect_instance_leaf(body, symbol, members);
+            break;
+        case SymbolKind::ContinuousAssign:
+            members.assigns.push_back(&symbol.as<ContinuousAssignSymbol>());
+            break;
+        case SymbolKind::ProceduralBlock:
+            members.processes.push_back(&symbol.as<ProceduralBlockSymbol>());
+            break;
+        default:
+            break;
+        }
     }
 }
 
@@ -606,9 +648,10 @@ interface_signals(const InstanceSymbol& instance, std::string_view modport_name)
             if (symbol.kind == SymbolKind::Net || symbol.kind == SymbolKind::Variable) {
                 signals.push_back(
                     InterfaceSignal{
-                        symbol.name,
+                        copy_string(symbol.name),
                         &symbol.as<ValueSymbol>(),
                         &symbol.as<ValueSymbol>(),
+                        nullptr,
                         ArgumentDirection::InOut,
                     });
             }
@@ -622,26 +665,250 @@ interface_signals(const InstanceSymbol& instance, std::string_view modport_name)
             "interface instance '" + copy_string(instance.name) + "' has no modport '" +
             copy_string(modport_name) + "'");
     }
+    const auto storage_belongs_to_instance = [&](const ValueSymbol& value) {
+        auto* scope = value.getParentScope();
+        while (scope) {
+            const auto& parent = scope->asSymbol();
+            if (&parent == &instance.body) {
+                return true;
+            }
+            if (parent.kind == SymbolKind::Subroutine) {
+                return false;
+            }
+            scope = parent.getParentScope();
+        }
+        return false;
+    };
+    struct MethodCapture {
+        const ValueSymbol* value;
+        const Expression* expression;
+        bool written;
+    };
+    const auto append_method_captures = [&](const MethodPrototypeSymbol& method,
+                                            const SubroutineSymbol& implementation) {
+        struct CaptureVisitor : ASTVisitor<CaptureVisitor, VisitFlags::AllGood> {
+            explicit CaptureVisitor(const decltype(storage_belongs_to_instance)& belongs)
+                : belongs(belongs) {}
+
+            void capture(
+                const ValueSymbol& value, const Expression& expression, bool written = false) {
+                if (!belongs(value)) {
+                    if ((value.kind == SymbolKind::Net || value.kind == SymbolKind::Variable) &&
+                        !is_subroutine_local(value)) {
+                        external_storage.push_back(&value);
+                    }
+                    return;
+                }
+                auto existing = std::ranges::find(captures, &value, &MethodCapture::value);
+                if (existing == captures.end()) {
+                    captures.push_back(MethodCapture{&value, &expression, written});
+                } else {
+                    existing->written = existing->written || written;
+                }
+            }
+
+            void handle(const NamedValueExpression& expression) {
+                capture(expression.symbol, expression);
+            }
+
+            void handle(const HierarchicalValueExpression& expression) {
+                capture(expression.symbol, expression);
+            }
+
+            void handle(const CallExpression& expression) {
+                if (const auto* selected =
+                        std::get_if<const SubroutineSymbol*>(&expression.subroutine);
+                    selected && *selected) {
+                    const auto& called = resolve_synthesizable_subroutine(
+                        **selected, expression.sourceRange.start());
+                    calls.push_back(&called);
+                    const auto arguments = called.getArguments();
+                    const auto actuals = expression.arguments();
+                    for (size_t index = 0;
+                         index < std::min(arguments.size(), actuals.size()); ++index) {
+                        const auto* argument = arguments[index];
+                        const auto* actual = actuals[index];
+                        if (!argument || !actual || argument->direction == ArgumentDirection::In) {
+                            continue;
+                        }
+                        const auto& lvalue = call_output_lvalue(*actual);
+                        if (const auto* value = expression_root_value(lvalue)) {
+                            capture(*value, lvalue, true);
+                        }
+                    }
+                }
+                visitDefault(expression);
+            }
+
+            static bool is_subroutine_local(const ValueSymbol& value) {
+                auto* scope = value.getParentScope();
+                while (scope) {
+                    const auto& parent = scope->asSymbol();
+                    if (parent.kind == SymbolKind::Subroutine) {
+                        return true;
+                    }
+                    scope = parent.getParentScope();
+                }
+                return false;
+            }
+
+            const decltype(storage_belongs_to_instance)& belongs;
+            std::vector<MethodCapture> captures;
+            std::vector<const SubroutineSymbol*> calls;
+            std::vector<const ValueSymbol*> external_storage;
+        };
+        std::vector<MethodCapture> captures;
+        std::vector<const SubroutineSymbol*> active;
+        const auto collect = [&](const auto& self, const SubroutineSymbol& subroutine) -> void {
+            if (std::ranges::find(active, &subroutine) != active.end()) {
+                return;
+            }
+            active.push_back(&subroutine);
+            CaptureVisitor visitor(storage_belongs_to_instance);
+            subroutine.getBody().visit(visitor);
+            if (!visitor.external_storage.empty()) {
+                const auto* value = visitor.external_storage.front();
+                throw LoweringFailure(
+                    OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE,
+                    6,
+                    method.location,
+                    "modport method '" + copy_string(method.name) +
+                        "' captures storage outside its interface: '" +
+                        copy_string(value->name) + "'");
+            }
+            for (auto capture : visitor.captures) {
+                capture.written = capture.written ||
+                                  statement_assigns_value(subroutine.getBody(), *capture.value);
+                auto existing =
+                    std::ranges::find(captures, capture.value, &MethodCapture::value);
+                if (existing == captures.end()) {
+                    captures.push_back(capture);
+                } else {
+                    existing->written = existing->written || capture.written;
+                }
+            }
+            for (const auto* called : visitor.calls) {
+                self(self, *called);
+            }
+            active.pop_back();
+        };
+        collect(collect, implementation);
+        for (const auto& capture : captures) {
+            const auto* value = capture.value;
+            auto direction = capture.written ? ArgumentDirection::Ref : ArgumentDirection::In;
+            if (direction == ArgumentDirection::Ref && value->kind == SymbolKind::Net) {
+                throw LoweringFailure(
+                    OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE,
+                    3,
+                    method.location,
+                    "modport method '" + copy_string(method.name) +
+                        "' writes captured net '" + copy_string(value->name) + "'");
+            }
+            auto existing = std::ranges::find_if(signals, [&](const InterfaceSignal& signal) {
+                return signal.value == value;
+            });
+            if (existing != signals.end()) {
+                if (direction == ArgumentDirection::Ref) {
+                    existing->direction = ArgumentDirection::Ref;
+                }
+                continue;
+            }
+            auto name = "__opto_method_" + copy_string(method.name) + "." +
+                        module_relative_name(instance.body, *value);
+            signals.push_back(
+                InterfaceSignal{
+                    std::move(name),
+                    value,
+                    value,
+                    capture.expression,
+                    direction,
+                });
+        }
+    };
+    // Materialize named ports before method dependencies so a method capture
+    // reuses an explicitly exposed member instead of adding a hidden duplicate.
     for (const auto& member : symbol->as<ModportSymbol>().members()) {
+        if (member.kind == SymbolKind::MethodPrototype) {
+            continue;
+        }
         if (member.kind != SymbolKind::ModportPort) {
             throw std::runtime_error(
                 "unsupported modport member '" + copy_string(member.name) + "'");
         }
         const auto& port = member.as<ModportPortSymbol>();
-        if (!port.internalSymbol || !ValueSymbol::isKind(port.internalSymbol->kind) ||
-            port.explicitConnection) {
+        const auto* connection = port.getConnectionExpr();
+        if (!connection) {
             throw std::runtime_error(
-                "modport port '" + copy_string(port.name) + "' is not a direct interface signal");
+                "modport port '" + copy_string(port.name) + "' has no elaborated connection");
+        }
+        const ValueSymbol* value = nullptr;
+        if (port.internalSymbol && ValueSymbol::isKind(port.internalSymbol->kind)) {
+            value = &port.internalSymbol->as<ValueSymbol>();
         }
         signals.push_back(
             InterfaceSignal{
-                port.name,
-                &port.internalSymbol->as<ValueSymbol>(),
+                copy_string(port.name),
+                value,
                 &port,
+                connection,
                 port.direction,
             });
     }
+    for (const auto& member : symbol->as<ModportSymbol>().members()) {
+        if (member.kind != SymbolKind::MethodPrototype) {
+            continue;
+        }
+        const auto& method = member.as<MethodPrototypeSymbol>();
+        const auto* selected = method.getSubroutine();
+        if (!selected) {
+            throw LoweringFailure(
+                OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE,
+                2,
+                member.location,
+                "modport method '" + copy_string(member.name) +
+                    "' has no statically resolved implementation");
+        }
+        const auto& implementation =
+            resolve_synthesizable_subroutine(*selected, member.location);
+        append_method_captures(method, implementation);
+    }
     return signals;
+}
+
+const SubroutineSymbol& resolve_synthesizable_subroutine(
+    const SubroutineSymbol& selected, slang::SourceLocation location) {
+    const SubroutineSymbol* implementation = &selected;
+    if (selected.flags.has(MethodFlags::InterfaceExtern)) {
+        const auto* prototype = selected.getPrototype();
+        const auto* candidate = prototype ? prototype->getFirstExternImpl() : nullptr;
+        if (!candidate) {
+            throw LoweringFailure(
+                OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE,
+                2,
+                location,
+                "extern interface method '" + copy_string(selected.name) +
+                    "' has no statically resolved implementation");
+        }
+        if (candidate->getNextImpl()) {
+            throw LoweringFailure(
+                OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE,
+                4,
+                location,
+                "extern interface method '" + copy_string(selected.name) +
+                    "' has ambiguous exported implementations");
+        }
+        implementation = candidate->impl;
+    }
+    if (implementation->isVirtual() ||
+        implementation->flags.has(MethodFlags::DPIImport | MethodFlags::BuiltIn)) {
+        throw LoweringFailure(
+            OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE,
+            2,
+            location,
+            "modport method '" + copy_string(selected.name) +
+                "' does not resolve to a synthesizable implementation");
+    }
+    return *implementation;
 }
 
 std::optional<ArgumentDirection>
@@ -683,7 +950,9 @@ std::optional<ArgumentDirection> infer_interface_direction_impl(
             }
             for (auto* leaf : leaves) {
                 for (const auto& signal : interface_signals(*leaf, modport_name)) {
-                    if (signal.value != &value) {
+                    if (signal.value != &value &&
+                        (!signal.connection ||
+                         !expression_references_interface_value(*signal.connection, value))) {
                         continue;
                     }
                     auto child_direction = modport_name.empty() ? infer_interface_direction_impl(
@@ -723,9 +992,13 @@ bool same_interface_value(const Symbol* reference, const ValueSymbol& target) {
         return false;
     }
     const auto& port = reference->as<ModportPortSymbol>();
-    return port.internalSymbol == &target ||
-           (port.internalSymbol && ValueSymbol::isKind(port.internalSymbol->kind) &&
-            port.internalSymbol->getHierarchicalPath() == target.getHierarchicalPath());
+    if (port.internalSymbol == &target ||
+        (port.internalSymbol && ValueSymbol::isKind(port.internalSymbol->kind) &&
+         port.internalSymbol->getHierarchicalPath() == target.getHierarchicalPath())) {
+        return true;
+    }
+    return port.explicitConnection &&
+           expression_references_interface_value(*port.explicitConnection, target);
 }
 
 bool expression_references_interface_value(
