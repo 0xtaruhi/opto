@@ -54,6 +54,24 @@ fn test_import_uses_the_public_two_stage_lifecycle() {
 }
 
 #[test]
+fn check_design_accepts_a_reachable_portless_definition() {
+    let path = temp_file("reachable-portless-definition.sv");
+    std::fs::write(
+        &path,
+        "module leaf; endmodule\nmodule top(input logic clk_i); leaf i_leaf(); endmodule\n",
+    )
+    .unwrap();
+
+    let mut session = Session::new();
+    session
+        .import_verilog(std::slice::from_ref(&path), &FrontendOptions::default())
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+
+    assert_eq!(session.check_design().unwrap(), "1");
+}
+
+#[test]
 fn synthesize_updates_implementation_and_object_index_for_always_comb_processes() {
     let mut word = WordModule::new("top");
     let a = word

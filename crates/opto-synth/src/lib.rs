@@ -42,7 +42,7 @@ pub use api::{
     ReferencePortMap, StageId, SynthError, SynthesisConfig, SynthesisDiagnostics, SynthesisEffort,
     SynthesisMetrics, SynthesisOptions, SynthesisProgress, SynthesisProgressStatus,
     SynthesisReport, SynthesisResult, SynthesisTimingProgress, TimingSummary,
-    check_design_with_references,
+    check_definition_with_references, check_design_with_references,
 };
 pub use artifact::{
     BoundaryEdgeId, ImplementationDb, ImplementationRegion, ImplementationRegionId,

@@ -80,6 +80,11 @@ ASIC synthesis profile: any reachable assignment, declaration initializer,
 memory preload, system task, timing control, or other executable initial
 behavior remains an explicit unsupported-profile error.
 
+Structural validation requires the selected root design to expose an external
+port interface. A reachable child definition may have no ports; it remains
+subject to the same name, reference, connection, driver, and typed-ID checks as
+every other definition.
+
 ## Non-Negotiable Rules
 
 - There is no fallback, legacy, shadow, or environment-selected synthesis path.
