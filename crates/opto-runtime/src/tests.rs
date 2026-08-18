@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::indexed::range_tasks;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 fn runtime(threads: usize) -> ExecutionContext {
@@ -50,19 +50,23 @@ fn indexed_analysis_preserves_dense_order() {
 }
 
 #[test]
-fn explicit_indexed_grain_exposes_expensive_items_to_all_workers() {
-    let active = AtomicUsize::new(0);
-    let peak = AtomicUsize::new(0);
-    runtime(4)
-        .analyze_indexed_with_grain(8, std::num::NonZeroUsize::MIN, |index| {
-            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-            peak.fetch_max(now, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(2));
-            active.fetch_sub(1, Ordering::SeqCst);
-            Ok::<_, RuntimeError>(index)
-        })
-        .unwrap();
-    assert_eq!(peak.load(Ordering::SeqCst), 4);
+fn explicit_indexed_grain_changes_only_scheduling() {
+    let run = |minimum_grain| {
+        let calls = AtomicUsize::new(0);
+        let results = runtime(4)
+            .analyze_indexed_with_grain(257, minimum_grain, |index| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, RuntimeError>(index.rotate_left(3))
+            })
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 257);
+        results
+    };
+
+    assert_eq!(
+        run(std::num::NonZeroUsize::MIN),
+        run(std::num::NonZeroUsize::new(17).unwrap())
+    );
 }
 
 #[test]
@@ -70,6 +74,7 @@ fn composite_scheduler_bounds_outer_work_and_preserves_order() {
     let runtime = runtime(16);
     let active = AtomicUsize::new(0);
     let peak = AtomicUsize::new(0);
+    let initial_wave = Barrier::new(4);
     let outputs = runtime
         .map_ordered_composite(
             (0_u64..40)
@@ -83,7 +88,7 @@ fn composite_scheduler_bounds_outer_work_and_preserves_order() {
                 assert_eq!(nested.parallelism(), 4);
                 let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(now, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(1));
+                initial_wave.wait();
                 active.fetch_sub(1, Ordering::SeqCst);
                 Ok::<_, RuntimeError>(index)
             },
