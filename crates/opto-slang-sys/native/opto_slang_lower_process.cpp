@@ -1801,7 +1801,10 @@ const Expression* statement_anchor_expression(const Statement& statement) {
         return &statement.as<DisableStatement>().target;
     case StatementKind::Conditional: {
         const auto& conditional = statement.as<ConditionalStatement>();
-        return conditional.conditions.empty() ? nullptr : conditional.conditions.front().expr;
+        if (conditional.conditions.empty()) {
+            return nullptr;
+        }
+        return conditional.conditions.front().expr.get();
     }
     case StatementKind::Case:
         return &statement.as<CaseStatement>().expr;
@@ -3838,11 +3841,11 @@ CfgFragment lower_subroutine_call_statement(
     auto initialization = builder.effects(std::move(initializers), source);
     CfgFragment disable_initialization;
     if (statement_disables_target(function.getBody(), function)) {
-        auto [control, initialization] =
+        auto [control, control_initialization] =
             lower_disable_control(builder, design, function, call, source);
         design.disable_controls.push_back(control);
         disable_control_pushed = true;
-        disable_initialization = std::move(initialization);
+        disable_initialization = std::move(control_initialization);
     }
     auto lowered_body = lower_statement(
         builder, design, function.getBody(), procedure_kind);
