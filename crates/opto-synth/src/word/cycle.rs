@@ -336,9 +336,33 @@ fn operation_dependencies(
         word::OpKind::Cast { kind, value, .. } => {
             push_cast_slice(module, &mut dependencies, *kind, *value, selection)?;
         }
-        word::OpKind::DynamicExtract { value, offset, .. } => {
-            push_full(module, &mut dependencies, *value)?;
-            push_full(module, &mut dependencies, *offset)?;
+        word::OpKind::DynamicExtract {
+            value,
+            offset,
+            width,
+        } => {
+            if let Some(offset) = known_u32(module, known_bits, *offset) {
+                let input_width = value_width(module, *value)?;
+                if offset
+                    .checked_add(width.get())
+                    .is_some_and(|end| end <= input_width)
+                {
+                    push_slice(
+                        module,
+                        &mut dependencies,
+                        *value,
+                        offset.checked_add(selection.lsb).ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "dynamic extract dependency offset overflow",
+                            )
+                        })?,
+                        selection.width,
+                    )?;
+                }
+            } else {
+                push_full(module, &mut dependencies, *value)?;
+                push_full(module, &mut dependencies, *offset)?;
+            }
         }
         word::OpKind::DynamicInsert {
             value,
@@ -352,6 +376,23 @@ fn operation_dependencies(
         word::OpKind::Register(_) | word::OpKind::Latch(_) => {}
     }
     Ok(dependencies)
+}
+
+fn known_u32(
+    module: &word::WordModule,
+    known_bits: &mut word::KnownBitsAnalysis,
+    value: word::ValueId,
+) -> Option<u32> {
+    let width = module.value(value)?.ty.width();
+    let mut result = 0u32;
+    for index in 0..width {
+        match known_bits.bit(module, value, index) {
+            word::KnownBit::Zero => {}
+            word::KnownBit::One if index < u32::BITS => result |= 1u32 << index,
+            word::KnownBit::One | word::KnownBit::Unknown => return None,
+        }
+    }
+    Some(result)
 }
 
 fn push_extended_slice(

@@ -965,4 +965,77 @@ mod tests {
                 .all(|&(source, _)| source != assembled)
         );
     }
+
+    #[test]
+    fn follows_constant_dynamic_selection_across_disjoint_packed_fields() {
+        let mut source = word::WordModule::new("dynamic_packed_fields");
+        let bit = word::WordType::bits(1).unwrap();
+        let pair = word::WordType::bits(2).unwrap();
+        let high_port = source
+            .add_port(
+                "high",
+                word::PortDirection::Input,
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let request = source
+            .add_wire("request", pair, word::SourceSpan::default())
+            .unwrap();
+        let request_value = source
+            .read_signal(request, word::SourceSpan::default())
+            .unwrap();
+        let offset = source
+            .constant(
+                opto_ir::ConstBits::from_bin_str("1").unwrap(),
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let selected = source
+            .dynamic_extract(request_value, offset, 1, word::SourceSpan::default())
+            .unwrap();
+        let high = source
+            .read_signal(
+                source.port(high_port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(request).with_range(word::BitRange { msb: 1, lsb: 1 }),
+                high,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(request).with_range(word::BitRange { msb: 0, lsb: 0 }),
+                selected,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let row = crate::RegionRowId::from_index(0).unwrap();
+
+        crate::word::cycle::validate_combinational_acyclic(&source).unwrap();
+        let cone = RegionalWordCone::build(RegionalWordConeRequest {
+            source: &source,
+            operation_regions: &[Some(row)],
+            region: row,
+            memories: &[],
+            memory_implementations: &[],
+            target_cells: &opto_library::TargetCellSet::default(),
+            boundary_inputs: &[],
+            observations: vec![],
+            roots: vec![selected],
+        })
+        .unwrap();
+
+        assert!(cone.source_to_local.contains_key(&selected));
+        assert!(
+            cone.boundary_bindings
+                .iter()
+                .all(|&(source, _)| source != selected)
+        );
+    }
 }

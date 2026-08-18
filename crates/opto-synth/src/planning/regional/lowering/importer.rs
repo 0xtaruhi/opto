@@ -452,10 +452,39 @@ impl RegionalWordImporter<'_> {
                     self.constant_bit(false, span)
                 }
             }
+            word::OpKind::DynamicExtract { value, offset, .. } => {
+                let Some(offset) = self.known_u32(offset) else {
+                    return Err(crate::SynthError::invariant(
+                        "active region-local recursion reached a variable dynamic extract",
+                    ));
+                };
+                let selected = offset.checked_add(bit).ok_or_else(|| {
+                    crate::SynthError::invariant("active dynamic extract bit offset overflow")
+                })?;
+                if selected < self.source_value_type(value)?.width() {
+                    self.import_value_bit(value, selected, span)
+                } else {
+                    self.constant_bit(false, span)
+                }
+            }
             _ => Err(crate::SynthError::invariant(
                 "active region-local recursion reached a non-bitwise operation",
             )),
         }
+    }
+
+    fn known_u32(&self, value: word::ValueId) -> Option<u32> {
+        let width = self.source.value(value)?.ty.width();
+        let mut known_bits = word::KnownBitsAnalysis::new(self.source);
+        let mut result = 0u32;
+        for index in 0..width {
+            match known_bits.bit(self.source, value, index) {
+                word::KnownBit::Zero => {}
+                word::KnownBit::One if index < u32::BITS => result |= 1u32 << index,
+                word::KnownBit::One | word::KnownBit::Unknown => return None,
+            }
+        }
+        Some(result)
     }
 
     fn import_extended_value_bit(
