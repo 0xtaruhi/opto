@@ -67,8 +67,12 @@ def commit_subjects(base: str, head: str) -> list[CommitSubject]:
 
     if not _commit_exists(head):
         raise ValueError(f"head commit is unavailable or invalid: {head!r}")
+    if base and not _commit_exists(base):
+        raise ValueError(f"base commit is unavailable or invalid: {base!r}")
+    if base == head:
+        return []
     revision = head
-    if _commit_exists(base) and base != head:
+    if base:
         revision = f"{base}..{head}"
     result = subprocess.run(
         ["git", "log", "--format=%H%x00%s", "--reverse", revision],
