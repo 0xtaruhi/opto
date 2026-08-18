@@ -756,6 +756,151 @@ fn native_compile_preserves_module_reference_ports_as_exact_aliases() {
 }
 
 #[test]
+fn native_compile_lowers_named_legacy_port_concatenations() {
+    let source = NativeTestSource::new(
+        "module legacy(.incoming({high, low}), .outgoing({upper[0:3], lower[7:4]})); input [3:0] high; input [0:3] low; output [0:3] upper; output [7:0] lower; assign upper = low; assign lower = {high, low}; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+
+    assert_eq!(
+        module
+            .ports()
+            .map(|port| (
+                port.name().unwrap(),
+                port.direction().unwrap(),
+                port.width()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("incoming", SlangPortDirection::Input, 8),
+            ("outgoing", SlangPortDirection::Output, 8),
+        ]
+    );
+    assert_eq!(
+        module
+            .nets()
+            .map(|net| net.name().unwrap())
+            .collect::<Vec<_>>(),
+        ["high", "low", "upper", "lower"]
+    );
+
+    let assignments = module.assigns().collect::<Vec<_>>();
+    let incoming = assignments
+        .iter()
+        .filter_map(|assignment| {
+            let lhs = assignment.lhs().ok()?.kind().ok()?;
+            let SlangExpressionKind::Signal(signal) = lhs else {
+                return None;
+            };
+            matches!(signal.name, "high" | "low").then(|| assignment.rhs().unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(incoming.len(), 2);
+    assert!(matches!(
+        incoming[0].kind().unwrap(),
+        SlangExpressionKind::Extract {
+            lsb: 4,
+            width: 4,
+            ..
+        }
+    ));
+    assert!(matches!(
+        incoming[1].kind().unwrap(),
+        SlangExpressionKind::Extract {
+            lsb: 0,
+            width: 4,
+            ..
+        }
+    ));
+
+    let outgoing = assignments
+        .iter()
+        .find(|assignment| is_signal(assignment.lhs().unwrap(), "outgoing"))
+        .expect("external output projection should be driven");
+    let SlangExpressionKind::Concat(parts) = outgoing.rhs().unwrap().kind().unwrap() else {
+        panic!("external output should preserve concatenation order");
+    };
+    let parts = parts
+        .parts()
+        .map(|part| part.unwrap().kind().unwrap())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        parts[0],
+        SlangExpressionKind::Signal(SlangSignalRef {
+            name: "upper",
+            range: Some(SlangBitRange { msb: 3, lsb: 0 })
+        })
+    ));
+    assert!(matches!(
+        parts[1],
+        SlangExpressionKind::Signal(SlangSignalRef {
+            name: "lower",
+            range: Some(SlangBitRange { msb: 7, lsb: 4 })
+        })
+    ));
+
+    let source =
+        NativeTestSource::new("module exact(.shared(shared)); inout [3:0] shared; endmodule\n");
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    assert_eq!(
+        module
+            .ports()
+            .map(|port| (
+                port.name().unwrap(),
+                port.direction().unwrap(),
+                port.width()
+            ))
+            .collect::<Vec<_>>(),
+        [("shared", SlangPortDirection::Inout, 4)]
+    );
+    assert_eq!(module.nets().count(), 0);
+}
+
+#[test]
+fn native_compile_rejects_noninvertible_legacy_port_projections() {
+    let cases = [
+        (
+            "module bad(.p({a[3:0], a[2:0]})); output [3:0] a; endmodule\n",
+            "overlapping internal bit mappings",
+        ),
+        (
+            "module bad(.p({a, b})); inout a, b; endmodule\n",
+            "exact whole-signal inout or ref mapping",
+        ),
+        (
+            "module bad(.p({a, b})); input a; output b; assign b = a; endmodule\n",
+            "mixes input and output component directions",
+        ),
+    ];
+
+    for (text, expected) in cases {
+        let source = NativeTestSource::new(text);
+        let error = compile(
+            std::slice::from_ref(&source.path),
+            &SlangCompileOptions::default(),
+        )
+        .expect_err("invalid external port projection should fail lowering");
+        let SlangError::LoweringFailed(failure) = error else {
+            panic!("expected structured lowering failure, got {error}");
+        };
+        assert_eq!(
+            failure.category,
+            SlangLoweringFailureCategory::InvalidProjection
+        );
+        assert_eq!(failure.stable_code(), "OPT-HDL-LR-0001");
+        assert!(failure.message.contains(expected), "{}", failure.message);
+        let location = failure
+            .location
+            .expect("external port should have a source span");
+        assert_eq!(location.path, source.path);
+        assert_eq!(location.line, 1);
+        assert!(location.column > 0);
+    }
+}
+
+#[test]
 fn native_compile_flattens_reference_modport_members_as_aliases() {
     let source = NativeTestSource::new(
         "interface bus_if; logic [7:0] data; modport alias_port(ref data); endinterface\nmodule child(bus_if.alias_port bus, input logic [7:0] d); always_comb bus.data = d; endmodule\nmodule top(input logic [7:0] d, output logic [7:0] y); bus_if link(); child u_child(.bus(link), .d(d)); assign y = link.data; endmodule\n",

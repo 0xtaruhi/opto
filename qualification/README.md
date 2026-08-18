@@ -10,7 +10,7 @@ all pass.
 | Tier | Corpus | Current scale | Gate |
 | --- | --- | ---: | --- |
 | Unit | Rust tests beside each domain | domain-local cases and invariants | every pull request |
-| Static integration | focused RTL, Tcl shell behavior, SDC, hierarchy, memory and sequential cases | 62 cases | every pull request |
+| Static integration | focused RTL, Tcl shell behavior, SDC, hierarchy, memory and sequential cases | 64 cases | every pull request |
 | Generated semantics | operator × width × signedness × context | 238 synthesis points on pull requests; the same points are CEC-proved nightly | pull request and nightly |
 | Generated differential | deterministic RTL generator | 512 fixed-seed, CEC-proved designs as a regression sentinel | nightly |
 | Mapping-fixture determinism | presubmit mapping cases without Yosys | 5 zero-tolerance local-mechanism baselines | every Linux pull request |
@@ -19,7 +19,7 @@ all pass.
 | Real designs | pinned Ibex and CVA6 configurations | complete checked manifests | weekly |
 | QoR | representative kernels and blocks | area, timing, cell mix, runtime, memory and CEC | weekly |
 
-The 62 static cases are seeds, not a claim of broad coverage. Every fixed bug
+The 64 static cases are seeds, not a claim of broad coverage. Every fixed bug
 must add the smallest stable regression case that would have caught it. Broad
 semantic spaces belong in a generator; real integration behavior belongs in a
 pinned upstream design.
@@ -30,8 +30,10 @@ Every static case declares its unique dimension in the checked `covers` field:
 | --- | --- | --- |
 | `frontend-packed-generate` | packed-struct arrays across generated parameterized instances | elaboration inventory |
 | `frontend-dynamic-continuous-lvalue` | runtime-indexed continuous net lvalue rejected during language legality | expected process failure and diagnostic text |
+| `frontend-let-expressions` | hygienic module, procedural, and interface-scope `let` expansion in combinational and sequential right-hand sides | mapped synthesis against an explicit let-free expansion; CEC nightly |
 | `frontend-syntax-error` | malformed SystemVerilog port-list diagnostic | expected process failure and diagnostic text |
 | `hierarchy-parameter-generate` | indexed part-selects through generated child hierarchy | mapped synthesis; CEC nightly |
+| `hierarchy-legacy-port-expressions` | Verilog-2005 named external port concatenations and constant selections preserve boundary bit order | mapped synthesis against an explicit ANSI-port expansion; CEC nightly |
 | `hierarchy-reference-ports` | module `ref` ports, including runtime-selected unpacked-array actuals, eliminated as exact aliases of parent variables | mapped synthesis against an explicitly flattened reference; CEC nightly |
 | `hierarchy-reference-modport` | `ref` modport members flattened as exact interface-variable aliases | mapped synthesis against an explicitly flattened reference; CEC nightly |
 | `hierarchy-modport-members` | typed explicit input/output/inout expressions plus statically inlined imported and exported modport methods | mapped synthesis against an explicitly flattened reference; CEC nightly |

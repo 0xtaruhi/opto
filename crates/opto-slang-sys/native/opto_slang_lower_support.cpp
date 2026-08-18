@@ -577,6 +577,7 @@ void collect_elaborated_members(
             members.processes.push_back(&symbol.as<ProceduralBlockSymbol>());
             break;
         case SymbolKind::Port:
+        case SymbolKind::MultiPort:
         case SymbolKind::InterfacePort:
         case SymbolKind::TransparentMember:
         case SymbolKind::EmptyMember:
@@ -590,17 +591,16 @@ void collect_elaborated_members(
         case SymbolKind::ExplicitImport:
         case SymbolKind::WildcardImport:
         case SymbolKind::Subroutine:
+        case SymbolKind::LetDecl:
         case SymbolKind::DefParam:
         case SymbolKind::Specparam:
         case SymbolKind::SpecifyBlock:
             break;
-        case SymbolKind::MultiPort:
         case SymbolKind::Primitive:
         case SymbolKind::Sequence:
         case SymbolKind::Property:
         case SymbolKind::AssertionPort:
         case SymbolKind::ClockingBlock:
-        case SymbolKind::LetDecl:
         case SymbolKind::Checker:
         case SymbolKind::CheckerInstance:
         case SymbolKind::CovergroupType:
