@@ -13,7 +13,7 @@ pub use catalog::{ImplementationCandidate, ImplementationCandidateId};
 pub(crate) use decisions::ArchitectureDecisions;
 pub use durable::{
     DurableOperatorArena, DynamicExtractShape, OperatorManifest, OperatorManifestInstance,
-    OperatorShape, OperatorSignature, OperatorSignatureId, OperatorTermShape,
+    OperatorOccurrenceId, OperatorShape, OperatorSignature, OperatorSignatureId, OperatorTermShape,
     PreservedOperatorInstance,
 };
 pub(crate) use sharing::share_muxed_arithmetic;

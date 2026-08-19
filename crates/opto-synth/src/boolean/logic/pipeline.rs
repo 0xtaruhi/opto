@@ -91,20 +91,32 @@ pub(super) fn optimize(
         return finish(identity(source), roots);
     }
     let mut state = TransformState::start(roots, identity(source))?;
-    if let Some(reduction) =
+    let reduction = {
+        let _profile = crate::api::diagnostics::ProfileSpan::new(diagnostics.timing, || {
+            "logic.pipeline.functional_reduction".to_string()
+        });
         reduce_functionally(&state.network, &state.roots, diagnostics, runtime)?
-    {
+    };
+    if let Some(reduction) = reduction {
         state.apply(reduction)?;
     }
-    let canonical = optimize_canonical(
-        &state.network,
-        &state.roots,
-        requirements,
-        diagnostics,
-        runtime,
-        incremental,
-    )?;
+    let canonical = {
+        let _profile = crate::api::diagnostics::ProfileSpan::new(diagnostics.timing, || {
+            "logic.pipeline.canonical_optimization".to_string()
+        });
+        optimize_canonical(
+            &state.network,
+            &state.roots,
+            requirements,
+            diagnostics,
+            runtime,
+            incremental,
+        )?
+    };
     state.apply(canonical)?;
+    let _profile = crate::api::diagnostics::ProfileSpan::new(diagnostics.timing, || {
+        "logic.pipeline.finalization".to_string()
+    });
     finish(state.finish(), roots)
 }
 
@@ -147,14 +159,30 @@ fn optimize_canonical(
     runtime: &ExecutionContext,
     incremental: Option<RewriteIncremental<'_>>,
 ) -> Result<TransformProduct, crate::SynthError> {
+    let trace = crate::api::diagnostics::SynthTrace::timing(diagnostics);
+    let started = std::time::Instant::now();
     let mut state = TransformState::start(roots, copy_active(source, roots)?)?;
+    crate::api::diagnostics::trace!(
+        trace,
+        "logic.pipeline.copy_active",
+        "wall={:?}",
+        started.elapsed()
+    );
     let mut expanded = false;
-    for _ in 0..MUX_DECOMPOSITION_ROUNDS {
+    for round in 0..MUX_DECOMPOSITION_ROUNDS {
+        let started = std::time::Instant::now();
         let Some(decomposition) = decompose_muxes(&state.network, &state.roots)? else {
             break;
         };
         state.apply(decomposition)?;
+        crate::api::diagnostics::trace!(
+            trace,
+            "logic.pipeline.mux_decomposition",
+            "round={round} wall={:?}",
+            started.elapsed()
+        );
         expanded = true;
+        let started = std::time::Instant::now();
         let optimized = optimize_with(
             &state.network,
             &state.roots,
@@ -165,6 +193,12 @@ fn optimize_canonical(
             OptimizationPolicy::Factored,
         )?;
         state.apply(optimized)?;
+        crate::api::diagnostics::trace!(
+            trace,
+            "logic.pipeline.mux_optimization",
+            "round={round} wall={:?}",
+            started.elapsed()
+        );
     }
     if expanded {
         return Ok(state.finish());

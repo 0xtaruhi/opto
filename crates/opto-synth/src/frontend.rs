@@ -75,6 +75,7 @@ fn lower_procedures(
     let mut edge_guards = vec![None; procedures.edges().len()];
     let mut rewrite_scratch = RewriteScratch::default();
     let mut constant_analysis = word::KnownBitsAnalysis::new(&module);
+    let mut range_analysis = word::UnsignedValueAnalysis::new(&module);
     let mut incomplete_comb = Vec::new();
     let cfgs = run_frontend_stage(observer, crate::StageId::NORMALIZATION_CFG_ANALYSIS, || {
         let cfg_tasks = (0..procedures.procedures().len())
@@ -112,6 +113,7 @@ fn lower_procedures(
                         edge_guards: &mut edge_guards,
                         rewrite_scratch: &mut rewrite_scratch,
                         constant_analysis: &mut constant_analysis,
+                        range_analysis: &mut range_analysis,
                         incomplete_comb: &mut incomplete_comb,
                     },
                 )?
@@ -125,7 +127,7 @@ fn lower_procedures(
         if observability.observes_signal(assignment.target.signal)? {
             return Err(crate::SynthError::invalid(format!(
                 "always_comb target '{}' is not assigned on every observable control-flow path",
-                assignment.target_name(&module)
+                assignment.target_description(&module)
             )));
         }
     }
@@ -202,6 +204,7 @@ struct ProcedureNormalizer<'a> {
     reads: &'a BTreeMap<word::SignalId, usize>,
     rewrite_scratch: &'a mut RewriteScratch,
     constant_analysis: &'a mut word::KnownBitsAnalysis,
+    range_analysis: &'a mut word::UnsignedValueAnalysis,
     predicates: PredicateArena,
     event_controls: Vec<EventControl>,
     decision_choices: BTreeMap<proc::BlockId, Vec<DecisionChoice>>,
@@ -223,5 +226,6 @@ struct ProcedureInput<'a> {
     edge_guards: &'a mut [Option<Predicate>],
     rewrite_scratch: &'a mut RewriteScratch,
     constant_analysis: &'a mut word::KnownBitsAnalysis,
+    range_analysis: &'a mut word::UnsignedValueAnalysis,
     incomplete_comb: &'a mut Vec<Assignment>,
 }

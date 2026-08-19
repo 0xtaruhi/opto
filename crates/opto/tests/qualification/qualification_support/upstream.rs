@@ -23,7 +23,8 @@ pub(super) fn run(case: &Case, opto: &Path, output_root: &Path) -> ResultEntry {
     validate_checkout(case, &source_root, &manifest);
     let output = prepare_case_output(output_root, &case.spec.id);
     let script = case.relative_path(case.spec.script.as_deref().expect("validated script"));
-    let runs = config_runs(case, &source_root);
+    let runs = upstream_runs(case, &source_root);
+    let mut failures = Vec::new();
     for config in runs {
         let report = output.join(format!("check-{}.rpt", config.id));
         let mut environment = BTreeMap::from([
@@ -49,14 +50,8 @@ pub(super) fn run(case: &Case, opto: &Path, output_root: &Path) -> ResultEntry {
                 report.clone(),
             ),
         ]);
-        if let Some(path) = &config.path {
-            environment.insert(
-                case.spec
-                    .config_environment
-                    .clone()
-                    .expect("upstream config environment"),
-                path.clone(),
-            );
+        if let Some((key, value)) = &config.environment {
+            environment.insert(key.clone(), value.clone());
         }
         let process = run_process(
             opto,
@@ -69,26 +64,31 @@ pub(super) fn run(case: &Case, opto: &Path, output_root: &Path) -> ResultEntry {
             &output.join(format!("opto-{}.log", config.id)),
             true,
         );
-        assert!(
-            process.status.success(),
-            "upstream case {} failed",
-            case.spec.id
-        );
+        if !process.status.success() {
+            failures.push(format!("{}: synthesis process failed", config.id));
+            continue;
+        }
         let ports = report_integer(&report, "Number of ports");
         let nets = report_integer(&report, "Number of nets");
-        assert!(
-            ports.is_some_and(|value| value >= config.min_ports),
-            "{} expected ports >= {}, got {ports:?}",
-            case.spec.id,
-            config.min_ports
-        );
-        assert!(
-            nets.is_some_and(|value| value >= config.min_nets),
-            "{} expected nets >= {}, got {nets:?}",
-            case.spec.id,
-            config.min_nets
-        );
+        if ports.is_none_or(|value| value < config.min_ports) {
+            failures.push(format!(
+                "{}: expected ports >= {}, got {ports:?}",
+                config.id, config.min_ports
+            ));
+        }
+        if nets.is_none_or(|value| value < config.min_nets) {
+            failures.push(format!(
+                "{}: expected nets >= {}, got {nets:?}",
+                config.id, config.min_nets
+            ));
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "upstream case {} failed: {}",
+        case.spec.id,
+        failures.join("; ")
+    );
     ResultEntry {
         id: case.spec.id.clone(),
         kind: case.spec.kind,
@@ -114,44 +114,120 @@ fn upstream_inputs(case: &Case, manifest: &Path) -> BTreeMap<String, String> {
     if let Some(configs) = &case.spec.configs {
         inputs.insert("configs".to_string(), sha256(&case.relative_path(configs)));
     }
+    if let Some(designs) = &case.spec.designs {
+        inputs.insert("designs".to_string(), sha256(&case.relative_path(designs)));
+    }
     inputs
 }
 
-struct ConfigRun {
+struct UpstreamRun {
     id: String,
-    path: Option<PathBuf>,
+    environment: Option<(String, PathBuf)>,
     min_ports: u64,
     min_nets: u64,
 }
 
-fn config_runs(case: &Case, source_root: &Path) -> Vec<ConfigRun> {
-    let Some(configs) = &case.spec.configs else {
-        return vec![ConfigRun {
-            id: case.spec.id.clone(),
-            path: None,
-            min_ports: case.spec.assertions.ports.unwrap_or(0),
-            min_nets: case.spec.assertions.nets.unwrap_or(0),
-        }];
-    };
-    let path = case.relative_path(configs);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+fn upstream_runs(case: &Case, source_root: &Path) -> Vec<UpstreamRun> {
+    if let Some(configs) = &case.spec.configs {
+        let path = case.relative_path(configs);
+        return read_run_table(&path, 5, |line, fields| {
+            let config = source_root.join(fields[1]);
+            assert!(config.is_file(), "missing config {}", config.display());
+            assert_eq!(
+                sha256(&config),
+                fields[2],
+                "config hash mismatch in row: {line}"
+            );
+            UpstreamRun {
+                id: fields[0].to_string(),
+                environment: Some((
+                    case.spec
+                        .config_environment
+                        .clone()
+                        .expect("validated upstream config environment"),
+                    config,
+                )),
+                min_ports: parse_threshold(fields[3], "ports", line),
+                min_nets: parse_threshold(fields[4], "nets", line),
+            }
+        });
+    }
+    if let Some(designs) = &case.spec.designs {
+        let path = case.relative_path(designs);
+        return read_run_table(&path, 4, |line, fields| {
+            let id = fields[0];
+            let top = fields[1];
+            assert!(!id.is_empty(), "upstream design id is empty");
+            assert!(
+                !top.is_empty() && !top.chars().any(char::is_whitespace),
+                "invalid upstream design top: {top}"
+            );
+            UpstreamRun {
+                id: id.to_string(),
+                environment: Some((
+                    case.spec
+                        .design_environment
+                        .clone()
+                        .expect("validated upstream design environment"),
+                    PathBuf::from(top),
+                )),
+                min_ports: parse_threshold(fields[2], "ports", line),
+                min_nets: parse_threshold(fields[3], "nets", line),
+            }
+        });
+    }
+    vec![UpstreamRun {
+        id: case.spec.id.clone(),
+        environment: None,
+        min_ports: case.spec.assertions.ports.unwrap_or(0),
+        min_nets: case.spec.assertions.nets.unwrap_or(0),
+    }]
+}
+
+fn read_run_table(
+    path: &Path,
+    field_count: usize,
+    mut build: impl FnMut(&str, &[&str]) -> UpstreamRun,
+) -> Vec<UpstreamRun> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let runs = text
         .lines()
         .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
         .map(|line| {
-            let fields = line.split('\t').collect::<Vec<_>>();
-            assert_eq!(fields.len(), 5, "invalid config row: {line}");
-            let config = source_root.join(fields[1]);
-            assert!(config.is_file(), "missing config {}", config.display());
-            assert_eq!(sha256(&config), fields[2], "config hash mismatch");
-            ConfigRun {
-                id: fields[0].to_string(),
-                path: Some(config),
-                min_ports: fields[3].parse().expect("minimum ports is an integer"),
-                min_nets: fields[4].parse().expect("minimum nets is an integer"),
-            }
+            let fields = run_table_fields(line, field_count);
+            build(line, &fields)
         })
-        .collect()
+        .collect();
+    validate_runs(runs)
+}
+
+fn run_table_fields(line: &str, field_count: usize) -> Vec<&str> {
+    let fields = line.split('\t').map(str::trim).collect::<Vec<_>>();
+    assert_eq!(fields.len(), field_count, "invalid run table row: {line}");
+    fields
+}
+
+fn parse_threshold(value: &str, name: &str, line: &str) -> u64 {
+    value
+        .parse()
+        .unwrap_or_else(|error| panic!("minimum {name} is invalid in row {line:?}: {error}"))
+}
+
+fn validate_runs(runs: Vec<UpstreamRun>) -> Vec<UpstreamRun> {
+    assert!(!runs.is_empty(), "upstream run table is empty");
+    let mut ids = std::collections::BTreeSet::new();
+    for run in &runs {
+        assert!(
+            run.id.chars().all(
+                |character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            ),
+            "invalid upstream run id: {}",
+            run.id
+        );
+        assert!(ids.insert(&run.id), "duplicate upstream run id: {}", run.id);
+    }
+    runs
 }
 
 fn validate_checkout(case: &Case, source_root: &Path, manifest: &Path) {
@@ -217,4 +293,15 @@ fn git_revision(root: &Path) -> String {
         .expect("Git revision is UTF-8")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn trims_portable_run_table_fields() {
+        assert_eq!(
+            super::run_table_fields("design\ttop\t6\t100\r", 4),
+            ["design", "top", "6", "100"]
+        );
+    }
 }

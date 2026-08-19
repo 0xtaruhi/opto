@@ -299,12 +299,24 @@ impl RegionArchitectureMaterializer<'_, '_> {
         context: RegionContextKey,
         runtime: &ExecutionContext,
     ) -> Result<RegionalArchitectureMapping, SynthError> {
-        let (private, root_pairs) = self.lower_private_region(memory_implementations, region)?;
+        let profiling = self.request.mapping_context.config.diagnostics.timing;
+        let row = region.row().raw();
+        let (private, root_pairs) = {
+            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+                format!("logic_lowering.region[{row}].private_lowering")
+            });
+            self.lower_private_region(memory_implementations, region)?
+        };
         let PreparedRegionCover {
             slice,
             decision_key,
             publication,
-        } = self.prepare_region_cover(&private, root_pairs, memory_implementations, region)?;
+        } = {
+            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+                format!("logic_lowering.region[{row}].cover_preparation")
+            });
+            self.prepare_region_cover(&private, root_pairs, memory_implementations, region)?
+        };
         let LoweredPrivateRegion {
             module,
             source_to_local,
@@ -319,30 +331,35 @@ impl RegionArchitectureMaterializer<'_, '_> {
         } = private;
         let empty_port_bindings = opto_timing::PortBindings::new([]);
         let LocalRegionBooleanLowering { ownership, subject } = lowering;
-        let analysis = super::cover::analyze_region_cover(
-            &module,
-            super::cover::RegionCoverRequest {
-                roots: slice.roots(),
-                timing: self.request.timing,
-                port_bindings: &empty_port_bindings,
-                catalog: &self.request.mapping_context.combinational_catalog,
-                options: RegionLogicOptions {
-                    optimize: self
-                        .request
-                        .mapping_context
-                        .combinational_catalog
-                        .can_invert(),
-                    config: self.request.mapping_context.config,
-                    runtime,
-                    incremental: Some(crate::boolean::logic::RewriteIncremental::new(
-                        self.request.rewrite_recipes,
-                        self.request.incremental_metrics,
-                    )),
+        let analysis = {
+            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+                format!("logic_lowering.region[{row}].cover_analysis")
+            });
+            super::cover::analyze_region_cover(
+                &module,
+                super::cover::RegionCoverRequest {
+                    roots: slice.roots(),
+                    timing: self.request.timing,
+                    port_bindings: &empty_port_bindings,
+                    catalog: &self.request.mapping_context.combinational_catalog,
+                    options: RegionLogicOptions {
+                        optimize: self
+                            .request
+                            .mapping_context
+                            .combinational_catalog
+                            .can_invert(),
+                        config: self.request.mapping_context.config,
+                        runtime,
+                        incremental: Some(crate::boolean::logic::RewriteIncremental::new(
+                            self.request.rewrite_recipes,
+                            self.request.incremental_metrics,
+                        )),
+                    },
+                    regional_slice: &slice,
                 },
-                regional_slice: &slice,
-            },
-            subject,
-        )?;
+                subject,
+            )?
+        };
         let response_models = super::cover::CoverResponseModels::new(self.request.scenarios);
         let (rematerialized, binding) = match analysis {
             super::cover::RegionCoverAnalysis::NoCombinationalLogic => (
@@ -433,24 +450,39 @@ impl RegionArchitectureMaterializer<'_, '_> {
             .collect::<Vec<_>>();
         tracked_values.sort_unstable();
         tracked_values.dedup();
-        let mut local_decisions = ArchitectureDecisions::for_private_region(
-            &module,
-            &tracked_values,
-            implementation_providers().into(),
-        )?;
-        local_decisions.select_for_budget(
-            self.request.target_model,
-            self.request.contracts.delay_budget(region.row()),
-        )?;
-        let (architecture, operators) = self.prepare_operators(
-            region,
-            &module,
-            &local_decisions,
-            &operation_sources,
-            &source_to_local,
-        )?;
         let profiling = self.request.mapping_context.config.diagnostics.timing;
         let row = region.row().raw();
+        let mut local_decisions = {
+            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+                format!("logic_lowering.region[{row}].architecture_candidates")
+            });
+            ArchitectureDecisions::for_private_region(
+                &module,
+                &tracked_values,
+                implementation_providers().into(),
+            )?
+        };
+        {
+            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+                format!("logic_lowering.region[{row}].architecture_selection")
+            });
+            local_decisions.select_for_budget(
+                self.request.target_model,
+                self.request.contracts.delay_budget(region.row()),
+            )?;
+        }
+        let (architecture, operators) = {
+            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+                format!("logic_lowering.region[{row}].operator_provenance")
+            });
+            self.prepare_operators(
+                region,
+                &module,
+                &local_decisions,
+                &operation_sources,
+                &source_to_local,
+            )?
+        };
         let lowering = {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("logic_lowering.region[{row}].bitblast")

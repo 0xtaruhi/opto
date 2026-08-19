@@ -61,6 +61,15 @@ fn upstream_cva6() {
 }
 
 #[test]
+#[ignore = "requires a pinned external PULP AXI checkout"]
+fn upstream_pulp_axi() {
+    run_named_suite(
+        "qualification/suites/upstream-pulp-axi.toml",
+        RunMode::Upstream,
+    );
+}
+
+#[test]
 #[ignore = "requires the pinned external CHIPS Alliance sv-tests checkout"]
 fn systemverilog_conformance() {
     run_sv_tests();

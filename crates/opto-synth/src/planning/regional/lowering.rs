@@ -81,8 +81,12 @@ impl RegionalWordCone {
             recursive_boundaries: BTreeMap::new(),
             memory_signals: BTreeMap::new(),
             imported_bits: BTreeMap::new(),
+            dynamic_selectors: BTreeMap::new(),
+            dynamic_choice_matches: BTreeMap::new(),
             boundary_signals: BTreeMap::new(),
             boundary_port_signals: BTreeMap::new(),
+            known_bits: word::KnownBitsAnalysis::new(source),
+            unsigned_values: word::UnsignedValueAnalysis::new(source),
         };
         importer.import_memories(memories)?;
         let observations = observations.into_iter().collect::<BTreeSet<_>>();
@@ -205,8 +209,12 @@ struct RegionalWordImporter<'a> {
     recursive_boundaries: BTreeMap<word::ValueId, word::ValueId>,
     memory_signals: BTreeMap<word::SignalId, word::SignalId>,
     imported_bits: BTreeMap<(word::ValueId, u32), word::ValueId>,
+    dynamic_selectors: BTreeMap<word::ValueId, word::ValueId>,
+    dynamic_choice_matches: BTreeMap<(word::ValueId, u128), word::ValueId>,
     boundary_signals: BTreeMap<word::SignalRef, (word::WordType, word::ValueId)>,
     boundary_port_signals: BTreeMap<word::SignalId, word::SignalId>,
+    known_bits: word::KnownBitsAnalysis,
+    unsigned_values: word::UnsignedValueAnalysis,
 }
 
 #[cfg(test)]
@@ -965,6 +973,82 @@ mod tests {
     }
 
     #[test]
+    fn reconstructs_comparison_operands_across_disjoint_packed_fields() {
+        let mut source = word::WordModule::new("packed_comparison");
+        let bit = word::WordType::bits(1).unwrap();
+        let pair = word::WordType::bits(2).unwrap();
+        let address_port = source
+            .add_port(
+                "address",
+                word::PortDirection::Input,
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let request = source
+            .add_wire("request", pair, word::SourceSpan::default())
+            .unwrap();
+        let old_address = source
+            .read_signal_slice(request, 0, 1, word::SourceSpan::default())
+            .unwrap();
+        let zero = source
+            .constant(
+                opto_ir::ConstBits::from_bin_str("0").unwrap(),
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let flag = source
+            .binary(
+                word::BinaryOp::Eq,
+                old_address,
+                zero,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let new_address = source
+            .read_signal(
+                source.port(address_port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let assembled = source
+            .concat(vec![flag, new_address], word::SourceSpan::default())
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(request),
+                assembled,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let root = source
+            .read_signal_slice(request, 1, 1, word::SourceSpan::default())
+            .unwrap();
+        let row = crate::RegionRowId::from_index(0).unwrap();
+
+        crate::word::cycle::validate_combinational_acyclic(&source).unwrap();
+        let cone = RegionalWordCone::build(RegionalWordConeRequest {
+            source: &source,
+            operation_regions: &[Some(row), Some(row)],
+            region: row,
+            memories: &[],
+            memory_implementations: &[],
+            target_cells: &opto_library::TargetCellSet::default(),
+            observations: vec![],
+            roots: vec![root],
+        })
+        .unwrap();
+
+        assert!(cone.source_to_local.contains_key(&root));
+        assert!(
+            cone.boundary_bindings
+                .iter()
+                .all(|&(source, _)| source != flag && source != assembled && source != root)
+        );
+    }
+
+    #[test]
     fn reconstructs_acyclic_bits_in_a_recursive_whole_value() {
         let mut source = word::WordModule::new("recursive_whole_value");
         let bit = word::WordType::bits(1).unwrap();
@@ -1259,6 +1343,136 @@ mod tests {
             cone.boundary_bindings
                 .iter()
                 .all(|&(source, _)| source != feedback && source != selected)
+        );
+    }
+
+    #[test]
+    fn shares_dynamic_selector_matches_across_active_result_bits() {
+        let mut source = word::WordModule::new("shared_dynamic_selector");
+        let selector_port = source
+            .add_port(
+                "selector",
+                word::PortDirection::Input,
+                word::WordType::bits(1).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let data_port = source
+            .add_port(
+                "data",
+                word::PortDirection::Input,
+                word::WordType::bits(4).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let state = source
+            .add_wire(
+                "state",
+                word::WordType::bits(5).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let state_value = source
+            .read_signal(state, word::SourceSpan::default())
+            .unwrap();
+        let selector = source
+            .read_signal(
+                source.port(selector_port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let offset_ty = word::WordType::bits(2).unwrap();
+        let selector = source
+            .cast(
+                word::CastKind::ZeroExtend,
+                selector,
+                offset_ty,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let scale = source
+            .constant(
+                opto_ir::ConstBits::from_bin_str("10").unwrap(),
+                offset_ty,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let offset = source
+            .binary(
+                word::BinaryOp::Mul,
+                selector,
+                scale,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let selected = source
+            .dynamic_extract(state_value, offset, 2, word::SourceSpan::default())
+            .unwrap();
+        let low = source
+            .extract(selected, 0, 1, word::SourceSpan::default())
+            .unwrap();
+        let high = source
+            .extract(selected, 1, 1, word::SourceSpan::default())
+            .unwrap();
+        let feedback = source
+            .binary(
+                word::BinaryOp::BitXor,
+                low,
+                high,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(state).with_range(word::BitRange { msb: 4, lsb: 4 }),
+                feedback,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let data = source
+            .read_signal(
+                source.port(data_port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(state).with_range(word::BitRange { msb: 3, lsb: 0 }),
+                data,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let row = crate::RegionRowId::from_index(0).unwrap();
+        let operation_regions = vec![Some(row); source.operations().len()];
+
+        crate::word::cycle::validate_combinational_acyclic(&source).unwrap();
+        let cone = RegionalWordCone::build(RegionalWordConeRequest {
+            source: &source,
+            operation_regions: &operation_regions,
+            region: row,
+            memories: &[],
+            memory_implementations: &[],
+            target_cells: &opto_library::TargetCellSet::default(),
+            observations: vec![],
+            roots: vec![feedback],
+        })
+        .unwrap();
+
+        assert_eq!(
+            cone.module
+                .operations()
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation.kind,
+                        word::OpKind::Binary {
+                            op: word::BinaryOp::Eq,
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            2
         );
     }
 }

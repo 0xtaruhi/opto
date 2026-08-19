@@ -264,20 +264,37 @@ pub(crate) fn analyze_region_cover(
         .iter()
         .map(|root| root.required_time)
         .collect::<Vec<_>>();
-    let subject = RegionLogicGraph::from_canonical(
-        canonical,
-        &root_values,
-        &root_requirements,
-        request.options,
-    )?;
+    let profiling = request.options.config.diagnostics.timing;
+    let subject = {
+        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+            "cover.subject_optimization".to_string()
+        });
+        RegionLogicGraph::from_canonical(
+            canonical,
+            &root_values,
+            &root_requirements,
+            request.options,
+        )?
+    };
     let inputs = subject.inputs().to_vec().into_boxed_slice();
-    let cuts =
-        CutDatabase::build_parallel(subject.network(), MAX_MATCH_INPUTS, request.options.runtime)?;
-    let truths =
-        CutTruthDatabase::build_parallel(subject.network(), &cuts, request.options.runtime)?;
-    let Some((outputs, cover)) =
+    let cuts = {
+        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+            "cover.cut_enumeration".to_string()
+        });
+        CutDatabase::build_parallel(subject.network(), MAX_MATCH_INPUTS, request.options.runtime)?
+    };
+    let truths = {
+        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+            "cover.truth_evaluation".to_string()
+        });
+        CutTruthDatabase::build_parallel(subject.network(), &cuts, request.options.runtime)?
+    };
+    let Some((outputs, cover)) = ({
+        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+            "cover.library_selection".to_string()
+        });
         select_subject_cover(&subject, &cuts, &truths, &inputs, module, &request)?
-    else {
+    }) else {
         return Ok(RegionCoverAnalysis::NoCombinationalLogic);
     };
     Ok(RegionCoverAnalysis::Covered(Box::new(

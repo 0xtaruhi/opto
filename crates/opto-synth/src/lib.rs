@@ -68,9 +68,9 @@ use opto_library::{
 };
 pub use planning::{
     DurableOperatorArena, DynamicExtractShape, ImplementationCandidate, ImplementationCandidateId,
-    OperatorId, OperatorKind, OperatorManifest, OperatorManifestInstance, OperatorShape,
-    OperatorSignature, OperatorSignatureId, OperatorTermShape, PreservedOperatorInstance,
-    SemanticOperator,
+    OperatorId, OperatorKind, OperatorManifest, OperatorManifestInstance, OperatorOccurrenceId,
+    OperatorShape, OperatorSignature, OperatorSignatureId, OperatorTermShape,
+    PreservedOperatorInstance, SemanticOperator,
 };
 pub use regional::{
     BoundaryCheckKind, BoundaryContract, BoundaryContractError, BoundaryContractRow,

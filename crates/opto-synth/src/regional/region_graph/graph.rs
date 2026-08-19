@@ -35,6 +35,13 @@ digest_id!(
     "Stable identity of a source operation occurrence, independent of arena order and source spans."
 );
 
+#[cfg(test)]
+impl OperationAnchorId {
+    pub(crate) const fn from_bytes_for_test(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
 digest_id!(
     BoundaryPortId,
     "Stable identity of one typed region-boundary endpoint across compatible revisions."

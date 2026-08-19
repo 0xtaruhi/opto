@@ -247,8 +247,10 @@ impl<'a> ConnectivityIndex<'a> {
                     Ok(None)
                 } else {
                     Err(crate::SynthError::invariant(format!(
-                        "live internal signal bit {:?} has no semantic producer",
-                        reference.signal
+                        "live internal signal slice {:?}[{}:{}] has no semantic producer",
+                        reference.signal,
+                        reference.lsb + reference.width() - 1,
+                        reference.lsb
                     )))
                 }
             }

@@ -53,6 +53,7 @@ pub(crate) fn validate_combinational_acyclic(
 ) -> Result<(), crate::SynthError> {
     let drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
     let mut known_bits = word::KnownBitsAnalysis::new(module);
+    let mut unsigned_values = word::UnsignedValueAnalysis::new(module);
     let mut state = HashMap::<ValueSlice, u8>::new();
     let mut stack = Vec::<WalkFrame>::new();
     for index in 0..module.values().len() {
@@ -65,6 +66,7 @@ pub(crate) fn validate_combinational_acyclic(
             module,
             &drivers,
             &mut known_bits,
+            &mut unsigned_values,
             root,
             &mut state,
             &mut stack,
@@ -84,6 +86,7 @@ pub(crate) fn validate_combinational_acyclic(
                     module,
                     &drivers,
                     &mut known_bits,
+                    &mut unsigned_values,
                     dependency,
                     &mut state,
                     &mut stack,
@@ -141,6 +144,7 @@ fn push_frame(
     module: &word::WordModule,
     drivers: &crate::word::signal_driver::SignalDriverIndex,
     known_bits: &mut word::KnownBitsAnalysis,
+    unsigned_values: &mut word::UnsignedValueAnalysis,
     selection: ValueSlice,
     state: &mut HashMap<ValueSlice, u8>,
     stack: &mut Vec<WalkFrame>,
@@ -148,7 +152,7 @@ fn push_frame(
     state.insert(selection, 1);
     stack.push(WalkFrame {
         selection,
-        dependencies: dependencies(module, drivers, known_bits, selection)?,
+        dependencies: dependencies(module, drivers, known_bits, unsigned_values, selection)?,
         next: 0,
     });
     Ok(())
@@ -158,6 +162,7 @@ fn dependencies(
     module: &word::WordModule,
     drivers: &crate::word::signal_driver::SignalDriverIndex,
     known_bits: &mut word::KnownBitsAnalysis,
+    unsigned_values: &mut word::UnsignedValueAnalysis,
     selection: ValueSlice,
 ) -> Result<SmallVec<[ValueSlice; 4]>, crate::SynthError> {
     let stored = module.value(selection.value).ok_or_else(|| {
@@ -186,7 +191,13 @@ fn dependencies(
             ) {
                 SmallVec::new()
             } else {
-                operation_dependencies(module, known_bits, &operation.kind, selection)?
+                operation_dependencies(
+                    module,
+                    known_bits,
+                    unsigned_values,
+                    &operation.kind,
+                    selection,
+                )?
             }
         }
     })
@@ -228,6 +239,7 @@ fn signal_dependencies(
 fn operation_dependencies(
     module: &word::WordModule,
     known_bits: &mut word::KnownBitsAnalysis,
+    unsigned_values: &mut word::UnsignedValueAnalysis,
     operation: &word::OpKind,
     selection: ValueSlice,
 ) -> Result<SmallVec<[ValueSlice; 4]>, crate::SynthError> {
@@ -341,7 +353,7 @@ fn operation_dependencies(
             offset,
             width,
         } => {
-            if let Some(offset) = known_u32(module, known_bits, *offset) {
+            if let Some(offset) = crate::word::known_u32(module, known_bits, *offset) {
                 let input_width = value_width(module, *value)?;
                 if offset
                     .checked_add(width.get())
@@ -359,8 +371,11 @@ fn operation_dependencies(
                         selection.width,
                     )?;
                 }
-            } else if let Some((scale, maximum_selector)) =
-                scaled_dynamic_offset(module, known_bits, *offset)
+            } else if let Some(crate::word::ScaledDynamicOffset {
+                scale,
+                maximum_selector,
+                ..
+            }) = crate::word::scaled_dynamic_offset(module, known_bits, *offset)
             {
                 push_full(module, &mut dependencies, *offset)?;
                 let input_width = value_width(module, *value)?;
@@ -395,6 +410,31 @@ fn operation_dependencies(
                     )?;
                     selector += 1;
                 }
+            } else if let Some(range) = unsigned_values.range(module, *offset) {
+                push_full(module, &mut dependencies, *offset)?;
+                let input_width = value_width(module, *value)?;
+                let available_offsets = input_width.checked_sub(width.get()).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "dynamic extract dependency width exceeds its input",
+                    )
+                })?;
+                let first = range.minimum();
+                let last = range.maximum().min(u128::from(available_offsets));
+                if first <= last {
+                    let lsb = first
+                        .checked_add(u128::from(selection.lsb))
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            crate::SynthError::capacity("dynamic extract dependency offset")
+                        })?;
+                    let end = last
+                        .checked_add(u128::from(selection.end()?))
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            crate::SynthError::capacity("dynamic extract dependency end")
+                        })?;
+                    push_slice(module, &mut dependencies, *value, lsb, end - lsb)?;
+                }
             } else {
                 push_full(module, &mut dependencies, *value)?;
                 push_full(module, &mut dependencies, *offset)?;
@@ -412,78 +452,6 @@ fn operation_dependencies(
         word::OpKind::Register(_) | word::OpKind::Latch(_) => {}
     }
     Ok(dependencies)
-}
-
-fn known_u32(
-    module: &word::WordModule,
-    known_bits: &mut word::KnownBitsAnalysis,
-    value: word::ValueId,
-) -> Option<u32> {
-    let width = module.value(value)?.ty.width();
-    let mut result = 0u32;
-    for index in 0..width {
-        match known_bits.bit(module, value, index) {
-            word::KnownBit::Zero => {}
-            word::KnownBit::One if index < u32::BITS => result |= 1u32 << index,
-            word::KnownBit::One | word::KnownBit::Unknown => return None,
-        }
-    }
-    Some(result)
-}
-
-fn scaled_dynamic_offset(
-    module: &word::WordModule,
-    known_bits: &mut word::KnownBitsAnalysis,
-    offset: word::ValueId,
-) -> Option<(u128, u128)> {
-    let stored = module.value(offset)?;
-    let word::ValueKind::Operation(operation) = stored.kind else {
-        return None;
-    };
-    let word::OpKind::Binary {
-        op: word::BinaryOp::Mul,
-        left,
-        right,
-    } = module.operation(operation)?.kind
-    else {
-        return None;
-    };
-    let (selector, scale) = match (
-        known_u32(module, known_bits, left),
-        known_u32(module, known_bits, right),
-    ) {
-        (Some(scale), None) if scale != 0 => (right, u128::from(scale)),
-        (None, Some(scale)) if scale != 0 => (left, u128::from(scale)),
-        _ => return None,
-    };
-    let selector_ty = module.value(selector)?.ty;
-    if selector_ty.is_signed() || selector_ty.width() >= u128::BITS {
-        return None;
-    }
-    let maximum_selector = possible_unsigned_max(module, known_bits, selector)?;
-    let maximum_product = maximum_selector.checked_mul(scale)?;
-    if stored.ty.width() < u128::BITS && maximum_product >= (1u128 << stored.ty.width()) {
-        return None;
-    }
-    Some((scale, maximum_selector))
-}
-
-fn possible_unsigned_max(
-    module: &word::WordModule,
-    known_bits: &mut word::KnownBitsAnalysis,
-    value: word::ValueId,
-) -> Option<u128> {
-    let width = module.value(value)?.ty.width();
-    if width >= u128::BITS {
-        return None;
-    }
-    let mut maximum = 0u128;
-    for index in 0..width {
-        if known_bits.bit(module, value, index) != word::KnownBit::Zero {
-            maximum |= 1u128 << index;
-        }
-    }
-    Some(maximum)
 }
 
 fn push_extended_slice(

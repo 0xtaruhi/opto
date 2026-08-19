@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Zhengyi Zhang
+# SPDX-License-Identifier: GPL-3.0-only
+
+format = 1
+id = "upstream-pulp-axi"
+kind = "upstream"
+category = "interconnect"
+source_root = "pulp_axi"
+revision = "4da15979747f326bde2f9869c64e587ce599772c"
+manifest = "manifest.tsv"
+designs = "designs.tsv"
+script = "flow.tcl"
+root_environment = "PULP_AXI_ROOT"
+manifest_environment = "PULP_AXI_MANIFEST"
+report_environment = "PULP_AXI_CHECK_REPORT"
+design_environment = "PULP_AXI_TOP"

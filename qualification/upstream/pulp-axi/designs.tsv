@@ -1,0 +1,15 @@
+# id	top	minimum_ports	minimum_nets
+pipeline	opto_axi_pipeline_live	8	100
+cdc	opto_axi_cdc_live	8	100
+data-width	opto_axi_dw_downsize_live	6	100
+data-width-up	opto_axi_dw_upsize_live	6	100
+id-width	opto_axi_id_serialize_live	6	100
+memory-bridge	opto_axi_to_mem_live	15	100
+lite-crossbar	opto_axi_lite_xbar_live	6	1000
+full-lite-bridge	opto_axi_full_lite_bridge_live	6	100
+control	opto_axi_control_live	8	100
+lite-peripherals	opto_axi_lite_peripherals_live	18	100
+full-crossbar	opto_axi_full_xbar_live	6	1000
+memory-endpoints	opto_axi_memory_endpoints_live	19	100
+utilities	opto_axi_utilities_live	22	100
+compare	opto_axi_compare_live	15	1000

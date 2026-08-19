@@ -16,7 +16,7 @@ all pass.
 | Mapping-fixture determinism | presubmit mapping cases without Yosys | 5 zero-tolerance local-mechanism baselines | every Linux pull request |
 | Language conformance | CHIPS Alliance `sv-tests` | 1,027 audited HDL files; 137/137 reviewed positive ASIC cases | nightly |
 | Synthesis qualification | Yosys RTL tests | 549 files audited; 172 designs synthesized; 119/119 mandatory observable designs proved | nightly |
-| Real designs | pinned Ibex and CVA6 configurations | complete checked manifests | weekly |
+| Real designs | pinned Ibex, CVA6, and PULP AXI configurations | complete checked manifests and 14 live AXI roots | weekly |
 | QoR | representative kernels and blocks | area, timing, cell mix, runtime, memory and CEC | weekly |
 
 The 64 static cases are seeds, not a claim of broad coverage. Every fixed bug

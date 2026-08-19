@@ -19,7 +19,7 @@ pub(crate) mod regional;
 pub use architecture::{OperatorId, OperatorKind, SemanticOperator};
 pub use operator::{
     DurableOperatorArena, DynamicExtractShape, OperatorManifest, OperatorManifestInstance,
-    OperatorShape, OperatorSignature, OperatorSignatureId, OperatorTermShape,
+    OperatorOccurrenceId, OperatorShape, OperatorSignature, OperatorSignatureId, OperatorTermShape,
     PreservedOperatorInstance,
 };
 pub use operator::{ImplementationCandidate, ImplementationCandidateId};

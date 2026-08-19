@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 476
+expected_tests = 485
 
 [[owners]]
 path = "src/api"
@@ -20,7 +20,7 @@ contract = "Stage ordering, immutable states, publication, determinism, and repo
 [[owners]]
 path = "src/frontend"
 owner = "frontend"
-tests = 42
+tests = 46
 contract = "Procedural normalization and the single validated Word-IR entry boundary."
 
 [[owners]]
@@ -32,7 +32,7 @@ contract = "Reusable Word-IR dependency, driver, cycle, use, and instance analys
 [[owners]]
 path = "src/planning"
 owner = "planning"
-tests = 77
+tests = 81
 contract = "Region-owned Word optimization, recognition, resource choice, and architecture recipes."
 
 [[owners]]
@@ -68,7 +68,7 @@ contract = "MMMC measurement, power objectives, mapped boundaries, and transacti
 [[owners]]
 path = "src/artifact"
 owner = "artifact"
-tests = 5
+tests = 6
 contract = "Durable implementation ownership, publication identity, and source provenance."
 
 [[focused_contracts]]
