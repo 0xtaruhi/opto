@@ -12,7 +12,7 @@ use super::graph::{
     BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBitFlow,
     RegionBoundaryPort, RegionBoundaryPortId, RegionGraphOwnerId, RegionPortDirection,
     RegionRevision, RegionRowId, SynthesisRegion, SynthesisRegionGraph, SynthesisRegionKind,
-    SynthesisRegionRevision, packed_rows, remap_optional_owner_rows, remap_owner_rows,
+    SynthesisRegionRevision, packed_rows, remap_optional_owner_rows,
 };
 use crate::word::signal_driver::SignalDriverIndex;
 use opto_ir::word;
@@ -1097,8 +1097,12 @@ fn append_memory_regions(
     module: &word::WordModule,
     regions: &mut Vec<TempRegion>,
 ) -> Result<(), crate::SynthError> {
+    let observability = crate::word::uses::netlist_observability(module)?;
     for (index, memory) in module.memories().iter().enumerate() {
         let memory_id = word::MemoryId::from_index(index).map_err(crate::SynthError::from)?;
+        if !observability.observes_memory(memory_id)? {
+            continue;
+        }
         let port_work = module
             .memory_read_ports()
             .iter()
@@ -1138,11 +1142,9 @@ fn memory_signal_owners(
 ) -> Result<BTreeMap<word::SignalId, usize>, crate::SynthError> {
     let mut owners = BTreeMap::new();
     for port in module.memory_read_ports() {
-        let owner = memory_owner
-            .get(port.memory.index())
-            .copied()
-            .flatten()
-            .ok_or_else(|| crate::SynthError::invariant("memory read has no region owner"))?;
+        let Some(owner) = memory_owner.get(port.memory.index()).copied().flatten() else {
+            continue;
+        };
         if owners.insert(port.data, owner).is_some() {
             return Err(crate::SynthError::invariant(
                 "memory read signal has more than one producer region",
@@ -1172,15 +1174,17 @@ fn build_edges(
         }
     }
     for read in module.memory_read_ports() {
-        let sink = memory_owner[read.memory.index()]
-            .ok_or_else(|| crate::SynthError::invariant("memory read has no region owner"))?;
+        let Some(sink) = memory_owner[read.memory.index()] else {
+            continue;
+        };
         for value in memory_read_inputs(read) {
             connectivity.append_input_edge(value, sink, &mut edges, &mut bit_flows)?;
         }
     }
     for write in module.memory_write_ports() {
-        let sink = memory_owner[write.memory.index()]
-            .ok_or_else(|| crate::SynthError::invariant("memory write has no region owner"))?;
+        let Some(sink) = memory_owner[write.memory.index()] else {
+            continue;
+        };
         for value in memory_write_inputs(write) {
             connectivity.append_input_edge(value, sink, &mut edges, &mut bit_flows)?;
         }
@@ -1435,7 +1439,7 @@ fn canonicalize(
         old_to_new[old] = RegionRowId::from_index(row)?;
     }
     let operation_owners = remap_optional_owner_rows(operation_owners, &old_to_new);
-    let memory_owners = remap_owner_rows(memory_owners, &old_to_new, "Word memory")?;
+    let memory_owners = remap_optional_owner_rows(memory_owners, &old_to_new);
     let mut publication_bits = vec![Vec::new(); regions.len()];
     for flow in bit_flows {
         let producer = old_to_new[flow.source];

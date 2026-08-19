@@ -447,7 +447,7 @@ fn skips_dead_state_before_fsm_analysis() {
     let (mut module, state) = sparse_fsm(true);
     let connects = module.take_connects();
     for connect in connects {
-        if connect.target.signal == state {
+        if connect.target.signal != state {
             module
                 .connect(connect.target, connect.value, connect.source)
                 .unwrap();

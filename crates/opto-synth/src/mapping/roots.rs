@@ -281,7 +281,7 @@ pub(crate) fn mapping_roots(
     }
     for (connect_index, connect) in module.connects().iter().enumerate() {
         let is_live = observability.observes_connect(connect_index)?;
-        let is_root = observability.observes_root_connect(connect_index)?;
+        let is_publication = observability.observes_publication_connect(connect_index)?;
         if !is_live {
             continue;
         }
@@ -314,7 +314,7 @@ pub(crate) fn mapping_roots(
             roots.push(timed_root(enable.value, endpoint_required));
             continue;
         }
-        if !is_root {
+        if !is_publication {
             continue;
         }
         if let Some(dynamic) = connect.target.dynamic {
@@ -626,6 +626,64 @@ mod tests {
 
         assert!(roots.iter().any(|root| root.value == data));
         assert!(roots.iter().any(|root| root.value == enable));
+    }
+
+    #[test]
+    fn live_dynamic_internal_connect_projects_publication_roots() {
+        let mut module = WordModule::new("dynamic_connect_roots");
+        let bit = WordType::bits(1).unwrap();
+        let pair = WordType::bits(2).unwrap();
+        let inputs = ["data", "offset"].map(|name| {
+            module
+                .add_port(name, PortDirection::Input, bit, SourceSpan::default())
+                .unwrap()
+        });
+        let [data, offset] = inputs.map(|port| {
+            module
+                .read_signal(module.port(port).unwrap().signal, SourceSpan::default())
+                .unwrap()
+        });
+        let driven = module
+            .unary(word::UnaryOp::BitNot, data, SourceSpan::default())
+            .unwrap();
+        let internal = module
+            .add_wire("internal", pair, SourceSpan::default())
+            .unwrap();
+        module
+            .connect(
+                LValue::signal(internal).with_dynamic_range(offset, NonZeroU32::new(1).unwrap()),
+                driven,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let output = module
+            .add_port("q", PortDirection::Output, pair, SourceSpan::default())
+            .unwrap();
+        let internal = module.read_signal(internal, SourceSpan::default()).unwrap();
+        module
+            .connect(
+                LValue::signal(module.port(output).unwrap().signal),
+                internal,
+                SourceSpan::default(),
+            )
+            .unwrap();
+
+        let roots = mapping_roots(
+            &module,
+            &opto_timing::TimingContext::new(),
+            &opto_timing::PortBindings::new([]),
+            None,
+        )
+        .unwrap();
+
+        assert!(roots.iter().any(|root| root.value == driven));
+        assert!(roots.iter().any(|root| root.value == offset));
+        assert!(
+            FullDomainRootSemantics::new(&module)
+                .unwrap()
+                .requires_artifact(driven)
+                .unwrap()
+        );
     }
 
     #[test]

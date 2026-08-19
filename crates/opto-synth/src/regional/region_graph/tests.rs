@@ -739,6 +739,8 @@ fn memory_read_address_operations_have_a_region_owner() {
             source: test_span(),
         })
         .unwrap();
+    let observed = module.read_signal(read_data, test_span()).unwrap();
+    output(&mut module, "q", observed);
 
     let graph = SynthesisRegionGraph::build(&module).unwrap();
 
@@ -746,6 +748,47 @@ fn memory_read_address_operations_have_a_region_owner() {
         graph
             .operation_owner(operation(&module, translated_address))
             .is_some()
+    );
+}
+
+#[test]
+fn unobserved_memory_and_its_address_cone_have_no_region() {
+    let mut module = WordModule::new("dead_memory");
+    let address_type = WordType::bits(2).unwrap();
+    let address = input_with_type(&mut module, "address", address_type);
+    let translated_address = module
+        .binary(BinaryOp::Add, address, address, test_span())
+        .unwrap();
+    let memory = module
+        .add_memory(
+            "memory",
+            WordType::bits(1).unwrap(),
+            NonZeroU32::new(4).unwrap(),
+            test_span(),
+        )
+        .unwrap();
+    let read_data = module
+        .add_wire("read_data", WordType::bits(1).unwrap(), test_span())
+        .unwrap();
+    module
+        .add_memory_read_port(MemoryReadPort {
+            memory,
+            address: translated_address,
+            data: read_data,
+            timing: MemoryReadTiming::Asynchronous,
+            read_during_write: ReadDuringWrite::OldData,
+            source: test_span(),
+        })
+        .unwrap();
+
+    let graph = SynthesisRegionGraph::build(&module).unwrap();
+
+    assert!(graph.regions().is_empty());
+    assert_eq!(graph.memory_owner_rows(), &[None]);
+    assert!(
+        graph
+            .operation_owner(operation(&module, translated_address))
+            .is_none()
     );
 }
 

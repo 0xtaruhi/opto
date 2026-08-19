@@ -120,7 +120,7 @@ pub(crate) fn prepare_regional_architectures(
 ) -> Result<
     (
         Box<[RegionalArchitectureMapping]>,
-        Box<[MemoryImplementationCandidate]>,
+        Box<[Option<MemoryImplementationCandidate>]>,
     ),
     SynthError,
 > {
@@ -217,13 +217,7 @@ pub(crate) fn prepare_regional_architectures(
     }
     Ok((
         prepared_regions.into_boxed_slice(),
-        selected_memories
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                SynthError::invariant("first-class memory has no selected regional implementation")
-            })?
-            .into_boxed_slice(),
+        selected_memories.into_boxed_slice(),
     ))
 }
 
@@ -1063,7 +1057,7 @@ fn empty_target_plan(
 pub(crate) fn extend_operation_regions_for_memories(
     module: &word::WordModule,
     original: &[Option<RegionRowId>],
-    memory_regions: &[RegionRowId],
+    memory_regions: &[Option<RegionRowId>],
     memory_ownership: &crate::planning::memory::MemoryLoweringOwnership,
 ) -> Result<Vec<Option<RegionRowId>>, SynthError> {
     if original.len() > module.operations().len() {
@@ -1077,6 +1071,7 @@ pub(crate) fn extend_operation_regions_for_memories(
         let owner = memory_regions
             .get(memory.index())
             .copied()
+            .flatten()
             .ok_or_else(|| SynthError::invariant("lowered memory has no synthesis-region owner"))?;
         let slot = owners.get_mut(operation.index()).ok_or_else(|| {
             SynthError::invariant("lowered memory operation is outside the Word arena")
@@ -1099,6 +1094,7 @@ pub(crate) fn extend_operation_regions_for_memories(
         let owner = memory_regions
             .get(memory.index())
             .copied()
+            .flatten()
             .ok_or_else(|| SynthError::invariant("lowered memory has no synthesis-region owner"))?;
         let slot = owners.get_mut(operation.index()).ok_or_else(|| {
             SynthError::invariant("lowered memory state operation is outside the Word arena")

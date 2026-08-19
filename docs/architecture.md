@@ -685,19 +685,26 @@ model the external electrical environment of an `inout` port.
 Four-state `X` is the Word representation of a care-free SSA bit, not an early
 choice of Boolean zero. Fixed combinational dataflow supplies value facts in
 topological order; regional observability and cover propagate care from frozen
-roots over the reverse dependencies. A register or latch is not itself an
-observability root: state outside the port, preserved-object, retained-instance,
-and memory-control closure is dead and does not enter regional ownership.
-The `word::uses` observability closure is the sole definition of global SSA
-liveness. It classifies root signals, root connections, retained-instance and
-memory roots, and their complete reverse dependency closure in one snapshot.
+roots over the reverse dependencies. A register, latch, or memory is not itself
+an observability root: storage outside the port, preserved-object,
+retained-instance, explicit-value, and observable-memory-read closure is dead
+and does not enter regional ownership. The `word::uses` observability closure
+is the sole definition of global SSA liveness. It classifies root signals,
+externally rooted and region-publication connections, retained-instance values,
+observable memories and their port controls, and the complete reverse
+dependency closure in one snapshot.
 Regional reachability, FSM discovery, operator demand and sharing, sequential
 selection, mapping publication, and global bit lowering consume projections of
 that snapshot; those stages may add a local phase boundary or project a
 physical shell such as tri-state data and enable, but they must not rescan
 ports, connections, instances, memories, or state to seed another global root
 set. In particular, FSM discovery rejects dead state through this snapshot
-before bounded transition extraction or symbolic analysis begins.
+before bounded transition extraction or symbolic analysis begins. An internal
+dynamic connection reached by the closure is a publication connection because
+its target cannot be represented as one static driver edge. An internal memory
+becomes observable only when one of its read-data signals is reached; dead
+memories have no region owner or implementation decision and are erased when
+aggregate memory resources are lowered.
 Before global bit lowering changes state-boundary identities, the final region
 graph freezes each live sequential operation together with its region row. Bit
 lowering resolves that record once to the emitted scalar state operations;
@@ -731,7 +738,7 @@ not run here. After the owned structural stage,
 
 - stable operation, region-anchor, and region-revision identities;
 - dense revision-local `RegionRowId`;
-- exact member operations and first-class memories;
+- exact member operations and observable first-class memories;
 - typed input/output boundary ports with identities separate from value
   revisions;
 - predecessor/successor packed rows;

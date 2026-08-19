@@ -103,18 +103,6 @@ impl RegionRowId {
     }
 }
 
-pub(super) fn remap_owner_rows(
-    owners: Vec<Option<usize>>,
-    remap: &[RegionRowId],
-    resource: &'static str,
-) -> Result<Box<[RegionRowId]>, crate::SynthError> {
-    owners
-        .into_iter()
-        .map(|owner| owner.and_then(|owner| remap.get(owner).copied()))
-        .collect::<Option<Box<[_]>>>()
-        .ok_or_else(|| crate::SynthError::invariant(format!("{resource} has no region owner")))
-}
-
 pub(super) fn remap_optional_owner_rows(
     owners: Vec<Option<usize>>,
     remap: &[RegionRowId],
@@ -399,7 +387,7 @@ pub struct SynthesisRegionGraph {
     pub(super) operation_anchors: Box<[OperationAnchorId]>,
     pub(super) operation_owners: Box<[Option<RegionRowId>]>,
     pub(super) memories: opto_core::PackedRows<word::MemoryId>,
-    pub(super) memory_owners: Box<[RegionRowId]>,
+    pub(super) memory_owners: Box<[Option<RegionRowId>]>,
     pub(super) ports: Box<[RegionBoundaryPort]>,
     pub(super) input_ports: opto_core::PackedRows<RegionBoundaryPortId>,
     pub(super) output_ports: opto_core::PackedRows<RegionBoundaryPortId>,
@@ -488,7 +476,7 @@ impl SynthesisRegionGraph {
     }
 
     #[must_use]
-    pub(crate) fn memory_owner_rows(&self) -> &[RegionRowId] {
+    pub(crate) fn memory_owner_rows(&self) -> &[Option<RegionRowId>] {
         &self.memory_owners
     }
 
@@ -535,7 +523,7 @@ impl SynthesisRegionGraph {
         if self.operation_owners.len() != module.operations().len()
             || self.memory_owners.len() != module.memories().len()
             || self.operations.value_count() != self.operation_owners.iter().flatten().count()
-            || self.memories.value_count() != self.memory_owners.len()
+            || self.memories.value_count() != self.memory_owners.iter().flatten().count()
         {
             return Err(crate::SynthError::invariant(
                 "region reverse-owner columns do not match the Word arenas",
@@ -553,6 +541,7 @@ impl SynthesisRegionGraph {
                 self.memory_owners
                     .get(read.memory.index())
                     .copied()
+                    .flatten()
                     .map(|owner| (read.data, owner))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
@@ -631,7 +620,7 @@ impl SynthesisRegionGraph {
                 }
             }
             for &memory in self.memories(*region) {
-                if self.memory_owners.get(memory.index()) != Some(&region.row()) {
+                if self.memory_owners.get(memory.index()) != Some(&Some(region.row())) {
                     return Err(crate::SynthError::invariant(
                         "region memory CSR disagrees with its reverse-owner column",
                     ));
@@ -646,6 +635,7 @@ impl SynthesisRegionGraph {
             || self
                 .memory_owners
                 .iter()
+                .flatten()
                 .any(|owner| owner.index() >= self.regions.len())
         {
             return Err(crate::SynthError::invariant(
