@@ -279,7 +279,12 @@ pub(crate) fn mapping_roots(
             global_required,
         );
     }
-    for connect in module.connects() {
+    for (connect_index, connect) in module.connects().iter().enumerate() {
+        let is_live = observability.observes_connect(connect_index)?;
+        let is_root = observability.observes_root_connect(connect_index)?;
+        if !is_live {
+            continue;
+        }
         let endpoint = timing_port_for_signal(module, connect.target.signal, port_bindings);
         let endpoint_required = endpoint
             .and_then(|port| timing.minimum_max_delay_to(opto_timing::TimingEndpoint::Port(port)))
@@ -288,21 +293,40 @@ pub(crate) fn mapping_roots(
         let value = module.value(connect.value).ok_or_else(|| {
             crate::SynthError::invariant(format!("unknown RTL value {:?}", connect.value))
         })?;
-        if let word::ValueKind::Operation(operation_id) = value.kind {
-            let operation = module.operation(operation_id).ok_or_else(|| {
-                crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
-            })?;
-            if let word::OpKind::TriState { data, enable } = operation.kind {
-                roots.push(timed_root(data, endpoint_required));
-                roots.push(timed_root(enable.value, endpoint_required));
-                continue;
+        let operation = match value.kind {
+            word::ValueKind::Operation(operation_id) => {
+                Some(module.operation(operation_id).ok_or_else(|| {
+                    crate::SynthError::invariant(format!("unknown RTL operation {operation_id:?}"))
+                })?)
             }
-            if matches!(
+            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+        };
+        if let Some(operation) = operation
+            && let word::OpKind::TriState { data, enable } = operation.kind
+        {
+            roots.extend(
+                connect
+                    .target
+                    .dynamic
+                    .map(|dynamic| timed_root(dynamic.offset, endpoint_required)),
+            );
+            roots.push(timed_root(data, endpoint_required));
+            roots.push(timed_root(enable.value, endpoint_required));
+            continue;
+        }
+        if !is_root {
+            continue;
+        }
+        if let Some(dynamic) = connect.target.dynamic {
+            roots.push(timed_root(dynamic.offset, endpoint_required));
+        }
+        if operation.is_some_and(|operation| {
+            matches!(
                 operation.kind,
                 word::OpKind::Register(_) | word::OpKind::Latch(_)
-            ) {
-                continue;
-            }
+            )
+        }) {
+            continue;
         }
         roots.push(MappingRoot {
             value: connect.value,
@@ -311,13 +335,9 @@ pub(crate) fn mapping_roots(
             requires_combinational_cover: false,
         });
     }
-    for connection in module
-        .instances()
-        .iter()
-        .flat_map(|instance| &instance.connections)
-    {
+    for &value in observability.instance_root_values() {
         roots.extend(
-            scalar_value_parts(module, connection.value)?
+            scalar_value_parts(module, value)?
                 .into_iter()
                 .map(unconstrained_root),
         );
@@ -516,6 +536,16 @@ mod tests {
                 SourceSpan::default(),
             )
             .unwrap();
+        let dead = module
+            .unary(word::UnaryOp::BitNot, value, SourceSpan::default())
+            .unwrap();
+        let dead_signal = module
+            .add_wire("dead", WordType::bits(1).unwrap(), SourceSpan::default())
+            .unwrap();
+        let dead_connect = module.connects().len();
+        module
+            .connect(LValue::signal(dead_signal), dead, SourceSpan::default())
+            .unwrap();
 
         let input_port = opto_timing::PortId::from_uid(opto_core::ObjectUid::from_raw(2).unwrap());
         let output_port = opto_timing::PortId::from_uid(opto_core::ObjectUid::from_raw(3).unwrap());
@@ -535,6 +565,67 @@ mod tests {
         assert_eq!(roots[0].value, value);
         assert_eq!(roots[0].required_time, Some(0.8));
         assert_eq!(roots[0].output_load, Some(0.02));
+
+        let observability = crate::word::uses::netlist_observability(&module).unwrap();
+        assert!(!observability.observes_value(dead).unwrap());
+        assert!(!observability.observes_connect(dead_connect).unwrap());
+    }
+
+    #[test]
+    fn live_physical_tri_state_shell_projects_data_and_enable_roots() {
+        let mut module = WordModule::new("tri_state_roots");
+        let bit = WordType::bits(1).unwrap();
+        let inputs = ["data", "enable"].map(|name| {
+            module
+                .add_port(name, PortDirection::Input, bit, SourceSpan::default())
+                .unwrap()
+        });
+        let [data, enable] = inputs.map(|port| {
+            module
+                .read_signal(module.port(port).unwrap().signal, SourceSpan::default())
+                .unwrap()
+        });
+        let resolved = module
+            .add_wire("resolved", bit, SourceSpan::default())
+            .unwrap();
+        module
+            .set_signal_resolution(resolved, word::SignalResolution::TriState)
+            .unwrap();
+        let driver = module
+            .tri_state(
+                data,
+                word::Enable {
+                    value: enable,
+                    active_high: true,
+                },
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(LValue::signal(resolved), driver, SourceSpan::default())
+            .unwrap();
+        let resolved = module.read_signal(resolved, SourceSpan::default()).unwrap();
+        let output = module
+            .add_port("y", PortDirection::Output, bit, SourceSpan::default())
+            .unwrap();
+        module
+            .connect(
+                LValue::signal(module.port(output).unwrap().signal),
+                resolved,
+                SourceSpan::default(),
+            )
+            .unwrap();
+
+        let roots = mapping_roots(
+            &module,
+            &opto_timing::TimingContext::new(),
+            &opto_timing::PortBindings::new([]),
+            None,
+        )
+        .unwrap();
+
+        assert!(roots.iter().any(|root| root.value == data));
+        assert!(roots.iter().any(|root| root.value == enable));
     }
 
     #[test]

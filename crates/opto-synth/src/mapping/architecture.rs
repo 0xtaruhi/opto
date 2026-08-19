@@ -297,73 +297,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
         }
     }
 
-    fn value_is_region_sink(&self, value: word::ValueId, region: SynthesisRegion) -> bool {
-        self.request.source.connects().iter().any(|connect| {
-            let is_observable_connect = self
-                .request
-                .source
-                .signal_is_preserved(connect.target.signal)
-                || self
-                    .request
-                    .source
-                    .signal(connect.target.signal)
-                    .is_some_and(|signal| {
-                        let word::SignalKind::Port(port) = signal.kind else {
-                            return false;
-                        };
-                        self.request.source.port(port).is_some_and(|port| {
-                            matches!(
-                                port.direction,
-                                word::PortDirection::Output | word::PortDirection::Inout
-                            )
-                        })
-                    });
-            if connect.value == value && is_observable_connect {
-                return true;
-            }
-            let Some(word::ValueKind::Operation(operation)) = self
-                .request
-                .source
-                .value(connect.value)
-                .map(|stored| &stored.kind)
-            else {
-                return false;
-            };
-            self.request
-                .source
-                .operation(*operation)
-                .is_some_and(|operation| {
-                    matches!(
-                        operation.kind,
-                        word::OpKind::TriState { data, enable }
-                            if data == value || enable.value == value
-                    )
-                })
-        }) || self
-            .request
-            .source
-            .instances()
-            .iter()
-            .flat_map(|instance| &instance.connections)
-            .any(|connection| connection.value == value)
-            || self
-                .request
-                .regions
-                .operations(region)
-                .iter()
-                .any(|&operation| {
-                    self.request
-                        .source
-                        .operation(operation)
-                        .is_some_and(|operation| {
-                            matches!(
-                                operation.kind,
-                                word::OpKind::Register(_) | word::OpKind::Latch(_)
-                            ) && crate::word::operation_inputs(&operation.kind).contains(&value)
-                        })
-                })
-    }
-
     fn materialize(
         &self,
         memory_implementations: &[MemoryImplementationCandidate],
@@ -492,19 +425,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
         let owned_memory_logic = owned_memory_logic.into_vec();
         let memory_states = memory_states.into_vec();
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
-        let mut local_decisions =
-            ArchitectureDecisions::for_private_region(&module, implementation_providers().into())?;
-        local_decisions.select_for_budget(
-            self.request.target_model,
-            self.request.contracts.delay_budget(region.row()),
-        )?;
-        let (architecture, operators) = self.prepare_operators(
-            region,
-            &module,
-            &local_decisions,
-            &operation_sources,
-            &source_to_local,
-        )?;
         let local_root_values = root_pairs
             .iter()
             .map(|(_, local)| *local)
@@ -519,6 +439,22 @@ impl RegionArchitectureMaterializer<'_, '_> {
             .collect::<Vec<_>>();
         tracked_values.sort_unstable();
         tracked_values.dedup();
+        let mut local_decisions = ArchitectureDecisions::for_private_region(
+            &module,
+            &tracked_values,
+            implementation_providers().into(),
+        )?;
+        local_decisions.select_for_budget(
+            self.request.target_model,
+            self.request.contracts.delay_budget(region.row()),
+        )?;
+        let (architecture, operators) = self.prepare_operators(
+            region,
+            &module,
+            &local_decisions,
+            &operation_sources,
+            &source_to_local,
+        )?;
         let profiling = self.request.mapping_context.config.diagnostics.timing;
         let row = region.row().raw();
         let lowering = {
@@ -670,9 +606,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
         let mut regional_observations = Vec::new();
         let mut regional_roots = Vec::new();
         for &root in self.roots {
-            if !self.value_is_region_sink(root.value, region) {
-                continue;
-            }
             let mut producers = std::collections::BTreeSet::new();
             for value in canonical_root_producers(self.request.source, self.semantics, root.value)?
             {

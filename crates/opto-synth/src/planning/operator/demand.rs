@@ -15,8 +15,11 @@ pub(super) struct ObservableBits {
 }
 
 impl ObservableBits {
-    pub(super) fn analyze(module: &word::WordModule) -> Result<Self, crate::SynthError> {
-        DemandAnalysis::new(module)?.run()
+    pub(super) fn analyze_with_values(
+        module: &word::WordModule,
+        observed_values: &[word::ValueId],
+    ) -> Result<Self, crate::SynthError> {
+        DemandAnalysis::new(module)?.run(observed_values)
     }
 
     pub(super) fn required_prefix(&self, value: word::ValueId) -> u32 {
@@ -54,22 +57,13 @@ impl<'a> DemandAnalysis<'a> {
         })
     }
 
-    fn run(mut self) -> Result<ObservableBits, crate::SynthError> {
-        for port in self.module.ports() {
-            if matches!(
-                port.direction,
-                word::PortDirection::Output | word::PortDirection::Inout
-            ) {
-                self.require_signal(port.signal, port.ty.width())?;
-            }
-        }
-        for value in self
-            .module
-            .instances()
-            .iter()
-            .flat_map(|instance| &instance.connections)
-            .map(|connection| connection.value)
-        {
+    fn run(
+        mut self,
+        observed_values: &[word::ValueId],
+    ) -> Result<ObservableBits, crate::SynthError> {
+        let observability =
+            crate::word::uses::netlist_observability_with_values(self.module, observed_values)?;
+        for &value in observability.root_values() {
             self.require_value_full(value)?;
         }
 
@@ -427,7 +421,7 @@ mod tests {
             )
             .unwrap();
 
-        let observable = ObservableBits::analyze(&module).unwrap();
+        let observable = ObservableBits::analyze_with_values(&module, &[]).unwrap();
 
         assert_eq!(observable.required_prefix(sum), 7);
     }
@@ -486,7 +480,7 @@ mod tests {
             )
             .unwrap();
 
-        let observable = ObservableBits::analyze(&module).unwrap();
+        let observable = ObservableBits::analyze_with_values(&module, &[]).unwrap();
 
         assert_eq!(observable.required_prefix(sum), 11);
     }

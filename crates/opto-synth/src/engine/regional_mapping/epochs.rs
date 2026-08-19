@@ -183,7 +183,10 @@ impl RegionalMapper<'_> {
             state.rows.iter().map(|row| &row.binding),
         )
         .into_vec();
-        observed_values.extend(materialize::sequential_binding_values(state.module)?);
+        observed_values.extend(materialize::sequential_binding_values(
+            state.module,
+            state.sequential_operations,
+        )?);
         observed_values.extend(
             boundary_values
                 .iter()
@@ -241,7 +244,7 @@ impl RegionalMapper<'_> {
             state.module,
             &mapped.signals,
             self.regions,
-            state.region_ownership,
+            state.sequential_operations,
             &self.config,
         )?;
         let rows = (0..state.rows.len()).collect::<Vec<_>>();

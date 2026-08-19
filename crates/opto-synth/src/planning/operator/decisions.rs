@@ -34,6 +34,7 @@ impl ArchitectureDecisions {
     pub(crate) fn for_module(module: &word::WordModule) -> Result<Self, crate::SynthError> {
         Self::for_private_region(
             module,
+            &[],
             crate::boolean::bitblast::implementation_providers().into(),
         )
     }
@@ -42,6 +43,7 @@ impl ArchitectureDecisions {
     pub(crate) fn for_unfused_module(module: &word::WordModule) -> Result<Self, crate::SynthError> {
         Self::build(
             module,
+            &[],
             false,
             crate::boolean::bitblast::implementation_providers().into(),
         )
@@ -49,20 +51,23 @@ impl ArchitectureDecisions {
 
     pub(crate) fn for_private_region(
         module: &word::WordModule,
+        observed_values: &[word::ValueId],
         providers: Box<[&'static dyn ImplementationProvider]>,
     ) -> Result<Self, crate::SynthError> {
-        Self::build(module, true, providers)
+        Self::build(module, observed_values, true, providers)
     }
 
     fn build(
         module: &word::WordModule,
+        observed_values: &[word::ValueId],
         fuse_arithmetic: bool,
         providers: Box<[&'static dyn ImplementationProvider]>,
     ) -> Result<Self, crate::SynthError> {
-        let observable = ObservableBits::analyze(module)?;
+        let observable = ObservableBits::analyze_with_values(module, observed_values)?;
         let catalog = Arc::new(OperatorCatalog::for_module(
             module,
             &observable,
+            observed_values,
             fuse_arithmetic,
             providers,
         )?);

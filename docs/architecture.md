@@ -685,12 +685,29 @@ model the external electrical environment of an `inout` port.
 Four-state `X` is the Word representation of a care-free SSA bit, not an early
 choice of Boolean zero. Fixed combinational dataflow supplies value facts in
 topological order; regional observability and cover propagate care from frozen
-roots over the reverse dependencies. Rewrites use sparse dependency worklists
-when a changed fact can affect another result. Registers, latches, and memories
-are explicit boundaries, and source combinational cycles are diagnosed instead
-of being treated as a fixed-point optimization problem. Deterministic zero is
-chosen for a remaining care-free bit only when the final physical netlist is
-published.
+roots over the reverse dependencies. A register or latch is not itself an
+observability root: state outside the port, preserved-object, retained-instance,
+and memory-control closure is dead and does not enter regional ownership.
+The `word::uses` observability closure is the sole definition of global SSA
+liveness. It classifies root signals, root connections, retained-instance and
+memory roots, and their complete reverse dependency closure in one snapshot.
+Regional reachability, FSM discovery, operator demand and sharing, sequential
+selection, mapping publication, and global bit lowering consume projections of
+that snapshot; those stages may add a local phase boundary or project a
+physical shell such as tri-state data and enable, but they must not rescan
+ports, connections, instances, memories, or state to seed another global root
+set. In particular, FSM discovery rejects dead state through this snapshot
+before bounded transition extraction or symbolic analysis begins.
+Before global bit lowering changes state-boundary identities, the final region
+graph freezes each live sequential operation together with its region row. Bit
+lowering resolves that record once to the emitted scalar state operations;
+substrate observation and sequential-cell materialization consume the resolved
+records and never rediscover liveness or ownership from the mutated Word graph.
+Rewrites use sparse dependency worklists when a changed fact can affect another
+result. Registers, latches, and memories are explicit boundaries, and source
+combinational cycles are diagnosed instead of being treated as a fixed-point
+optimization problem. Deterministic zero is chosen for a remaining care-free
+bit only when the final physical netlist is published.
 
 Failures carry the structured diagnostic contract defined above, including the
 Tcl invocation that triggered the work when available. A raw failure string
@@ -724,8 +741,8 @@ not run here. After the owned structural stage,
 `StructuralOwnershipProvenance` is the write authority during structural
 preparation. Initial operations carry their frozen owner atom; every transform
 must claim each generated operation from an exact source set with one common
-atom. The final graph independently recomputes the complete synthesis-root
-closure, rejects an unowned live operation, and verifies that every surviving
+atom. The final graph consumes the shared observability closure, rejects an
+unowned live operation, and verifies that every surviving
 frozen atom remains whole. Final partitioning may merge whole atoms but may not
 split one. Ownership is not a preparation-side lookup that later partitioning
 may discard: it survives operation replacement, final partition, private-IR

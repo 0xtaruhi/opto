@@ -34,22 +34,18 @@ impl SequentialTimingProjection {
         sequential: &SequentialCellCatalog,
         combinational: &crate::mapping::library::CombinationalCellCatalog,
     ) -> Result<Self, crate::SynthError> {
-        let live = crate::mapping::word_util::live_operation_mask(module, &[])?;
-        let mut rows = module
-            .operations()
-            .iter()
-            .enumerate()
-            .filter(|&(index, _)| live[index])
-            .filter_map(|(_, operation)| match &operation.kind {
-                word::OpKind::Register(register) => Some((operation.result, register)),
-                _ => None,
-            })
-            .map(|(result, register)| {
-                sequential
-                    .select_register(module, register, combinational)
-                    .map(|selected| (result, selected.timing()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let observability = crate::word::uses::netlist_observability(module)?;
+        let mut rows = Vec::new();
+        for operation in module.operations() {
+            let word::OpKind::Register(register) = &operation.kind else {
+                continue;
+            };
+            if !observability.observes_value(operation.result)? {
+                continue;
+            }
+            let selected = sequential.select_register(module, register, combinational)?;
+            rows.push((operation.result, selected.timing()));
+        }
         rows.sort_unstable_by_key(|&(value, _)| value);
         Ok(Self {
             rows: rows.into_boxed_slice(),

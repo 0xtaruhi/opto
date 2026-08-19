@@ -443,6 +443,23 @@ fn merges_states_with_equal_observations_and_successor_classes() {
 }
 
 #[test]
+fn skips_dead_state_before_fsm_analysis() {
+    let (mut module, state) = sparse_fsm(true);
+    let connects = module.take_connects();
+    for connect in connects {
+        if connect.target.signal == state {
+            module
+                .connect(connect.target, connect.value, connect.source)
+                .unwrap();
+        }
+    }
+
+    let catalog = derive_catalog(&module, crate::test_runtime()).unwrap();
+
+    assert!(catalog.machines.is_empty());
+}
+
+#[test]
 fn keeps_lookalike_states_when_successor_classes_differ() {
     let mut module = mergeable_fsm(true);
     let catalog = derive_catalog(&module, crate::test_runtime()).unwrap();

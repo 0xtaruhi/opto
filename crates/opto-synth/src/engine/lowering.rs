@@ -105,6 +105,14 @@ pub(super) fn lower_logic(
     }
     regional_binding_values.sort_unstable();
     regional_binding_values.dedup();
+    let source_sequential_operations =
+        crate::mapping::materialize::frozen_sequential_operations(&source, &operation_regions)?;
+    regional_binding_values.extend(crate::mapping::materialize::sequential_binding_values(
+        &source,
+        &source_sequential_operations,
+    )?);
+    regional_binding_values.sort_unstable();
+    regional_binding_values.dedup();
     let operator_manifest = crate::OperatorManifest::capture(
         prepared_regions.iter().map(|prepared| &prepared.operators),
     )?;
@@ -137,6 +145,11 @@ pub(super) fn lower_logic(
         )?;
         Ok::<_, crate::SynthError>((provenance, ownership, regional_plans))
     }?;
+    let sequential_operations = crate::mapping::materialize::lowered_sequential_operations(
+        &source,
+        &region_ownership,
+        &source_sequential_operations,
+    )?;
     {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.binding_materialization".to_string()
@@ -158,6 +171,7 @@ pub(super) fn lower_logic(
         region_ownership,
         contracts,
         regional_plans: regional_plans.into_boxed_slice(),
+        sequential_operations,
         synthesized: source,
         provenance,
         operator_manifest,

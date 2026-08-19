@@ -552,8 +552,8 @@ fn state_fanout_consumers_share_one_downstream_region() {
 }
 
 #[test]
-fn star_fragments_are_absorbed_without_mutual_nomination() {
-    let mut module = WordModule::new("state_star");
+fn dead_state_cones_do_not_enter_the_region_graph() {
+    let mut module = WordModule::new("dead_state");
     let data = input(&mut module, "d");
     let clock = input(&mut module, "clk");
     let shared = module.unary(UnaryOp::BitNot, data, test_span()).unwrap();
@@ -573,14 +573,9 @@ fn star_fragments_are_absorbed_without_mutual_nomination() {
             .unwrap();
     }
 
-    let graph = super::partition::build(
-        &module,
-        RegionPartitionPolicy::with_work_limits(1, 8, 16, 64),
-    )
-    .unwrap();
+    let graph = super::partition::build(&module, RegionPartitionPolicy::default()).unwrap();
 
-    assert_eq!(graph.regions().len(), 1);
-    assert_eq!(graph.operations(graph.regions()[0]).len(), 13);
+    assert!(graph.regions().is_empty());
 }
 
 #[test]
@@ -673,12 +668,31 @@ fn unreachable_operations_have_no_region_owner() {
     let dead = module
         .binary(BinaryOp::BitAnd, input, input, test_span())
         .unwrap();
+    let dead_offset = module
+        .binary(BinaryOp::Add, input, input, test_span())
+        .unwrap();
+    let dead_signal = module
+        .add_wire("dead_dynamic", WordType::bits(2).unwrap(), test_span())
+        .unwrap();
+    module
+        .connect(
+            LValue::signal(dead_signal)
+                .with_dynamic_range(dead_offset, NonZeroU32::new(1).unwrap()),
+            input,
+            test_span(),
+        )
+        .unwrap();
     output(&mut module, "y", live);
 
     let graph = SynthesisRegionGraph::build(&module).unwrap();
 
     assert!(graph.operation_owner(operation(&module, live)).is_some());
     assert!(graph.operation_owner(operation(&module, dead)).is_none());
+    assert!(
+        graph
+            .operation_owner(operation(&module, dead_offset))
+            .is_none()
+    );
     assert_eq!(
         graph
             .regions()
