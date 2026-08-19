@@ -240,7 +240,15 @@ acquires sink provenance merely because a repair crosses a boundary.
 
 Semantic operators also have a distinct durable database representation.
 Region-private recognition interns complete, versioned semantic signatures and
-records each occurrence by `OperationAnchorId` and source-operation provenance.
+records many-to-many source-operation provenance independently from occurrence
+identity. `OperatorOccurrenceId` hashes the semantic signature, the complete
+sorted set of stable source-operation anchors, and a deterministic same-key
+ordinal. Source spans are diagnostics only and never infer ownership or
+provenance. This keeps one explicit provenance relation while allowing one
+source operation to contribute to multiple generated semantic operators. The
+operator-occurrence identity change increments the synthesis-cache ABI, so a
+checkpoint produced with the former anchor semantics is rejected rather than
+reinterpreted.
 The technology-independent Word and operator representations remain the normal
 input to architecture selection; target lowering expands the chosen recipe and
 Liberty covering produces the only publishable mapped netlist.
@@ -636,8 +644,12 @@ care-free; two-state zero is the language-domain value. An instance retained by
 `dont_touch`, `keep_hierarchy`, or black-box status instead preserves the absent
 binding as part of its structural interface. After procedures and resolved nets
 are lowered, otherwise-undefined bits of source-observable output ports are
-sealed with the same type-correct completion rule. This step does not add
-drivers to missing internal or generated logic.
+sealed with the same type-correct completion rule. The same sealing boundary
+completes holes in a partially driven internal single-driver aggregate, so a
+whole-value SSA read cannot make unused packed-layout padding look like a
+missing producer. Wholly undriven internals remain invalid; signals with a
+dynamic target, resolved nets, ports, and generated logic are never completed
+by this rule.
 
 Built-in `and`, `or`, `xor`, `nand`, `nor`, `xnor`, `buf`, and `not` instances
 lower to ordinary structural Word operations. `pullup` and `pulldown` lower to

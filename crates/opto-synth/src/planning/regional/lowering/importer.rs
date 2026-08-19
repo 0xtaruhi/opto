@@ -6,6 +6,12 @@
 use super::{BTreeMap, RegionalWordImporter, word};
 
 #[derive(Debug, Clone, Copy)]
+enum OperandImport {
+    Whole,
+    Bits,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct ScaledDynamicExtractBit {
     value: word::ValueId,
     selector: word::ValueId,
@@ -535,7 +541,9 @@ impl RegionalWordImporter<'_> {
                 offset,
                 width,
             } => {
-                if let Some(offset) = self.known_u32(offset) {
+                if let Some(offset) =
+                    crate::word::known_u32(self.source, &mut self.known_bits, offset)
+                {
                     let selected = offset.checked_add(bit).ok_or_else(|| {
                         crate::SynthError::invariant("active dynamic extract bit offset overflow")
                     })?;
@@ -548,8 +556,12 @@ impl RegionalWordImporter<'_> {
                     } else {
                         self.constant_bit(false, span)
                     }
-                } else if let Some((selector, scale, maximum_selector)) =
-                    self.scaled_dynamic_offset(offset)
+                } else if let Some(crate::word::ScaledDynamicOffset {
+                    selector,
+                    scale,
+                    maximum_selector,
+                }) =
+                    crate::word::scaled_dynamic_offset(self.source, &mut self.known_bits, offset)
                 {
                     self.import_scaled_dynamic_extract_bit(
                         ScaledDynamicExtractBit {
@@ -563,65 +575,14 @@ impl RegionalWordImporter<'_> {
                         span,
                     )
                 } else {
-                    Err(crate::SynthError::invariant(
-                        "active region-local recursion reached a variable dynamic extract",
-                    ))
+                    self.import_variable_dynamic_extract_bit(value, offset, width.get(), bit, span)
                 }
             }
-            _ => Err(crate::SynthError::invariant(
-                "active region-local recursion reached a non-bitwise operation",
-            )),
-        }
-    }
-
-    fn known_u32(&self, value: word::ValueId) -> Option<u32> {
-        let width = self.source.value(value)?.ty.width();
-        let mut known_bits = word::KnownBitsAnalysis::new(self.source);
-        let mut result = 0u32;
-        for index in 0..width {
-            match known_bits.bit(self.source, value, index) {
-                word::KnownBit::Zero => {}
-                word::KnownBit::One if index < u32::BITS => result |= 1u32 << index,
-                word::KnownBit::One | word::KnownBit::Unknown => return None,
+            operation => {
+                let local = self.import_operation_kind(&operation, span, OperandImport::Bits)?;
+                self.extract_local_bit(local, bit, span)
             }
         }
-        Some(result)
-    }
-
-    fn scaled_dynamic_offset(&self, offset: word::ValueId) -> Option<(word::ValueId, u128, u128)> {
-        let stored = self.source.value(offset)?;
-        let word::ValueKind::Operation(operation) = stored.kind else {
-            return None;
-        };
-        let word::OpKind::Binary {
-            op: word::BinaryOp::Mul,
-            left,
-            right,
-        } = self.source.operation(operation)?.kind
-        else {
-            return None;
-        };
-        let (selector, scale) = match (self.known_u32(left), self.known_u32(right)) {
-            (Some(scale), None) if scale != 0 => (right, u128::from(scale)),
-            (None, Some(scale)) if scale != 0 => (left, u128::from(scale)),
-            _ => return None,
-        };
-        let selector_ty = self.source_value_type(selector).ok()?;
-        if selector_ty.is_signed() || selector_ty.width() >= u128::BITS {
-            return None;
-        }
-        let mut known_bits = word::KnownBitsAnalysis::new(self.source);
-        let mut maximum_selector = 0u128;
-        for index in 0..selector_ty.width() {
-            if known_bits.bit(self.source, selector, index) != word::KnownBit::Zero {
-                maximum_selector |= 1u128 << index;
-            }
-        }
-        let maximum_product = maximum_selector.checked_mul(scale)?;
-        if stored.ty.width() < u128::BITS && maximum_product >= (1u128 << stored.ty.width()) {
-            return None;
-        }
-        Some((selector, scale, maximum_selector))
     }
 
     fn import_scaled_dynamic_extract_bit(
@@ -649,24 +610,22 @@ impl RegionalWordImporter<'_> {
             let offset = choice.checked_mul(scale).ok_or_else(|| {
                 crate::SynthError::invariant("scaled dynamic extract offset overflow")
             })?;
-            let selected = if offset
-                .checked_add(u128::from(width))
-                .is_some_and(|end| end <= u128::from(input_width))
-            {
-                let selected = offset.checked_add(u128::from(bit)).ok_or_else(|| {
-                    crate::SynthError::invariant("scaled dynamic extract selected bit overflow")
-                })?;
-                self.import_value_bit(
-                    value,
-                    u32::try_from(selected).map_err(|_| {
-                        crate::SynthError::capacity("scaled dynamic extract selected bit")
-                    })?,
-                    span,
-                )?
-            } else {
-                self.constant_bit(false, span)?
-            };
-            let choice = self.unsigned_constant(choice, selector_ty, span)?;
+            let selected = offset.checked_add(u128::from(bit)).ok_or_else(|| {
+                crate::SynthError::invariant("scaled dynamic extract selected bit overflow")
+            })?;
+            let selected = self.import_value_bit(
+                value,
+                u32::try_from(selected).map_err(|_| {
+                    crate::SynthError::capacity("scaled dynamic extract selected bit")
+                })?,
+                span,
+            )?;
+            let choice = crate::word::unsigned_constant(
+                &mut self.module,
+                choice,
+                selector_ty,
+                span.clone(),
+            )?;
             let matches = self
                 .module
                 .binary(word::BinaryOp::Eq, selector, choice, span.clone())
@@ -681,29 +640,52 @@ impl RegionalWordImporter<'_> {
         Ok(result)
     }
 
-    fn unsigned_constant(
+    fn import_variable_dynamic_extract_bit(
         &mut self,
-        value: u128,
-        ty: word::WordType,
+        value: word::ValueId,
+        offset: word::ValueId,
+        width: u32,
+        bit: u32,
         span: &word::SourceSpan,
     ) -> Result<word::ValueId, crate::SynthError> {
-        let bits = (0..ty.width())
-            .rev()
-            .map(|bit| {
-                if value & (1u128 << bit) == 0 {
-                    opto_ir::BitVal::Zero
-                } else {
-                    opto_ir::BitVal::One
-                }
-            })
-            .collect();
-        self.module
-            .constant(
-                opto_ir::ConstBits::from_bits(bits).map_err(crate::SynthError::from)?,
-                ty,
-                span.clone(),
-            )
-            .map_err(crate::SynthError::from)
+        let offset_ty = self.source_value_type(offset)?;
+        let range = self
+            .unsigned_values
+            .range(self.source, offset)
+            .ok_or_else(|| {
+                crate::SynthError::invariant("dynamic extract offset has no unsigned range")
+            })?;
+        let offset = self.import_active_value(offset, offset_ty, span)?;
+        let input_width = self.source_value_type(value)?.width();
+        let available_offsets = input_width.checked_sub(width).ok_or_else(|| {
+            crate::SynthError::invariant("dynamic extract width exceeds its input")
+        })?;
+        let first = range.minimum();
+        let last = range.maximum().min(u128::from(available_offsets));
+        let mut result = self.constant_bit(false, span)?;
+        if first > last {
+            return Ok(result);
+        }
+        for choice in (first..=last).rev() {
+            let selected = choice
+                .checked_add(u128::from(bit))
+                .and_then(|selected| u32::try_from(selected).ok())
+                .ok_or_else(|| crate::SynthError::capacity("dynamic extract selected bit"))?;
+            let selected = self.import_value_bit(value, selected, span)?;
+            let choice =
+                crate::word::unsigned_constant(&mut self.module, choice, offset_ty, span.clone())?;
+            let matches = self
+                .module
+                .binary(word::BinaryOp::Eq, offset, choice, span.clone())
+                .map_err(crate::SynthError::from)?;
+            self.record_generated_operation(matches)?;
+            result = self
+                .module
+                .mux(matches, selected, result, span.clone())
+                .map_err(crate::SynthError::from)?;
+            self.record_generated_operation(result)?;
+        }
+        Ok(result)
     }
 
     fn import_extended_value_bit(
@@ -935,107 +917,11 @@ impl RegionalWordImporter<'_> {
     }
 
     fn import_operation(&mut self, source: word::OpId) -> Result<word::ValueId, crate::SynthError> {
-        let operation = self.source.operation(source).ok_or_else(|| {
+        let operation = self.source.operation(source).cloned().ok_or_else(|| {
             crate::SynthError::invariant("region-local Word import reached an unknown operation")
         })?;
         let span = operation.source.clone();
-        let local = match &operation.kind {
-            word::OpKind::Unary { op, arg } => {
-                let arg = self.import(*arg)?;
-                self.module.unary(*op, arg, span)
-            }
-            word::OpKind::Binary { op, left, right } => {
-                let left = self.import(*left)?;
-                let right = self.import(*right)?;
-                self.module.binary(*op, left, right, span)
-            }
-            word::OpKind::Mux {
-                cond,
-                then_value,
-                else_value,
-            } => {
-                let cond = self.import(*cond)?;
-                let then_value = self.import(*then_value)?;
-                let else_value = self.import(*else_value)?;
-                self.module.mux(cond, then_value, else_value, span)
-            }
-            word::OpKind::TriState { data, enable } => {
-                let data = self.import(*data)?;
-                let enable = self.import_enable(*enable)?;
-                self.module.tri_state(data, enable, span)
-            }
-            word::OpKind::Concat { parts } => {
-                let parts = parts
-                    .iter()
-                    .map(|&part| self.import(part))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.module.concat(parts, span)
-            }
-            word::OpKind::Extract { value, lsb, width } => {
-                let value = self.import(*value)?;
-                self.module.extract(value, *lsb, width.get(), span)
-            }
-            word::OpKind::DynamicExtract {
-                value,
-                offset,
-                width,
-            } => {
-                let value = self.import(*value)?;
-                let offset = self.import(*offset)?;
-                self.module
-                    .dynamic_extract(value, offset, width.get(), span)
-            }
-            word::OpKind::DynamicInsert {
-                value,
-                offset,
-                replacement,
-            } => {
-                let value = self.import(*value)?;
-                let offset = self.import(*offset)?;
-                let replacement = self.import(*replacement)?;
-                self.module.dynamic_insert(value, offset, replacement, span)
-            }
-            word::OpKind::Cast {
-                kind,
-                value,
-                target,
-            } => {
-                let value = self.import(*value)?;
-                self.module.cast(*kind, value, *target, span)
-            }
-            word::OpKind::Register(register) => {
-                let register = word::RegisterOp {
-                    name: None,
-                    d: self.import(register.d)?,
-                    clock: self.import(register.clock)?,
-                    edge: register.edge,
-                    enable: register
-                        .enable
-                        .map(|enable| self.import_enable(enable))
-                        .transpose()?,
-                    resets: register
-                        .resets
-                        .iter()
-                        .map(|&reset| self.import_reset(reset))
-                        .collect::<Result<Vec<_>, _>>()?,
-                };
-                self.module.register(register, span)
-            }
-            word::OpKind::Latch(latch) => {
-                let latch = word::LatchOp {
-                    name: None,
-                    d: self.import(latch.d)?,
-                    enable: self.import_enable(latch.enable)?,
-                    resets: latch
-                        .resets
-                        .iter()
-                        .map(|&reset| self.import_reset(reset))
-                        .collect::<Result<Vec<_>, _>>()?,
-                };
-                self.module.latch(latch, span)
-            }
-        }
-        .map_err(crate::SynthError::from)?;
+        let local = self.import_operation_kind(&operation.kind, &span, OperandImport::Whole)?;
         let word::ValueKind::Operation(local_operation) = self
             .module
             .value(local)
@@ -1050,28 +936,165 @@ impl RegionalWordImporter<'_> {
                 "region-local operation builder returned a non-operation value",
             ));
         };
-        if local_operation.index() != self.operation_sources.len() {
-            return Err(crate::SynthError::invariant(
-                "region-local operation source rows are not dense",
-            ));
-        }
-        self.operation_sources.push(Some(source));
+        let provenance = self
+            .operation_sources
+            .get_mut(local_operation.index())
+            .ok_or_else(|| {
+                crate::SynthError::invariant("region-local operation source rows are not dense")
+            })?;
+        *provenance = Some(source);
         Ok(local)
     }
 
+    fn import_operation_kind(
+        &mut self,
+        operation: &word::OpKind,
+        span: &word::SourceSpan,
+        operands: OperandImport,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let local = match operation {
+            word::OpKind::Unary { op, arg } => {
+                let arg = self.import_operand(*arg, span, operands)?;
+                self.module.unary(*op, arg, span.clone())
+            }
+            word::OpKind::Binary { op, left, right } => {
+                let left = self.import_operand(*left, span, operands)?;
+                let right = self.import_operand(*right, span, operands)?;
+                self.module.binary(*op, left, right, span.clone())
+            }
+            word::OpKind::Mux {
+                cond,
+                then_value,
+                else_value,
+            } => {
+                let cond = self.import_operand(*cond, span, operands)?;
+                let then_value = self.import_operand(*then_value, span, operands)?;
+                let else_value = self.import_operand(*else_value, span, operands)?;
+                self.module.mux(cond, then_value, else_value, span.clone())
+            }
+            word::OpKind::TriState { data, enable } => {
+                let data = self.import_operand(*data, span, operands)?;
+                let enable = self.import_enable_with(*enable, span, operands)?;
+                self.module.tri_state(data, enable, span.clone())
+            }
+            word::OpKind::Concat { parts } => {
+                let parts = parts
+                    .iter()
+                    .map(|&part| self.import_operand(part, span, operands))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.module.concat(parts, span.clone())
+            }
+            word::OpKind::Extract { value, lsb, width } => {
+                let value = self.import_operand(*value, span, operands)?;
+                self.module.extract(value, *lsb, width.get(), span.clone())
+            }
+            word::OpKind::DynamicExtract {
+                value,
+                offset,
+                width,
+            } => {
+                let value = self.import_operand(*value, span, operands)?;
+                let offset = self.import_operand(*offset, span, operands)?;
+                self.module
+                    .dynamic_extract(value, offset, width.get(), span.clone())
+            }
+            word::OpKind::DynamicInsert {
+                value,
+                offset,
+                replacement,
+            } => {
+                let value = self.import_operand(*value, span, operands)?;
+                let offset = self.import_operand(*offset, span, operands)?;
+                let replacement = self.import_operand(*replacement, span, operands)?;
+                self.module
+                    .dynamic_insert(value, offset, replacement, span.clone())
+            }
+            word::OpKind::Cast {
+                kind,
+                value,
+                target,
+            } => {
+                let value = self.import_operand(*value, span, operands)?;
+                self.module.cast(*kind, value, *target, span.clone())
+            }
+            word::OpKind::Register(register) => {
+                let register = word::RegisterOp {
+                    name: None,
+                    d: self.import_operand(register.d, span, operands)?,
+                    clock: self.import_operand(register.clock, span, operands)?,
+                    edge: register.edge,
+                    enable: register
+                        .enable
+                        .map(|enable| self.import_enable_with(enable, span, operands))
+                        .transpose()?,
+                    resets: register
+                        .resets
+                        .iter()
+                        .map(|&reset| self.import_reset_with(reset, span, operands))
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                self.module.register(register, span.clone())
+            }
+            word::OpKind::Latch(latch) => {
+                let latch = word::LatchOp {
+                    name: None,
+                    d: self.import_operand(latch.d, span, operands)?,
+                    enable: self.import_enable_with(latch.enable, span, operands)?,
+                    resets: latch
+                        .resets
+                        .iter()
+                        .map(|&reset| self.import_reset_with(reset, span, operands))
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                self.module.latch(latch, span.clone())
+            }
+        }
+        .map_err(crate::SynthError::from)?;
+        self.record_generated_operation(local)?;
+        Ok(local)
+    }
+
+    fn import_operand(
+        &mut self,
+        source: word::ValueId,
+        span: &word::SourceSpan,
+        operands: OperandImport,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        match operands {
+            OperandImport::Whole => self.import(source),
+            OperandImport::Bits => {
+                self.import_active_value(source, self.source_value_type(source)?, span)
+            }
+        }
+    }
+
     fn import_enable(&mut self, enable: word::Enable) -> Result<word::Enable, crate::SynthError> {
+        self.import_enable_with(enable, &word::SourceSpan::default(), OperandImport::Whole)
+    }
+
+    fn import_enable_with(
+        &mut self,
+        enable: word::Enable,
+        span: &word::SourceSpan,
+        operands: OperandImport,
+    ) -> Result<word::Enable, crate::SynthError> {
         Ok(word::Enable {
-            value: self.import(enable.value)?,
+            value: self.import_operand(enable.value, span, operands)?,
             active_high: enable.active_high,
         })
     }
 
-    fn import_reset(&mut self, reset: word::Reset) -> Result<word::Reset, crate::SynthError> {
+    fn import_reset_with(
+        &mut self,
+        reset: word::Reset,
+        span: &word::SourceSpan,
+        operands: OperandImport,
+    ) -> Result<word::Reset, crate::SynthError> {
         Ok(word::Reset {
             kind: reset.kind,
-            value: self.import(reset.value)?,
+            value: self.import_operand(reset.value, span, operands)?,
             active_high: reset.active_high,
-            reset_value: self.import(reset.reset_value)?,
+            reset_value: self.import_operand(reset.reset_value, span, operands)?,
         })
     }
 }

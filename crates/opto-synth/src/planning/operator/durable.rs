@@ -13,6 +13,18 @@ use std::collections::BTreeMap;
 const MISSING_OPERATOR: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Stable identity of one semantic operator occurrence.
+pub struct OperatorOccurrenceId([u8; 32]);
+
+impl OperatorOccurrenceId {
+    /// Return the canonical occurrence digest.
+    #[must_use]
+    pub const fn bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 /// Content-derived identity of one complete operator semantic signature.
 pub struct OperatorSignatureId([u8; 32]);
 
@@ -184,7 +196,7 @@ fn valid_dynamic_extract(shape: &DynamicExtractShape, signature: &OperatorSignat
 /// One durable operator occurrence with separate semantics and provenance.
 pub struct PreservedOperatorInstance {
     operator: OperatorId,
-    anchor: OperationAnchorId,
+    occurrence: OperatorOccurrenceId,
     signature: OperatorSignatureId,
     operands: Box<[word::ValueId]>,
     result: word::ValueId,
@@ -198,10 +210,10 @@ impl PreservedOperatorInstance {
         self.operator
     }
 
-    /// Return the stable source occurrence identity.
+    /// Return the stable semantic occurrence identity.
     #[must_use]
-    pub const fn anchor(&self) -> OperationAnchorId {
-        self.anchor
+    pub const fn occurrence(&self) -> OperatorOccurrenceId {
+        self.occurrence
     }
 
     /// Return the shared semantic signature identity.
@@ -247,7 +259,7 @@ pub struct OperatorManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// One operator occurrence retained by the synthesis database.
 pub struct OperatorManifestInstance {
-    anchor: OperationAnchorId,
+    occurrence: OperatorOccurrenceId,
     signature: OperatorSignatureId,
     source_operations: Box<[word::OpId]>,
 }
@@ -277,7 +289,7 @@ impl OperatorManifest {
         let instances = arenas
             .flat_map(DurableOperatorArena::instances)
             .map(|instance| OperatorManifestInstance {
-                anchor: instance.anchor(),
+                occurrence: instance.occurrence(),
                 signature: instance.signature(),
                 source_operations: instance.source_operations().into(),
             })
@@ -321,29 +333,36 @@ impl OperatorManifest {
             .iter()
             .map(OperatorManifestInstance::signature)
             .collect::<std::collections::BTreeSet<_>>();
-        let anchors = self
+        if used_signatures != signatures {
+            return Err(crate::SynthError::invariant(
+                "operator manifest retains a signature without an occurrence",
+            ));
+        }
+        let occurrences = self
             .instances
             .iter()
-            .map(OperatorManifestInstance::anchor)
+            .map(OperatorManifestInstance::occurrence)
             .collect::<std::collections::BTreeSet<_>>();
-        let mut source_operations = std::collections::BTreeSet::new();
-        if used_signatures != signatures
-            || anchors.len() != self.instances.len()
-            || self.instances.iter().any(|instance| {
-                instance.source_operations.is_empty()
-                    || !instance
-                        .source_operations
-                        .windows(2)
-                        .all(|pair| pair[0] < pair[1])
-                    || instance
-                        .source_operations
-                        .iter()
-                        .any(|&operation| !source_operations.insert(operation))
-            })
-        {
+        if occurrences.len() != self.instances.len() {
             return Err(crate::SynthError::invariant(
-                "operator manifest has invalid occurrence identities",
+                "operator manifest contains duplicate occurrence identities",
             ));
+        }
+        for instance in &self.instances {
+            if instance.source_operations.is_empty() {
+                return Err(crate::SynthError::invariant(
+                    "operator manifest occurrence has no source operation",
+                ));
+            }
+            if !instance
+                .source_operations
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            {
+                return Err(crate::SynthError::invariant(
+                    "operator manifest occurrence source operations are not unique and ordered",
+                ));
+            }
         }
         Ok(())
     }
@@ -419,10 +438,10 @@ impl OperatorManifest {
 }
 
 impl OperatorManifestInstance {
-    /// Return the stable source occurrence identity.
+    /// Return the stable semantic occurrence identity.
     #[must_use]
-    pub const fn anchor(&self) -> OperationAnchorId {
-        self.anchor
+    pub const fn occurrence(&self) -> OperatorOccurrenceId {
+        self.occurrence
     }
 
     /// Return the complete semantic-signature identity.
@@ -447,6 +466,7 @@ impl DurableOperatorArena {
     ) -> Result<Self, crate::SynthError> {
         let mut signatures = BTreeMap::new();
         let mut instances = Vec::with_capacity(decisions.operators().len());
+        let mut occurrence_ordinals = BTreeMap::new();
         for (semantic, source_operations) in decisions.operators().iter().zip(source_operations) {
             let operands = decisions.operator_inputs(*semantic).collect::<Vec<_>>();
             let input_types = operands
@@ -488,12 +508,30 @@ impl DurableOperatorArena {
                 }
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
-            let primary_source = *source_operations.first().ok_or_else(|| {
-                crate::SynthError::invariant("durable operator has no source occurrence")
+            if source_operations.is_empty() {
+                return Err(crate::SynthError::invariant(
+                    "durable operator has no source occurrence",
+                ));
+            }
+            let mut source_anchors = source_operations
+                .iter()
+                .copied()
+                .map(&mut operation_anchor)
+                .collect::<Result<Vec<_>, _>>()?;
+            source_anchors.sort_unstable();
+            let occurrence_key = (signature.id, source_anchors.into_boxed_slice());
+            let ordinal = occurrence_ordinals
+                .entry(occurrence_key.clone())
+                .or_insert(0u32);
+            let occurrence = occurrence_id(signature.id, &occurrence_key.1, *ordinal)?;
+            *ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                crate::SynthError::capacity(
+                    "same-source operator occurrence ordinal exceeds 32 bits",
+                )
             })?;
             instances.push(PreservedOperatorInstance {
                 operator: semantic.id(),
-                anchor: operation_anchor(primary_source)?,
+                occurrence,
                 signature: signature.id,
                 operands: operands.into_boxed_slice(),
                 result: semantic.result(),
@@ -650,6 +688,24 @@ fn signature_id(signature: &OperatorSignature) -> Result<OperatorSignatureId, cr
     Ok(OperatorSignatureId(*digest.finalize().as_bytes()))
 }
 
+fn occurrence_id(
+    signature: OperatorSignatureId,
+    sources: &[OperationAnchorId],
+    ordinal: u32,
+) -> Result<OperatorOccurrenceId, crate::SynthError> {
+    let source_count = u64::try_from(sources.len())
+        .map_err(|_| crate::SynthError::capacity("operator provenance count exceeds 64 bits"))?;
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"opto/operator-occurrence/v1\0");
+    digest.update(&signature.bytes());
+    digest.update(&source_count.to_le_bytes());
+    for source in sources {
+        digest.update(&source.bytes());
+    }
+    digest.update(&ordinal.to_le_bytes());
+    Ok(OperatorOccurrenceId(*digest.finalize().as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,5 +730,45 @@ mod tests {
         signature.shape = OperatorShape::Division;
         signature.id = signature_id(&signature).unwrap();
         assert!(signature.validate_checkpoint().is_err());
+    }
+
+    #[test]
+    fn manifest_accepts_many_to_many_source_provenance() {
+        let ty = word::WordType::bits(8).unwrap();
+        let mut signature = OperatorSignature {
+            id: OperatorSignatureId([0; 32]),
+            kind: OperatorKind::Multiply,
+            input_types: Box::new([ty, ty]),
+            result_type: ty,
+            implementation_width: 8,
+            shape: OperatorShape::Arithmetic,
+        };
+        signature.id = signature_id(&signature).unwrap();
+        let first_source = OperationAnchorId::from_bytes_for_test([1; 32]);
+        let second_source = OperationAnchorId::from_bytes_for_test([2; 32]);
+        let first_operation = word::OpId::from_index(0).unwrap();
+        let second_operation = word::OpId::from_index(1).unwrap();
+        let manifest = OperatorManifest {
+            signatures: Box::new([signature.clone()]),
+            instances: Box::new([
+                OperatorManifestInstance {
+                    occurrence: occurrence_id(signature.id, &[first_source], 0).unwrap(),
+                    signature: signature.id,
+                    source_operations: Box::new([first_operation]),
+                },
+                OperatorManifestInstance {
+                    occurrence: occurrence_id(signature.id, &[first_source, second_source], 0)
+                        .unwrap(),
+                    signature: signature.id,
+                    source_operations: Box::new([first_operation, second_operation]),
+                },
+            ]),
+        };
+
+        manifest.validate_checkpoint().unwrap();
+        assert_ne!(
+            manifest.instances[0].occurrence(),
+            manifest.instances[1].occurrence()
+        );
     }
 }

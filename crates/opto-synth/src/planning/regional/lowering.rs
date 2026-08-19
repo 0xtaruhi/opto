@@ -83,6 +83,8 @@ impl RegionalWordCone {
             imported_bits: BTreeMap::new(),
             boundary_signals: BTreeMap::new(),
             boundary_port_signals: BTreeMap::new(),
+            known_bits: word::KnownBitsAnalysis::new(source),
+            unsigned_values: word::UnsignedValueAnalysis::new(source),
         };
         importer.import_memories(memories)?;
         let observations = observations.into_iter().collect::<BTreeSet<_>>();
@@ -207,6 +209,8 @@ struct RegionalWordImporter<'a> {
     imported_bits: BTreeMap<(word::ValueId, u32), word::ValueId>,
     boundary_signals: BTreeMap<word::SignalRef, (word::WordType, word::ValueId)>,
     boundary_port_signals: BTreeMap<word::SignalId, word::SignalId>,
+    known_bits: word::KnownBitsAnalysis,
+    unsigned_values: word::UnsignedValueAnalysis,
 }
 
 #[cfg(test)]
@@ -961,6 +965,82 @@ mod tests {
             boundary_bindings
                 .iter()
                 .all(|&(source, _)| source != assembled && source != root)
+        );
+    }
+
+    #[test]
+    fn reconstructs_comparison_operands_across_disjoint_packed_fields() {
+        let mut source = word::WordModule::new("packed_comparison");
+        let bit = word::WordType::bits(1).unwrap();
+        let pair = word::WordType::bits(2).unwrap();
+        let address_port = source
+            .add_port(
+                "address",
+                word::PortDirection::Input,
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let request = source
+            .add_wire("request", pair, word::SourceSpan::default())
+            .unwrap();
+        let old_address = source
+            .read_signal_slice(request, 0, 1, word::SourceSpan::default())
+            .unwrap();
+        let zero = source
+            .constant(
+                opto_ir::ConstBits::from_bin_str("0").unwrap(),
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let flag = source
+            .binary(
+                word::BinaryOp::Eq,
+                old_address,
+                zero,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let new_address = source
+            .read_signal(
+                source.port(address_port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let assembled = source
+            .concat(vec![flag, new_address], word::SourceSpan::default())
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(request),
+                assembled,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let root = source
+            .read_signal_slice(request, 1, 1, word::SourceSpan::default())
+            .unwrap();
+        let row = crate::RegionRowId::from_index(0).unwrap();
+
+        crate::word::cycle::validate_combinational_acyclic(&source).unwrap();
+        let cone = RegionalWordCone::build(RegionalWordConeRequest {
+            source: &source,
+            operation_regions: &[Some(row), Some(row)],
+            region: row,
+            memories: &[],
+            memory_implementations: &[],
+            target_cells: &opto_library::TargetCellSet::default(),
+            observations: vec![],
+            roots: vec![root],
+        })
+        .unwrap();
+
+        assert!(cone.source_to_local.contains_key(&root));
+        assert!(
+            cone.boundary_bindings
+                .iter()
+                .all(|&(source, _)| source != flag && source != assembled && source != root)
         );
     }
 

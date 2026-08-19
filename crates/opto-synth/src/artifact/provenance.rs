@@ -112,20 +112,12 @@ pub(crate) fn resolve_private_operator_sources(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
-    let mut source_by_identity =
-        std::collections::BTreeMap::<word::SourceIdentity, Vec<word::OpId>>::new();
     for &operation_id in &owned_operations {
-        let operation = source.operation(operation_id).ok_or_else(|| {
+        source.operation(operation_id).ok_or_else(|| {
             crate::SynthError::invariant(
                 "private architecture owner references an unknown source operation",
             )
         })?;
-        if let Some(identity) = operation.source.identity() {
-            source_by_identity
-                .entry(identity)
-                .or_default()
-                .push(operation_id);
-        }
     }
     decisions
         .operators()
@@ -147,12 +139,6 @@ pub(crate) fn resolve_private_operator_sources(
                         "private architecture references an unknown local operation",
                     )
                 })?;
-                if let Some(identity) = operation.source.identity()
-                    && let Some(matches) = source_by_identity.get(&identity)
-                {
-                    sources.extend(matches);
-                    continue;
-                }
                 pending.extend(
                     crate::word::operation_inputs(&operation.kind)
                         .iter()
@@ -788,6 +774,78 @@ mod tests {
             assert_eq!(region.source_inputs(), operator.inputs());
             assert_eq!(region.source_operations(), [operator.source_operation()]);
         }
+    }
+
+    #[test]
+    fn resolves_generated_operators_only_through_explicit_provenance() {
+        fn input(module: &mut WordModule, name: &str, ty: WordType) -> word::ValueId {
+            let port = module
+                .add_port(name, PortDirection::Input, ty, test_span())
+                .unwrap();
+            module
+                .read_signal(module.port(port).unwrap().signal, test_span())
+                .unwrap()
+        }
+
+        fn operation(module: &WordModule, value: word::ValueId) -> word::OpId {
+            match module.value(value).unwrap().kind {
+                word::ValueKind::Operation(operation) => operation,
+                word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => unreachable!(),
+            }
+        }
+
+        let ty = WordType::bits(8).unwrap();
+        let mut source = WordModule::new("source");
+        let source_inputs = ["a", "b", "c", "d"].map(|name| input(&mut source, name, ty));
+        let represented_value = source
+            .binary(
+                BinaryOp::Mul,
+                source_inputs[0],
+                source_inputs[1],
+                test_span(),
+            )
+            .unwrap();
+        let unrelated_value = source
+            .binary(
+                BinaryOp::Mul,
+                source_inputs[2],
+                source_inputs[3],
+                test_span(),
+            )
+            .unwrap();
+        let represented = operation(&source, represented_value);
+        let unrelated = operation(&source, unrelated_value);
+
+        let mut local = WordModule::new("local");
+        let local_inputs = ["a", "b", "c"].map(|name| input(&mut local, name, ty));
+        let copied = local
+            .binary(BinaryOp::Mul, local_inputs[0], local_inputs[1], test_span())
+            .unwrap();
+        let generated = local
+            .binary(BinaryOp::Add, copied, local_inputs[2], test_span())
+            .unwrap();
+        let output = local
+            .add_port("y", PortDirection::Output, ty, test_span())
+            .unwrap();
+        local
+            .connect(
+                LValue::signal(local.port(output).unwrap().signal),
+                generated,
+                test_span(),
+            )
+            .unwrap();
+
+        let decisions = ArchitectureDecisions::for_module(&local).unwrap();
+        let sources = resolve_private_operator_sources(
+            &source,
+            &local,
+            &decisions,
+            &[represented, unrelated],
+            &[Some(represented), None],
+        )
+        .unwrap();
+
+        assert_eq!(sources.as_ref(), &[Box::from([represented])]);
     }
 
     #[test]

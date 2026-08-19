@@ -71,6 +71,21 @@ impl Assignment {
             .map_or("<unnamed>", |name| module.name_str(name))
     }
 
+    pub(super) fn target_description(&self, module: &word::WordModule) -> String {
+        let name = self.target_name(module);
+        if let Some(range) = self.target.range {
+            if range.width() == 1 {
+                format!("{name}[{}]", range.lsb)
+            } else {
+                format!("{name}[{}:{}]", range.msb, range.lsb)
+            }
+        } else if let Some(dynamic) = self.target.dynamic {
+            format!("{name}[<dynamic> +: {}]", dynamic.width)
+        } else {
+            name.to_owned()
+        }
+    }
+
     pub(super) fn holds_on(&self, event: proc::EventId) -> bool {
         self.held_events.contains(&event)
     }

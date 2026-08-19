@@ -1225,6 +1225,103 @@ fn dynamic_target_uses_the_latest_blocking_base() {
 }
 
 #[test]
+fn bounded_dynamic_target_does_not_claim_disjoint_signal_bits() {
+    let mut module = WordModule::new("bounded_dynamic_target");
+    let lower_port = module
+        .add_port(
+            "lower",
+            PortDirection::Input,
+            WordType::bits(4).unwrap(),
+            span(),
+        )
+        .unwrap();
+    let output_port = module
+        .add_port(
+            "y",
+            PortDirection::Output,
+            WordType::bits(8).unwrap(),
+            span(),
+        )
+        .unwrap();
+    let lower_signal = module.port(lower_port).unwrap().signal;
+    let output_signal = module.port(output_port).unwrap().signal;
+    let lower_value = read(&mut module, lower_signal);
+    module
+        .connect(
+            word::LValue::signal(output_signal).with_range(word::BitRange { msb: 3, lsb: 0 }),
+            lower_value,
+            span(),
+        )
+        .unwrap();
+    let selector_signal = input(&mut module, "selector");
+    let enable_signal = input(&mut module, "enable");
+    let data_signal = input(&mut module, "data");
+    let selector = read(&mut module, selector_signal);
+    let enable = read(&mut module, enable_signal);
+    let data = read(&mut module, data_signal);
+    let offset_base = module
+        .constant(
+            ConstBits::from_bin_str("10").unwrap(),
+            WordType::bits(2).unwrap(),
+            span(),
+        )
+        .unwrap();
+    let offset = module.concat(vec![offset_base, selector], span()).unwrap();
+    let upper_default = module
+        .constant(
+            ConstBits::from_bin_str("0000").unwrap(),
+            WordType::bits(4).unwrap(),
+            span(),
+        )
+        .unwrap();
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_combinational_procedure(ProcedureKind::Combinational, span())
+        .unwrap();
+    let entry = cfg.add_block(procedure, span()).unwrap();
+    let update = cfg.add_block(procedure, span()).unwrap();
+    let bypass = cfg.add_block(procedure, span()).unwrap();
+    let exit = cfg.add_block(procedure, span()).unwrap();
+    cfg.assign(
+        entry,
+        AssignmentMode::Blocking,
+        ProcTarget::signal(output_signal).with_select(proc::TargetSelect::Static(word::BitRange {
+            msb: 7,
+            lsb: 4,
+        })),
+        upper_default,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_branch(entry, enable, update, bypass, span())
+        .unwrap();
+    cfg.assign(
+        update,
+        AssignmentMode::Blocking,
+        ProcTarget::signal(output_signal).with_select(proc::TargetSelect::Dynamic {
+            offset,
+            width: NonZeroU32::MIN,
+        }),
+        data,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(update, exit, span()).unwrap();
+    cfg.terminate_jump(bypass, exit, span()).unwrap();
+    cfg.terminate_return(exit, span()).unwrap();
+
+    let lowered = lower(module, cfg).unwrap();
+    assert!(lowered.connects().iter().any(|connect| {
+        connect.target.signal == output_signal
+            && matches!(connect.target.range, Some(range) if range.lsb == 0 && range.msb == 3)
+    }));
+    assert!(lowered.connects().iter().any(|connect| {
+        connect.target.signal == output_signal
+            && matches!(connect.target.range, Some(range) if range.lsb == 4 && range.msb == 7)
+    }));
+}
+
+#[test]
 fn signed_whole_assignment_splits_into_unsigned_partial_state() {
     let mut module = WordModule::new("top");
     let signed = WordType::new(4, true, word::LogicStateKind::FourState).unwrap();

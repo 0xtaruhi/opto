@@ -48,6 +48,7 @@ impl<'a> ProcedureNormalizer<'a> {
             edge_guards,
             rewrite_scratch,
             constant_analysis,
+            range_analysis,
             incomplete_comb,
         } = input;
         let procedure = procedures
@@ -115,6 +116,7 @@ impl<'a> ProcedureNormalizer<'a> {
             reads,
             rewrite_scratch,
             constant_analysis,
+            range_analysis,
             predicates,
             event_controls,
             decision_choices: BTreeMap::new(),
@@ -399,6 +401,18 @@ impl<'a> ProcedureNormalizer<'a> {
         value: word::ValueId,
         source: &word::SourceSpan,
     ) -> Result<(), crate::SynthError> {
+        let dynamic_bounds = match select {
+            proc::TargetSelect::Dynamic { offset, width } => self
+                .range_analysis
+                .range(self.module, offset)
+                .and_then(|range| {
+                    range
+                        .maximum()
+                        .checked_add(u128::from(width.get()))
+                        .map(|end| (range.minimum(), end))
+                }),
+            proc::TargetSelect::Whole | proc::TargetSelect::Static(_) => None,
+        };
         let updated = if let proc::TargetSelect::Dynamic { offset, .. } = select {
             let original = self
                 .module
@@ -491,7 +505,12 @@ impl<'a> ProcedureNormalizer<'a> {
                         "dynamic procedural target produced no inserted value",
                     )
                 })?;
-                for &key in keys {
+                for &key in keys.iter().filter(|key| {
+                    dynamic_bounds.is_none_or(|(start, end)| {
+                        u128::from(key.lsb) < end
+                            && u128::from(key.lsb) + u128::from(key.width) > start
+                    })
+                }) {
                     let value =
                         extract_assignment(self.module, updated, key.lsb, key.width, source)?;
                     self.states
