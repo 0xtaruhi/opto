@@ -53,6 +53,7 @@ pub(crate) fn validate_combinational_acyclic(
 ) -> Result<(), crate::SynthError> {
     let drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
     let mut known_bits = word::KnownBitsAnalysis::new(module);
+    let mut unsigned_values = word::UnsignedValueAnalysis::new(module);
     let mut state = HashMap::<ValueSlice, u8>::new();
     let mut stack = Vec::<WalkFrame>::new();
     for index in 0..module.values().len() {
@@ -65,6 +66,7 @@ pub(crate) fn validate_combinational_acyclic(
             module,
             &drivers,
             &mut known_bits,
+            &mut unsigned_values,
             root,
             &mut state,
             &mut stack,
@@ -84,6 +86,7 @@ pub(crate) fn validate_combinational_acyclic(
                     module,
                     &drivers,
                     &mut known_bits,
+                    &mut unsigned_values,
                     dependency,
                     &mut state,
                     &mut stack,
@@ -141,6 +144,7 @@ fn push_frame(
     module: &word::WordModule,
     drivers: &crate::word::signal_driver::SignalDriverIndex,
     known_bits: &mut word::KnownBitsAnalysis,
+    unsigned_values: &mut word::UnsignedValueAnalysis,
     selection: ValueSlice,
     state: &mut HashMap<ValueSlice, u8>,
     stack: &mut Vec<WalkFrame>,
@@ -148,7 +152,7 @@ fn push_frame(
     state.insert(selection, 1);
     stack.push(WalkFrame {
         selection,
-        dependencies: dependencies(module, drivers, known_bits, selection)?,
+        dependencies: dependencies(module, drivers, known_bits, unsigned_values, selection)?,
         next: 0,
     });
     Ok(())
@@ -158,6 +162,7 @@ fn dependencies(
     module: &word::WordModule,
     drivers: &crate::word::signal_driver::SignalDriverIndex,
     known_bits: &mut word::KnownBitsAnalysis,
+    unsigned_values: &mut word::UnsignedValueAnalysis,
     selection: ValueSlice,
 ) -> Result<SmallVec<[ValueSlice; 4]>, crate::SynthError> {
     let stored = module.value(selection.value).ok_or_else(|| {
@@ -186,7 +191,13 @@ fn dependencies(
             ) {
                 SmallVec::new()
             } else {
-                operation_dependencies(module, known_bits, &operation.kind, selection)?
+                operation_dependencies(
+                    module,
+                    known_bits,
+                    unsigned_values,
+                    &operation.kind,
+                    selection,
+                )?
             }
         }
     })
@@ -228,6 +239,7 @@ fn signal_dependencies(
 fn operation_dependencies(
     module: &word::WordModule,
     known_bits: &mut word::KnownBitsAnalysis,
+    unsigned_values: &mut word::UnsignedValueAnalysis,
     operation: &word::OpKind,
     selection: ValueSlice,
 ) -> Result<SmallVec<[ValueSlice; 4]>, crate::SynthError> {
@@ -397,6 +409,31 @@ fn operation_dependencies(
                         selection.width,
                     )?;
                     selector += 1;
+                }
+            } else if let Some(range) = unsigned_values.range(module, *offset) {
+                push_full(module, &mut dependencies, *offset)?;
+                let input_width = value_width(module, *value)?;
+                let available_offsets = input_width.checked_sub(width.get()).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "dynamic extract dependency width exceeds its input",
+                    )
+                })?;
+                let first = range.minimum();
+                let last = range.maximum().min(u128::from(available_offsets));
+                if first <= last {
+                    let lsb = first
+                        .checked_add(u128::from(selection.lsb))
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            crate::SynthError::capacity("dynamic extract dependency offset")
+                        })?;
+                    let end = last
+                        .checked_add(u128::from(selection.end()?))
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            crate::SynthError::capacity("dynamic extract dependency end")
+                        })?;
+                    push_slice(module, &mut dependencies, *value, lsb, end - lsb)?;
                 }
             } else {
                 push_full(module, &mut dependencies, *value)?;

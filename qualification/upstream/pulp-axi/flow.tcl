@@ -9,26 +9,34 @@ foreach variable {PULP_AXI_ROOT PULP_AXI_MANIFEST PULP_AXI_TOP PULP_AXI_CHECK_RE
 
 set manifest [open $env(PULP_AXI_MANIFEST) r]
 set sources {}
+set common_cell_roots {}
 while {[gets $manifest line] >= 0} {
     set fields [split $line "\t"]
     if {[llength $fields] == 2 && ![string match "#*" $line]} {
-        lappend sources [file join $env(PULP_AXI_ROOT) [lindex $fields 0]]
+        set relative [lindex $fields 0]
+        lappend sources [file join $env(PULP_AXI_ROOT) $relative]
+        if {[string match \
+                ".bender/git/checkouts/common_cells-*/include/common_cells/*.svh" \
+                $relative]} {
+            lappend common_cell_roots \
+                [file dirname [file dirname [file dirname $relative]]]
+        }
     }
 }
 close $manifest
 
-set common_cells [glob -nocomplain -types d \
-    [file join $env(PULP_AXI_ROOT) .bender git checkouts common_cells-*]]
-if {[llength $common_cells] != 1} {
-    error "expected exactly one pinned common_cells Bender checkout"
+set common_cell_roots [lsort -unique $common_cell_roots]
+if {[llength $common_cell_roots] != 1} {
+    error "manifest must pin exactly one common_cells include root"
 }
+set common_cells [file join $env(PULP_AXI_ROOT) [lindex $common_cell_roots 0]]
 
 lappend sources [file join [file dirname [info script]] live_tops.sv]
 read_hdl \
     -define {SYNTHESIS COMMON_CELLS_ASSERTS_OFF} \
     -incdir [list \
         [file join $env(PULP_AXI_ROOT) include] \
-        [file join [lindex $common_cells 0] include]] \
+        [file join $common_cells include]] \
     $sources
 elaborate $env(PULP_AXI_TOP)
 check_design

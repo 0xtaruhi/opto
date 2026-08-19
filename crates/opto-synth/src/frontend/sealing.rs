@@ -110,6 +110,11 @@ pub(super) fn seal_observable_dont_cares(
         .map(|port| (port.signal, port.ty, port.source.clone()))
         .collect::<Vec<_>>();
     for (signal, ty, source) in outputs {
+        if *has_dynamic_target.get(signal.index()).ok_or_else(|| {
+            crate::SynthError::invariant("output port references an unknown signal")
+        })? {
+            continue;
+        }
         let row = driven.get(signal.index()).ok_or_else(|| {
             crate::SynthError::invariant("output port references an unknown signal")
         })?;
@@ -357,6 +362,53 @@ mod tests {
                 .filter(|connect| connect.target.signal == internal)
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn does_not_seal_output_ports_with_dynamic_targets() {
+        let mut module = word::WordModule::new("dynamic_output");
+        let output = module
+            .add_port(
+                "output",
+                word::PortDirection::Output,
+                word::WordType::bits(4).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let output = module.port(output).unwrap().signal;
+        let bit = module
+            .constant(
+                ConstBits::from_bits(vec![BitVal::One]).unwrap(),
+                word::WordType::bits(1).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let offset = module
+            .constant(
+                ConstBits::from_bits(vec![BitVal::Zero, BitVal::Zero]).unwrap(),
+                word::WordType::bits(2).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(output)
+                    .with_dynamic_range(offset, std::num::NonZeroU32::new(1).unwrap()),
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+
+        seal_observable_dont_cares(&mut module, &ReferencePortMap::new()).unwrap();
+
+        assert_eq!(
+            module
+                .connects()
+                .iter()
+                .filter(|connect| connect.target.signal == output)
+                .count(),
+            1
         );
     }
 }

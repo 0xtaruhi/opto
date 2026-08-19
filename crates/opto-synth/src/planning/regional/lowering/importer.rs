@@ -21,6 +21,18 @@ struct ScaledDynamicExtractBit {
     bit: u32,
 }
 
+fn dynamic_choice_bounds(
+    range: Option<word::UnsignedValueRange>,
+    available_offsets: u32,
+) -> (u128, u128) {
+    (
+        range.map_or(0, word::UnsignedValueRange::minimum),
+        range.map_or(u128::from(available_offsets), |range| {
+            range.maximum().min(u128::from(available_offsets))
+        }),
+    )
+}
+
 impl RegionalWordImporter<'_> {
     pub(super) fn import_memories(
         &mut self,
@@ -599,7 +611,7 @@ impl RegionalWordImporter<'_> {
             bit,
         } = selection;
         let selector_ty = self.source_value_type(selector)?;
-        let selector = self.import(selector)?;
+        let local_selector = self.import_dynamic_selector(selector, selector_ty, span)?;
         let input_width = self.source_value_type(value)?.width();
         let available_offsets = input_width.checked_sub(width).ok_or_else(|| {
             crate::SynthError::invariant("scaled dynamic extract width exceeds its input")
@@ -620,17 +632,13 @@ impl RegionalWordImporter<'_> {
                 })?,
                 span,
             )?;
-            let choice = crate::word::unsigned_constant(
-                &mut self.module,
+            let matches = self.import_dynamic_choice_match(
+                selector,
+                local_selector,
                 choice,
                 selector_ty,
-                span.clone(),
+                span,
             )?;
-            let matches = self
-                .module
-                .binary(word::BinaryOp::Eq, selector, choice, span.clone())
-                .map_err(crate::SynthError::from)?;
-            self.record_generated_operation(matches)?;
             result = self
                 .module
                 .mux(matches, selected, result, span.clone())
@@ -649,19 +657,13 @@ impl RegionalWordImporter<'_> {
         span: &word::SourceSpan,
     ) -> Result<word::ValueId, crate::SynthError> {
         let offset_ty = self.source_value_type(offset)?;
-        let range = self
-            .unsigned_values
-            .range(self.source, offset)
-            .ok_or_else(|| {
-                crate::SynthError::invariant("dynamic extract offset has no unsigned range")
-            })?;
-        let offset = self.import_active_value(offset, offset_ty, span)?;
+        let range = self.unsigned_values.range(self.source, offset);
+        let local_offset = self.import_dynamic_selector(offset, offset_ty, span)?;
         let input_width = self.source_value_type(value)?.width();
         let available_offsets = input_width.checked_sub(width).ok_or_else(|| {
             crate::SynthError::invariant("dynamic extract width exceeds its input")
         })?;
-        let first = range.minimum();
-        let last = range.maximum().min(u128::from(available_offsets));
+        let (first, last) = dynamic_choice_bounds(range, available_offsets);
         let mut result = self.constant_bit(false, span)?;
         if first > last {
             return Ok(result);
@@ -672,13 +674,8 @@ impl RegionalWordImporter<'_> {
                 .and_then(|selected| u32::try_from(selected).ok())
                 .ok_or_else(|| crate::SynthError::capacity("dynamic extract selected bit"))?;
             let selected = self.import_value_bit(value, selected, span)?;
-            let choice =
-                crate::word::unsigned_constant(&mut self.module, choice, offset_ty, span.clone())?;
-            let matches = self
-                .module
-                .binary(word::BinaryOp::Eq, offset, choice, span.clone())
-                .map_err(crate::SynthError::from)?;
-            self.record_generated_operation(matches)?;
+            let matches =
+                self.import_dynamic_choice_match(offset, local_offset, choice, offset_ty, span)?;
             result = self
                 .module
                 .mux(matches, selected, result, span.clone())
@@ -686,6 +683,42 @@ impl RegionalWordImporter<'_> {
             self.record_generated_operation(result)?;
         }
         Ok(result)
+    }
+
+    fn import_dynamic_selector(
+        &mut self,
+        source: word::ValueId,
+        ty: word::WordType,
+        span: &word::SourceSpan,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        if let Some(local) = self.dynamic_selectors.get(&source).copied() {
+            return Ok(local);
+        }
+        let local = self.import_active_value(source, ty, span)?;
+        self.dynamic_selectors.insert(source, local);
+        Ok(local)
+    }
+
+    fn import_dynamic_choice_match(
+        &mut self,
+        source: word::ValueId,
+        local: word::ValueId,
+        choice: u128,
+        ty: word::WordType,
+        span: &word::SourceSpan,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        if let Some(matches) = self.dynamic_choice_matches.get(&(source, choice)).copied() {
+            return Ok(matches);
+        }
+        let constant = crate::word::unsigned_constant(&mut self.module, choice, ty, span.clone())?;
+        let matches = self
+            .module
+            .binary(word::BinaryOp::Eq, local, constant, span.clone())
+            .map_err(crate::SynthError::from)?;
+        self.record_generated_operation(matches)?;
+        self.dynamic_choice_matches
+            .insert((source, choice), matches);
+        Ok(matches)
     }
 
     fn import_extended_value_bit(
@@ -1096,5 +1129,13 @@ impl RegionalWordImporter<'_> {
             active_high: reset.active_high,
             reset_value: self.import_operand(reset.reset_value, span, operands)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unbounded_dynamic_choice_covers_every_legal_offset() {
+        assert_eq!(super::dynamic_choice_bounds(None, 86), (0, 86));
     }
 }

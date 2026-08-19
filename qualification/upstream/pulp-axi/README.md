@@ -9,7 +9,7 @@ Solderpad Hardware License 0.51; the audited root `LICENSE` SHA-256 is
 `6527a46225891b976fa94f634f6ee0cd22e1c7129d6f11c5c98c997627625fc7`.
 No upstream source is copied into this repository.
 
-`manifest.tsv` pins all 60 production AXI source files and 109 required source
+`manifest.tsv` pins all 60 production AXI source files and 111 required source
 files from the Bender checkouts. The checkout used to establish the manifest
 has these dependency revisions:
 

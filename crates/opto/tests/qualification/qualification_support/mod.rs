@@ -547,6 +547,22 @@ fn validate_case(case: &Case) {
                 "upstream case has no manifest"
             );
             assert!(case.spec.script.is_some(), "upstream case has no script");
+            for name in [
+                case.spec.root_environment.as_deref(),
+                case.spec.manifest_environment.as_deref(),
+                case.spec.report_environment.as_deref(),
+                case.spec.config_environment.as_deref(),
+                case.spec.design_environment.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(
+                    portable_environment_name(name),
+                    "upstream case {} has invalid environment binding {name:?}",
+                    case.spec.id
+                );
+            }
             assert!(
                 case.spec.root_environment.is_some()
                     && case.spec.manifest_environment.is_some()
@@ -569,6 +585,14 @@ fn validate_case(case: &Case) {
             );
         }
     }
+}
+
+fn portable_environment_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn run_regression_case(
@@ -975,4 +999,17 @@ fn run_upstream_case(case: &Case, opto: &Path, output_root: &Path) -> ResultEntr
 
 fn run_qor_case(case: &Case, opto: &Path, yosys: &Path, output_root: &Path) -> ResultEntry {
     qor::run(case, opto, yosys, output_root)
+}
+
+#[cfg(test)]
+mod validation_tests {
+    #[test]
+    fn accepts_only_portable_environment_names() {
+        for valid in ["PULP_AXI_ROOT", "_QUALIFICATION", "A1"] {
+            assert!(super::portable_environment_name(valid));
+        }
+        for invalid in ["", "1ROOT", "PULP-AXI", "PULP AXI", "root.local"] {
+            assert!(!super::portable_environment_name(invalid));
+        }
+    }
 }
