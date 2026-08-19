@@ -36,6 +36,13 @@ pub(crate) struct PendingMappedSequential {
     cells: Box<[(TempCellId, MappedCellSource)]>,
 }
 
+/// One live state operation and its owner frozen before bit lowering.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FrozenSequentialOperation {
+    operation: word::OpId,
+    owner: crate::RegionRowId,
+}
+
 impl PendingMappedSequential {
     pub(crate) fn resolve(
         self,
@@ -57,15 +64,99 @@ impl PendingMappedSequential {
     }
 }
 
-/// Returns the exact lowered values the one-time substrate must resolve before
-/// [`MappedSequentialArtifact::from_module`] is called.
+/// Projects the frozen region-graph membership onto sequential operations
+/// before bit lowering changes the representation of state boundaries.
+pub(crate) fn frozen_sequential_operations(
+    module: &word::WordModule,
+    operation_regions: &[Option<crate::RegionRowId>],
+) -> Result<Box<[FrozenSequentialOperation]>, crate::SynthError> {
+    if operation_regions.len() != module.operations().len() {
+        return Err(crate::SynthError::invariant(
+            "frozen sequential projection does not cover the Word operation arena",
+        ));
+    }
+    let mut operations = Vec::new();
+    for (index, operation) in module.operations().iter().enumerate() {
+        if matches!(
+            operation.kind,
+            word::OpKind::Register(_) | word::OpKind::Latch(_)
+        ) && let Some(owner) = operation_regions[index]
+        {
+            operations.push(FrozenSequentialOperation {
+                operation: word::OpId::from_index(index).map_err(crate::SynthError::Word)?,
+                owner,
+            });
+        }
+    }
+    Ok(operations.into_boxed_slice())
+}
+
+/// Resolves frozen source state operations to the scalar state operations
+/// emitted by global bit lowering while preserving their frozen region owner.
+pub(crate) fn lowered_sequential_operations(
+    module: &word::WordModule,
+    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+    source_operations: &[FrozenSequentialOperation],
+) -> Result<Box<[FrozenSequentialOperation]>, crate::SynthError> {
+    let mut lowered = std::collections::BTreeMap::new();
+    for frozen in source_operations {
+        let source = module.operation(frozen.operation).ok_or_else(|| {
+            crate::SynthError::invariant("frozen source sequential operation disappeared")
+        })?;
+        let values = ownership.lowered_bits(source.result).ok_or_else(|| {
+            crate::SynthError::invariant(format!(
+                "frozen sequential operation {:?} has no lowered state values",
+                frozen.operation
+            ))
+        })?;
+        for &value in values {
+            let operation = module
+                .value(value)
+                .and_then(|value| match value.kind {
+                    word::ValueKind::Operation(operation) => Some(operation),
+                    word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+                })
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "lowered sequential state is not produced by an operation",
+                    )
+                })?;
+            let stored = module.operation(operation).ok_or_else(|| {
+                crate::SynthError::invariant("lowered sequential operation disappeared")
+            })?;
+            if !matches!(
+                stored.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            ) {
+                return Err(crate::SynthError::invariant(
+                    "lowered sequential state is produced by combinational logic",
+                ));
+            }
+            if lowered
+                .insert(operation, frozen.owner)
+                .is_some_and(|owner| owner != frozen.owner)
+            {
+                return Err(crate::SynthError::invariant(
+                    "one lowered sequential operation has conflicting frozen owners",
+                ));
+            }
+        }
+    }
+    Ok(lowered
+        .into_iter()
+        .map(|(operation, owner)| FrozenSequentialOperation { operation, owner })
+        .collect())
+}
+
+/// Returns every value needed to materialize a frozen sequential operation set.
 pub(crate) fn sequential_binding_values(
     module: &word::WordModule,
+    operations: &[FrozenSequentialOperation],
 ) -> Result<Box<[word::ValueId]>, crate::SynthError> {
     let mut values = BTreeSet::new();
-    for operation in live_sequential_operations(module)? {
+    for frozen in operations {
         let operation = module
-            .operation(operation)
+            .operation(frozen.operation)
             .ok_or_else(|| crate::SynthError::invariant("live sequential operation disappeared"))?;
         values.insert(operation.result);
         values.extend(crate::word::operation_inputs(&operation.kind));
@@ -82,7 +173,7 @@ impl MappedSequentialArtifact {
         module: &word::WordModule,
         mapped_values: &WordMappedSignals,
         regions: &crate::SynthesisRegionGraph,
-        ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+        operations: &[FrozenSequentialOperation],
         config: &crate::mapping::MappingConfig<'_>,
     ) -> Result<Self, crate::SynthError> {
         let mut artifact = ArtifactBuilder::new(module)?;
@@ -93,19 +184,20 @@ impl MappedSequentialArtifact {
             combinational_catalog: &config.mapping_context.combinational_catalog,
             target_cells: &config.options.target_cells,
         };
-        for operation_id in live_sequential_operations(module)? {
+        for frozen in operations {
+            let operation_id = frozen.operation;
             let operation = module.operation(operation_id).ok_or_else(|| {
                 crate::SynthError::invariant("live sequential operation disappeared")
             })?;
             require_scalar(module, operation.result, "sequential result")?;
-            let owner = ownership
-                .owner(operation.result)
-                .and_then(|row| regions.region(row))
+            let owner = regions
+                .region(frozen.owner)
                 .map(|region| region.id())
                 .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "sequential artifact has no lowered synthesis-region owner",
-                    )
+                    crate::SynthError::invariant(format!(
+                        "sequential artifact for {operation_id:?} at {:?} references unknown frozen region {:?}",
+                        operation.source, frozen.owner
+                    ))
                 })?;
             match &operation.kind {
                 word::OpKind::Register(register) => {
@@ -491,26 +583,6 @@ impl<'a> ArtifactBuilder<'a> {
     }
 }
 
-fn live_sequential_operations(
-    module: &word::WordModule,
-) -> Result<Box<[word::OpId]>, crate::SynthError> {
-    let live = crate::mapping::word_util::live_operation_mask(module, &[])?;
-    module
-        .operations()
-        .iter()
-        .enumerate()
-        .filter(|(index, operation)| {
-            live[*index]
-                && matches!(
-                    operation.kind,
-                    word::OpKind::Register(_) | word::OpKind::Latch(_)
-                )
-        })
-        .map(|(index, _)| word::OpId::from_index(index).map_err(crate::SynthError::Word))
-        .collect::<Result<Vec<_>, _>>()
-        .map(Vec::into_boxed_slice)
-}
-
 fn require_scalar(
     module: &word::WordModule,
     value: word::ValueId,
@@ -607,5 +679,79 @@ fn unique_instance_name(module: &word::WordModule, base: String) -> String {
         suffix = suffix
             .checked_add(1)
             .expect("mapped instance count fits within 32-bit naming space");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opto_ir::word::{Edge, LValue, PortDirection, RegisterOp, SourceSpan, WordType};
+
+    #[test]
+    fn frozen_state_owner_follows_the_scalar_operation_emitted_by_bit_lowering() {
+        let mut module = word::WordModule::new("frozen_state_owner");
+        let bit = WordType::bits(1).unwrap();
+        let clock = module
+            .add_port("clock", PortDirection::Input, bit, SourceSpan::default())
+            .unwrap();
+        let data = module
+            .add_port("data", PortDirection::Input, bit, SourceSpan::default())
+            .unwrap();
+        let output = module
+            .add_port("q", PortDirection::Output, bit, SourceSpan::default())
+            .unwrap();
+        let clock = module
+            .read_signal(module.port(clock).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let data = module
+            .read_signal(module.port(data).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let state = module
+            .register(
+                RegisterOp {
+                    name: None,
+                    d: data,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: Vec::new(),
+                },
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(
+                LValue::signal(module.port(output).unwrap().signal),
+                state,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        let owner = crate::RegionRowId::from_index(0).unwrap();
+        let source_operations = frozen_sequential_operations(&module, &[Some(owner)]).unwrap();
+        let required = sequential_binding_values(&module, &source_operations).unwrap();
+        let shell = crate::planning::operator::ArchitectureDecisions::for_regional_shell(&module);
+        let mut provenance =
+            crate::artifact::provenance::ProvenanceBuilder::new(&module, &shell).unwrap();
+
+        let ownership = crate::boolean::bitblast::bitblast_module_with_regions(
+            &mut module,
+            &shell,
+            &mut provenance,
+            &[Some(owner)],
+            &required,
+            &[],
+            crate::boolean::bitblast::GlobalBitblastScope::RegionalShell,
+        )
+        .unwrap();
+        let lowered =
+            lowered_sequential_operations(&module, &ownership, &source_operations).unwrap();
+
+        assert_eq!(lowered.len(), 1);
+        assert_eq!(lowered[0].owner, owner);
+        assert_ne!(lowered[0].operation, source_operations[0].operation);
+        assert!(matches!(
+            module.operation(lowered[0].operation).unwrap().kind,
+            word::OpKind::Register(_)
+        ));
     }
 }

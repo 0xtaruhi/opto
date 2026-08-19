@@ -36,6 +36,7 @@ pub(crate) struct RegionalMappingRequest<'a> {
     pub(crate) region_ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
     pub(crate) contracts: &'a crate::regional::RegionContractSet,
     pub(crate) regional_plans: &'a [RegionalPlanRow],
+    pub(crate) sequential_operations: &'a [materialize::FrozenSequentialOperation],
     pub(crate) config: MappingConfig<'a>,
 }
 
@@ -57,6 +58,7 @@ struct RegionalMappingState<'a> {
     module: &'a word::WordModule,
     provenance: &'a mut ProvenanceBuilder,
     region_ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
+    sequential_operations: &'a [materialize::FrozenSequentialOperation],
     contracts: crate::regional::RegionContractSet,
     rows: Vec<RegionalPlanRow>,
     plan_journal:
@@ -144,6 +146,7 @@ pub(crate) fn map_mapping_library_cells(
         region_ownership,
         contracts,
         regional_plans,
+        sequential_operations,
         config,
     } = request;
     if regional_plans.len() != regions.regions().len()
@@ -160,6 +163,7 @@ pub(crate) fn map_mapping_library_cells(
         module,
         provenance,
         region_ownership,
+        sequential_operations,
         contracts: contracts.clone(),
         rows: regional_plans.to_vec(),
         plan_journal: std::collections::BTreeMap::new(),

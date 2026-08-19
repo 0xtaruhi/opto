@@ -86,6 +86,7 @@ impl OperatorCatalog {
     pub(super) fn for_module(
         module: &word::WordModule,
         observable: &ObservableBits,
+        observed_values: &[word::ValueId],
         fuse_arithmetic: bool,
         providers: Box<[&'static dyn crate::planning::provider::ImplementationProvider]>,
     ) -> Result<Self, crate::SynthError> {
@@ -95,7 +96,7 @@ impl OperatorCatalog {
         let mut operator_by_source_operation = vec![MISSING_OPERATOR_ID; module.operations().len()];
         let mut elided_operations = vec![false; module.operations().len()];
         let regions = if fuse_arithmetic {
-            arithmetic_regions(module)?
+            arithmetic_regions(module, observed_values)?
         } else {
             AdditiveRegions::default()
         };
@@ -388,8 +389,14 @@ struct AdditiveRegions {
     absorbed: hashbrown::HashSet<usize>,
 }
 
-fn arithmetic_regions(module: &word::WordModule) -> Result<AdditiveRegions, crate::SynthError> {
-    let uses = crate::word::uses::value_use_counts(module)?;
+fn arithmetic_regions(
+    module: &word::WordModule,
+    observed_values: &[word::ValueId],
+) -> Result<AdditiveRegions, crate::SynthError> {
+    let mut uses = crate::word::uses::value_use_counts(module)?;
+    for &value in observed_values {
+        crate::word::uses::increment_use_count(&mut uses, value)?;
+    }
     additive_regions(module, &uses)
 }
 

@@ -128,9 +128,14 @@ impl RegionalWordCone {
             root_bindings.extend(roots.into_iter().map(|root| (root, sink)));
         }
         let imported_operation_count = importer.module.operations().len();
+        let selected_memories = memory_implementations
+            .iter()
+            .copied()
+            .map(Some)
+            .collect::<Vec<_>>();
         let memory_ownership = crate::planning::memory::lower_selected_memories(
             &mut importer.module,
-            memory_implementations,
+            &selected_memories,
             target_cells,
         )?;
         importer

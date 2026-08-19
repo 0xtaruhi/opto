@@ -236,6 +236,8 @@ pub(crate) fn bitblast_module_with_regions(
     }
     let publication_contract =
         freeze_publication_contract(module, operation_regions, regional_publication, scope)?;
+    let observability =
+        crate::word::uses::netlist_observability_with_values(module, required_values)?;
     let connects = module.take_connects();
     let instance_connections = crate::word::instances::snapshot(module);
     let mut blaster = BitBlaster::<WordBackend>::new(
@@ -252,7 +254,10 @@ pub(crate) fn bitblast_module_with_regions(
             publication_contract,
         },
     )?;
-    for connect in connects {
+    for (index, connect) in connects.into_iter().enumerate() {
+        if !observability.observes_connect(index)? {
+            continue;
+        }
         match blaster.classify_connect(&connect)? {
             io::ConnectLowering::Boolean => blaster.lower_boolean_connect(&connect)?,
             io::ConnectLowering::PhysicalTriState(connect) => {

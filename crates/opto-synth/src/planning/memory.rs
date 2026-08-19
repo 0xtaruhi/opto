@@ -101,12 +101,13 @@ fn unique_name(
     Err(crate::SynthError::capacity(exhausted))
 }
 
-/// Atomically materializes every selected first-class memory implementation.
-/// Register banks are scalarized by word; characterized macros become exact
-/// pin-bound target instances and leave no aggregate memory resource behind.
+/// Atomically removes the first-class memory arena, materializing only selected
+/// implementations. `None` entries are dead resources already rejected by the
+/// shared observability closure. Register banks are scalarized by word;
+/// characterized macros become exact pin-bound target instances.
 pub(crate) fn lower_selected_memories(
     module: &mut word::WordModule,
-    implementations: &[crate::planning::regional::MemoryImplementationCandidate],
+    implementations: &[Option<crate::planning::regional::MemoryImplementationCandidate>],
     target_cells: &TargetCellSet,
 ) -> Result<MemoryLoweringOwnership, crate::SynthError> {
     module
@@ -142,7 +143,10 @@ pub(crate) fn lower_selected_memories(
     };
     for (index, memory) in resources.memories.iter().enumerate() {
         let first_operation = module.operations().len();
-        match implementations[index] {
+        let Some(implementation) = implementations[index] else {
+            continue;
+        };
+        match implementation {
             crate::planning::regional::MemoryImplementationCandidate::RegisterBank => {
                 let clocks = register_bank_clocks[index].as_deref().ok_or_else(|| {
                     crate::SynthError::invariant(
@@ -196,8 +200,9 @@ pub(crate) fn lower_selected_memories(
 pub(crate) fn lower_memories_to_register_banks(
     module: &mut word::WordModule,
 ) -> Result<MemoryLoweringOwnership, crate::SynthError> {
-    let implementations = vec![
-            crate::planning::regional::MemoryImplementationCandidate::RegisterBank;
+    let implementations =
+        vec![
+            Some(crate::planning::regional::MemoryImplementationCandidate::RegisterBank);
             module.memories().len()
         ];
     lower_selected_memories(module, &implementations, &TargetCellSet::default())
@@ -205,14 +210,17 @@ pub(crate) fn lower_memories_to_register_banks(
 
 fn preflight(
     module: &word::WordModule,
-    implementations: &[crate::planning::regional::MemoryImplementationCandidate],
+    implementations: &[Option<crate::planning::regional::MemoryImplementationCandidate>],
     target_cells: &TargetCellSet,
 ) -> Result<Vec<Option<Vec<word::MemoryClock>>>, crate::SynthError> {
     let mut register_bank_clocks = vec![None; module.memories().len()];
     for (index, memory) in module.memories().iter().enumerate() {
         let id = word::MemoryId::from_index(index)
             .map_err(|error| crate::SynthError::capacity(error.to_string()))?;
-        match implementations[index] {
+        let Some(implementation) = implementations[index] else {
+            continue;
+        };
+        match implementation {
             crate::planning::regional::MemoryImplementationCandidate::RegisterBank => {
                 let has_write = module
                     .memory_write_ports()

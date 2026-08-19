@@ -12,7 +12,7 @@ use super::graph::{
     BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBitFlow,
     RegionBoundaryPort, RegionBoundaryPortId, RegionGraphOwnerId, RegionPortDirection,
     RegionRevision, RegionRowId, SynthesisRegion, SynthesisRegionGraph, SynthesisRegionKind,
-    SynthesisRegionRevision, packed_rows, remap_optional_owner_rows, remap_owner_rows,
+    SynthesisRegionRevision, packed_rows, remap_optional_owner_rows,
 };
 use crate::word::signal_driver::SignalDriverIndex;
 use opto_ir::word;
@@ -282,8 +282,7 @@ fn partition_owned_operations(
     }
     let mut input_operations = InputOperations::new(module, drivers);
     let dependencies = operation_dependencies(module, &mut input_operations)?;
-    let roots = synthesis_root_operations(module, &mut input_operations);
-    let reachable = synthesis_root_closure(&dependencies, &roots);
+    let reachable = synthesis_reachable_operations(module)?;
     let estimates = StructuralEstimateIndex::build(module, &dependencies);
     let criticality = estimates.criticality(&dependencies);
     let mut owner_regions = BTreeMap::<RegionRowId, TempRegion>::new();
@@ -351,8 +350,8 @@ fn partition_operations(
 ) -> Result<Vec<TempRegion>, crate::SynthError> {
     let mut input_operations = InputOperations::new(module, drivers);
     let dependencies = operation_dependencies(module, &mut input_operations)?;
-    let roots = synthesis_root_operations(module, &mut input_operations);
-    let reachable = synthesis_root_closure(&dependencies, &roots);
+    let roots = synthesis_root_operations(module, &mut input_operations)?;
+    let reachable = synthesis_reachable_operations(module)?;
     let estimates = StructuralEstimateIndex::build(module, &dependencies);
     if let Some(region) = whole_design_region(module, &reachable, &estimates, policy)? {
         return Ok(vec![region]);
@@ -382,11 +381,21 @@ fn partition_operations(
 pub(crate) fn synthesis_reachable_operations(
     module: &word::WordModule,
 ) -> Result<Box<[bool]>, crate::SynthError> {
-    let drivers = SignalDriverIndex::new(module)?;
-    let mut input_operations = InputOperations::new(module, &drivers);
-    let dependencies = operation_dependencies(module, &mut input_operations)?;
-    let roots = synthesis_root_operations(module, &mut input_operations);
-    Ok(synthesis_root_closure(&dependencies, &roots))
+    let observability = crate::word::uses::netlist_observability(module)?;
+    module
+        .operations()
+        .iter()
+        .map(|operation| {
+            if matches!(operation.kind, word::OpKind::TriState { .. }) {
+                // The resolved physical shell is not Boolean-owned; its data
+                // and enable values are projected as roots instead.
+                Ok(false)
+            } else {
+                observability.observes_value(operation.result)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Vec::into_boxed_slice)
 }
 
 fn whole_design_region(
@@ -576,90 +585,39 @@ fn operation_dependencies(
         .collect()
 }
 
-fn synthesis_root_values(module: &word::WordModule) -> Vec<word::ValueId> {
-    let outputs = module
-        .ports()
-        .iter()
-        .filter(|port| {
-            matches!(
-                port.direction,
-                word::PortDirection::Output | word::PortDirection::Inout
-            )
-        })
-        .map(|port| port.signal)
-        .chain(module.preserved_signals())
-        .collect::<BTreeSet<_>>();
+fn synthesis_root_values(
+    module: &word::WordModule,
+) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    let observability = crate::word::uses::netlist_observability(module)?;
     let mut roots = Vec::new();
-    for connect in module.connects() {
-        let tri_state = module
-            .signal(connect.target.signal)
-            .is_some_and(|signal| signal.resolution == word::SignalResolution::TriState);
-        if tri_state
-            && let Some(operation) =
-                module
-                    .value(connect.value)
-                    .and_then(|value| match value.kind {
-                        word::ValueKind::Operation(operation) => module.operation(operation),
-                        word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
-                    })
-            && let word::OpKind::TriState { data, enable } = operation.kind
+    for &value in observability.root_values() {
+        if let Some(word::OpKind::TriState { data, enable }) = module
+            .value(value)
+            .and_then(|value| match value.kind {
+                word::ValueKind::Operation(operation) => module.operation(operation),
+                word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+            })
+            .map(|operation| &operation.kind)
         {
-            roots.extend([data, enable.value]);
-        } else if outputs.contains(&connect.target.signal) {
-            roots.push(connect.value);
+            roots.extend([*data, enable.value]);
+        } else {
+            roots.push(value);
         }
-        roots.extend(connect.target.dynamic.map(|dynamic| dynamic.offset));
     }
-    roots.extend(
-        module
-            .instances()
-            .iter()
-            .flat_map(|instance| &instance.connections)
-            .map(|connection| connection.value)
-            .chain(
-                module
-                    .memory_read_ports()
-                    .iter()
-                    .flat_map(memory_read_inputs),
-            )
-            .chain(
-                module
-                    .memory_write_ports()
-                    .iter()
-                    .flat_map(memory_write_inputs),
-            ),
-    );
     roots.sort_unstable();
     roots.dedup();
-    roots
+    Ok(roots)
 }
 
 fn synthesis_root_operations(
     module: &word::WordModule,
     inputs: &mut InputOperations<'_>,
-) -> BTreeSet<usize> {
-    let mut roots = module
-        .operations()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, operation)| is_state(&operation.kind).then_some(index))
-        .collect::<BTreeSet<_>>();
-    for value in synthesis_root_values(module) {
+) -> Result<BTreeSet<usize>, crate::SynthError> {
+    let mut roots = BTreeSet::new();
+    for value in synthesis_root_values(module)? {
         roots.extend(inputs.resolve(value));
     }
-    roots
-}
-
-fn synthesis_root_closure(dependencies: &[Vec<usize>], roots: &BTreeSet<usize>) -> Box<[bool]> {
-    let mut reachable = vec![false; dependencies.len()];
-    let mut pending = roots.iter().copied().collect::<Vec<_>>();
-    while let Some(operation) = pending.pop() {
-        if std::mem::replace(&mut reachable[operation], true) {
-            continue;
-        }
-        pending.extend(dependencies[operation].iter().copied());
-    }
-    reachable.into_boxed_slice()
+    Ok(roots)
 }
 
 fn initial_seeds(
@@ -1139,8 +1097,12 @@ fn append_memory_regions(
     module: &word::WordModule,
     regions: &mut Vec<TempRegion>,
 ) -> Result<(), crate::SynthError> {
+    let observability = crate::word::uses::netlist_observability(module)?;
     for (index, memory) in module.memories().iter().enumerate() {
         let memory_id = word::MemoryId::from_index(index).map_err(crate::SynthError::from)?;
+        if !observability.observes_memory(memory_id)? {
+            continue;
+        }
         let port_work = module
             .memory_read_ports()
             .iter()
@@ -1180,11 +1142,9 @@ fn memory_signal_owners(
 ) -> Result<BTreeMap<word::SignalId, usize>, crate::SynthError> {
     let mut owners = BTreeMap::new();
     for port in module.memory_read_ports() {
-        let owner = memory_owner
-            .get(port.memory.index())
-            .copied()
-            .flatten()
-            .ok_or_else(|| crate::SynthError::invariant("memory read has no region owner"))?;
+        let Some(owner) = memory_owner.get(port.memory.index()).copied().flatten() else {
+            continue;
+        };
         if owners.insert(port.data, owner).is_some() {
             return Err(crate::SynthError::invariant(
                 "memory read signal has more than one producer region",
@@ -1214,15 +1174,17 @@ fn build_edges(
         }
     }
     for read in module.memory_read_ports() {
-        let sink = memory_owner[read.memory.index()]
-            .ok_or_else(|| crate::SynthError::invariant("memory read has no region owner"))?;
+        let Some(sink) = memory_owner[read.memory.index()] else {
+            continue;
+        };
         for value in memory_read_inputs(read) {
             connectivity.append_input_edge(value, sink, &mut edges, &mut bit_flows)?;
         }
     }
     for write in module.memory_write_ports() {
-        let sink = memory_owner[write.memory.index()]
-            .ok_or_else(|| crate::SynthError::invariant("memory write has no region owner"))?;
+        let Some(sink) = memory_owner[write.memory.index()] else {
+            continue;
+        };
         for value in memory_write_inputs(write) {
             connectivity.append_input_edge(value, sink, &mut edges, &mut bit_flows)?;
         }
@@ -1232,7 +1194,7 @@ fn build_edges(
     // dependency or a synthesis root; publishing every named intermediate
     // would retain dead substrate aliases and can make one net appear as both
     // a region input and output.
-    for value in synthesis_root_values(module) {
+    for value in synthesis_root_values(module)? {
         connectivity.append_bit_flows(value, None, &mut bit_flows)?;
         if let Some(source) = connectivity.value_region(value)? {
             let stored = module.value(value).ok_or_else(|| {
@@ -1477,7 +1439,7 @@ fn canonicalize(
         old_to_new[old] = RegionRowId::from_index(row)?;
     }
     let operation_owners = remap_optional_owner_rows(operation_owners, &old_to_new);
-    let memory_owners = remap_owner_rows(memory_owners, &old_to_new, "Word memory")?;
+    let memory_owners = remap_optional_owner_rows(memory_owners, &old_to_new);
     let mut publication_bits = vec![Vec::new(); regions.len()];
     for flow in bit_flows {
         let producer = old_to_new[flow.source];

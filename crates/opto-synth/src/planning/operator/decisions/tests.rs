@@ -273,6 +273,7 @@ fn multi_operand_fusion_exists_only_in_private_region_catalogs() {
 
     let mut private = ArchitectureDecisions::for_private_region(
         &module,
+        &[],
         crate::boolean::bitblast::implementation_providers().into(),
     )
     .unwrap();
@@ -321,4 +322,49 @@ fn multi_operand_fusion_exists_only_in_private_region_catalogs() {
         .min()
         .unwrap();
     assert_eq!(selected_score, best_score);
+}
+
+#[test]
+fn explicit_region_root_is_not_absorbed_into_its_arithmetic_consumer() {
+    let mut module = WordModule::new("published_intermediate");
+    let ty = WordType::bits(8).unwrap();
+    let inputs = ["a", "b", "c"].map(|name| {
+        let port = module
+            .add_port(name, PortDirection::Input, ty, SourceSpan::default())
+            .unwrap();
+        module
+            .read_signal(module.port(port).unwrap().signal, SourceSpan::default())
+            .unwrap()
+    });
+    let published = module
+        .binary(
+            word::BinaryOp::Sub,
+            inputs[0],
+            inputs[1],
+            SourceSpan::default(),
+        )
+        .unwrap();
+    let root = module
+        .binary(
+            word::BinaryOp::Add,
+            published,
+            inputs[2],
+            SourceSpan::default(),
+        )
+        .unwrap();
+
+    let private = ArchitectureDecisions::for_private_region(
+        &module,
+        &[published, root],
+        crate::boolean::bitblast::implementation_providers().into(),
+    )
+    .unwrap();
+
+    assert_eq!(private.operators().len(), 2);
+    assert!([published, root].into_iter().all(|value| {
+        private
+            .operators()
+            .iter()
+            .any(|operator| operator.result() == value)
+    }));
 }

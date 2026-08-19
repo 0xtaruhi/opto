@@ -93,6 +93,7 @@ fn regional_boolean_lowering_builds_axm_without_scalar_boolean_word_ops() {
     add_output(&mut module, "y", 8, result);
     let plan = crate::planning::operator::ArchitectureDecisions::for_private_region(
         &module,
+        &[shifted],
         implementation_providers().into(),
     )
     .unwrap();
@@ -144,6 +145,7 @@ fn regional_boolean_lowering_resolves_dont_care_at_publication_boundary() {
         .unwrap();
     let plan = crate::planning::operator::ArchitectureDecisions::for_private_region(
         &module,
+        &[root],
         implementation_providers().into(),
     )
     .unwrap();
@@ -545,19 +547,24 @@ fn regional_shell_freezes_unowned_proven_constant_operations() {
 }
 
 #[test]
-fn regional_shell_elides_an_unowned_dynamic_extract_on_a_dead_connect() {
-    let mut module = word::WordModule::new("unowned_dynamic_extract");
+fn regional_shell_drops_unowned_arithmetic_on_a_dead_connect() {
+    let mut module = word::WordModule::new("unowned_arithmetic");
     let data = add_input(&mut module, "data", 8);
     let data = read_port(&mut module, data);
-    let offset = add_input(&mut module, "offset", 3);
-    let offset = read_port(&mut module, offset);
+    let one = module
+        .constant(
+            ConstBits::from_bin_str("00000001").unwrap(),
+            word::WordType::bits(8).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
     let result = module
-        .dynamic_extract(data, offset, 2, word::SourceSpan::default())
+        .binary(word::BinaryOp::Sub, data, one, word::SourceSpan::default())
         .unwrap();
     let dead = module
         .add_wire(
             "dead",
-            word::WordType::bits(2).unwrap(),
+            word::WordType::bits(8).unwrap(),
             word::SourceSpan::default(),
         )
         .unwrap();
@@ -583,11 +590,57 @@ fn regional_shell_elides_an_unowned_dynamic_extract_on_a_dead_connect() {
     )
     .unwrap();
 
-    assert_eq!(module.connects().len(), 2);
-    assert!(module.connects().iter().all(|connect| matches!(
-        module.value(connect.value).map(|value| &value.kind),
-        Some(word::ValueKind::Constant(bits)) if bits.bit_lsb(0) == Some(BitVal::Zero)
-    )));
+    assert!(module.connects().is_empty());
+}
+
+#[test]
+fn regional_shell_keeps_connects_needed_by_an_explicit_lowering_root() {
+    let mut module = word::WordModule::new("required_internal_value");
+    let data = add_input(&mut module, "data", 8);
+    let data = read_port(&mut module, data);
+    let inverted = module
+        .unary(word::UnaryOp::BitNot, data, word::SourceSpan::default())
+        .unwrap();
+    let internal = module
+        .add_wire(
+            "required",
+            word::WordType::bits(8).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(internal),
+            inverted,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let required = module
+        .read_signal(internal, word::SourceSpan::default())
+        .unwrap();
+    let shell = crate::planning::operator::ArchitectureDecisions::for_regional_shell(&module);
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::new(&module, &shell).unwrap();
+    let region = crate::RegionRowId::from_index(0).unwrap();
+
+    bitblast_module_with_regions(
+        &mut module,
+        &shell,
+        &mut provenance,
+        &[Some(region)],
+        &[required],
+        &[],
+        GlobalBitblastScope::RegionalShell,
+    )
+    .unwrap();
+
+    assert_eq!(module.connects().len(), 8);
+    assert!(
+        module
+            .connects()
+            .iter()
+            .all(|connect| connect.target.signal == internal)
+    );
 }
 
 #[test]

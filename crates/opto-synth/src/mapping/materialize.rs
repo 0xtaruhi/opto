@@ -24,7 +24,10 @@ const TRI_STATE_CELL_PREFIX: &str = "_tri_state_";
 
 use crate::artifact::MappedCellSource;
 pub(crate) use region_delta::REGION_CELL_PREFIX;
-pub(crate) use sequential_delta::{MappedSequentialArtifact, sequential_binding_values};
+pub(crate) use sequential_delta::{
+    FrozenSequentialOperation, MappedSequentialArtifact, frozen_sequential_operations,
+    lowered_sequential_operations, sequential_binding_values,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ArtifactSignal {

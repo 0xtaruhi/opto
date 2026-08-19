@@ -269,6 +269,7 @@ mod tests {
         );
         let plan = crate::planning::operator::ArchitectureDecisions::for_private_region(
             &module,
+            &[],
             crate::boolean::bitblast::implementation_providers().into(),
         )
         .unwrap();

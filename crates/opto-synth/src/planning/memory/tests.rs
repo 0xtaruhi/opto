@@ -45,6 +45,35 @@ fn memory_module() -> (
 }
 
 #[test]
+fn unselected_memory_is_elided_without_an_implementation() {
+    let (mut module, memory, clock, address, data) = memory_module();
+    module
+        .add_memory_write_port(word::MemoryWritePort {
+            memory,
+            address,
+            data,
+            clock: word::MemoryClock {
+                value: clock,
+                edge: word::Edge::Pos,
+            },
+            enable: None,
+            mask: None,
+            priority: 0,
+            source: test_span(),
+        })
+        .unwrap();
+
+    let ownership =
+        lower_selected_memories(&mut module, &[None], &TargetCellSet::default()).unwrap();
+
+    assert!(module.memories().is_empty());
+    assert!(module.memory_read_ports().is_empty());
+    assert!(module.memory_write_ports().is_empty());
+    assert_eq!(ownership.operations().count(), 0);
+    assert_eq!(ownership.state_values().count(), 0);
+}
+
+#[test]
 fn out_of_range_read_selects_unknown_instead_of_word_zero() {
     let (mut module, memory, clock, address, data) = memory_module();
     let read_data = module
@@ -664,7 +693,9 @@ fn compatible_macro_is_selected_and_materialized_with_exact_scalar_pins() {
     );
     lower_selected_memories(
         &mut module,
-        &[crate::planning::regional::MemoryImplementationCandidate::Macro(0)],
+        &[Some(
+            crate::planning::regional::MemoryImplementationCandidate::Macro(0),
+        )],
         &cells,
     )
     .unwrap();
@@ -743,7 +774,9 @@ fn distinct_clock_write_ports_bind_to_an_exact_multiport_macro() {
     );
     lower_selected_memories(
         &mut module,
-        &[crate::planning::regional::MemoryImplementationCandidate::Macro(0)],
+        &[Some(
+            crate::planning::regional::MemoryImplementationCandidate::Macro(0),
+        )],
         &cells,
     )
     .unwrap();
@@ -850,7 +883,9 @@ fn same_clock_mutually_exclusive_write_ports_bind_to_a_multiport_macro() {
     );
     lower_selected_memories(
         &mut module,
-        &[crate::planning::regional::MemoryImplementationCandidate::Macro(0)],
+        &[Some(
+            crate::planning::regional::MemoryImplementationCandidate::Macro(0),
+        )],
         &cells,
     )
     .unwrap();
@@ -1001,7 +1036,9 @@ fn shared_macro_pins_require_identical_logical_bindings() {
     );
     let error = lower_selected_memories(
         &mut module,
-        &[crate::planning::regional::MemoryImplementationCandidate::Macro(0)],
+        &[Some(
+            crate::planning::regional::MemoryImplementationCandidate::Macro(0),
+        )],
         &cells,
     )
     .unwrap_err();

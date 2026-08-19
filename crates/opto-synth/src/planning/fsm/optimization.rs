@@ -159,6 +159,7 @@ fn derive_catalog(
     module: &word::WordModule,
     runtime: &opto_runtime::ExecutionContext,
 ) -> Result<FsmCatalog, crate::SynthError> {
+    let observability = crate::word::uses::netlist_observability(module)?;
     let uses = crate::word::uses::value_use_counts(module)?;
     let signal_drivers = SignalDriverIndex::new(module)?;
     let dependency_index = FsmDependencyIndex::build(module, &signal_drivers)?;
@@ -177,9 +178,12 @@ fn derive_catalog(
             crate::SynthError::capacity("signal driver count exceeds 32-bit capacity")
         })?;
     }
-    let observation_candidates = fsm_observation_candidates(module, &uses)?;
+    let observation_candidates = fsm_observation_candidates(module, &uses, &observability)?;
     let mut candidates = Vec::new();
-    for connect in module.connects() {
+    for (connect_index, connect) in module.connects().iter().enumerate() {
+        if !observability.observes_connect(connect_index)? {
+            continue;
+        }
         if connect.target.range.is_some() || connect.target.dynamic.is_some() {
             continue;
         }
@@ -200,6 +204,9 @@ fn derive_catalog(
         let word::OpKind::Register(register) = &operation.kind else {
             continue;
         };
+        if !observability.observes_value(operation.result)? {
+            continue;
+        }
         let Some(signal) = module.signal(connect.target.signal) else {
             return Err(crate::SynthError::invariant(format!(
                 "FSM candidate targets unknown signal {:?}",
@@ -292,14 +299,7 @@ fn derive_catalog(
                 exposes_state_encoding: false,
             },
             reset_states,
-            allow_state_merging: !matches!(
-                signal.kind,
-                word::SignalKind::Port(port)
-                    if module.port(port).is_some_and(|port| matches!(
-                        port.direction,
-                        word::PortDirection::Output | word::PortDirection::Inout
-                    ))
-            ),
+            allow_state_merging: !observability.observes_root_signal(connect.target.signal)?,
         });
     }
     let analyzed = runtime.analyze_indexed(candidates.len(), |index| {
@@ -312,7 +312,8 @@ fn derive_catalog(
             &observation_candidates,
             &dependency_index,
         )?;
-        machine.exposes_state_encoding = state_encoding_is_observable(module, machine.state_signal);
+        machine.exposes_state_encoding =
+            state_encoding_is_observable(module, machine.state_signal, &observability)?;
         let mut behavior =
             derive_symbolic_behavior(module, &machine, &observation_roots.values, &signal_drivers)?;
         if let Some(current) = &behavior {
@@ -345,42 +346,31 @@ fn derive_catalog(
     })
 }
 
-fn state_encoding_is_observable(module: &word::WordModule, state: word::SignalId) -> bool {
-    let state_is_output = module.signal(state).is_some_and(|signal| {
-        let word::SignalKind::Port(port) = signal.kind else {
-            return false;
-        };
-        module.port(port).is_some_and(|port| {
+fn state_encoding_is_observable(
+    module: &word::WordModule,
+    state: word::SignalId,
+    observability: &crate::word::uses::NetlistObservability,
+) -> Result<bool, crate::SynthError> {
+    if observability.observes_root_signal(state)? {
+        return Ok(true);
+    }
+    for (index, connect) in module.connects().iter().enumerate() {
+        if !observability.observes_root_connect(index)? {
+            continue;
+        }
+        if module.value(connect.value).is_some_and(|value| {
             matches!(
-                port.direction,
-                word::PortDirection::Output | word::PortDirection::Inout
+                value.kind,
+                word::ValueKind::Signal(reference)
+                    if reference.signal == state
+                        && reference.lsb == 0
+                        && reference.width() == value.ty.width()
             )
-        })
-    });
-    state_is_output
-        || module.connects().iter().any(|connect| {
-            let target_is_output = module.signal(connect.target.signal).is_some_and(|signal| {
-                let word::SignalKind::Port(port) = signal.kind else {
-                    return false;
-                };
-                module.port(port).is_some_and(|port| {
-                    matches!(
-                        port.direction,
-                        word::PortDirection::Output | word::PortDirection::Inout
-                    )
-                })
-            });
-            target_is_output
-                && module.value(connect.value).is_some_and(|value| {
-                    matches!(
-                        value.kind,
-                        word::ValueKind::Signal(reference)
-                            if reference.signal == state
-                                && reference.lsb == 0
-                                && reference.width() == value.ty.width()
-                    )
-                })
-        })
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn transition_cone_within_budget(
@@ -416,6 +406,7 @@ fn transition_cone_within_budget(
 fn fsm_observation_candidates(
     module: &word::WordModule,
     uses: &[u32],
+    observability: &crate::word::uses::NetlistObservability,
 ) -> Result<Box<[FsmObservationCandidate]>, crate::SynthError> {
     let estimated = module
         .connects()
@@ -437,60 +428,21 @@ fn fsm_observation_candidates(
             });
         }
     };
-    for connect in module.connects() {
-        let signal = module.signal(connect.target.signal).ok_or_else(|| {
-            crate::SynthError::invariant(format!(
-                "FSM observation targets unknown signal {:?}",
-                connect.target.signal
-            ))
-        })?;
-        let observable = match signal.kind {
-            word::SignalKind::Port(port) => module.port(port).is_some_and(|port| {
-                matches!(
-                    port.direction,
-                    word::PortDirection::Output | word::PortDirection::Inout
-                )
-            }),
-            word::SignalKind::Wire
-            | word::SignalKind::Register
-            | word::SignalKind::ProcessLocal => false,
-        };
-        if observable {
+    for (index, connect) in module.connects().iter().enumerate() {
+        if observability.observes_root_connect(index)? {
             add_candidate(connect.value, Some(connect.value));
             if let Some(dynamic) = connect.target.dynamic {
                 add_candidate(dynamic.offset, Some(connect.value));
             }
         }
     }
-    for connection in module
-        .instances()
-        .iter()
-        .flat_map(|instance| &instance.connections)
-    {
-        add_candidate(connection.value, None);
-    }
-    for port in module.memory_read_ports() {
-        add_candidate(port.address, None);
-        if let word::MemoryReadTiming::Synchronous { clock, enable, .. } = port.timing {
-            add_candidate(clock.value, None);
-            if let Some(enable) = enable {
-                add_candidate(enable.value, None);
-            }
-        }
-    }
-    for port in module.memory_write_ports() {
-        for value in [port.address, port.data, port.clock.value] {
-            add_candidate(value, None);
-        }
-        if let Some(enable) = port.enable {
-            add_candidate(enable.value, None);
-        }
-        if let Some(mask) = port.mask {
-            add_candidate(mask.value, None);
-        }
+    for &value in observability.non_connect_root_values() {
+        add_candidate(value, None);
     }
     for operation in module.operations() {
-        if uses.get(operation.result.index()).copied().unwrap_or(0) == 0 {
+        if uses.get(operation.result.index()).copied().unwrap_or(0) == 0
+            || !observability.observes_value(operation.result)?
+        {
             continue;
         }
         match &operation.kind {

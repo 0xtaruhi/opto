@@ -80,9 +80,15 @@ pub(super) struct UseIndex {
 
 impl UseIndex {
     pub(super) fn build(module: &word::WordModule) -> Result<Self, crate::SynthError> {
+        let observability = crate::word::uses::netlist_observability(module)?;
         let mut entries = Vec::<(word::ValueId, Use)>::new();
         for operation in module.operations() {
-            append_operation_uses(&operation.kind, operation.result, &mut entries);
+            append_operation_uses(
+                &operation.kind,
+                operation.result,
+                observability.observes_value(operation.result)?,
+                &mut entries,
+            );
         }
 
         let mut signal_reads = vec![Vec::new(); module.signals().len()];
@@ -92,18 +98,15 @@ impl UseIndex {
                     .push(word::ValueId::from_index(index).map_err(crate::SynthError::Word)?);
             }
         }
-        let mut observable_signals = vec![false; module.signals().len()];
-        for port in module.ports() {
-            if matches!(
-                port.direction,
-                word::PortDirection::Output | word::PortDirection::Inout
-            ) {
-                observable_signals[port.signal.index()] = true;
-            }
-        }
-        for connect in module.connects() {
-            if observable_signals[connect.target.signal.index()] {
+        for (index, connect) in module.connects().iter().enumerate() {
+            if observability.observes_root_connect(index)? {
                 entries.push((connect.value, Use::Root));
+                entries.extend(
+                    connect
+                        .target
+                        .dynamic
+                        .map(|dynamic| (dynamic.offset, Use::Root)),
+                );
             } else {
                 entries.extend(
                     signal_reads[connect.target.signal.index()]
@@ -114,11 +117,11 @@ impl UseIndex {
             }
         }
         entries.extend(
-            module
-                .instances()
+            observability
+                .non_connect_root_values()
                 .iter()
-                .flat_map(|instance| &instance.connections)
-                .map(|connection| (connection.value, Use::Root)),
+                .copied()
+                .map(|value| (value, Use::Root)),
         );
         entries.sort_by_key(|(value, _)| *value);
 
@@ -175,6 +178,7 @@ impl UseIndex {
 fn append_operation_uses(
     kind: &word::OpKind,
     result: word::ValueId,
+    result_is_observable: bool,
     entries: &mut Vec<(word::ValueId, Use)>,
 ) {
     match kind {
@@ -205,11 +209,14 @@ fn append_operation_uses(
                 },
             ));
         }
-        word::OpKind::Register(_) | word::OpKind::Latch(_) => entries.extend(
-            crate::word::operation_inputs(kind)
-                .into_iter()
-                .map(|input| (input, Use::Root)),
-        ),
+        word::OpKind::Register(_) | word::OpKind::Latch(_) if result_is_observable => {
+            entries.extend(
+                crate::word::operation_inputs(kind)
+                    .into_iter()
+                    .map(|input| (input, Use::Root)),
+            );
+        }
+        word::OpKind::Register(_) | word::OpKind::Latch(_) => {}
         _ => entries.extend(
             crate::word::operation_inputs(kind)
                 .into_iter()
