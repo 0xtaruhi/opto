@@ -85,10 +85,12 @@ pub(super) fn run(mode: RunMode) {
             revision: None,
             manifest: None,
             configs: None,
+            designs: None,
             root_environment: None,
             manifest_environment: None,
             report_environment: None,
             config_environment: None,
+            design_environment: None,
         };
         std::fs::write(
             &descriptor,

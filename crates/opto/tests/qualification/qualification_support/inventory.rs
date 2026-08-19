@@ -18,6 +18,7 @@ pub(super) fn validate() {
         &[
             "qualification/suites/upstream-ibex.toml",
             "qualification/suites/upstream-cva6.toml",
+            "qualification/suites/upstream-pulp-axi.toml",
         ],
     );
     assert_exact_inventory(

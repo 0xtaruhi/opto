@@ -13,6 +13,7 @@ manifests or inventory, and keeps generated reports outside the checkout.
 | Yosys RTL tests | `a0fbe6e13311d4909938c63eeb28b6c730467e6c` | ISC; root `COPYING` hash and the 549-file HDL inventory are checked | 172 synthesized designs; 119/119 mandatory observable targets formally equivalent |
 | lowRISC Ibex | `c6edaa4060b1a3cd27fda928058db4f0ee3d24bd` | Apache-2.0 upstream checkout; every consumed RTL file is hash-pinned | ALU and complete core hierarchy |
 | OpenHW CVA6 | `ed2efa51744387f510bfa4dcec29eb2e1f5697cf` | external checkout with upstream per-file licenses; every consumed RTL/config file is hash-pinned | two large core configurations |
+| PULP AXI | `4da15979747f326bde2f9869c64e587ce599772c` | Solderpad Hardware License 0.51 external checkout; all consumed AXI and Bender dependency sources are hash-pinned | complete production source manifest and fourteen live mapped integration roots |
 
 `sv-tests` contains 1,027 HDL files at the audited revision. Because its
 metadata does not define an ASIC synthesis subset, the reviewed
@@ -66,6 +67,10 @@ OPTO_SOURCE_IBEX=/path/to/ibex \
 OPTO_SOURCE_CVA6=/path/to/cva6 \
   cargo test -p opto --test qualification upstream_cva6 \
   -- --exact --ignored --nocapture
+
+OPTO_SOURCE_PULP_AXI=/path/to/axi \
+  cargo test -p opto --test qualification upstream_pulp_axi \
+  --release --locked -- --exact --ignored --nocapture
 ```
 
 Why external checkouts: ISC and Apache-2.0 material can be distributed under

@@ -187,6 +187,8 @@ pub(super) struct CaseSpec {
     #[serde(default)]
     pub(super) configs: Option<PathBuf>,
     #[serde(default)]
+    pub(super) designs: Option<PathBuf>,
+    #[serde(default)]
     pub(super) root_environment: Option<String>,
     #[serde(default)]
     pub(super) manifest_environment: Option<String>,
@@ -194,6 +196,8 @@ pub(super) struct CaseSpec {
     pub(super) report_environment: Option<String>,
     #[serde(default)]
     pub(super) config_environment: Option<String>,
+    #[serde(default)]
+    pub(super) design_environment: Option<String>,
 }
 
 fn default_language() -> String {

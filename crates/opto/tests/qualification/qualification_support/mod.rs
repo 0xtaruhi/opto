@@ -547,6 +547,26 @@ fn validate_case(case: &Case) {
                 "upstream case has no manifest"
             );
             assert!(case.spec.script.is_some(), "upstream case has no script");
+            assert!(
+                case.spec.root_environment.is_some()
+                    && case.spec.manifest_environment.is_some()
+                    && case.spec.report_environment.is_some(),
+                "upstream case has incomplete environment bindings"
+            );
+            assert!(
+                case.spec.configs.is_none() || case.spec.designs.is_none(),
+                "upstream case cannot declare both configs and designs"
+            );
+            assert_eq!(
+                case.spec.configs.is_some(),
+                case.spec.config_environment.is_some(),
+                "upstream configs and config_environment must be declared together"
+            );
+            assert_eq!(
+                case.spec.designs.is_some(),
+                case.spec.design_environment.is_some(),
+                "upstream designs and design_environment must be declared together"
+            );
         }
     }
 }
