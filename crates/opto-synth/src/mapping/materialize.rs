@@ -116,8 +116,10 @@ pub(crate) struct FrozenObservableConnectivity {
     boundary_nets: BTreeSet<NetId>,
     resolved_nets: BTreeSet<NetId>,
     outputs: Box<[ObservableOutput]>,
+    output_nets: BTreeSet<NetId>,
     static_driver_counts: Box<[u8]>,
     source_driver_pins: BTreeSet<PinId>,
+    source_sink_pins: BTreeSet<PinId>,
 }
 
 impl FrozenObservableConnectivity {
@@ -155,6 +157,7 @@ impl FrozenObservableConnectivity {
             }
         }
         let mut source_driver_pins = BTreeSet::new();
+        let mut source_sink_pins = BTreeSet::new();
         for cell in mapped.cell_ids() {
             let stored = mapped
                 .cell(cell)
@@ -186,6 +189,12 @@ impl FrozenObservableConnectivity {
                     word::PortDirection::Output | word::PortDirection::Inout
                 ) {
                     source_driver_pins.insert(pin);
+                }
+                if matches!(
+                    direction,
+                    word::PortDirection::Input | word::PortDirection::Inout
+                ) {
+                    source_sink_pins.insert(pin);
                 }
             }
         }
@@ -224,12 +233,15 @@ impl FrozenObservableConnectivity {
                 }
             }
         }
+        let output_nets = outputs.iter().map(|output| output.net).collect();
         let frozen = Self {
             boundary_nets,
             resolved_nets,
             outputs: outputs.into_boxed_slice(),
+            output_nets,
             static_driver_counts: static_driver_counts.into_boxed_slice(),
             source_driver_pins,
+            source_sink_pins,
         };
         frozen.validate(mapped, target_cells)?;
         Ok(frozen)
@@ -248,13 +260,12 @@ impl FrozenObservableConnectivity {
         {
             return Ok(false);
         }
-        for output in self
-            .outputs
-            .iter()
-            .filter(|output| affected.contains(&output.net))
-        {
-            let drivers = self.driver_count(mapped, target_cells, output.net)?;
-            if drivers == 0 || (!self.resolved_nets.contains(&output.net) && drivers != 1) {
+        for net in affected {
+            if !self.net_is_required(mapped, target_cells, net)? {
+                continue;
+            }
+            let drivers = self.driver_count(mapped, target_cells, net)?;
+            if drivers == 0 || (!self.resolved_nets.contains(&net) && drivers != 1) {
                 return Ok(false);
             }
         }
@@ -297,7 +308,90 @@ impl FrozenObservableConnectivity {
                 }
             }
         }
+        for &net in self
+            .required_nets(mapped, target_cells)?
+            .difference(&self.output_nets)
+        {
+            let drivers = self.driver_count(mapped, target_cells, net)?;
+            match drivers {
+                1 => {}
+                0 => {
+                    return Err(crate::SynthError::invariant(format!(
+                        "mapped net {net:?} is consumed but has no physical driver"
+                    )));
+                }
+                _ if self.resolved_nets.contains(&net) => {}
+                _ => {
+                    let sources = self.driver_sources(mapped, target_cells, net)?;
+                    return Err(crate::SynthError::invariant(format!(
+                        "mapped net {net:?} is consumed but has {drivers} physical drivers ({})",
+                        sources.join(", "),
+                    )));
+                }
+            }
+        }
         Ok(())
+    }
+
+    fn required_nets(
+        &self,
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+    ) -> Result<BTreeSet<NetId>, crate::SynthError> {
+        let mut required = BTreeSet::new();
+        for net in mapped.net_ids() {
+            if self.net_is_required(mapped, target_cells, net)? {
+                required.insert(net);
+            }
+        }
+        Ok(required)
+    }
+
+    fn net_is_required(
+        &self,
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+        net: NetId,
+    ) -> Result<bool, crate::SynthError> {
+        if self.output_nets.contains(&net) {
+            return Ok(true);
+        }
+        for pin in mapped.pins_on_net(net).into_iter().flatten() {
+            if self.source_sink_pins.contains(&pin) {
+                return Ok(true);
+            }
+            let cell = mapped.pin_owner(pin).ok_or_else(|| {
+                crate::SynthError::invariant("mapped consumer pin has no live owner")
+            })?;
+            let stored = mapped
+                .cell(cell)
+                .ok_or_else(|| crate::SynthError::invariant("mapped consumer cell is unknown"))?;
+            let Some(library_index) = stored.library_cell else {
+                continue;
+            };
+            let connection = mapped.connection(pin).ok_or_else(|| {
+                crate::SynthError::invariant("mapped consumer cell has no pin binding")
+            })?;
+            let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
+                crate::SynthError::invariant("mapped cell is absent from the target library")
+            })?;
+            let library_pin = match connection.library_pin {
+                Some(pin) => library_cell.pins().nth(pin as usize),
+                None => mapped
+                    .pin_name(connection)
+                    .and_then(|name| library_cell.pins().find(|pin| pin.name() == name)),
+            }
+            .ok_or_else(|| {
+                crate::SynthError::invariant("mapped pin is absent from its target-library cell")
+            })?;
+            if matches!(
+                library_pin.direction(),
+                opto_library::TargetPinDirection::Input | opto_library::TargetPinDirection::Inout
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn driver_count(
@@ -310,9 +404,10 @@ impl FrozenObservableConnectivity {
             .static_driver_counts
             .get(net.index())
             .copied()
-            .ok_or_else(|| {
-                crate::SynthError::invariant("mapped boundary net exceeds connectivity freeze")
-            })?;
+            // Post-map transactions may add net slots after the frozen
+            // substrate. Treat those as having no static port/constant driver;
+            // dynamic cell pins below still provide their current drivers.
+            .unwrap_or(0);
         for pin in mapped.pins_on_net(net).into_iter().flatten() {
             if self.source_driver_pins.contains(&pin) {
                 count = count.saturating_add(1);

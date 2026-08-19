@@ -26,7 +26,6 @@ pub(crate) struct RegionalWordConeRequest<'a> {
     pub(crate) memory_implementations:
         &'a [crate::planning::regional::MemoryImplementationCandidate],
     pub(crate) target_cells: &'a opto_library::TargetCellSet,
-    pub(crate) boundary_inputs: &'a [word::ValueId],
     pub(crate) observations: Vec<word::ValueId>,
     pub(crate) roots: Vec<word::ValueId>,
 }
@@ -54,7 +53,6 @@ impl RegionalWordCone {
             memories,
             memory_implementations,
             target_cells,
-            boundary_inputs,
             observations,
             roots,
         } = request;
@@ -85,12 +83,8 @@ impl RegionalWordCone {
             imported_bits: BTreeMap::new(),
             boundary_signals: BTreeMap::new(),
             boundary_port_signals: BTreeMap::new(),
-            boundary_inputs: boundary_inputs.iter().copied().collect(),
         };
         importer.import_memories(memories)?;
-        for &input in boundary_inputs {
-            importer.import(input)?;
-        }
         let observations = observations.into_iter().collect::<BTreeSet<_>>();
         for &observation in &observations {
             importer.import(observation)?;
@@ -208,7 +202,6 @@ struct RegionalWordImporter<'a> {
     imported_bits: BTreeMap<(word::ValueId, u32), word::ValueId>,
     boundary_signals: BTreeMap<word::SignalRef, (word::WordType, word::ValueId)>,
     boundary_port_signals: BTreeMap<word::SignalId, word::SignalId>,
-    boundary_inputs: std::collections::BTreeSet<word::ValueId>,
 }
 
 #[cfg(test)]
@@ -269,7 +262,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![],
             roots: vec![left_value],
         }) else {
@@ -347,7 +339,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![],
             roots: vec![first],
         })
@@ -430,7 +421,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![],
             roots: vec![register, next],
         })
@@ -513,7 +503,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![],
             roots: vec![consumer],
         })
@@ -585,7 +574,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![observation],
             roots: vec![producer],
         })
@@ -602,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn cuts_static_signal_slices_at_the_declared_region_boundary() {
+    fn cuts_static_signal_slices_at_the_foreign_bit_producer() {
         let mut source = word::WordModule::new("boundary_slice");
         let ty = word::WordType::bits(2).unwrap();
         let inputs = ["left", "right"].map(|name| {
@@ -655,7 +643,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[boundary],
             observations: vec![],
             roots: vec![consumer],
         })
@@ -663,22 +650,32 @@ mod tests {
         let RegionalWordCone {
             module,
             source_to_local,
+            boundary_bindings,
             operation_sources,
             ..
         } = cone;
 
         assert!(matches!(
-            module.value(source_to_local[&boundary]).unwrap().kind,
+            module.value(source_to_local[&producer]).unwrap().kind,
             word::ValueKind::Signal(_)
         ));
         assert_eq!(
-            operation_sources.as_ref(),
-            &[Some(word::OpId::from_index(1).unwrap())]
+            operation_sources
+                .iter()
+                .filter_map(|source| *source)
+                .collect::<Vec<_>>(),
+            vec![word::OpId::from_index(1).unwrap()]
         );
-        assert!(module.operations().iter().all(|operation| !matches!(
-            operation.kind,
-            word::OpKind::Extract { .. } | word::OpKind::Concat { .. }
-        )));
+        assert!(
+            boundary_bindings
+                .iter()
+                .any(|&(source, _)| source == producer)
+        );
+        assert!(
+            boundary_bindings
+                .iter()
+                .all(|&(source, _)| source != boundary)
+        );
     }
 
     #[test]
@@ -731,7 +728,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![],
             roots: vec![root],
         })
@@ -806,7 +802,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[first],
             observations: vec![],
             roots: vec![root],
         })
@@ -856,7 +851,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[full, lower],
             observations: vec![],
             roots: vec![full, lower],
         })
@@ -947,7 +941,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![],
             roots: vec![root],
         })
@@ -962,7 +955,87 @@ mod tests {
         assert!(
             boundary_bindings
                 .iter()
-                .all(|&(source, _)| source != assembled)
+                .all(|&(source, _)| source != assembled && source != root)
+        );
+    }
+
+    #[test]
+    fn reconstructs_acyclic_bits_in_a_recursive_whole_value() {
+        let mut source = word::WordModule::new("recursive_whole_value");
+        let bit = word::WordType::bits(1).unwrap();
+        let pair = word::WordType::bits(2).unwrap();
+        let input_port = source
+            .add_port(
+                "a",
+                word::PortDirection::Input,
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let a = source
+            .read_signal(
+                source.port(input_port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let state = source
+            .add_wire("state", pair, word::SourceSpan::default())
+            .unwrap();
+        let whole = source
+            .read_signal(state, word::SourceSpan::default())
+            .unwrap();
+        let mask = source
+            .constant(
+                opto_ir::ConstBits::from_bin_str("01").unwrap(),
+                pair,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let masked = source
+            .binary(
+                word::BinaryOp::BitAnd,
+                whole,
+                mask,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let copied_low = source
+            .extract(masked, 0, 1, word::SourceSpan::default())
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(state).with_range(word::BitRange { msb: 0, lsb: 0 }),
+                a,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        source
+            .connect(
+                word::LValue::signal(state).with_range(word::BitRange { msb: 1, lsb: 1 }),
+                copied_low,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let row = crate::RegionRowId::from_index(0).unwrap();
+
+        crate::word::cycle::validate_combinational_acyclic(&source).unwrap();
+        let cone = RegionalWordCone::build(RegionalWordConeRequest {
+            source: &source,
+            operation_regions: &[Some(row), Some(row)],
+            region: row,
+            memories: &[],
+            memory_implementations: &[],
+            target_cells: &opto_library::TargetCellSet::default(),
+            observations: vec![],
+            roots: vec![whole],
+        })
+        .unwrap();
+
+        assert!(cone.source_to_local.contains_key(&whole));
+        assert!(
+            cone.boundary_bindings
+                .iter()
+                .all(|&(source, _)| ![whole, masked, copied_low].contains(&source))
         );
     }
 
@@ -1025,7 +1098,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![],
             roots: vec![selected],
         })
@@ -1172,7 +1244,6 @@ mod tests {
             memories: &[],
             memory_implementations: &[],
             target_cells: &opto_library::TargetCellSet::default(),
-            boundary_inputs: &[],
             observations: vec![],
             roots: vec![feedback],
         })

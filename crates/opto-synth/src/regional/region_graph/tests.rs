@@ -99,6 +99,27 @@ fn physical_tri_state_shell_is_not_owned_by_a_boolean_region() {
 }
 
 #[test]
+fn packed_instance_projection_preserves_nested_signal_boundaries() {
+    let mut module = WordModule::new("packed_instance_boundary");
+    let bit = WordType::bits(1).unwrap();
+    let low = module.add_wire("low", bit, test_span()).unwrap();
+    let high = module.add_wire("high", bit, test_span()).unwrap();
+    let low = module.read_signal(low, test_span()).unwrap();
+    let high = module.read_signal(high, test_span()).unwrap();
+    let packed = module.concat(vec![high, low], test_span()).unwrap();
+    module
+        .add_instance(
+            "consumer",
+            "external_consumer",
+            vec![("data".to_string(), packed, test_span())],
+            test_span(),
+        )
+        .unwrap();
+
+    SynthesisRegionGraph::build(&module).unwrap();
+}
+
+#[test]
 fn deterministic_split_materializes_typed_cross_region_ports() {
     let mut module = WordModule::new("chain");
     let a = input(&mut module, "a");
@@ -135,6 +156,61 @@ fn deterministic_split_materializes_typed_cross_region_ports() {
         .unwrap();
     assert_eq!(internal.direction(), RegionPortDirection::Output);
     assert_eq!(internal.ty(), WordType::bits(1).unwrap());
+}
+
+#[test]
+fn packed_crossings_freeze_each_bit_at_its_semantic_producer() {
+    let mut module = WordModule::new("packed_bit_producers");
+    let a = input(&mut module, "a");
+    let b = input(&mut module, "b");
+    let low = module.unary(UnaryOp::BitNot, a, test_span()).unwrap();
+    let high = module.unary(UnaryOp::BitNot, b, test_span()).unwrap();
+    let pair = WordType::bits(2).unwrap();
+    let bus = module.add_wire("bus", pair, test_span()).unwrap();
+    module
+        .connect(
+            LValue::signal(bus).with_range(opto_ir::word::BitRange { msb: 0, lsb: 0 }),
+            low,
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(
+            LValue::signal(bus).with_range(opto_ir::word::BitRange { msb: 1, lsb: 1 }),
+            high,
+            test_span(),
+        )
+        .unwrap();
+    let packed = module.read_signal(bus, test_span()).unwrap();
+    let result = module.unary(UnaryOp::BitNot, packed, test_span()).unwrap();
+    let out = module
+        .add_port("y", PortDirection::Output, pair, test_span())
+        .unwrap();
+    module
+        .connect(
+            LValue::signal(module.port(out).unwrap().signal),
+            result,
+            test_span(),
+        )
+        .unwrap();
+
+    let graph =
+        super::partition::build(&module, RegionPartitionPolicy::with_target_work(1)).unwrap();
+    let consumer = graph
+        .operation_owner(operation(&module, result))
+        .unwrap()
+        .row();
+    for producer in [low, high] {
+        let owner = graph.operation_owner(operation(&module, producer)).unwrap();
+        assert!(graph.bit_flows(owner).iter().any(|flow| {
+            flow.value() == producer && flow.bit() == 0 && flow.consumer() == Some(consumer)
+        }));
+        assert!(
+            graph
+                .predecessors(graph.region(consumer).unwrap())
+                .contains(&owner.row())
+        );
+    }
 }
 
 #[test]
@@ -344,6 +420,56 @@ fn unrelated_component_preserves_existing_region_identity() {
 
     assert!(before_ids.is_subset(&after_ids));
     assert_ne!(before.revision(), after.revision());
+}
+
+#[test]
+fn publication_order_does_not_change_region_revision() {
+    let build = |reverse_sinks| {
+        let mut module = WordModule::new("publication_order");
+        let primary_input = input(&mut module, "input");
+        let left_input = input(&mut module, "left_input");
+        let right_input = input(&mut module, "right_input");
+        let source = module
+            .unary(UnaryOp::BitNot, primary_input, SourceSpan::stable("source"))
+            .unwrap();
+        let make_left = |module: &mut WordModule| {
+            module
+                .binary(
+                    BinaryOp::BitAnd,
+                    source,
+                    left_input,
+                    SourceSpan::stable("left"),
+                )
+                .unwrap()
+        };
+        let make_right = |module: &mut WordModule| {
+            module
+                .binary(
+                    BinaryOp::BitOr,
+                    source,
+                    right_input,
+                    SourceSpan::stable("right"),
+                )
+                .unwrap()
+        };
+        let (left, right) = if reverse_sinks {
+            let right = make_right(&mut module);
+            let left = make_left(&mut module);
+            (left, right)
+        } else {
+            (make_left(&mut module), make_right(&mut module))
+        };
+        output(&mut module, "left_output", left);
+        output(&mut module, "right_output", right);
+        let graph =
+            super::partition::build(&module, RegionPartitionPolicy::with_target_work(1)).unwrap();
+        graph
+            .operation_owner(operation(&module, source))
+            .unwrap()
+            .revision()
+    };
+
+    assert_eq!(build(false), build(true));
 }
 
 #[test]

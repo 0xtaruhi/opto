@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::TempEdge;
+use super::{TempBitFlow, TempEdge};
+use crate::word::bit_connectivity::{BitConnectivity, BitSource};
 use crate::word::signal_driver::SignalDriverIndex;
 use opto_ir::word;
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,7 +84,8 @@ pub(super) struct ConnectivityIndex<'a> {
     value_keys: &'a [[u8; 32]],
     operation_owner: &'a [Option<usize>],
     memory_signal_owner: &'a BTreeMap<word::SignalId, usize>,
-    drivers: &'a SignalDriverIndex,
+    instance_boundary_signals: BTreeSet<word::SignalId>,
+    bit_connectivity: BitConnectivity<'a>,
 }
 
 impl<'a> ConnectivityIndex<'a> {
@@ -92,15 +94,27 @@ impl<'a> ConnectivityIndex<'a> {
         value_keys: &'a [[u8; 32]],
         operation_owner: &'a [Option<usize>],
         memory_signal_owner: &'a BTreeMap<word::SignalId, usize>,
-        drivers: &'a SignalDriverIndex,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, crate::SynthError> {
+        let mut instance_boundary_signals = BTreeSet::new();
+        for connection in module
+            .instances()
+            .iter()
+            .flat_map(|instance| &instance.connections)
+        {
+            collect_projection_signal_leaves(
+                module,
+                connection.value,
+                &mut instance_boundary_signals,
+            )?;
+        }
+        Ok(Self {
             module,
             value_keys,
             operation_owner,
             memory_signal_owner,
-            drivers,
-        }
+            instance_boundary_signals,
+            bit_connectivity: BitConnectivity::new(module)?,
+        })
     }
 
     pub(super) fn append_input_edge(
@@ -108,11 +122,13 @@ impl<'a> ConnectivityIndex<'a> {
         value: word::ValueId,
         sink: usize,
         edges: &mut BTreeSet<TempEdge>,
+        bit_flows: &mut BTreeSet<TempBitFlow>,
     ) -> Result<(), crate::SynthError> {
         let stored = self.module.value(value).ok_or_else(|| {
             crate::SynthError::invariant("region input references an unknown value")
         })?;
-        let source = self.value_region(value);
+        self.append_bit_flows(value, Some(sink), bit_flows)?;
+        let source = self.value_region(value)?;
         if source == Some(sink) || matches!(stored.kind, word::ValueKind::Constant(_)) {
             return Ok(());
         }
@@ -128,41 +144,153 @@ impl<'a> ConnectivityIndex<'a> {
         Ok(())
     }
 
-    pub(super) fn value_region(&self, value: word::ValueId) -> Option<usize> {
-        let mut owner = None;
-        let mut pending = vec![value];
-        let mut visited = BTreeSet::new();
-        while let Some(value) = pending.pop() {
-            if !visited.insert(value) {
+    pub(super) fn append_bit_flows(
+        &self,
+        value: word::ValueId,
+        sink: Option<usize>,
+        bit_flows: &mut BTreeSet<TempBitFlow>,
+    ) -> Result<(), crate::SynthError> {
+        let width = self
+            .module
+            .value(value)
+            .ok_or_else(|| crate::SynthError::invariant("bit flow references an unknown value"))?
+            .ty
+            .width();
+        for bit in 0..width {
+            let BitSource::Value {
+                value: source,
+                bit: source_bit,
+            } = self.bit_connectivity.source(value, bit)?
+            else {
                 continue;
-            }
-            match &self.module.value(value)?.kind {
-                word::ValueKind::Operation(operation) => {
-                    let candidate = self.operation_owner[operation.index()]?;
-                    if owner
-                        .replace(candidate)
-                        .is_some_and(|current| current != candidate)
-                    {
-                        return None;
-                    }
-                }
-                word::ValueKind::Signal(reference) => {
-                    if let Some(candidate) =
-                        self.memory_signal_owner.get(&reference.signal).copied()
-                    {
-                        if owner
-                            .replace(candidate)
-                            .is_some_and(|current| current != candidate)
-                        {
-                            return None;
-                        }
-                    } else {
-                        pending.extend(self.drivers.reference_drivers(*reference)?);
-                    }
-                }
-                word::ValueKind::Constant(_) => {}
+            };
+            let Some(producer) = self.endpoint_owner(source)? else {
+                continue;
+            };
+            if Some(producer) != sink {
+                bit_flows.insert(TempBitFlow {
+                    source: producer,
+                    sink,
+                    value: source,
+                    bit: source_bit,
+                });
             }
         }
-        owner
+        Ok(())
     }
+
+    pub(super) fn value_region(
+        &self,
+        value: word::ValueId,
+    ) -> Result<Option<usize>, crate::SynthError> {
+        let width = self
+            .module
+            .value(value)
+            .ok_or_else(|| crate::SynthError::invariant("region value is unknown"))?
+            .ty
+            .width();
+        let mut owner = None;
+        for bit in 0..width {
+            let BitSource::Value { value, .. } = self.bit_connectivity.source(value, bit)? else {
+                continue;
+            };
+            let Some(candidate) = self.endpoint_owner(value)? else {
+                continue;
+            };
+            if owner
+                .replace(candidate)
+                .is_some_and(|current| current != candidate)
+            {
+                return Ok(None);
+            }
+        }
+        Ok(owner)
+    }
+
+    fn endpoint_owner(&self, value: word::ValueId) -> Result<Option<usize>, crate::SynthError> {
+        let stored = self.module.value(value).ok_or_else(|| {
+            crate::SynthError::invariant("bit producer references an unknown value")
+        })?;
+        match stored.kind {
+            word::ValueKind::Operation(operation) => {
+                if let Some(owner) = self
+                    .operation_owner
+                    .get(operation.index())
+                    .copied()
+                    .flatten()
+                {
+                    return Ok(Some(owner));
+                }
+                if self.module.operation(operation).is_some_and(|operation| {
+                    matches!(operation.kind, word::OpKind::TriState { .. })
+                }) {
+                    // The resolved-net shell owns the physical driver cell;
+                    // only its data and enable cones receive region placement.
+                    Ok(None)
+                } else {
+                    Err(crate::SynthError::invariant(format!(
+                        "live bit producer operation {operation:?} has no region placement"
+                    )))
+                }
+            }
+            word::ValueKind::Signal(reference) => {
+                if let Some(owner) = self.memory_signal_owner.get(&reference.signal).copied() {
+                    return Ok(Some(owner));
+                }
+                let signal = self.module.signal(reference.signal).ok_or_else(|| {
+                    crate::SynthError::invariant("bit producer signal is unknown")
+                })?;
+                if signal.resolution == word::SignalResolution::TriState
+                    || self.instance_boundary_signals.contains(&reference.signal)
+                    || matches!(signal.kind, word::SignalKind::Port(port) if self.module.port(port).is_some_and(|port| matches!(port.direction, word::PortDirection::Input | word::PortDirection::Inout)))
+                {
+                    Ok(None)
+                } else {
+                    Err(crate::SynthError::invariant(format!(
+                        "live internal signal bit {:?} has no semantic producer",
+                        reference.signal
+                    )))
+                }
+            }
+            word::ValueKind::Constant(_) => Ok(None),
+        }
+    }
+}
+
+fn collect_projection_signal_leaves(
+    module: &word::WordModule,
+    root: word::ValueId,
+    signals: &mut BTreeSet<word::SignalId>,
+) -> Result<(), crate::SynthError> {
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    while let Some(value) = pending.pop() {
+        if !visited.insert(value) {
+            continue;
+        }
+        let stored = module.value(value).ok_or_else(|| {
+            crate::SynthError::invariant("instance connection references an unknown Word value")
+        })?;
+        match &stored.kind {
+            word::ValueKind::Signal(reference) => {
+                signals.insert(reference.signal);
+            }
+            word::ValueKind::Operation(operation) => {
+                let operation = module.operation(*operation).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "instance connection projection references an unknown operation",
+                    )
+                })?;
+                match &operation.kind {
+                    word::OpKind::Extract { value, .. } | word::OpKind::Cast { value, .. } => {
+                        pending.push(*value);
+                    }
+                    word::OpKind::Concat { parts } => pending.extend(parts.iter().copied()),
+                    _ => {}
+                }
+            }
+            word::ValueKind::Constant(_) => {}
+        }
+    }
+    Ok(())
 }

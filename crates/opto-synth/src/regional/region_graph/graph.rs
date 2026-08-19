@@ -195,6 +195,44 @@ pub struct RegionBoundaryPort {
     pub(super) edge_key: [u8; 32],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// One frozen per-bit publication obligation derived before region placement.
+///
+/// The value and bit identify the semantic producer. `consumer` is absent for
+/// a design root and names the consuming region for an internal crossing.
+pub struct RegionBitFlow {
+    pub(super) producer: RegionRowId,
+    pub(super) consumer: Option<RegionRowId>,
+    pub(super) value: word::ValueId,
+    pub(super) bit: u32,
+}
+
+impl RegionBitFlow {
+    #[must_use]
+    /// Return the region responsible only for placing this producer artifact.
+    pub const fn producer(self) -> RegionRowId {
+        self.producer
+    }
+
+    #[must_use]
+    /// Return the consuming region, or `None` for a design-root publication.
+    pub const fn consumer(self) -> Option<RegionRowId> {
+        self.consumer
+    }
+
+    #[must_use]
+    /// Return the canonical producer value before bit lowering.
+    pub const fn value(self) -> word::ValueId {
+        self.value
+    }
+
+    #[must_use]
+    /// Return the least-significant-bit-based index within the producer value.
+    pub const fn bit(self) -> u32 {
+        self.bit
+    }
+}
+
 impl RegionBoundaryPort {
     #[must_use]
     /// Return the dense boundary-port ID within the owning graph.
@@ -365,6 +403,7 @@ pub struct SynthesisRegionGraph {
     pub(super) ports: Box<[RegionBoundaryPort]>,
     pub(super) input_ports: opto_core::PackedRows<RegionBoundaryPortId>,
     pub(super) output_ports: opto_core::PackedRows<RegionBoundaryPortId>,
+    pub(super) bit_flows: opto_core::PackedRows<RegionBitFlow>,
     pub(super) predecessors: opto_core::PackedRows<RegionRowId>,
     pub(super) successors: opto_core::PackedRows<RegionRowId>,
 }
@@ -472,6 +511,12 @@ impl SynthesisRegionGraph {
     }
 
     #[must_use]
+    /// Return exact bit publication obligations owned by `region`.
+    pub fn bit_flows(&self, region: SynthesisRegion) -> &[RegionBitFlow] {
+        &self.bit_flows[self.checked_row(region)]
+    }
+
+    #[must_use]
     /// Return unique predecessor rows in ascending order.
     pub fn predecessors(&self, region: SynthesisRegion) -> &[RegionRowId] {
         &self.predecessors[self.checked_row(region)]
@@ -495,6 +540,69 @@ impl SynthesisRegionGraph {
             return Err(crate::SynthError::invariant(
                 "region reverse-owner columns do not match the Word arenas",
             ));
+        }
+        if self.bit_flows.row_count() != self.regions.len() {
+            return Err(crate::SynthError::invariant(
+                "regional bit-flow rows do not match the region arena",
+            ));
+        }
+        let memory_data_owners = module
+            .memory_read_ports()
+            .iter()
+            .filter_map(|read| {
+                self.memory_owners
+                    .get(read.memory.index())
+                    .copied()
+                    .map(|owner| (read.data, owner))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for region in &self.regions {
+            for publication in self.bit_flows(*region) {
+                if publication.producer() != region.row()
+                    || publication
+                        .consumer()
+                        .is_some_and(|consumer| consumer.index() >= self.regions.len())
+                    || publication.consumer() == Some(publication.producer())
+                {
+                    return Err(crate::SynthError::invariant(
+                        "regional bit publication has an invalid endpoint",
+                    ));
+                }
+                let stored = module.value(publication.value()).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "regional bit publication references an unknown value",
+                    )
+                })?;
+                if publication.bit() >= stored.ty.width() {
+                    return Err(crate::SynthError::invariant(
+                        "regional bit publication exceeds its producer value",
+                    ));
+                }
+                match stored.kind {
+                    word::ValueKind::Operation(operation) => {
+                        if self.operation_owners.get(operation.index())
+                            != Some(&Some(publication.producer()))
+                        {
+                            return Err(crate::SynthError::invariant(
+                                "regional bit flow disagrees with operation placement",
+                            ));
+                        }
+                    }
+                    word::ValueKind::Signal(reference) => {
+                        let memory_owner = memory_data_owners.get(&reference.signal).copied();
+                        if memory_owner != Some(publication.producer()) {
+                            return Err(crate::SynthError::invariant(
+                                "regional bit flow disagrees with memory placement",
+                            ));
+                        }
+                    }
+                    word::ValueKind::Constant(_) => {
+                        return Err(crate::SynthError::invariant(
+                            "regional bit flow cannot use a constant producer",
+                        ));
+                    }
+                }
+            }
         }
         for region in &self.regions {
             if region.row().index() >= self.regions.len() {

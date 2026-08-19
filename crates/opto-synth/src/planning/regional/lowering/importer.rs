@@ -161,11 +161,6 @@ impl RegionalWordImporter<'_> {
         let value = self.source.value(source).ok_or_else(|| {
             crate::SynthError::invariant("region-local Word import reached an unknown value")
         })?;
-        if self.boundary_inputs.contains(&source) {
-            let local = self.import_boundary(source, value.ty, &value.source)?;
-            self.source_to_local.insert(source, local);
-            return Ok(local);
-        }
         if self.visiting.contains(&source) {
             if !self.source_acyclic {
                 // Importing a packed value is deliberately coarser than the
@@ -176,7 +171,7 @@ impl RegionalWordImporter<'_> {
                 crate::word::cycle::validate_combinational_acyclic(self.source)?;
                 self.source_acyclic = true;
             }
-            return self.import_recursive_boundary(source, value.ty, &value.source);
+            return self.import_active_value(source, value.ty, &value.source);
         }
         self.visiting.insert(source);
         self.import_path.push(source);
@@ -213,6 +208,50 @@ impl RegionalWordImporter<'_> {
         }
         self.visiting.remove(&source);
         self.source_to_local.insert(source, local);
+        Ok(local)
+    }
+
+    fn import_active_value(
+        &mut self,
+        source: word::ValueId,
+        ty: word::WordType,
+        span: &word::SourceSpan,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let mut parts = (0..ty.width())
+            .map(|bit| self.import_value_bit(source, bit, span))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut local = if let [part] = parts.as_slice() {
+            *part
+        } else {
+            parts.reverse();
+            let local = self
+                .module
+                .concat(parts, span.clone())
+                .map_err(crate::SynthError::from)?;
+            self.record_generated_operation(local)?;
+            local
+        };
+        let local_ty = self
+            .module
+            .value(local)
+            .map(|stored| stored.ty)
+            .ok_or_else(|| crate::SynthError::invariant("active imported value disappeared"))?;
+        if local_ty != ty {
+            local = self
+                .module
+                .cast(
+                    if ty.is_signed() {
+                        word::CastKind::SignExtend
+                    } else {
+                        word::CastKind::ZeroExtend
+                    },
+                    local,
+                    ty,
+                    span.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+            self.record_generated_operation(local)?;
+        }
         Ok(local)
     }
 

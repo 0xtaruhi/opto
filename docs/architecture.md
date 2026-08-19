@@ -694,11 +694,21 @@ closure, rejects an unowned live operation, and verifies that every surviving
 frozen atom remains whole. Final partitioning may merge whole atoms but may not
 split one. Ownership is not a preparation-side lookup that later partitioning
 may discard: it survives operation replacement, final partition, private-IR
-construction, plan binding, artifact publication, and provenance.
+construction, plan binding, and provenance. It is placement and write
+authority only; it is not a connectivity classifier and never decides whether
+a bit is external, live, or publishable.
 Published objects use exactly three owner classes: global substrate, one
 region, or one directed boundary edge.
 
-The same freeze seals full-domain connectivity and boundary identity. Global
+The same freeze first resolves full-domain connectivity per bit, through exact
+signal connects and width-only projections, without consulting placement. It
+then records every live crossing as an immutable
+`(producer value, producer bit, producer region, consumer region/root)` row.
+An operation reached by that table without a placement owner is an invariant
+failure; `None` is reserved for a real physical boundary or constant, never an
+unknown-owner fallback. Aggregate typed ports remain boundary contract
+identities, while bit-flow rows are the sole source of producer publication.
+Global
 substrate equivalence may come only from an explicit unique static connect, a
 globally exact pass-through, or a constant proved over the complete Word
 domain. A care set, truth-table reduction, or region-local rewrite is not
@@ -929,7 +939,9 @@ composition, analysis
 invalidation, and proposal handling do not leak into candidate enumeration.
 Dispatch remains monomorphic, with no per-node pass objects or virtual calls.
 
-Boundary slices of the same source signal share one region-local backing port.
+Boundary slices of the same physical source signal share one region-local
+backing port. Internally driven signals are reconstructed from their canonical
+bit producers; an aggregate port marker cannot turn them into imported data.
 Overlapping views therefore produce the same AXM input IDs and structural
 hashing can preserve cross-output sharing. A true cross-region value remains a
 hard boundary; backing-port coalescing never follows a driver into another
@@ -945,8 +957,9 @@ An observation preserves the contract endpoint in the private Word import but
 never enters the cover-input binding namespace. Its exact global producer is
 the publication root, so a local simplification cannot reinterpret an owned
 output as an imported copy of itself.
-Before private optimization, each observable root receives a full-domain
-publication obligation from the source Word graph. If that graph does not
+Before private optimization, each bit-flow producer and observable root
+receives a full-domain publication obligation from the source Word graph. If
+that graph does not
 prove the root to be a constant, an imported projection, or an already-owned
 state artifact, the plan must retain a combinational artifact even when its
 local care set reduces the function to a constant or pass-through. Local cover
@@ -960,10 +973,12 @@ but includes region ownership in clock-gating bank keys, so publication cannot
 create a cross-region sharing opportunity.
 
 The scalar shell is substrate, not a second cover input. Private plans and
-their bindings cross lowering together and are the only regional publication
-source. No epoch repartitions the shell or attempts to rediscover private logic
-from its endpoints. Plan inputs may resolve to frozen substrate nets; plan
-outputs are owner write obligations. If an implementation output resolves to
+their bindings cross lowering together. Exact frozen bit-flow rows select the
+producer bits that those plans must publish; neither owner lookup nor alias
+membership may invent or erase that set. No epoch repartitions the shell or
+attempts to rediscover private logic from its endpoints. Plan inputs may
+resolve to frozen substrate nets; plan outputs are explicit bit-flow write
+obligations. If an implementation output resolves to
 the same substrate class as one of its inputs, publication keeps the required
 cell on an artifact-local net and does not write that imported class. This is a
 write-permission rule, not an alias-conflict repair heuristic.
@@ -973,6 +988,9 @@ duplicate claims from the same region are idempotent, while claims from
 different regions fail independently of discovery order. Regional claims only
 validate the full-domain contract; they can never replace its constant or
 connectivity proof.
+Final mapped validation applies the same distinction physically: every net
+consumed by a cell input or observable output has exactly one driver, except an
+explicit resolved net, which must have at least one potential driver.
 Memory lowering applies the same single-owner rule before regional binding:
 every generated register or latch result receives one `MemoryStateBit`
 identity, while only non-state operations enter the independently ordinalled
