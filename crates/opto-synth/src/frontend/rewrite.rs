@@ -7,6 +7,8 @@ use opto_ir::word;
 pub(super) struct RewriteScratch {
     cache: Vec<Option<word::ValueId>>,
     touched: Vec<usize>,
+    visited: Vec<bool>,
+    visit_touched: Vec<usize>,
 }
 
 impl RewriteScratch {
@@ -15,6 +17,25 @@ impl RewriteScratch {
             self.cache[index] = None;
         }
         self.cache.resize(values, None);
+    }
+
+    pub(super) fn begin_visit(&mut self, values: usize) {
+        for index in self.visit_touched.drain(..) {
+            self.visited[index] = false;
+        }
+        self.visited.resize(values, false);
+    }
+
+    pub(super) fn visit(&mut self, value: word::ValueId) -> Result<bool, crate::SynthError> {
+        let reached = self.visited.get_mut(value.index()).ok_or_else(|| {
+            crate::SynthError::invariant("procedural expression references an unknown value")
+        })?;
+        if *reached {
+            return Ok(false);
+        }
+        *reached = true;
+        self.visit_touched.push(value.index());
+        Ok(true)
     }
 }
 

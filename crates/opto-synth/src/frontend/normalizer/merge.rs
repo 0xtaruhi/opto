@@ -487,7 +487,7 @@ impl ProcedureNormalizer<'_> {
                 &reset_input.origins,
             )? || reset_input.slot.coverage != Predicate::Always
                 || !reset_input.slot.resets.is_empty()
-                || !constant_value(self.module, reset_input.slot.update)
+                || !constant_value(self.module, self.constant_analysis, reset_input.slot.update)
             {
                 continue;
             }
@@ -518,8 +518,12 @@ impl ProcedureNormalizer<'_> {
                 continue;
             }
             let mut resets = ResetList::with_capacity(data.resets.len() + 1);
-            let reset_value =
-                materialize_synthesis_constant(self.module, reset_input.slot.update, &source)?;
+            let reset_value = materialize_synthesis_constant(
+                self.module,
+                self.constant_analysis,
+                reset_input.slot.update,
+                &source,
+            )?;
             resets.push(word::Reset {
                 kind,
                 value: condition,
@@ -567,7 +571,11 @@ impl ProcedureNormalizer<'_> {
                         };
                         if input.slot.coverage != Predicate::Always
                             || !input.slot.resets.is_empty()
-                            || !constant_value(self.module, input.slot.update)
+                            || !constant_value(
+                                self.module,
+                                self.constant_analysis,
+                                input.slot.update,
+                            )
                             || reset_value.is_some_and(|value| value != input.slot.update)
                         {
                             valid = false;
@@ -601,8 +609,12 @@ impl ProcedureNormalizer<'_> {
                 data.coverage = Predicate::Always;
             }
             let mut resets = ResetList::with_capacity(data.resets.len() + 1);
-            let reset_value =
-                materialize_synthesis_constant(self.module, reset_value, &self.procedure.source)?;
+            let reset_value = materialize_synthesis_constant(
+                self.module,
+                self.constant_analysis,
+                reset_value,
+                &self.procedure.source,
+            )?;
             resets.push(word::Reset {
                 kind: word::ResetKind::Async,
                 value: event.event.value,

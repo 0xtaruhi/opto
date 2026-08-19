@@ -1073,8 +1073,10 @@ fn synthesis_boundary_materializes_self_xor_as_zero() {
     let xor = module
         .binary(word::BinaryOp::BitXor, left, right, span())
         .unwrap();
+    let mut analysis = word::KnownBitsAnalysis::new(&module);
 
-    let constant = materialize_synthesis_constant(&mut module, xor, &span()).unwrap();
+    let constant =
+        materialize_synthesis_constant(&mut module, &mut analysis, xor, &span()).unwrap();
 
     assert!(matches!(
         module.value(constant).unwrap().kind,

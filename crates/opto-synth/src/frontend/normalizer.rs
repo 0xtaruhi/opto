@@ -47,6 +47,7 @@ impl<'a> ProcedureNormalizer<'a> {
             outputs,
             edge_guards,
             rewrite_scratch,
+            constant_analysis,
             incomplete_comb,
         } = input;
         let procedure = procedures
@@ -113,6 +114,7 @@ impl<'a> ProcedureNormalizer<'a> {
             bases,
             reads,
             rewrite_scratch,
+            constant_analysis,
             predicates,
             event_controls,
             decision_choices: BTreeMap::new(),
@@ -368,7 +370,12 @@ impl<'a> ProcedureNormalizer<'a> {
         Ok(match select {
             proc::TargetSelect::Dynamic { offset, width } => {
                 let offset = self.rewrite(frame, offset)?;
-                let offset = materialize_synthesis_constant(self.module, offset, source)?;
+                let offset = materialize_synthesis_constant(
+                    self.module,
+                    self.constant_analysis,
+                    offset,
+                    source,
+                )?;
                 if let Some(lsb) = constant_u32(self.module, offset) {
                     let msb = lsb.checked_add(width.get() - 1).ok_or_else(|| {
                         crate::SynthError::capacity(
@@ -564,17 +571,14 @@ impl<'a> ProcedureNormalizer<'a> {
     }
 
     fn procedural_memory_reads(
-        &self,
+        &mut self,
         root: word::ValueId,
     ) -> Result<Vec<word::SignalId>, crate::SynthError> {
-        let mut visited = vec![false; self.module.values().len()];
+        self.rewrite_scratch.begin_visit(self.module.values().len());
         let mut pending = vec![root];
         let mut reads = BTreeSet::new();
         while let Some(value) = pending.pop() {
-            let reached = visited.get_mut(value.index()).ok_or_else(|| {
-                crate::SynthError::invariant("procedural expression references an unknown value")
-            })?;
-            if std::mem::replace(reached, true) {
+            if !self.rewrite_scratch.visit(value)? {
                 continue;
             }
             match self
@@ -743,7 +747,12 @@ impl<'a> ProcedureNormalizer<'a> {
                         crate::SynthError::invariant("procedural decision block disappeared")
                     })?
                     .source;
-                let condition = materialize_synthesis_constant(self.module, condition, source)?;
+                let condition = materialize_synthesis_constant(
+                    self.module,
+                    self.constant_analysis,
+                    condition,
+                    source,
+                )?;
                 let condition = self.predicate(condition)?;
                 if condition == Predicate::Always {
                     self.set_edge_guard(then_edge, guard)?;
