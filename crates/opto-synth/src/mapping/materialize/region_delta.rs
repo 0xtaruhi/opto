@@ -185,6 +185,7 @@ impl MappedRegionArtifact {
                 }
             }
         }
+        detach_imported_output_targets(&inputs, &mut output_targets);
         let mut output_owners = std::collections::BTreeSet::new();
         for outputs in &mut output_targets {
             for target in outputs {
@@ -588,6 +589,29 @@ fn assign_output_target(
     Ok(())
 }
 
+fn detach_imported_output_targets(
+    inputs: &[ArtifactSignal],
+    targets: &mut [[Option<MappedValueSignal>; 2]],
+) {
+    let imported_nets = inputs
+        .iter()
+        .filter_map(|signal| match signal {
+            ArtifactSignal::Mapped(signal @ MappedValueSignal::Net(_)) => Some(*signal),
+            ArtifactSignal::Mapped(MappedValueSignal::Constant(_))
+            | ArtifactSignal::LocalNet(_) => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for target in targets.iter_mut().flatten() {
+        if target.is_some_and(|signal| imported_nets.contains(&signal)) {
+            // A frozen connectivity class can appear through both a regional
+            // input alias and an output alias. The substrate already owns that
+            // net; publishing any local path back onto it creates a physical
+            // combinational cycle even when the cover itself is acyclic.
+            *target = None;
+        }
+    }
+}
+
 fn allocate_output(
     target: Option<MappedValueSignal>,
     local_net_count: &mut usize,
@@ -696,5 +720,17 @@ mod tests {
 
         assert_eq!(output, ArtifactSignal::LocalNet(0));
         assert_eq!(local_net_count, 1);
+    }
+
+    #[test]
+    fn imported_substrate_net_is_not_republished_through_a_local_path() {
+        let shared = MappedValueSignal::Net(NetId::from_index(3).unwrap());
+        let distinct = MappedValueSignal::Net(NetId::from_index(4).unwrap());
+        let inputs = [ArtifactSignal::Mapped(shared)];
+        let mut targets = [[None, None], [Some(shared), Some(distinct)]];
+
+        detach_imported_output_targets(&inputs, &mut targets);
+
+        assert_eq!(targets, [[None, None], [None, Some(distinct)]]);
     }
 }

@@ -398,6 +398,25 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             self.cache[index] = Some(span);
             return Ok(span);
         }
+        if let word::ValueKind::Operation(operation) = value.kind
+            && self.global_scope == super::GlobalBitblastScope::RegionalShell
+            && self
+                .operation_regions
+                .get(operation.index())
+                .copied()
+                .flatten()
+                .is_none()
+            && let Some(constant) = self.known_bits.constant(self.module, value_id)
+        {
+            let bits = self.constant_bits(value_id, &constant, value.ty, &value.source)?;
+            let span = self.store(&bits)?;
+            let index = value_id.index();
+            if self.cache.len() <= index {
+                self.cache.resize(index + 1, None);
+            }
+            self.cache[index] = Some(span);
+            return Ok(span);
+        }
         let bits = match value.kind {
             word::ValueKind::Signal(reference) => {
                 self.signal_bits(value_id, reference, &value.source)?
@@ -646,6 +665,10 @@ impl<B: BitBackend> BitBlaster<'_, B> {
         ty: word::WordType,
         source: &word::SourceSpan,
     ) -> Result<Vec<ScalarBit>, crate::SynthError> {
+        let original_is_constant = self
+            .module
+            .value(original)
+            .is_some_and(|value| matches!(value.kind, word::ValueKind::Constant(_)));
         (0..ty.width())
             .map(|index| {
                 let bit = constant.bit_lsb(index).ok_or_else(|| {
@@ -654,7 +677,9 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                     ))
                 })?;
                 match bit {
-                    BitVal::Zero | BitVal::One | BitVal::X if ty.width() == 1 => {
+                    BitVal::Zero | BitVal::One | BitVal::X
+                        if ty.width() == 1 && original_is_constant =>
+                    {
                         Ok(self.backend.import_word(self.module, original))
                     }
                     BitVal::Zero | BitVal::One | BitVal::X => {

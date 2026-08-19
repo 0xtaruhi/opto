@@ -5,6 +5,16 @@
 
 use super::{BTreeMap, RegionalWordImporter, word};
 
+#[derive(Debug, Clone, Copy)]
+struct ScaledDynamicExtractBit {
+    value: word::ValueId,
+    selector: word::ValueId,
+    scale: u128,
+    maximum_selector: u128,
+    width: u32,
+    bit: u32,
+}
+
 impl RegionalWordImporter<'_> {
     pub(super) fn import_memories(
         &mut self,
@@ -393,6 +403,18 @@ impl RegionalWordImporter<'_> {
                 self.record_generated_operation(local)?;
                 Ok(local)
             }
+            word::OpKind::Unary {
+                op: word::UnaryOp::LogicalNot,
+                arg,
+            } if bit == 0 && self.source_value_type(arg)?.width() == 1 => {
+                let arg = self.import_value_bit(arg, 0, span)?;
+                let local = self
+                    .module
+                    .unary(word::UnaryOp::LogicalNot, arg, span.clone())
+                    .map_err(crate::SynthError::from)?;
+                self.record_generated_operation(local)?;
+                Ok(local)
+            }
             word::OpKind::Binary {
                 op: op @ (word::BinaryOp::BitAnd | word::BinaryOp::BitOr | word::BinaryOp::BitXor),
                 left,
@@ -400,6 +422,23 @@ impl RegionalWordImporter<'_> {
             } => {
                 let left = self.import_extended_value_bit(left, bit, span)?;
                 let right = self.import_extended_value_bit(right, bit, span)?;
+                let local = self
+                    .module
+                    .binary(op, left, right, span.clone())
+                    .map_err(crate::SynthError::from)?;
+                self.record_generated_operation(local)?;
+                Ok(local)
+            }
+            word::OpKind::Binary {
+                op: op @ (word::BinaryOp::LogicalAnd | word::BinaryOp::LogicalOr),
+                left,
+                right,
+            } if bit == 0
+                && self.source_value_type(left)?.width() == 1
+                && self.source_value_type(right)?.width() == 1 =>
+            {
+                let left = self.import_value_bit(left, 0, span)?;
+                let right = self.import_value_bit(right, 0, span)?;
                 let local = self
                     .module
                     .binary(op, left, right, span.clone())
@@ -452,10 +491,180 @@ impl RegionalWordImporter<'_> {
                     self.constant_bit(false, span)
                 }
             }
+            word::OpKind::DynamicExtract {
+                value,
+                offset,
+                width,
+            } => {
+                if let Some(offset) = self.known_u32(offset) {
+                    let selected = offset.checked_add(bit).ok_or_else(|| {
+                        crate::SynthError::invariant("active dynamic extract bit offset overflow")
+                    })?;
+                    let input_width = self.source_value_type(value)?.width();
+                    if offset
+                        .checked_add(width.get())
+                        .is_some_and(|end| end <= input_width)
+                    {
+                        self.import_value_bit(value, selected, span)
+                    } else {
+                        self.constant_bit(false, span)
+                    }
+                } else if let Some((selector, scale, maximum_selector)) =
+                    self.scaled_dynamic_offset(offset)
+                {
+                    self.import_scaled_dynamic_extract_bit(
+                        ScaledDynamicExtractBit {
+                            value,
+                            selector,
+                            scale,
+                            maximum_selector,
+                            width: width.get(),
+                            bit,
+                        },
+                        span,
+                    )
+                } else {
+                    Err(crate::SynthError::invariant(
+                        "active region-local recursion reached a variable dynamic extract",
+                    ))
+                }
+            }
             _ => Err(crate::SynthError::invariant(
                 "active region-local recursion reached a non-bitwise operation",
             )),
         }
+    }
+
+    fn known_u32(&self, value: word::ValueId) -> Option<u32> {
+        let width = self.source.value(value)?.ty.width();
+        let mut known_bits = word::KnownBitsAnalysis::new(self.source);
+        let mut result = 0u32;
+        for index in 0..width {
+            match known_bits.bit(self.source, value, index) {
+                word::KnownBit::Zero => {}
+                word::KnownBit::One if index < u32::BITS => result |= 1u32 << index,
+                word::KnownBit::One | word::KnownBit::Unknown => return None,
+            }
+        }
+        Some(result)
+    }
+
+    fn scaled_dynamic_offset(&self, offset: word::ValueId) -> Option<(word::ValueId, u128, u128)> {
+        let stored = self.source.value(offset)?;
+        let word::ValueKind::Operation(operation) = stored.kind else {
+            return None;
+        };
+        let word::OpKind::Binary {
+            op: word::BinaryOp::Mul,
+            left,
+            right,
+        } = self.source.operation(operation)?.kind
+        else {
+            return None;
+        };
+        let (selector, scale) = match (self.known_u32(left), self.known_u32(right)) {
+            (Some(scale), None) if scale != 0 => (right, u128::from(scale)),
+            (None, Some(scale)) if scale != 0 => (left, u128::from(scale)),
+            _ => return None,
+        };
+        let selector_ty = self.source_value_type(selector).ok()?;
+        if selector_ty.is_signed() || selector_ty.width() >= u128::BITS {
+            return None;
+        }
+        let mut known_bits = word::KnownBitsAnalysis::new(self.source);
+        let mut maximum_selector = 0u128;
+        for index in 0..selector_ty.width() {
+            if known_bits.bit(self.source, selector, index) != word::KnownBit::Zero {
+                maximum_selector |= 1u128 << index;
+            }
+        }
+        let maximum_product = maximum_selector.checked_mul(scale)?;
+        if stored.ty.width() < u128::BITS && maximum_product >= (1u128 << stored.ty.width()) {
+            return None;
+        }
+        Some((selector, scale, maximum_selector))
+    }
+
+    fn import_scaled_dynamic_extract_bit(
+        &mut self,
+        selection: ScaledDynamicExtractBit,
+        span: &word::SourceSpan,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let ScaledDynamicExtractBit {
+            value,
+            selector,
+            scale,
+            maximum_selector,
+            width,
+            bit,
+        } = selection;
+        let selector_ty = self.source_value_type(selector)?;
+        let selector = self.import(selector)?;
+        let input_width = self.source_value_type(value)?.width();
+        let available_offsets = input_width.checked_sub(width).ok_or_else(|| {
+            crate::SynthError::invariant("scaled dynamic extract width exceeds its input")
+        })?;
+        let maximum_selector = maximum_selector.min(u128::from(available_offsets) / scale);
+        let mut result = self.constant_bit(false, span)?;
+        for choice in (0..=maximum_selector).rev() {
+            let offset = choice.checked_mul(scale).ok_or_else(|| {
+                crate::SynthError::invariant("scaled dynamic extract offset overflow")
+            })?;
+            let selected = if offset
+                .checked_add(u128::from(width))
+                .is_some_and(|end| end <= u128::from(input_width))
+            {
+                let selected = offset.checked_add(u128::from(bit)).ok_or_else(|| {
+                    crate::SynthError::invariant("scaled dynamic extract selected bit overflow")
+                })?;
+                self.import_value_bit(
+                    value,
+                    u32::try_from(selected).map_err(|_| {
+                        crate::SynthError::capacity("scaled dynamic extract selected bit")
+                    })?,
+                    span,
+                )?
+            } else {
+                self.constant_bit(false, span)?
+            };
+            let choice = self.unsigned_constant(choice, selector_ty, span)?;
+            let matches = self
+                .module
+                .binary(word::BinaryOp::Eq, selector, choice, span.clone())
+                .map_err(crate::SynthError::from)?;
+            self.record_generated_operation(matches)?;
+            result = self
+                .module
+                .mux(matches, selected, result, span.clone())
+                .map_err(crate::SynthError::from)?;
+            self.record_generated_operation(result)?;
+        }
+        Ok(result)
+    }
+
+    fn unsigned_constant(
+        &mut self,
+        value: u128,
+        ty: word::WordType,
+        span: &word::SourceSpan,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let bits = (0..ty.width())
+            .rev()
+            .map(|bit| {
+                if value & (1u128 << bit) == 0 {
+                    opto_ir::BitVal::Zero
+                } else {
+                    opto_ir::BitVal::One
+                }
+            })
+            .collect();
+        self.module
+            .constant(
+                opto_ir::ConstBits::from_bits(bits).map_err(crate::SynthError::from)?,
+                ty,
+                span.clone(),
+            )
+            .map_err(crate::SynthError::from)
     }
 
     fn import_extended_value_bit(

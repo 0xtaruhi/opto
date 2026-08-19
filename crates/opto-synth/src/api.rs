@@ -14,7 +14,10 @@ pub(crate) mod types;
 
 #[cfg(test)]
 pub(crate) use check::target_cell_reference_ports;
-pub use check::{CheckDesignError, ReferencePort, ReferencePortMap, check_design_with_references};
+pub use check::{
+    CheckDesignError, ReferencePort, ReferencePortMap, check_definition_with_references,
+    check_design_with_references,
+};
 pub use error::{CombinationalCycle, CombinationalCycleNode, SynthError};
 pub use types::{
     OptimizationPhase, StageId, SynthesisConfig, SynthesisDiagnostics, SynthesisEffort,

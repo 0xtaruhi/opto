@@ -80,6 +80,11 @@ ASIC synthesis profile: any reachable assignment, declaration initializer,
 memory preload, system task, timing control, or other executable initial
 behavior remains an explicit unsupported-profile error.
 
+Structural validation requires the selected root design to expose an external
+port interface. A reachable child definition may have no ports; it remains
+subject to the same name, reference, connection, driver, and typed-ID checks as
+every other definition.
+
 ## Non-Negotiable Rules
 
 - There is no fallback, legacy, shadow, or environment-selected synthesis path.
@@ -707,6 +712,10 @@ mutates the Word graph. Proven bits enter substrate constant classes directly;
 unknown bits receive publication endpoints. A private cover may omit an
 artifact for one of those frozen constants, but a private pass-through never
 creates a substrate alias or weakens a source-level publication obligation.
+When several private cones reconstruct the same source operation bit, only
+that operation's frozen owner may publish it. A proven constant operation that
+has no live regional owner remains a substrate constant instead of entering
+regional implementation planning.
 
 State and output roots claim their fan-in cones. Size truncation promotes a
 frontier operation to a seed; shared fan-in receives one owner. Coarsening

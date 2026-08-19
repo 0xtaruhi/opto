@@ -336,9 +336,69 @@ fn operation_dependencies(
         word::OpKind::Cast { kind, value, .. } => {
             push_cast_slice(module, &mut dependencies, *kind, *value, selection)?;
         }
-        word::OpKind::DynamicExtract { value, offset, .. } => {
-            push_full(module, &mut dependencies, *value)?;
-            push_full(module, &mut dependencies, *offset)?;
+        word::OpKind::DynamicExtract {
+            value,
+            offset,
+            width,
+        } => {
+            if let Some(offset) = known_u32(module, known_bits, *offset) {
+                let input_width = value_width(module, *value)?;
+                if offset
+                    .checked_add(width.get())
+                    .is_some_and(|end| end <= input_width)
+                {
+                    push_slice(
+                        module,
+                        &mut dependencies,
+                        *value,
+                        offset.checked_add(selection.lsb).ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "dynamic extract dependency offset overflow",
+                            )
+                        })?,
+                        selection.width,
+                    )?;
+                }
+            } else if let Some((scale, maximum_selector)) =
+                scaled_dynamic_offset(module, known_bits, *offset)
+            {
+                push_full(module, &mut dependencies, *offset)?;
+                let input_width = value_width(module, *value)?;
+                let available_offsets = input_width.checked_sub(width.get()).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "dynamic extract dependency width exceeds its input",
+                    )
+                })?;
+                let mut selector = 0u128;
+                while selector <= maximum_selector {
+                    let candidate = selector.checked_mul(scale).ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "scaled dynamic extract dependency offset overflow",
+                        )
+                    })?;
+                    if candidate > u128::from(available_offsets) {
+                        break;
+                    }
+                    let candidate = u32::try_from(candidate).map_err(|_| {
+                        crate::SynthError::capacity("scaled dynamic extract dependency offset")
+                    })?;
+                    push_slice(
+                        module,
+                        &mut dependencies,
+                        *value,
+                        candidate.checked_add(selection.lsb).ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "scaled dynamic extract selected bit overflow",
+                            )
+                        })?,
+                        selection.width,
+                    )?;
+                    selector += 1;
+                }
+            } else {
+                push_full(module, &mut dependencies, *value)?;
+                push_full(module, &mut dependencies, *offset)?;
+            }
         }
         word::OpKind::DynamicInsert {
             value,
@@ -352,6 +412,78 @@ fn operation_dependencies(
         word::OpKind::Register(_) | word::OpKind::Latch(_) => {}
     }
     Ok(dependencies)
+}
+
+fn known_u32(
+    module: &word::WordModule,
+    known_bits: &mut word::KnownBitsAnalysis,
+    value: word::ValueId,
+) -> Option<u32> {
+    let width = module.value(value)?.ty.width();
+    let mut result = 0u32;
+    for index in 0..width {
+        match known_bits.bit(module, value, index) {
+            word::KnownBit::Zero => {}
+            word::KnownBit::One if index < u32::BITS => result |= 1u32 << index,
+            word::KnownBit::One | word::KnownBit::Unknown => return None,
+        }
+    }
+    Some(result)
+}
+
+fn scaled_dynamic_offset(
+    module: &word::WordModule,
+    known_bits: &mut word::KnownBitsAnalysis,
+    offset: word::ValueId,
+) -> Option<(u128, u128)> {
+    let stored = module.value(offset)?;
+    let word::ValueKind::Operation(operation) = stored.kind else {
+        return None;
+    };
+    let word::OpKind::Binary {
+        op: word::BinaryOp::Mul,
+        left,
+        right,
+    } = module.operation(operation)?.kind
+    else {
+        return None;
+    };
+    let (selector, scale) = match (
+        known_u32(module, known_bits, left),
+        known_u32(module, known_bits, right),
+    ) {
+        (Some(scale), None) if scale != 0 => (right, u128::from(scale)),
+        (None, Some(scale)) if scale != 0 => (left, u128::from(scale)),
+        _ => return None,
+    };
+    let selector_ty = module.value(selector)?.ty;
+    if selector_ty.is_signed() || selector_ty.width() >= u128::BITS {
+        return None;
+    }
+    let maximum_selector = possible_unsigned_max(module, known_bits, selector)?;
+    let maximum_product = maximum_selector.checked_mul(scale)?;
+    if stored.ty.width() < u128::BITS && maximum_product >= (1u128 << stored.ty.width()) {
+        return None;
+    }
+    Some((scale, maximum_selector))
+}
+
+fn possible_unsigned_max(
+    module: &word::WordModule,
+    known_bits: &mut word::KnownBitsAnalysis,
+    value: word::ValueId,
+) -> Option<u128> {
+    let width = module.value(value)?.ty.width();
+    if width >= u128::BITS {
+        return None;
+    }
+    let mut maximum = 0u128;
+    for index in 0..width {
+        if known_bits.bit(module, value, index) != word::KnownBit::Zero {
+            maximum |= 1u128 << index;
+        }
+    }
+    Some(maximum)
 }
 
 fn push_extended_slice(
@@ -707,6 +839,101 @@ mod tests {
                 word::SourceSpan::default(),
             )
             .unwrap();
+
+        validate_combinational_acyclic(&module).unwrap();
+    }
+
+    #[test]
+    fn scaled_dynamic_record_selection_keeps_fields_disjoint() {
+        let mut module = word::WordModule::new("dynamic_packed_fields");
+        let selector_ty = word::WordType::bits(2).unwrap();
+        let offset_ty = word::WordType::bits(3).unwrap();
+        let record_pair = word::WordType::bits(4).unwrap();
+        let selector_port = module
+            .add_port(
+                "selector",
+                word::PortDirection::Input,
+                selector_ty,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let data_port = module
+            .add_port(
+                "data",
+                word::PortDirection::Input,
+                word::WordType::bits(3).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let records = module
+            .add_wire("records", record_pair, word::SourceSpan::default())
+            .unwrap();
+        let selector = module
+            .read_signal(
+                module.port(selector_port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let selector = module
+            .cast(
+                word::CastKind::ZeroExtend,
+                selector,
+                offset_ty,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let scale = module
+            .constant(
+                opto_ir::ConstBits::from_bin_str("010").unwrap(),
+                offset_ty,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let offset = module
+            .binary(
+                word::BinaryOp::Mul,
+                selector,
+                scale,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let records_value = module
+            .read_signal(records, word::SourceSpan::default())
+            .unwrap();
+        let selected = module
+            .dynamic_extract(records_value, offset, 2, word::SourceSpan::default())
+            .unwrap();
+        let selected_low = module
+            .extract(selected, 0, 1, word::SourceSpan::default())
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(records).with_range(word::BitRange { msb: 1, lsb: 1 }),
+                selected_low,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let data = module
+            .read_signal(
+                module.port(data_port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        for (source_bit, target_bit) in [(0, 0), (1, 2), (2, 3)] {
+            let value = module
+                .extract(data, source_bit, 1, word::SourceSpan::default())
+                .unwrap();
+            module
+                .connect(
+                    word::LValue::signal(records).with_range(word::BitRange {
+                        msb: target_bit,
+                        lsb: target_bit,
+                    }),
+                    value,
+                    word::SourceSpan::default(),
+                )
+                .unwrap();
+        }
 
         validate_combinational_acyclic(&module).unwrap();
     }
