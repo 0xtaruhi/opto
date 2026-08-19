@@ -95,19 +95,18 @@ impl<'a> ConnectivityIndex<'a> {
         operation_owner: &'a [Option<usize>],
         memory_signal_owner: &'a BTreeMap<word::SignalId, usize>,
     ) -> Result<Self, crate::SynthError> {
-        let instance_boundary_signals = module
+        let mut instance_boundary_signals = BTreeSet::new();
+        for connection in module
             .instances()
             .iter()
             .flat_map(|instance| &instance.connections)
-            .filter_map(|connection| {
-                module
-                    .value(connection.value)
-                    .and_then(|stored| match stored.kind {
-                        word::ValueKind::Signal(reference) => Some(reference.signal),
-                        word::ValueKind::Operation(_) | word::ValueKind::Constant(_) => None,
-                    })
-            })
-            .collect();
+        {
+            collect_projection_signal_leaves(
+                module,
+                connection.value,
+                &mut instance_boundary_signals,
+            )?;
+        }
         Ok(Self {
             module,
             value_keys,
@@ -256,4 +255,42 @@ impl<'a> ConnectivityIndex<'a> {
             word::ValueKind::Constant(_) => Ok(None),
         }
     }
+}
+
+fn collect_projection_signal_leaves(
+    module: &word::WordModule,
+    root: word::ValueId,
+    signals: &mut BTreeSet<word::SignalId>,
+) -> Result<(), crate::SynthError> {
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    while let Some(value) = pending.pop() {
+        if !visited.insert(value) {
+            continue;
+        }
+        let stored = module.value(value).ok_or_else(|| {
+            crate::SynthError::invariant("instance connection references an unknown Word value")
+        })?;
+        match &stored.kind {
+            word::ValueKind::Signal(reference) => {
+                signals.insert(reference.signal);
+            }
+            word::ValueKind::Operation(operation) => {
+                let operation = module.operation(*operation).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "instance connection projection references an unknown operation",
+                    )
+                })?;
+                match &operation.kind {
+                    word::OpKind::Extract { value, .. } | word::OpKind::Cast { value, .. } => {
+                        pending.push(*value);
+                    }
+                    word::OpKind::Concat { parts } => pending.extend(parts.iter().copied()),
+                    _ => {}
+                }
+            }
+            word::ValueKind::Constant(_) => {}
+        }
+    }
+    Ok(())
 }

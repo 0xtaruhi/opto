@@ -251,6 +251,56 @@ fn publication_rejects_an_undriven_consumed_internal_net() {
 }
 
 #[test]
+fn publication_rejects_a_multiply_driven_consumed_internal_net() {
+    let mut sink = cell(
+        "SINK",
+        false,
+        opto_library::TargetCellUsage::default(),
+        false,
+    );
+    sink.pins.push(input_pin("A"));
+    let driver = cell(
+        "DRIVER",
+        false,
+        opto_library::TargetCellUsage::default(),
+        true,
+    );
+    let target_cells: opto_library::TargetCellSet = vec![sink, driver].into();
+    let mut builder =
+        MappedBuilder::new("multiply_driven_internal", opto_ir::RevisionId::INITIAL).unwrap();
+    let net = builder.add_net(Some("contended")).unwrap();
+    for instance in ["U_DRIVER_0", "U_DRIVER_1"] {
+        builder
+            .add_cell(
+                instance,
+                "DRIVER",
+                Some(1),
+                &[("Y".to_string(), Some(0), ConnectionSignal::Net(net))],
+            )
+            .unwrap();
+    }
+    builder
+        .add_cell(
+            "U_SINK",
+            "SINK",
+            Some(0),
+            &[("A".to_string(), Some(0), ConnectionSignal::Net(net))],
+        )
+        .unwrap();
+    let mapped = builder.freeze().unwrap();
+
+    let error =
+        validate_observable_drivers(&mapped, &target_cells, &crate::ReferencePortMap::new())
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("is consumed but has 2 physical drivers"),
+        "{error}"
+    );
+}
+
+#[test]
 fn materializes_a_tri_state_boundary_with_the_smallest_compatible_cell() {
     let mut module = word::WordModule::new("tri_state_boundary");
     let bit = word::WordType::bits(1).unwrap();

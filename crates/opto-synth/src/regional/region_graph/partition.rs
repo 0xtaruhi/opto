@@ -1288,17 +1288,25 @@ fn seal_region_identities(
             append_type_hash(&mut local, ty);
             local.update(&key);
         }
-        let publications = bit_flows
+        let mut publications = bit_flows
             .iter()
             .filter(|flow| flow.source == index)
+            .map(|flow| {
+                (
+                    value_keys[flow.value.index()],
+                    flow.bit,
+                    flow.sink.map(|sink| region_anchors[sink]),
+                )
+            })
             .collect::<Vec<_>>();
+        publications.sort_unstable();
         local.update(&(publications.len() as u64).to_le_bytes());
-        for publication in publications {
-            local.update(&value_keys[publication.value.index()]);
-            local.update(&publication.bit.to_le_bytes());
-            if let Some(sink) = publication.sink {
+        for (value_key, bit, consumer_anchor) in publications {
+            local.update(&value_key);
+            local.update(&bit.to_le_bytes());
+            if let Some(anchor) = consumer_anchor {
                 local.update(&[1]);
-                local.update(&region_anchors[sink]);
+                local.update(&anchor);
             } else {
                 local.update(&[0]);
             }

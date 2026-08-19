@@ -782,12 +782,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 )
             })
         };
-        let mut local_boundary_inputs = boundary_bindings
-            .iter()
-            .map(|&(_, local)| local)
-            .collect::<Vec<_>>();
-        local_boundary_inputs.sort_unstable();
-        local_boundary_inputs.dedup();
+        let local_boundary_inputs = collect_local_boundary_inputs(&module)?;
         let root_pairs = regional_roots
             .iter()
             .map(|root| map_source(&root.value).map(|local| (*root, local)))
@@ -806,6 +801,33 @@ impl RegionArchitectureMaterializer<'_, '_> {
             root_pairs,
         ))
     }
+}
+
+fn collect_local_boundary_inputs(
+    module: &word::WordModule,
+) -> Result<Vec<word::ValueId>, SynthError> {
+    let mut inputs = Vec::new();
+    for (index, stored) in module.values().iter().enumerate() {
+        let word::ValueKind::Signal(reference) = stored.kind else {
+            continue;
+        };
+        let signal = module.signal(reference.signal).ok_or_else(|| {
+            SynthError::invariant("regional boundary value references an unknown signal")
+        })?;
+        let word::SignalKind::Port(port) = signal.kind else {
+            continue;
+        };
+        let port = module.port(port).ok_or_else(|| {
+            SynthError::invariant("regional boundary signal references an unknown port")
+        })?;
+        if matches!(
+            port.direction,
+            word::PortDirection::Input | word::PortDirection::Inout
+        ) {
+            inputs.push(word::ValueId::from_index(index).map_err(SynthError::from)?);
+        }
+    }
+    Ok(inputs)
 }
 
 fn canonical_root_producers(
@@ -1160,6 +1182,42 @@ pub(crate) fn extend_operation_regions_for_memories(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_boundary_cast_is_not_a_hard_input() {
+        let mut module = word::WordModule::new("boundary_cast");
+        let unsigned = word::WordType::bits(2).unwrap();
+        let signed = word::WordType::new(2, true, word::LogicStateKind::FourState).unwrap();
+        let port = module
+            .add_port(
+                "boundary",
+                word::PortDirection::Input,
+                unsigned,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let signal = module
+            .read_signal(
+                module.port(port).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let cast = module
+            .cast(
+                word::CastKind::SignExtend,
+                signal,
+                signed,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+
+        assert_eq!(collect_local_boundary_inputs(&module).unwrap(), [signal]);
+        assert!(
+            !collect_local_boundary_inputs(&module)
+                .unwrap()
+                .contains(&cast)
+        );
+    }
 
     #[test]
     fn packed_root_publication_uses_bit_producers_not_the_wrapper_owner() {

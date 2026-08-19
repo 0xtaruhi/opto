@@ -536,12 +536,26 @@ impl SynthesisRegionGraph {
             || self.memory_owners.len() != module.memories().len()
             || self.operations.value_count() != self.operation_owners.iter().flatten().count()
             || self.memories.value_count() != self.memory_owners.len()
-            || self.bit_flows.row_count() != self.regions.len()
         {
             return Err(crate::SynthError::invariant(
                 "region reverse-owner columns do not match the Word arenas",
             ));
         }
+        if self.bit_flows.row_count() != self.regions.len() {
+            return Err(crate::SynthError::invariant(
+                "regional bit-flow rows do not match the region arena",
+            ));
+        }
+        let memory_data_owners = module
+            .memory_read_ports()
+            .iter()
+            .filter_map(|read| {
+                self.memory_owners
+                    .get(read.memory.index())
+                    .copied()
+                    .map(|owner| (read.data, owner))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         for region in &self.regions {
             for publication in self.bit_flows(*region) {
                 if publication.producer() != region.row()
@@ -575,12 +589,7 @@ impl SynthesisRegionGraph {
                         }
                     }
                     word::ValueKind::Signal(reference) => {
-                        let memory_owner = module
-                            .memory_read_ports()
-                            .iter()
-                            .find(|read| read.data == reference.signal)
-                            .and_then(|read| self.memory_owners.get(read.memory.index()))
-                            .copied();
+                        let memory_owner = memory_data_owners.get(&reference.signal).copied();
                         if memory_owner != Some(publication.producer()) {
                             return Err(crate::SynthError::invariant(
                                 "regional bit flow disagrees with memory placement",
