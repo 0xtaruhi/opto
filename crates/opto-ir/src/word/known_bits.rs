@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{BitVal, ConstBits};
 use opto_core::PackedRows;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Proven Boolean state of one word bit.
@@ -164,25 +164,26 @@ impl SignalDrivers {
         }
     }
 
-    fn sync_append_only(&mut self, module: &WordModule) -> bool {
+    fn sync_append_only(&mut self, module: &WordModule) -> Option<BTreeSet<SignalId>> {
         if module.connects().len() < self.observed_connects {
             *self = Self::build(module);
-            return true;
+            return None;
         }
-        let changed = module.connects().len() != self.observed_connects;
+        let mut changed = BTreeSet::new();
         for (index, connect) in module
             .connects()
             .iter()
             .enumerate()
             .skip(self.observed_connects)
         {
+            changed.insert(connect.target.signal);
             self.appended
                 .entry(connect.target.signal)
                 .or_default()
                 .push(index);
         }
         self.observed_connects = module.connects().len();
-        changed
+        Some(changed)
     }
 
     fn for_signal(&self, signal: SignalId) -> impl Iterator<Item = usize> + '_ {
@@ -195,6 +196,12 @@ impl SignalDrivers {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FactNode {
+    Value(ValueId),
+    Signal(SignalId),
+}
+
 /// Memoized whole-module known-bit analysis.
 ///
 /// Facts are retained in one packed word arena. Signal reads follow static,
@@ -204,9 +211,9 @@ impl SignalDrivers {
 pub struct KnownBitsAnalysis {
     values: Vec<FactState>,
     signals: Vec<FactState>,
-    touched_values: Vec<usize>,
-    touched_signals: Vec<usize>,
     arena: Vec<FactWord>,
+    derivation_stack: Vec<FactNode>,
+    dependents: BTreeMap<FactNode, Vec<FactNode>>,
     drivers: SignalDrivers,
     external_signals: Vec<bool>,
     observed_ports: usize,
@@ -225,9 +232,9 @@ impl KnownBitsAnalysis {
         Self {
             values: vec![FactState::Uncomputed; module.values().len()],
             signals: vec![FactState::Uncomputed; module.signals().len()],
-            touched_values: Vec::new(),
-            touched_signals: Vec::new(),
             arena: Vec::new(),
+            derivation_stack: Vec::new(),
+            dependents: BTreeMap::new(),
             drivers: SignalDrivers::build(module),
             external_signals,
             observed_ports: module.ports().len(),
@@ -237,8 +244,8 @@ impl KnownBitsAnalysis {
     /// Synchronizes this memoization state after append-only Word IR changes.
     ///
     /// Newly appended values and signals retain facts for the immutable prefix.
-    /// Appended connections or ports invalidate only facts reached since the
-    /// previous synchronization and update driver metadata incrementally.
+    /// Appended connections or ports invalidate only the transitive dependents
+    /// of changed signals and update driver metadata incrementally.
     pub fn sync_append_only(&mut self, module: &WordModule) {
         if module.values().len() < self.values.len()
             || module.signals().len() < self.signals.len()
@@ -253,25 +260,50 @@ impl KnownBitsAnalysis {
             .resize(module.signals().len(), FactState::Uncomputed);
         self.external_signals.resize(module.signals().len(), false);
 
-        let drivers_changed = self.drivers.sync_append_only(module);
-        let ports_changed = module.ports().len() != self.observed_ports;
-        if ports_changed {
-            self.external_signals.fill(false);
-            for port in module.ports() {
-                if matches!(port.direction, PortDirection::Input | PortDirection::Inout) {
-                    self.external_signals[port.signal.index()] = true;
+        let Some(mut changed_signals) = self.drivers.sync_append_only(module) else {
+            *self = Self::new(module);
+            return;
+        };
+        for port in module.ports().iter().skip(self.observed_ports) {
+            if matches!(port.direction, PortDirection::Input | PortDirection::Inout) {
+                self.external_signals[port.signal.index()] = true;
+                changed_signals.insert(port.signal);
+            }
+        }
+        self.observed_ports = module.ports().len();
+        self.invalidate(changed_signals.into_iter().map(FactNode::Signal));
+    }
+
+    fn record_dependency(&mut self, dependency: FactNode) {
+        let Some(&dependent) = self.derivation_stack.last() else {
+            return;
+        };
+        let dependents = self.dependents.entry(dependency).or_default();
+        if !dependents.contains(&dependent) {
+            dependents.push(dependent);
+        }
+    }
+
+    fn invalidate(&mut self, roots: impl IntoIterator<Item = FactNode>) {
+        let mut pending = roots.into_iter().collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            match node {
+                FactNode::Value(value) => {
+                    if let Some(state) = self.values.get_mut(value.index()) {
+                        *state = FactState::Uncomputed;
+                    }
+                }
+                FactNode::Signal(signal) => {
+                    if let Some(state) = self.signals.get_mut(signal.index()) {
+                        *state = FactState::Uncomputed;
+                    }
                 }
             }
-            self.observed_ports = module.ports().len();
-        }
-        if drivers_changed || ports_changed {
-            for index in self.touched_values.drain(..) {
-                self.values[index] = FactState::Uncomputed;
-            }
-            for index in self.touched_signals.drain(..) {
-                self.signals[index] = FactState::Uncomputed;
-            }
-            self.arena.clear();
+            pending.extend(self.dependents.get(&node).into_iter().flatten().copied());
         }
     }
 
@@ -332,6 +364,8 @@ fn derive_value(
     id: ValueId,
     analysis: &mut KnownBitsAnalysis,
 ) -> Option<FactRange> {
+    let node = FactNode::Value(id);
+    analysis.record_dependency(node);
     let width = module.value(id)?.ty.width();
     match analysis.values.get(id.index()).copied()? {
         FactState::Computed(facts) => return Some(facts),
@@ -339,27 +373,32 @@ fn derive_value(
         FactState::Uncomputed => {}
     }
     analysis.values[id.index()] = FactState::Computing;
-    analysis.touched_values.push(id.index());
-    let value = module.value(id)?;
-    let facts = match &value.kind {
-        ValueKind::Signal(reference) => {
-            let signal = derive_signal(module, reference.signal, analysis)?;
-            slice_facts(signal, reference.lsb, reference.width(), analysis)
-        }
-        ValueKind::Constant(bits) => store_bits(
-            bits.as_slice().iter().rev().map(|bit| match bit {
-                BitVal::Zero => KnownBit::Zero,
-                BitVal::One => KnownBit::One,
-                BitVal::X | BitVal::Z => KnownBit::Unknown,
-            }),
-            bits.width(),
-            &mut analysis.arena,
-        ),
-        ValueKind::Operation(operation) => {
-            let operation = module.operation(*operation)?;
-            derive_operation(module, &operation.kind, value.ty, analysis)
-        }
-    };
+    analysis.derivation_stack.push(node);
+    let facts = (|| {
+        let value = module.value(id)?;
+        Some(match &value.kind {
+            ValueKind::Signal(reference) => {
+                let signal = derive_signal(module, reference.signal, analysis)?;
+                slice_facts(signal, reference.lsb, reference.width(), analysis)
+            }
+            ValueKind::Constant(bits) => store_bits(
+                bits.as_slice().iter().rev().map(|bit| match bit {
+                    BitVal::Zero => KnownBit::Zero,
+                    BitVal::One => KnownBit::One,
+                    BitVal::X | BitVal::Z => KnownBit::Unknown,
+                }),
+                bits.width(),
+                &mut analysis.arena,
+            ),
+            ValueKind::Operation(operation) => {
+                let operation = module.operation(*operation)?;
+                derive_operation(module, &operation.kind, value.ty, analysis)
+            }
+        })
+    })();
+    let popped = analysis.derivation_stack.pop();
+    debug_assert_eq!(popped, Some(node));
+    let facts = facts?;
     analysis.values[id.index()] = FactState::Computed(facts);
     Some(facts)
 }
@@ -369,6 +408,8 @@ fn derive_signal(
     signal: SignalId,
     analysis: &mut KnownBitsAnalysis,
 ) -> Option<FactRange> {
+    let node = FactNode::Signal(signal);
+    analysis.record_dependency(node);
     let width = module.signal(signal)?.ty.width();
     match analysis.signals.get(signal.index()).copied()? {
         FactState::Computed(facts) => return Some(facts),
@@ -376,47 +417,53 @@ fn derive_signal(
         FactState::Uncomputed => {}
     }
     analysis.signals[signal.index()] = FactState::Computing;
-    analysis.touched_signals.push(signal.index());
+    analysis.derivation_stack.push(node);
     let connect_indices = analysis.drivers.for_signal(signal).collect::<Vec<_>>();
     let external = analysis.external_signals[signal.index()];
-    let facts = if external
-        || connect_indices.is_empty()
-        || connect_indices.iter().any(|&index| {
-            module
-                .connects()
-                .get(index)
-                .is_some_and(|connect| connect.target.dynamic.is_some())
-        }) {
-        FactRange::unknown(width)
-    } else {
-        let words = word_count(width);
-        let mut assigned = vec![0u64; words];
-        let mut bits = vec![FactWord::default(); words];
-        for index in connect_indices {
-            let connect = module.connects().get(index)?;
-            let source = derive_value(module, connect.value, analysis)?;
-            let target_width = connect
-                .target
-                .range
-                .map_or(width, super::model::BitRange::width);
-            for offset in 0..target_width {
-                let target = match connect.target.range {
-                    Some(range) if range.msb >= range.lsb => range.lsb.checked_add(offset)?,
-                    Some(range) => range.lsb.checked_sub(offset)?,
-                    None => offset,
-                };
-                let word = target as usize / u64::BITS as usize;
-                let mask = 1u64 << (target % u64::BITS);
-                if assigned[word] & mask == 0 {
-                    assigned[word] |= mask;
-                    set_bit(&mut bits, target, source.bit(&analysis.arena, offset));
-                } else {
-                    set_bit(&mut bits, target, KnownBit::Unknown);
+    let facts = (|| {
+        if external
+            || connect_indices.is_empty()
+            || connect_indices.iter().any(|&index| {
+                module
+                    .connects()
+                    .get(index)
+                    .is_some_and(|connect| connect.target.dynamic.is_some())
+            })
+        {
+            Some(FactRange::unknown(width))
+        } else {
+            let words = word_count(width);
+            let mut assigned = vec![0u64; words];
+            let mut bits = vec![FactWord::default(); words];
+            for index in connect_indices {
+                let connect = module.connects().get(index)?;
+                let source = derive_value(module, connect.value, analysis)?;
+                let target_width = connect
+                    .target
+                    .range
+                    .map_or(width, super::model::BitRange::width);
+                for offset in 0..target_width {
+                    let target = match connect.target.range {
+                        Some(range) if range.msb >= range.lsb => range.lsb.checked_add(offset)?,
+                        Some(range) => range.lsb.checked_sub(offset)?,
+                        None => offset,
+                    };
+                    let word = target as usize / u64::BITS as usize;
+                    let mask = 1u64 << (target % u64::BITS);
+                    if assigned[word] & mask == 0 {
+                        assigned[word] |= mask;
+                        set_bit(&mut bits, target, source.bit(&analysis.arena, offset));
+                    } else {
+                        set_bit(&mut bits, target, KnownBit::Unknown);
+                    }
                 }
             }
+            Some(store_words(bits, width, &mut analysis.arena))
         }
-        store_words(bits, width, &mut analysis.arena)
-    };
+    })();
+    let popped = analysis.derivation_stack.pop();
+    debug_assert_eq!(popped, Some(node));
+    let facts = facts?;
     analysis.signals[signal.index()] = FactState::Computed(facts);
     Some(facts)
 }
@@ -1278,6 +1325,72 @@ mod tests {
         assert_eq!(facts.constant(&module, read), None);
         assert_eq!(
             facts.constant(&module, one),
+            Some(ConstBits::from_bin_str("1").unwrap())
+        );
+    }
+
+    #[test]
+    fn append_only_sync_preserves_facts_outside_the_changed_signal_cone() {
+        let mut module = WordModule::new("incremental_dependencies");
+        let changed = module
+            .add_wire("changed", ty(1), SourceSpan::default())
+            .unwrap();
+        let stable = module
+            .add_wire("stable", ty(1), SourceSpan::default())
+            .unwrap();
+        let changed_read = module.read_signal(changed, SourceSpan::default()).unwrap();
+        let stable_read = module.read_signal(stable, SourceSpan::default()).unwrap();
+        let zero = module
+            .constant(
+                ConstBits::from_bin_str("0").unwrap(),
+                ty(1),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(LValue::signal(stable), zero, SourceSpan::default())
+            .unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(facts.constant(&module, changed_read), None);
+        assert_eq!(
+            facts.constant(&module, stable_read),
+            Some(ConstBits::from_bin_str("0").unwrap())
+        );
+        assert_eq!(
+            facts.constant(&module, zero),
+            Some(ConstBits::from_bin_str("0").unwrap())
+        );
+        let arena_len = facts.arena.len();
+
+        let one = module
+            .constant(
+                ConstBits::from_bin_str("1").unwrap(),
+                ty(1),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(LValue::signal(changed), one, SourceSpan::default())
+            .unwrap();
+        facts.sync_append_only(&module);
+
+        assert!(matches!(facts.values[zero.index()], FactState::Computed(_)));
+        assert!(matches!(
+            facts.values[stable_read.index()],
+            FactState::Computed(_)
+        ));
+        assert!(matches!(
+            facts.signals[stable.index()],
+            FactState::Computed(_)
+        ));
+        assert!(matches!(
+            facts.values[changed_read.index()],
+            FactState::Uncomputed
+        ));
+        assert_eq!(facts.arena.len(), arena_len);
+        assert_eq!(
+            facts.constant(&module, changed_read),
             Some(ConstBits::from_bin_str("1").unwrap())
         );
     }
