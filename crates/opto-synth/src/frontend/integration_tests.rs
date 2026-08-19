@@ -226,14 +226,20 @@ fn frontend_canonicalizes_nested_async_clear_set_priority() {
     )
     .unwrap();
 
-    let register = module
+    let registers = module
         .operations()
         .iter()
-        .find_map(|operation| match &operation.kind {
+        .filter_map(|operation| match &operation.kind {
             word::OpKind::Register(register) => Some(register),
             _ => None,
         })
-        .expect("nested asynchronous controls must lower to one register");
+        .collect::<Vec<_>>();
+    assert_eq!(
+        registers.len(),
+        1,
+        "nested asynchronous controls must lower to exactly one register"
+    );
+    let register = registers[0];
     assert_eq!(register.resets.len(), 2);
     assert!(
         register

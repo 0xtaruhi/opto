@@ -96,19 +96,31 @@ fn native_compile_canonicalizes_static_slice_and_concat_aliases() {
     let module = first_module(&compilation);
     let assignments = module.assigns().collect::<Vec<_>>();
 
+    assert_eq!(assignments.len(), 4);
     assert!(matches!(
         assignments[0].lhs().unwrap().kind().unwrap(),
-        SlangExpressionKind::Signal(signal) if signal.name == "a"
+        SlangExpressionKind::Signal(SlangSignalRef {
+            name: "a",
+            range: Some(SlangBitRange { msb: 1, lsb: 0 })
+        })
     ));
     assert!(matches!(
         assignments[1].rhs().unwrap().kind().unwrap(),
-        SlangExpressionKind::Signal(signal) if signal.name == "a"
+        SlangExpressionKind::Signal(SlangSignalRef {
+            name: "a",
+            range: Some(SlangBitRange { msb: 1, lsb: 0 })
+        })
     ));
-    assert!(assignments[2..].iter().all(|assignment| {
-        assignment
-            .lhs()
-            .is_ok_and(|lhs| is_signal(lhs, "c") || is_signal(lhs, "e"))
-    }));
+    for (assignment, target, source_bit) in [(&assignments[2], "c", 1), (&assignments[3], "e", 0)] {
+        assert!(is_signal(assignment.lhs().unwrap(), target));
+        assert!(matches!(
+            assignment.rhs().unwrap().kind().unwrap(),
+            SlangExpressionKind::Signal(SlangSignalRef {
+                name: "d",
+                range: Some(SlangBitRange { msb, lsb })
+            }) if msb == source_bit && lsb == source_bit
+        ));
+    }
 }
 
 #[test]

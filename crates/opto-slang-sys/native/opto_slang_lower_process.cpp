@@ -2061,7 +2061,8 @@ public:
         body_entry_(builder.add_block(source_)),
         continue_entry_(builder.add_block(source_)),
         latch_(builder.add_block(source_)),
-        exit_(external_exit ? *external_exit : builder.add_block(source_)) {
+        exit_(external_exit ? *external_exit : builder.add_block(source_)),
+        external_exit_(external_exit.has_value()) {
     std::optional<uint32_t> parent;
     for (auto active = design_.loop_controls.rbegin();
          active != design_.loop_controls.rend(); ++active) {
@@ -2134,7 +2135,11 @@ public:
     } else {
       builder_.jump(latch_, header_, source_);
     }
-    return {header_, {exit_}};
+    // An activation exit is a valid region target, but never ordinary loop
+    // fallthrough: exposing it would let sequence() connect a return to the
+    // statements lexically following an unconditional loop.
+    return {header_, external_exit_ ? std::vector<uint32_t>{}
+                                    : std::vector<uint32_t>{exit_}};
   }
 
 private:
@@ -2173,6 +2178,7 @@ private:
   uint32_t continue_entry_;
   uint32_t latch_;
   uint32_t exit_;
+  bool external_exit_;
 };
 
 CfgFragment lower_for_loop_cyclic(ProcedureBuilder &builder,

@@ -20,10 +20,22 @@ struct Driver {
     source: word::SourceSpan,
 }
 
+#[derive(Debug, Clone)]
+struct InstanceOutputConnection {
+    instance_index: usize,
+    instance_name: String,
+    port: String,
+    direction: word::PortDirection,
+    value: word::ValueId,
+    source: word::SourceSpan,
+}
+
 pub(super) fn lower_resolved_nets(
     module: &mut word::WordModule,
     reference_ports: &ReferencePortMap,
 ) -> Result<(), crate::SynthError> {
+    let instance_outputs = instance_output_connections(module, reference_ports);
+    validate_supply_instance_outputs(module, &instance_outputs)?;
     materialize_supply_nets(module)?;
     scalarize_tri_state_drivers(module)?;
     if !module
@@ -35,7 +47,7 @@ pub(super) fn lower_resolved_nets(
     }
 
     let mut drivers = BTreeMap::<word::SignalId, Vec<Driver>>::new();
-    redirect_instance_output_drivers(module, reference_ports, &mut drivers)?;
+    redirect_instance_output_drivers(module, &instance_outputs, &mut drivers)?;
 
     for connect in module.take_connects() {
         let signal = module.signal(connect.target.signal).ok_or_else(|| {
@@ -168,11 +180,6 @@ fn materialize_supply_nets(module: &mut word::WordModule) -> Result<(), crate::S
                 "explicit driver on supply net '{name}' requires strength resolution"
             )));
         }
-    }
-    for connect in module.take_connects() {
-        module
-            .connect(connect.target, connect.value, connect.source)
-            .map_err(crate::SynthError::from)?;
     }
     for (signal, ty, source, bit) in supplies {
         let value = module
@@ -479,11 +486,10 @@ fn lower_wired_driver(
         .map_err(crate::SynthError::from)
 }
 
-fn redirect_instance_output_drivers(
-    module: &mut word::WordModule,
+fn instance_output_connections(
+    module: &word::WordModule,
     reference_ports: &ReferencePortMap,
-    drivers: &mut BTreeMap<word::SignalId, Vec<Driver>>,
-) -> Result<(), crate::SynthError> {
+) -> Vec<InstanceOutputConnection> {
     let mut connections = Vec::new();
     for (instance_index, instance) in module.instances().iter().enumerate() {
         let reference = module.name_str(instance.module);
@@ -498,21 +504,57 @@ fn redirect_instance_output_drivers(
                     word::PortDirection::Output | word::PortDirection::Inout
                 )
             }) {
-                connections.push((
+                connections.push(InstanceOutputConnection {
                     instance_index,
-                    module.name_str(instance.name).to_string(),
-                    port.to_string(),
-                    ports[port].direction,
-                    connection.value,
-                    connection.source.clone(),
-                ));
+                    instance_name: module.name_str(instance.name).to_string(),
+                    port: port.to_string(),
+                    direction: ports[port].direction,
+                    value: connection.value,
+                    source: connection.source.clone(),
+                });
             }
         }
     }
+    connections
+}
 
-    for (instance_index, instance_name, port, direction, connection, source) in connections {
+fn validate_supply_instance_outputs(
+    module: &word::WordModule,
+    connections: &[InstanceOutputConnection],
+) -> Result<(), crate::SynthError> {
+    for connection in connections {
+        for fragment in module
+            .signal_fragments(connection.value)
+            .map_err(crate::SynthError::from)?
+        {
+            let signal = module.signal(fragment.reference.signal).ok_or_else(|| {
+                crate::SynthError::invariant("instance output signal disappeared")
+            })?;
+            if matches!(
+                signal.resolution,
+                word::SignalResolution::SupplyZero | word::SignalResolution::SupplyOne
+            ) {
+                let name = signal
+                    .name
+                    .map_or("<unnamed>", |name| module.name_str(name));
+                return Err(crate::SynthError::unsupported(format!(
+                    "instance output connection '{}.{}' drives supply net '{name}' and requires strength resolution",
+                    connection.instance_name, connection.port
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn redirect_instance_output_drivers(
+    module: &mut word::WordModule,
+    connections: &[InstanceOutputConnection],
+    drivers: &mut BTreeMap<word::SignalId, Vec<Driver>>,
+) -> Result<(), crate::SynthError> {
+    for connection in connections {
         let fragments = module
-            .signal_fragments(connection)
+            .signal_fragments(connection.value)
             .map_err(crate::SynthError::from)?;
         if !fragments.iter().any(|fragment| {
             module
@@ -521,27 +563,33 @@ fn redirect_instance_output_drivers(
         }) {
             continue;
         }
-        if direction == word::PortDirection::Inout {
+        if connection.direction == word::PortDirection::Inout {
             return Err(crate::SynthError::unsupported(format!(
-                "inout connection '{instance_name}.{port}' cannot drive a resolved net"
+                "inout connection '{}.{}' cannot drive a resolved net",
+                connection.instance_name, connection.port
             )));
         }
         let connection_ty = module
-            .value(connection)
+            .value(connection.value)
             .ok_or_else(|| crate::SynthError::invariant("missing instance output value"))?
             .ty;
         let hidden = add_unique_wire(
             module,
-            &format!("$resolve${instance_name}${port}"),
+            &format!(
+                "$resolve${instance}${port}",
+                instance = connection.instance_name,
+                port = connection.port
+            ),
             connection_ty,
-            source.clone(),
+            connection.source.clone(),
         )?;
         let hidden_value = module
-            .read_signal(hidden, source.clone())
+            .read_signal(hidden, connection.source.clone())
             .map_err(crate::SynthError::from)?;
-        let instance = word::InstId::from_index(instance_index).map_err(crate::SynthError::Word)?;
+        let instance =
+            word::InstId::from_index(connection.instance_index).map_err(crate::SynthError::Word)?;
         module
-            .set_instance_connection_value(instance, &port, hidden_value)
+            .set_instance_connection_value(instance, &connection.port, hidden_value)
             .map_err(crate::SynthError::from)?;
 
         let mut offset = 0u32;
@@ -554,11 +602,11 @@ fn redirect_instance_output_drivers(
                         hidden_value,
                         offset,
                         fragment.reference.width(),
-                        source.clone(),
+                        connection.source.clone(),
                     )
                     .map_err(crate::SynthError::from)?
             };
-            let value = coerce_value(module, value, fragment.ty, &source)?;
+            let value = coerce_value(module, value, fragment.ty, &connection.source)?;
             let target = fragment_lvalue(module, fragment)?;
             let resolved = module
                 .signal(fragment.reference.signal)
@@ -570,11 +618,11 @@ fn redirect_instance_output_drivers(
                     .push(Driver {
                         target,
                         value,
-                        source: source.clone(),
+                        source: connection.source.clone(),
                     });
             } else {
                 module
-                    .connect(target, value, source.clone())
+                    .connect(target, value, connection.source.clone())
                     .map_err(crate::SynthError::from)?;
             }
             offset = offset
@@ -912,5 +960,141 @@ mod tests {
             module.value(supply_driver.value).unwrap().kind,
             word::ValueKind::Constant(ref bits) if bits.bit_lsb(0) == Some(BitVal::Zero)
         ));
+    }
+
+    #[test]
+    fn pull_default_is_active_exactly_when_explicit_drivers_are_disabled() {
+        let mut module = word::WordModule::new("pull_override");
+        let ty = word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap();
+        let source = word::SourceSpan::stable("pull override test");
+        let enable_port = module
+            .add_port("enable", word::PortDirection::Input, ty, source.clone())
+            .unwrap();
+        let enable = module
+            .read_signal(module.port(enable_port).unwrap().signal, source.clone())
+            .unwrap();
+        let pull = module.add_wire("pull", ty, source.clone()).unwrap();
+        module
+            .set_signal_resolution(pull, word::SignalResolution::PullOne)
+            .unwrap();
+        let zero = module
+            .constant(
+                ConstBits::from_bits(vec![BitVal::Zero]).unwrap(),
+                ty,
+                source.clone(),
+            )
+            .unwrap();
+        let explicit = module
+            .tri_state(
+                zero,
+                word::Enable {
+                    value: enable,
+                    active_high: true,
+                },
+                source.clone(),
+            )
+            .unwrap();
+        module
+            .connect(word::LValue::signal(pull), explicit, source)
+            .unwrap();
+
+        lower_resolved_nets(&mut module, &ReferencePortMap::new()).unwrap();
+
+        let drivers = module
+            .connects()
+            .iter()
+            .filter(|connect| connect.target.signal == pull)
+            .map(|connect| {
+                let word::ValueKind::Operation(operation) =
+                    module.value(connect.value).unwrap().kind
+                else {
+                    panic!("pull contribution must remain physical");
+                };
+                let word::OpKind::TriState { data, enable } =
+                    module.operation(operation).unwrap().kind
+                else {
+                    panic!("pull contribution must remain tri-state");
+                };
+                (data, enable)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(drivers.len(), 2);
+        let (_, explicit_enable) = drivers
+            .iter()
+            .find(|(data, _)| *data == zero)
+            .expect("explicit zero driver must be preserved");
+        assert_eq!(explicit_enable.value, enable);
+        assert!(explicit_enable.active_high);
+        let (_, pull_enable) = drivers
+            .iter()
+            .find(|(data, _)| *data != zero)
+            .expect("default pull-one driver must be present");
+        assert!(pull_enable.active_high);
+        assert!(matches!(
+            module.value(pull_enable.value).unwrap().kind,
+            word::ValueKind::Operation(operation)
+                if matches!(module.operation(operation).unwrap().kind,
+                    word::OpKind::Unary { op: word::UnaryOp::BitNot, arg } if arg == enable)
+        ));
+    }
+
+    #[test]
+    fn rejects_direct_and_instance_output_supply_net_drivers() {
+        let ty = word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap();
+        let source = word::SourceSpan::stable("supply driver rejection test");
+
+        let mut direct = word::WordModule::new("direct_supply_driver");
+        let supply = direct.add_wire("supply", ty, source.clone()).unwrap();
+        direct
+            .set_signal_resolution(supply, word::SignalResolution::SupplyOne)
+            .unwrap();
+        let zero = direct
+            .constant(
+                ConstBits::from_bits(vec![BitVal::Zero]).unwrap(),
+                ty,
+                source.clone(),
+            )
+            .unwrap();
+        direct
+            .connect(word::LValue::signal(supply), zero, source.clone())
+            .unwrap();
+        let error = lower_resolved_nets(&mut direct, &ReferencePortMap::new()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("explicit driver on supply net 'supply'")
+        );
+
+        let mut instance = word::WordModule::new("instance_supply_driver");
+        let supply = instance.add_wire("supply", ty, source.clone()).unwrap();
+        instance
+            .set_signal_resolution(supply, word::SignalResolution::SupplyZero)
+            .unwrap();
+        let supply_value = instance.read_signal(supply, source.clone()).unwrap();
+        instance
+            .add_instance(
+                "u_source",
+                "SOURCE",
+                vec![("Y".to_string(), supply_value, source.clone())],
+                source,
+            )
+            .unwrap();
+        let references = ReferencePortMap::from([(
+            "SOURCE".to_string(),
+            BTreeMap::from([(
+                "Y".to_string(),
+                crate::ReferencePort {
+                    direction: word::PortDirection::Output,
+                    width: 1,
+                    exact_width: true,
+                },
+            )]),
+        )]);
+        let error = lower_resolved_nets(&mut instance, &references).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("instance output connection 'u_source.Y' drives supply net 'supply'")
+        );
     }
 }

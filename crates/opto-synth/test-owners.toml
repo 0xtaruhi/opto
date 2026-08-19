@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 463
+expected_tests = 465
 
 [[owners]]
 path = "src/api"
@@ -20,7 +20,7 @@ contract = "Stage ordering, immutable states, publication, determinism, and repo
 [[owners]]
 path = "src/frontend"
 owner = "frontend"
-tests = 40
+tests = 42
 contract = "Procedural normalization and the single validated Word-IR entry boundary."
 
 [[owners]]

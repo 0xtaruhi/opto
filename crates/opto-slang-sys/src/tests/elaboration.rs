@@ -345,16 +345,13 @@ fn native_compile_identifies_one_udp_data_clock_among_transition_controls() {
     let events = procedure.events().collect::<Vec<_>>();
 
     assert_eq!(events.len(), 2);
-    assert!(
-        events
+    for name in ["clk", "clear"] {
+        let event = events
             .iter()
-            .any(|event| event.signal().is_ok_and(|signal| signal.name == "clk"))
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| event.signal().is_ok_and(|signal| signal.name == "clear"))
-    );
+            .find(|event| event.signal().is_ok_and(|signal| signal.name == name))
+            .unwrap_or_else(|| panic!("UDP must publish the {name} transition"));
+        assert_eq!(event.edge().unwrap(), SlangEdge::Pos);
+    }
 }
 
 #[test]

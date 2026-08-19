@@ -1576,6 +1576,33 @@ fn native_compile_routes_valueless_returns_through_task_copy_out() {
 }
 
 #[test]
+fn native_compile_keeps_forever_return_out_of_ordinary_fallthrough() {
+    let source = NativeTestSource::new(
+        "module top(input logic stop, output logic [3:0] y); task automatic update(output logic [3:0] target, input logic halt); forever begin target = 1; if (halt) return; end target = 2; endtask always_comb update(y, stop); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let procedure = module.procedures().next().unwrap();
+
+    assert_eq!(procedure.loop_regions().len(), 1);
+    let effects = procedure_effects(procedure);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| { effect.lhs().is_ok_and(|lhs| is_signal(lhs, "y")) })
+    );
+    assert!(
+        effects.iter().all(|effect| {
+            !matches!(
+                effect.rhs().and_then(SlangExpression::kind),
+                Ok(SlangExpressionKind::Constant(value)) if value.bits == "0010"
+            )
+        }),
+        "statements after a forever-return must not become reachable fallthrough"
+    );
+}
+
+#[test]
 fn native_compile_routes_valueless_return_from_void_function() {
     let source = NativeTestSource::new(
         "module top(input logic stop, input logic value, output logic y); function automatic void update(ref logic target, input logic halt, value); target = value; if (halt) return; target = ~value; endfunction always_comb begin y = 0; update(y, stop, value); end endmodule\n",
