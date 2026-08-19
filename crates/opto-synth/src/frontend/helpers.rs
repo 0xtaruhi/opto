@@ -619,7 +619,11 @@ pub(super) fn inferred_reset_kind(
     }
 }
 
-pub(super) fn constant_value(module: &word::WordModule, value: word::ValueId) -> bool {
+pub(super) fn constant_value(
+    module: &word::WordModule,
+    analysis: &mut word::KnownBitsAnalysis,
+    value: word::ValueId,
+) -> bool {
     let Some(stored) = module.value(value) else {
         return false;
     };
@@ -630,25 +634,26 @@ pub(super) fn constant_value(module: &word::WordModule, value: word::ValueId) ->
             module
                 .operation(*operation)
                 .is_some_and(|operation| match &operation.kind {
-                    word::OpKind::Concat { parts } => {
-                        parts.iter().all(|&part| constant_value(module, part))
-                    }
+                    word::OpKind::Concat { parts } => parts
+                        .iter()
+                        .all(|&part| constant_value(module, analysis, part)),
                     word::OpKind::Cast { value, .. } | word::OpKind::Extract { value, .. } => {
-                        constant_value(module, *value)
+                        constant_value(module, analysis, *value)
                     }
                     _ => false,
                 })
         }
     };
-    structurally_constant || synthesis_constant_bits(module, value).is_some()
+    structurally_constant || synthesis_constant_bits(module, analysis, value).is_some()
 }
 
 pub(super) fn materialize_synthesis_constant(
     module: &mut word::WordModule,
+    analysis: &mut word::KnownBitsAnalysis,
     value: word::ValueId,
     source: &word::SourceSpan,
 ) -> Result<word::ValueId, crate::SynthError> {
-    let Some(bits) = synthesis_constant_bits(module, value) else {
+    let Some(bits) = synthesis_constant_bits(module, analysis, value) else {
         return Ok(value);
     };
     if module.value(value).is_some_and(
@@ -664,9 +669,11 @@ pub(super) fn materialize_synthesis_constant(
 
 fn synthesis_constant_bits(
     module: &word::WordModule,
+    analysis: &mut word::KnownBitsAnalysis,
     value: word::ValueId,
 ) -> Option<opto_ir::ConstBits> {
-    if let Some(bits) = word::KnownBitsAnalysis::new(module).constant(module, value) {
+    analysis.sync_append_only(module);
+    if let Some(bits) = analysis.constant(module, value) {
         return Some(bits);
     }
     let operation = module.value(value).and_then(|value| match value.kind {

@@ -74,6 +74,7 @@ fn lower_procedures(
     let mut outputs = vec![None; procedures.blocks().len()];
     let mut edge_guards = vec![None; procedures.edges().len()];
     let mut rewrite_scratch = RewriteScratch::default();
+    let mut constant_analysis = word::KnownBitsAnalysis::new(&module);
     let mut incomplete_comb = Vec::new();
     let cfgs = run_frontend_stage(observer, crate::StageId::NORMALIZATION_CFG_ANALYSIS, || {
         let cfg_tasks = (0..procedures.procedures().len())
@@ -110,6 +111,7 @@ fn lower_procedures(
                         outputs: &mut outputs,
                         edge_guards: &mut edge_guards,
                         rewrite_scratch: &mut rewrite_scratch,
+                        constant_analysis: &mut constant_analysis,
                         incomplete_comb: &mut incomplete_comb,
                     },
                 )?
@@ -199,6 +201,7 @@ struct ProcedureNormalizer<'a> {
     bases: BTreeMap<TargetKey, word::ValueId>,
     reads: &'a BTreeMap<word::SignalId, usize>,
     rewrite_scratch: &'a mut RewriteScratch,
+    constant_analysis: &'a mut word::KnownBitsAnalysis,
     predicates: PredicateArena,
     event_controls: Vec<EventControl>,
     decision_choices: BTreeMap<proc::BlockId, Vec<DecisionChoice>>,
@@ -219,5 +222,6 @@ struct ProcedureInput<'a> {
     outputs: &'a mut [Option<BlockOutput>],
     edge_guards: &'a mut [Option<Predicate>],
     rewrite_scratch: &'a mut RewriteScratch,
+    constant_analysis: &'a mut word::KnownBitsAnalysis,
     incomplete_comb: &'a mut Vec<Assignment>,
 }
