@@ -656,5 +656,9 @@ fn lower_resolution(resolution: SlangNetResolution) -> SignalResolution {
         SlangNetResolution::SingleDriver => SignalResolution::SingleDriver,
         SlangNetResolution::WiredAnd => SignalResolution::WiredAnd,
         SlangNetResolution::WiredOr => SignalResolution::WiredOr,
+        SlangNetResolution::PullZero => SignalResolution::PullZero,
+        SlangNetResolution::PullOne => SignalResolution::PullOne,
+        SlangNetResolution::SupplyZero => SignalResolution::SupplyZero,
+        SlangNetResolution::SupplyOne => SignalResolution::SupplyOne,
     }
 }

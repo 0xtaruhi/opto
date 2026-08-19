@@ -54,7 +54,11 @@ typedef enum OptoSlangPortDirection {
 typedef enum OptoSlangNetResolution {
   OPTO_SLANG_NET_SINGLE_DRIVER = 0,
   OPTO_SLANG_NET_WIRED_AND = 1,
-  OPTO_SLANG_NET_WIRED_OR = 2
+  OPTO_SLANG_NET_WIRED_OR = 2,
+  OPTO_SLANG_NET_PULL_ZERO = 3,
+  OPTO_SLANG_NET_PULL_ONE = 4,
+  OPTO_SLANG_NET_SUPPLY_ZERO = 5,
+  OPTO_SLANG_NET_SUPPLY_ONE = 6
 } OptoSlangNetResolution;
 
 typedef enum OptoSlangTypeLayoutKind {

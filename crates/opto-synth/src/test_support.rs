@@ -343,6 +343,46 @@ pub(crate) fn module_with_process(blocking: bool) -> TestModule {
     )
 }
 
+pub(crate) fn module_with_schedule_sensitive_nonblocking_process() -> TestModule {
+    let mut module = WordModule::new("top");
+    let a = module
+        .add_port("a", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let y = module
+        .add_port("y", PortDirection::Output, bit(), test_span())
+        .unwrap();
+    let observed = module
+        .add_port("observed", PortDirection::Output, bit(), test_span())
+        .unwrap();
+    let a_value = read_port(&mut module, a);
+    let y_value = read_port(&mut module, y);
+    let y_signal = module.port(y).unwrap().signal;
+    let observed_signal = module.port(observed).unwrap().signal;
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_combinational_procedure(ProcedureKind::Combinational, test_span())
+        .unwrap();
+    let block = cfg.add_block(procedure, test_span()).unwrap();
+    cfg.assign(
+        block,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(y_signal),
+        a_value,
+        SourceSpan::stable("schedule-sensitive nonblocking assignment"),
+    )
+    .unwrap();
+    cfg.assign(
+        block,
+        AssignmentMode::Blocking,
+        ProcTarget::signal(observed_signal),
+        y_value,
+        test_span(),
+    )
+    .unwrap();
+    cfg.terminate_return(block, test_span()).unwrap();
+    TestModule::new(module, cfg)
+}
+
 pub(crate) fn module_with_flop_process() -> TestModule {
     let mut module = WordModule::new("top");
     let clk = module
@@ -617,6 +657,100 @@ pub(crate) fn module_with_prioritized_constant_updates() -> TestModule {
     cfg.terminate_jump(second_update, exit, test_span())
         .unwrap();
     cfg.terminate_jump(second_hold, exit, test_span()).unwrap();
+    cfg.terminate_return(exit, test_span()).unwrap();
+    TestModule::new(module, cfg)
+}
+
+pub(crate) fn module_with_nested_async_controls() -> TestModule {
+    let mut module = WordModule::new("top");
+    let clk = module
+        .add_port("clk", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let clear = module
+        .add_port("clear", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let set = module
+        .add_port("set", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let data = module
+        .add_port("d", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let q = module
+        .add_port("q", PortDirection::Output, bit(), test_span())
+        .unwrap();
+    let clock = read_port(&mut module, clk);
+    let clear = read_port(&mut module, clear);
+    let set = read_port(&mut module, set);
+    let data = read_port(&mut module, data);
+    let zero = module
+        .constant(ConstBits::from_bin_str("0").unwrap(), bit(), test_span())
+        .unwrap();
+    let one = module
+        .constant(ConstBits::from_bin_str("1").unwrap(), bit(), test_span())
+        .unwrap();
+    let target = module.port(q).unwrap().signal;
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_clocked_procedure(
+            [
+                SensitivityEvent {
+                    value: clock,
+                    edge: Edge::Pos,
+                    iff: None,
+                },
+                SensitivityEvent {
+                    value: clear,
+                    edge: Edge::Pos,
+                    iff: None,
+                },
+                SensitivityEvent {
+                    value: set,
+                    edge: Edge::Pos,
+                    iff: None,
+                },
+            ],
+            test_span(),
+        )
+        .unwrap();
+    let entry = cfg.add_block(procedure, test_span()).unwrap();
+    let clear_update = cfg.add_block(procedure, test_span()).unwrap();
+    let data_update = cfg.add_block(procedure, test_span()).unwrap();
+    let set_test = cfg.add_block(procedure, test_span()).unwrap();
+    let set_update = cfg.add_block(procedure, test_span()).unwrap();
+    let exit = cfg.add_block(procedure, test_span()).unwrap();
+    cfg.terminate_branch(entry, clear, clear_update, data_update, test_span())
+        .unwrap();
+    cfg.assign(
+        clear_update,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(target),
+        zero,
+        test_span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(clear_update, set_test, test_span())
+        .unwrap();
+    cfg.assign(
+        data_update,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(target),
+        data,
+        test_span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(data_update, set_test, test_span())
+        .unwrap();
+    cfg.terminate_branch(set_test, set, set_update, exit, test_span())
+        .unwrap();
+    cfg.assign(
+        set_update,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(target),
+        one,
+        test_span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(set_update, exit, test_span()).unwrap();
     cfg.terminate_return(exit, test_span()).unwrap();
     TestModule::new(module, cfg)
 }

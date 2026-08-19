@@ -594,6 +594,14 @@ pub enum SignalResolution {
     WiredAnd,
     /// Driver values are combined by bitwise OR.
     WiredOr,
+    /// Physical tri-state drivers with a default weak zero when all are disabled.
+    PullZero,
+    /// Physical tri-state drivers with a default weak one when all are disabled.
+    PullOne,
+    /// A constant zero supply net materialized before Boolean lowering.
+    SupplyZero,
+    /// A constant one supply net materialized before Boolean lowering.
+    SupplyOne,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

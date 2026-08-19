@@ -985,6 +985,63 @@ fn verilog_frontend_preserves_wired_net_resolution() {
 }
 
 #[test]
+fn verilog_frontend_preserves_extended_net_resolution() {
+    let source = TestSource::new(
+        "extended-resolution.sv",
+        "module top(output triand a, output trior o, output tri0 p0, output tri1 p1, output supply0 s0, output supply1 s1); endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let resolution = |name| {
+        module
+            .signal(module.signal_id(name).unwrap())
+            .unwrap()
+            .resolution
+    };
+
+    assert_eq!(resolution("a"), SignalResolution::WiredAnd);
+    assert_eq!(resolution("o"), SignalResolution::WiredOr);
+    assert_eq!(resolution("p0"), SignalResolution::PullZero);
+    assert_eq!(resolution("p1"), SignalResolution::PullOne);
+    assert_eq!(resolution("s0"), SignalResolution::SupplyZero);
+    assert_eq!(resolution("s1"), SignalResolution::SupplyOne);
+}
+
+#[test]
+fn verilog_frontend_canonicalizes_static_alias_drivers() {
+    let source = TestSource::new(
+        "static-alias.sv",
+        "module top(input wire d, output wire y); wire a, b, c; alias a = b; alias b = c; assign c = d; assign y = b; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let a = module.signal_id("a").unwrap();
+
+    assert!(
+        module
+            .connects()
+            .iter()
+            .any(|connect| connect.target.signal == a)
+    );
+    assert!(!module.connects().iter().any(|connect| {
+        ["b", "c"]
+            .into_iter()
+            .filter_map(|name| module.signal_id(name))
+            .any(|signal| connect.target.signal == signal)
+    }));
+}
+
+#[test]
 fn verilog_frontend_materializes_tri_state_driver_contract() {
     let source = TestSource::new(
         "wired-tristate.sv",

@@ -150,15 +150,30 @@ fn synthesize_lowers_comb_if_else_to_mux_connect() {
 }
 
 #[test]
-fn synthesize_rejects_nonblocking_comb_processes() {
+fn synthesize_accepts_read_independent_nonblocking_comb_processes() {
     let mut module = module_with_process(false);
+
+    synthesize_test_module(
+        &mut module,
+        target_options(vec![target_cell("UNUSED", 1.0, &[])]),
+    )
+    .unwrap();
+    assert_eq!(module.connects().len(), 1);
+    assert!(write_verilog(&module).unwrap().contains("assign y = a;"));
+}
+
+#[test]
+fn synthesize_rejects_schedule_sensitive_nonblocking_comb_processes() {
+    let mut module = module_with_schedule_sensitive_nonblocking_process();
 
     let err = synthesize_test_module(
         &mut module,
         target_options(vec![target_cell("UNUSED", 1.0, &[])]),
     )
     .unwrap_err();
-    assert!(err.to_string().contains("nonblocking assignment"));
+    assert!(err.to_string().contains("nonblocking assignment to 'y'"));
+    assert!(err.to_string().contains("schedule-sensitive"));
+    assert!(err.to_string().contains("read during the same activation"));
     assert_eq!(module.procedures.procedures().len(), 1);
     assert!(module.connects().is_empty());
 }
@@ -198,6 +213,44 @@ fn frontend_preserves_priority_across_constant_update_joins() {
     assert!(text.contains("q <= 1'b1;"), "{text}");
     assert!(text.contains("if (first) begin"), "{text}");
     assert!(text.contains("q <= 1'b0;"), "{text}");
+}
+
+#[test]
+fn frontend_canonicalizes_nested_async_clear_set_priority() {
+    let module = module_with_nested_async_controls();
+    let module = crate::frontend::lower_to_validated_word(
+        module.rtl().unwrap(),
+        &ReferencePortMap::new(),
+        crate::test_runtime(),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    let register = module
+        .operations()
+        .iter()
+        .find_map(|operation| match &operation.kind {
+            word::OpKind::Register(register) => Some(register),
+            _ => None,
+        })
+        .expect("nested asynchronous controls must lower to one register");
+    assert_eq!(register.resets.len(), 2);
+    assert!(
+        register
+            .resets
+            .iter()
+            .all(|reset| reset.kind == word::ResetKind::Async)
+    );
+    assert!(matches!(
+        module.value(register.resets[0].reset_value).unwrap().kind,
+        word::ValueKind::Constant(ref bits)
+            if bits.bit_lsb(0) == Some(opto_ir::BitVal::One)
+    ));
+    assert!(matches!(
+        module.value(register.resets[1].reset_value).unwrap().kind,
+        word::ValueKind::Constant(ref bits)
+            if bits.bit_lsb(0) == Some(opto_ir::BitVal::Zero)
+    ));
 }
 
 #[test]

@@ -194,6 +194,11 @@ statements in that scope and the cyclic loop continuation are guarded by the
 inactive predicate. Exiting a task does not bypass its output and inout
 copy-out. Hierarchical or cross-process block targets and a task target other
 than the current activation are outside this profile and fail explicitly.
+Valueless `return;` in a task or void function is a direct edge to the current
+activation exit. That exit precedes copy-out and can terminate a cyclic region,
+so nested and loop-contained returns need no Boolean flag. A value function
+uses the same edge after storing its result; opposite valued/valueless forms
+remain errors.
 
 ### Side-effecting procedural expressions
 
@@ -214,6 +219,11 @@ effects. The two arms of `?:` receive distinct prelude fragments, while the
 right operand of `&&` or `||` is reachable only when the left operand does not
 decide the result. Nonblocking and timing-controlled assignments do not produce
 values in this profile.
+For compatibility, `always_comb` may use a nonblocking assignment only when
+the assigned signal has no read in the same activation. Reads include data and
+control expressions, dynamic lvalue offsets, and memory addressing. This proves
+that replacing end-of-step publication with a combinational connection cannot
+change a later source read; any dependency is rejected as schedule-sensitive.
 
 Assignment patterns, including replicated patterns, evaluate their elements in
 source order. The resulting values are then placed into the canonical packed
@@ -277,6 +287,13 @@ runtime-selected unpacked-array elements compose their dynamic offset into
 child reads and writes. The linked root cannot retain a reference port, and a
 preserved hierarchy boundary around one is rejected rather than approximated
 as an `inout` net.
+
+SystemVerilog net `alias` declarations use a structural contract. Equal-width
+whole nets, static slices, and unambiguous concatenations are flattened into
+per-bit equivalence classes, including transitive groups, and every read and
+driver is rewritten to one deterministic representative. Dynamic selections,
+incompatible resolution kinds, and noncontiguous or overlapping partial
+mappings without one exact flattened representation are rejected.
 
 ### User-defined primitives
 
@@ -353,6 +370,11 @@ high-impedance assignments as a typed Word `TriState` operation. `wand` and
 inversion and their declared enable polarity. Ordinary built-in logic gates
 lower to the corresponding structural operations, while `pullup` and
 `pulldown` become exact one-bit constant network drivers.
+`triand` and `trior` reuse the exact `wand` and `wor` reductions. `tri0` and
+`tri1` add a default zero or one contribution only while all ordinary bit
+drivers are disabled. `supply0` and `supply1` materialize as typed constants
+before Boolean planning; explicitly driven supplies remain outside the
+strength-free profile.
 Ordinary multi-driver `wire` / `tri` resolution and public `inout` publication
 now preserve one scalar data/enable contribution per target bit and materialize
 polarity-compatible Liberty three-state cells on a shared mapped net. Missing
@@ -424,6 +446,11 @@ synthetic clock. An event pattern must reduce losslessly to a typed clock,
 ordered reset/enable behavior, and per-bit state transition, or match an exact
 target-dependent sequential primitive contract. Otherwise it remains a
 reviewed profile gap or intentional rejection.
+Nested asynchronous set/clear control is representable when one data clock and
+one source-ordered reset list define a constant value for every asserted-
+control combination. Earlier list entries retain source priority. Conflicting
+path stacks, nonconstant asynchronous values, and updates requiring another
+clock are not approximated.
 
 A single positive- or negative-edge event with an `iff` qualifier lowers to
 the same clock and conditional hold as an explicit entry `if`, producing an

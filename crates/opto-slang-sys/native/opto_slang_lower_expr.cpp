@@ -77,6 +77,48 @@ void apply_signal_slice(ModuleLoweringContext &design, OptoSlangExpr &signal,
   set_expr_source(design, signal, source);
 }
 
+void canonicalize_static_net_alias(ModuleLoweringContext &design,
+                                   OptoSlangExpr &signal) {
+  if (signal.kind != OPTO_SLANG_EXPR_SIGNAL || !signal.signal_name) {
+    return;
+  }
+  const auto shape = design.value_shapes.find(*signal.signal_name);
+  if (shape == design.value_shapes.end()) {
+    return;
+  }
+  const auto lsb = signal.signal_has_range
+                       ? std::min(signal.signal_msb, signal.signal_lsb)
+                       : 0;
+  const auto width =
+      signal.signal_has_range
+          ? std::max(signal.signal_msb, signal.signal_lsb) - lsb + 1
+          : shape->second.width;
+  std::optional<std::pair<std::string, uint32_t>> first;
+  for (uint32_t offset = 0; offset < width; ++offset) {
+    const auto found = design.static_net_aliases.find(
+        {std::string(*signal.signal_name), lsb + offset});
+    if (found == design.static_net_aliases.end()) {
+      return;
+    }
+    if (!first) {
+      first = found->second;
+    } else if (found->second.first != first->first ||
+               found->second.second != first->second + offset) {
+      return;
+    }
+  }
+  if (!first || (first->first == *signal.signal_name && first->second == lsb)) {
+    return;
+  }
+  signal.signal_name = intern_string(design, first->first);
+  const auto target_shape = design.value_shapes.find(first->first);
+  signal.signal_has_range = target_shape == design.value_shapes.end() ||
+                            first->second != 0 ||
+                            width != target_shape->second.width;
+  signal.signal_lsb = first->second;
+  signal.signal_msb = first->second + width - 1;
+}
+
 uint32_t selected_element_width(const Type &type) {
   auto *element = type.getArrayElementType();
   return element ? checked_width(lowered_type_width(*element),
@@ -524,7 +566,9 @@ OptoSlangExpr *lower_signal_expr(ModuleLoweringContext &design,
     lowered.kind = OPTO_SLANG_EXPR_SIGNAL;
     lowered.signal_name =
         intern_string(design, registered_value_name(design, value.symbol));
-    return make_expr(design, std::move(lowered), expr);
+    auto *result = make_expr(design, std::move(lowered), expr);
+    canonicalize_static_net_alias(design, *result);
+    return result;
   }
   case ExpressionKind::HierarchicalValue: {
     const auto &value = expr.as<HierarchicalValueExpression>();
@@ -535,7 +579,9 @@ OptoSlangExpr *lower_signal_expr(ModuleLoweringContext &design,
     lowered.kind = OPTO_SLANG_EXPR_SIGNAL;
     lowered.signal_name =
         intern_string(design, registered_value_name(design, value.symbol));
-    return make_expr(design, std::move(lowered), expr);
+    auto *result = make_expr(design, std::move(lowered), expr);
+    canonicalize_static_net_alias(design, *result);
+    return result;
   }
   case ExpressionKind::ElementSelect: {
     const auto &select = expr.as<ElementSelectExpression>();
@@ -567,6 +613,7 @@ OptoSlangExpr *lower_signal_expr(ModuleLoweringContext &design,
     }
     const auto relative_lsb = static_cast<uint64_t>(translated) * element_width;
     apply_signal_slice(design, *base, relative_lsb, element_width, expr);
+    canonicalize_static_net_alias(design, *base);
     return base;
   }
   case ExpressionKind::RangeSelect: {
@@ -631,6 +678,7 @@ OptoSlangExpr *lower_signal_expr(ModuleLoweringContext &design,
     }
     apply_signal_slice(design, *base, relative_lsb,
                        static_cast<uint32_t>(width), expr);
+    canonicalize_static_net_alias(design, *base);
     return base;
   }
   case ExpressionKind::MemberAccess: {
@@ -648,6 +696,7 @@ OptoSlangExpr *lower_signal_expr(ModuleLoweringContext &design,
     apply_signal_slice(design, *base,
                        aggregate_field_storage_offset(aggregate_type, field),
                        width, expr);
+    canonicalize_static_net_alias(design, *base);
     return base;
   }
   default:

@@ -85,6 +85,22 @@ CfgFragment ProcedureBuilder::conditional(const OptoSlangExpr *condition,
           join ? std::vector<uint32_t>{*join} : std::vector<uint32_t>{}};
 }
 
+CfgFragment ProcedureBuilder::join_at(CfgFragment body, uint32_t target,
+                                      OptoSlangSourceSpanView source) {
+  if (target >= blocks_.size()) {
+    throw std::runtime_error("procedural CFG join targets an unknown block");
+  }
+  if (body.empty()) {
+    return {target, {target}};
+  }
+  for (auto exit : body.exits) {
+    if (exit != target) {
+      jump(exit, target, source);
+    }
+  }
+  return {body.entry, {target}};
+}
+
 void ProcedureBuilder::jump(uint32_t from, uint32_t target,
                             OptoSlangSourceSpanView source) {
   CfgTerminator terminator;

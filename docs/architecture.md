@@ -486,6 +486,13 @@ selection remains a one-bit `SignalRef`, a runtime bit selection remains a
 `DynamicExtract`, and an event-local qualifier cannot be confused with a
 qualifier on another sensitivity-list member.
 
+A valued function return stores its result and transfers directly to the
+activation exit. A task or void function `return;` transfers to that same exit
+without a synthetic returned flag. The exit precedes output/inout copy-out, so
+returns from nested conditionals or cyclic regions cannot bypass caller-visible
+writeback. Valued returns in tasks or void functions and valueless returns in
+value functions remain source-located errors.
+
 A scalar `iff` qualifier on a positive- or negative-edge clock becomes a
 conditional hold after event/reset classification and therefore an ordinary
 register or memory-write enable. With one qualified clock and unqualified
@@ -501,6 +508,11 @@ independent qualifiers and use the post-edge clock level in the exact dual-edge
 phase-bank template. Unrelated clocks are never combined into a synthetic
 clock; a multi-clock state pattern without an exact sequential implementation
 contract is rejected after preserving its event identities for diagnosis.
+Nested asynchronous clear/set branches are admitted only when normalization
+can produce one data clock and one ordered reset list whose constant result is
+defined for every combination of asserted controls. List order preserves
+source priority. Conflicting path stacks, nonconstant asynchronous updates, and
+unrelated data clocks remain structured rejections.
 
 Subroutine `ref` arguments are also eliminated before Proc publication. An
 inlined formal is a scoped binding to the actual canonical writable place, so
@@ -510,6 +522,14 @@ process-local value at call entry. Automatic-body formal clones resolve through
 their common originating syntax identity; no name-based alias lookup, copy-out
 approximation, or source-level reference node survives into Proc or Word IR.
 This contract applies to tasks and void or value-returning functions.
+
+Static SystemVerilog net aliases are eliminated as flattened-bit equivalence
+classes. Equal-width whole nets, static slices, and unambiguous concatenations
+union their bits transitively and select the lexicographically smallest
+`(flattened name, bit)` representative. Reads and lvalues are rewritten to that
+representative, so all members share one resolution domain instead of becoming
+directional assignments. Dynamic alias selections, incompatible resolution
+kinds, and mappings without one contiguous exact representation are rejected.
 
 Module `ref` ports and `ref` modport members retain a typed `Ref` direction
 only in definition-local Word IR. They are not resolved `inout` nets. Linked
@@ -560,6 +580,12 @@ only on the reachable CFG edge; side effects are therefore neither hoisted out
 of `?:` nor executed across a short-circuit boundary. Timing-controlled and
 nonblocking assignments remain statements rather than value-producing
 expressions.
+An `always_comb` nonblocking statement is accepted only when its target signal
+is not read anywhere during that procedure activation, including data and
+control expressions, dynamic target offsets, and memory addressing. Under this
+condition end-of-step publication and the generated combinational connection
+are equivalent. A same-activation read is schedule-sensitive and is diagnosed
+before assignment-mode normalization.
 
 Simple, structured, and replicated assignment-pattern elements are evaluated
 in source order into ordinary expression values. Only after evaluation does
@@ -625,6 +651,15 @@ High-impedance source drivers enter Word IR as an explicit `TriState` operation
 containing data and a polarized scalar enable; `Z` is not smuggled through an
 ordinary mux. Wired-AND and wired-OR normalization consume that operation by
 substituting their exact disabled-driver identity before Boolean planning.
+`triand` and `trior` use those same wired identities. `tri0` and `tri1` retain a
+default physical pull contribution enabled only when every ordinary driver on
+the bit is disabled, so no `Z` reaches Boolean planning. Undriven `supply0` and
+`supply1` become typed constant drivers at this boundary; an explicit supply-
+net driver is rejected because it requires out-of-profile strength resolution.
+These policies append explicit `SignalResolution` variants while preserving the
+existing serialized variant tags; the generic archive envelope version is
+unchanged, and an older reader rejects a new variant rather than decoding it as
+an older resolution policy.
 Ordinary resolved `wire` / `tri` nets and public `inout` ports retain the typed
 resolution boundary. Frontend normalization scalarizes each contribution into
 one `TriState(data, enable)` operation per target bit. The region graph owns the

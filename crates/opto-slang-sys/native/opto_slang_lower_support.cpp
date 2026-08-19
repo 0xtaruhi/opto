@@ -553,6 +553,9 @@ void collect_interface_behavior(const InstanceBodySymbol &body,
     case SymbolKind::ProceduralBlock:
       members.processes.push_back(&symbol.as<ProceduralBlockSymbol>());
       break;
+    case SymbolKind::NetAlias:
+      members.aliases.push_back(&symbol.as<NetAliasSymbol>());
+      break;
     default:
       break;
     }
@@ -606,6 +609,10 @@ void collect_elaborated_members(const InstanceBodySymbol &body,
     case SymbolKind::ProceduralBlock:
       members.processes.push_back(&symbol.as<ProceduralBlockSymbol>());
       break;
+    case SymbolKind::NetAlias:
+      (void)symbol.as<NetAliasSymbol>().getNetReferences();
+      members.aliases.push_back(&symbol.as<NetAliasSymbol>());
+      break;
     case SymbolKind::Port:
     case SymbolKind::MultiPort:
     case SymbolKind::InterfacePort:
@@ -636,7 +643,6 @@ void collect_elaborated_members(const InstanceBodySymbol &body,
     case SymbolKind::CovergroupType:
     case SymbolKind::CovergroupBody:
     case SymbolKind::AnonymousProgram:
-    case SymbolKind::NetAlias:
     case SymbolKind::ConfigBlock:
       throw std::runtime_error(unsupported_member_message(body, symbol));
     default:

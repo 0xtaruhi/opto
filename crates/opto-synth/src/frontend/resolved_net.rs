@@ -24,6 +24,7 @@ pub(super) fn lower_resolved_nets(
     module: &mut word::WordModule,
     reference_ports: &ReferencePortMap,
 ) -> Result<(), crate::SynthError> {
+    materialize_supply_nets(module)?;
     scalarize_tri_state_drivers(module)?;
     if !module
         .signals()
@@ -77,7 +78,12 @@ pub(super) fn lower_resolved_nets(
         let identity = match resolution {
             word::SignalResolution::WiredAnd => BitVal::One,
             word::SignalResolution::WiredOr => BitVal::Zero,
-            word::SignalResolution::SingleDriver | word::SignalResolution::TriState => {
+            word::SignalResolution::SingleDriver
+            | word::SignalResolution::TriState
+            | word::SignalResolution::PullZero
+            | word::SignalResolution::PullOne
+            | word::SignalResolution::SupplyZero
+            | word::SignalResolution::SupplyOne => {
                 unreachable!()
             }
         };
@@ -98,7 +104,12 @@ pub(super) fn lower_resolved_nets(
                     match resolution {
                         word::SignalResolution::WiredAnd => word::BinaryOp::BitAnd,
                         word::SignalResolution::WiredOr => word::BinaryOp::BitOr,
-                        word::SignalResolution::SingleDriver | word::SignalResolution::TriState => {
+                        word::SignalResolution::SingleDriver
+                        | word::SignalResolution::TriState
+                        | word::SignalResolution::PullZero
+                        | word::SignalResolution::PullOne
+                        | word::SignalResolution::SupplyZero
+                        | word::SignalResolution::SupplyOne => {
                             unreachable!()
                         }
                     },
@@ -118,6 +129,70 @@ pub(super) fn lower_resolved_nets(
     Ok(())
 }
 
+/// Replaces supply nets with one ordinary constant driver. Explicit drivers
+/// would require strength resolution against the supply strength and are
+/// rejected rather than being silently assigned Boolean priority.
+fn materialize_supply_nets(module: &mut word::WordModule) -> Result<(), crate::SynthError> {
+    let supplies = module
+        .signals()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, signal)| {
+            let bit = match signal.resolution {
+                word::SignalResolution::SupplyZero => BitVal::Zero,
+                word::SignalResolution::SupplyOne => BitVal::One,
+                _ => return None,
+            };
+            Some((
+                word::SignalId::from_index(index).expect("signal index must fit"),
+                signal.ty,
+                signal.source.clone(),
+                bit,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if supplies.is_empty() {
+        return Ok(());
+    }
+    let supply_ids = supplies
+        .iter()
+        .map(|(signal, _, _, _)| *signal)
+        .collect::<std::collections::BTreeSet<_>>();
+    for connect in module.connects() {
+        if supply_ids.contains(&connect.target.signal) {
+            let name = module
+                .signal(connect.target.signal)
+                .and_then(|signal| signal.name)
+                .map_or("<unnamed>", |name| module.name_str(name));
+            return Err(crate::SynthError::unsupported(format!(
+                "explicit driver on supply net '{name}' requires strength resolution"
+            )));
+        }
+    }
+    for connect in module.take_connects() {
+        module
+            .connect(connect.target, connect.value, connect.source)
+            .map_err(crate::SynthError::from)?;
+    }
+    for (signal, ty, source, bit) in supplies {
+        let value = module
+            .constant(
+                ConstBits::from_bits(vec![bit; ty.width() as usize])
+                    .map_err(crate::SynthError::from)?,
+                ty,
+                source.clone(),
+            )
+            .map_err(crate::SynthError::from)?;
+        module
+            .connect(word::LValue::signal(signal), value, source)
+            .map_err(crate::SynthError::from)?;
+        module
+            .set_signal_resolution(signal, word::SignalResolution::SingleDriver)
+            .map_err(crate::SynthError::from)?;
+    }
+    Ok(())
+}
+
 /// Converts every physically resolved contribution to one scalar tri-state
 /// driver per target bit. Ordinary contributions on a multi-driver wire use a
 /// constant active enable; explicit high-impedance contributions retain their
@@ -126,15 +201,19 @@ fn scalarize_tri_state_drivers(module: &mut word::WordModule) -> Result<(), crat
     if !module
         .signals()
         .iter()
-        .any(|signal| signal.resolution == word::SignalResolution::TriState)
+        .any(|signal| is_physical_resolution(signal.resolution))
     {
         return Ok(());
     }
+    let mut active_drivers = BTreeMap::<(word::SignalId, u32), Vec<word::ValueId>>::new();
     for connect in module.take_connects() {
-        let signal = module.signal(connect.target.signal).ok_or_else(|| {
-            crate::SynthError::invariant("tri-state connect target signal disappeared")
-        })?;
-        if signal.resolution != word::SignalResolution::TriState {
+        let resolution = module
+            .signal(connect.target.signal)
+            .ok_or_else(|| {
+                crate::SynthError::invariant("tri-state connect target signal disappeared")
+            })?
+            .resolution;
+        if !is_physical_resolution(resolution) {
             module
                 .connect(connect.target, connect.value, connect.source)
                 .map_err(crate::SynthError::from)?;
@@ -216,6 +295,24 @@ fn scalarize_tri_state_drivers(module: &mut word::WordModule) -> Result<(), crat
                     .ok_or_else(|| crate::SynthError::capacity("tri-state target overflow"))?,
                 None => bit,
             };
+            let active = if enable.active_high {
+                enable.value
+            } else {
+                let source =
+                    super::derived_source(&connect.source, "tri-state active enable", role)?;
+                module
+                    .unary(word::UnaryOp::BitNot, enable.value, source)
+                    .map_err(crate::SynthError::from)?
+            };
+            if matches!(
+                resolution,
+                word::SignalResolution::PullZero | word::SignalResolution::PullOne
+            ) {
+                active_drivers
+                    .entry((connect.target.signal, target_bit))
+                    .or_default()
+                    .push(active);
+            }
             module
                 .connect(
                     word::LValue::signal(connect.target.signal).with_range(word::BitRange {
@@ -228,7 +325,91 @@ fn scalarize_tri_state_drivers(module: &mut word::WordModule) -> Result<(), crat
                 .map_err(crate::SynthError::from)?;
         }
     }
+    let pulls = module
+        .signals()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, signal)| {
+            let bit = match signal.resolution {
+                word::SignalResolution::PullZero => BitVal::Zero,
+                word::SignalResolution::PullOne => BitVal::One,
+                _ => return None,
+            };
+            Some((
+                word::SignalId::from_index(index).expect("signal index must fit"),
+                signal.ty.width(),
+                signal.source.clone(),
+                bit,
+            ))
+        })
+        .collect::<Vec<_>>();
+    for (signal, width, source, pull_bit) in pulls {
+        for bit in 0..width {
+            let role = bit.to_le_bytes();
+            let derived = super::derived_source(&source, "default pull data", role)?;
+            let ty = word::WordType::new(1, false, word::LogicStateKind::FourState)
+                .map_err(crate::SynthError::from)?;
+            let data = module
+                .constant(
+                    ConstBits::from_bits(vec![pull_bit]).map_err(crate::SynthError::from)?,
+                    ty,
+                    derived.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+            let enable_value = if let Some(active) = active_drivers.remove(&(signal, bit)) {
+                let mut active = active.into_iter();
+                let first = active
+                    .next()
+                    .expect("recorded pull-net driver list must not be empty");
+                let any_active = active.try_fold(first, |left, right| {
+                    module
+                        .binary(word::BinaryOp::BitOr, left, right, derived.clone())
+                        .map_err(crate::SynthError::from)
+                })?;
+                module
+                    .unary(word::UnaryOp::BitNot, any_active, derived.clone())
+                    .map_err(crate::SynthError::from)?
+            } else {
+                module
+                    .constant(
+                        ConstBits::from_bits(vec![BitVal::One]).map_err(crate::SynthError::from)?,
+                        ty,
+                        derived.clone(),
+                    )
+                    .map_err(crate::SynthError::from)?
+            };
+            let driver = module
+                .tri_state(
+                    data,
+                    word::Enable {
+                        value: enable_value,
+                        active_high: true,
+                    },
+                    derived.clone(),
+                )
+                .map_err(crate::SynthError::from)?;
+            module
+                .connect(
+                    word::LValue::signal(signal).with_range(word::BitRange { msb: bit, lsb: bit }),
+                    driver,
+                    derived,
+                )
+                .map_err(crate::SynthError::from)?;
+        }
+        module
+            .set_signal_resolution(signal, word::SignalResolution::TriState)
+            .map_err(crate::SynthError::from)?;
+    }
     Ok(())
+}
+
+const fn is_physical_resolution(resolution: word::SignalResolution) -> bool {
+    matches!(
+        resolution,
+        word::SignalResolution::TriState
+            | word::SignalResolution::PullZero
+            | word::SignalResolution::PullOne
+    )
 }
 
 const fn is_wired_resolution(resolution: word::SignalResolution) -> bool {
@@ -269,7 +450,12 @@ fn lower_wired_driver(
     let identity_bit = match resolution {
         word::SignalResolution::WiredAnd => BitVal::One,
         word::SignalResolution::WiredOr => BitVal::Zero,
-        word::SignalResolution::SingleDriver | word::SignalResolution::TriState => {
+        word::SignalResolution::SingleDriver
+        | word::SignalResolution::TriState
+        | word::SignalResolution::PullZero
+        | word::SignalResolution::PullOne
+        | word::SignalResolution::SupplyZero
+        | word::SignalResolution::SupplyOne => {
             return Err(crate::SynthError::invariant(
                 "single-driver signal reached wired-net normalization",
             ));
@@ -670,5 +856,61 @@ mod tests {
             assert_eq!(enable.value, enable_value);
             assert!(!enable.active_high);
         }
+    }
+
+    #[test]
+    fn materializes_undriven_pull_and_supply_defaults() {
+        let mut module = word::WordModule::new("default_nets");
+        let ty = word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap();
+        let source = word::SourceSpan::stable("default net test");
+        let pull = module.add_wire("pull", ty, source.clone()).unwrap();
+        let supply = module.add_wire("supply", ty, source.clone()).unwrap();
+        module
+            .set_signal_resolution(pull, word::SignalResolution::PullOne)
+            .unwrap();
+        module
+            .set_signal_resolution(supply, word::SignalResolution::SupplyZero)
+            .unwrap();
+
+        lower_resolved_nets(&mut module, &ReferencePortMap::new()).unwrap();
+
+        assert_eq!(
+            module.signal(pull).unwrap().resolution,
+            word::SignalResolution::TriState
+        );
+        assert_eq!(
+            module.signal(supply).unwrap().resolution,
+            word::SignalResolution::SingleDriver
+        );
+        let pull_driver = module
+            .connects()
+            .iter()
+            .find(|connect| connect.target.signal == pull)
+            .unwrap();
+        let word::ValueKind::Operation(operation) = module.value(pull_driver.value).unwrap().kind
+        else {
+            panic!("default pull must remain an explicit physical driver");
+        };
+        let word::OpKind::TriState { data, enable } = module.operation(operation).unwrap().kind
+        else {
+            panic!("default pull must lower to a tri-state driver");
+        };
+        assert!(matches!(
+            module.value(data).unwrap().kind,
+            word::ValueKind::Constant(ref bits) if bits.bit_lsb(0) == Some(BitVal::One)
+        ));
+        assert!(matches!(
+            module.value(enable.value).unwrap().kind,
+            word::ValueKind::Constant(ref bits) if bits.bit_lsb(0) == Some(BitVal::One)
+        ));
+        let supply_driver = module
+            .connects()
+            .iter()
+            .find(|connect| connect.target.signal == supply)
+            .unwrap();
+        assert!(matches!(
+            module.value(supply_driver.value).unwrap().kind,
+            word::ValueKind::Constant(ref bits) if bits.bit_lsb(0) == Some(BitVal::Zero)
+        ));
     }
 }

@@ -138,6 +138,7 @@ impl<'a> ProcedureNormalizer<'a> {
     }
 
     fn validate_assignment_styles(&self) -> Result<(), crate::SynthError> {
+        let mut combinational_nonblocking = BTreeMap::new();
         for &block in self.cfg.blocks() {
             for (_, effect) in block_effects(self.procedures, block)? {
                 let proc::ProcTarget::Signal { signal, .. } = effect.target else {
@@ -160,13 +161,110 @@ impl<'a> ProcedureNormalizer<'a> {
                 if self.procedure.kind == proc::ProcedureKind::Combinational
                     && effect.mode == proc::AssignmentMode::Nonblocking
                 {
-                    return Err(crate::SynthError::unsupported(
-                        "nonblocking assignment in always_comb",
-                    ));
+                    combinational_nonblocking
+                        .entry(signal)
+                        .or_insert_with(|| effect.source.clone());
                 }
             }
         }
+        let read_signals = self.procedure_read_signals()?;
+        for (signal, source) in combinational_nonblocking {
+            if read_signals.contains(&signal) {
+                let name = self
+                    .module
+                    .signal(signal)
+                    .and_then(|signal| signal.name)
+                    .map_or("<unnamed>", |name| self.module.name_str(name));
+                let location = match (source.file(), source.line(), source.column()) {
+                    (Some(file), Some(line), Some(column)) => {
+                        format!("{file}:{line}:{column}")
+                    }
+                    (Some(file), Some(line), None) => format!("{file}:{line}"),
+                    (Some(file), None, None) => file.to_string(),
+                    _ => "<unknown>".to_string(),
+                };
+                return Err(crate::SynthError::unsupported(format!(
+                    "nonblocking assignment to '{name}' in always_comb at {location} is schedule-sensitive because the target is read during the same activation"
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// Proves the conservative compatibility subset for nonblocking
+    /// `always_comb`: an assigned signal must not feed any expression in the
+    /// same activation. Under that condition changing the assignment's visible
+    /// update point cannot affect a later read, while the scheduled final value
+    /// is identical to the generated combinational connection.
+    fn procedure_read_signals(&self) -> Result<HashSet<word::SignalId>, crate::SynthError> {
+        let mut roots = Vec::new();
+        for &block in self.cfg.blocks() {
+            for (_, effect) in block_effects(self.procedures, block)? {
+                roots.push(effect.value);
+                match effect.target {
+                    proc::ProcTarget::Signal { select, .. } => {
+                        if let proc::TargetSelect::Dynamic { offset, .. } = select {
+                            roots.push(offset);
+                        }
+                    }
+                    proc::ProcTarget::Memory {
+                        address, select, ..
+                    } => {
+                        roots.push(address);
+                        if let proc::TargetSelect::Dynamic { offset, .. } = select {
+                            roots.push(offset);
+                        }
+                    }
+                }
+            }
+            let stored = self.procedures.block(block).ok_or_else(|| {
+                crate::SynthError::invariant("procedural block disappeared during style analysis")
+            })?;
+            match stored.terminator.kind {
+                proc::TerminatorKind::Return | proc::TerminatorKind::Jump { .. } => {}
+                proc::TerminatorKind::Branch { condition, .. } => roots.push(condition),
+                proc::TerminatorKind::Switch { selector, .. } => {
+                    roots.push(selector);
+                    roots.extend(
+                        self.procedures
+                            .switch_arms(block)
+                            .ok_or_else(|| {
+                                crate::SynthError::invariant("procedural switch lost its arm range")
+                            })?
+                            .map(|(_, arm)| arm.pattern),
+                    );
+                }
+            }
+        }
+
+        let mut pending = roots;
+        let mut visited = HashSet::new();
+        let mut signals = HashSet::new();
+        while let Some(value) = pending.pop() {
+            if !visited.insert(value) {
+                continue;
+            }
+            let stored = self.module.value(value).ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "procedural expression references a missing Word value",
+                )
+            })?;
+            match stored.kind {
+                word::ValueKind::Signal(reference) => {
+                    signals.insert(reference.signal);
+                }
+                word::ValueKind::Operation(operation) => {
+                    let operation = self.module.operation(operation).ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "procedural expression references a missing Word operation",
+                        )
+                    })?;
+                    pending.extend(crate::word::operation_inputs(&operation.kind));
+                }
+                word::ValueKind::Constant(_) => {}
+            }
+        }
+        Ok(signals)
     }
 
     fn lower_block(&mut self, block: proc::BlockId) -> Result<(), crate::SynthError> {

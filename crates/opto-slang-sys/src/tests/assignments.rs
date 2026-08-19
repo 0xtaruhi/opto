@@ -44,6 +44,97 @@ fn native_compile_preserves_wired_net_resolution() {
 }
 
 #[test]
+fn native_compile_preserves_extended_net_resolution() {
+    let source = NativeTestSource::new(
+        "module top(output triand a, output trior o, output tri0 p0, output tri1 p1, output supply0 s0, output supply1 s1); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let resolution = |name| {
+        module
+            .ports()
+            .find(|port| port.name().unwrap() == name)
+            .unwrap()
+            .resolution()
+            .unwrap()
+    };
+
+    assert_eq!(resolution("a"), SlangNetResolution::WiredAnd);
+    assert_eq!(resolution("o"), SlangNetResolution::WiredOr);
+    assert_eq!(resolution("p0"), SlangNetResolution::PullZero);
+    assert_eq!(resolution("p1"), SlangNetResolution::PullOne);
+    assert_eq!(resolution("s0"), SlangNetResolution::SupplyZero);
+    assert_eq!(resolution("s1"), SlangNetResolution::SupplyOne);
+}
+
+#[test]
+fn native_compile_canonicalizes_static_net_alias_classes() {
+    let source = NativeTestSource::new(
+        "module top(input wire d, output wire y); wire a, b, c; alias a = b; alias b = c; assign c = d; assign y = b; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
+
+    assert_eq!(assignments.len(), 2);
+    assert!(matches!(
+        assignments[0].lhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Signal(signal) if signal.name == "a"
+    ));
+    assert!(matches!(
+        assignments[1].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Signal(signal) if signal.name == "a"
+    ));
+}
+
+#[test]
+fn native_compile_canonicalizes_static_slice_and_concat_aliases() {
+    let source = NativeTestSource::new(
+        "module top(input wire [1:0] d, output wire [1:0] y); wire [3:0] a, b; wire c, e, f, g; alias a[1:0] = b[3:2]; alias {c, e} = {f, g}; assign b[3:2] = d; assign y = a[1:0]; assign {f, g} = d; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let assignments = module.assigns().collect::<Vec<_>>();
+
+    assert!(matches!(
+        assignments[0].lhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Signal(signal) if signal.name == "a"
+    ));
+    assert!(matches!(
+        assignments[1].rhs().unwrap().kind().unwrap(),
+        SlangExpressionKind::Signal(signal) if signal.name == "a"
+    ));
+    assert!(assignments[2..].iter().all(|assignment| {
+        assignment
+            .lhs()
+            .is_ok_and(|lhs| is_signal(lhs, "c") || is_signal(lhs, "e"))
+    }));
+}
+
+#[test]
+fn native_compile_rejects_inexact_static_net_aliases() {
+    let cases = [
+        (
+            "module top; wire [2:0] a; alias a[1:0] = a[2:1]; endmodule\n",
+            "cannot alias a net to itself",
+        ),
+        (
+            "module top; wire a; wand b; alias a = b; endmodule\n",
+            "all nets in a net alias statement must have a common nettype",
+        ),
+    ];
+    for (text, expected) in cases {
+        let source = NativeTestSource::new(text);
+        let error = compile(
+            std::slice::from_ref(&source.path),
+            &SlangCompileOptions::default(),
+        )
+        .expect_err("inexact static alias must be rejected");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn native_compile_rejects_unmodeled_declaration_and_driver_semantics() {
     let cases = [
         (
@@ -69,10 +160,6 @@ fn native_compile_rejects_unmodeled_declaration_and_driver_semantics() {
         (
             "module top(output logic y); trireg (small) stored; assign y = stored; endmodule\n",
             "net type 'trireg' on net 'stored' is not supported for synthesis",
-        ),
-        (
-            "module top(output logic y); tri0 pulled; assign y = pulled; endmodule\n",
-            "net type 'tri0' on net 'pulled' is not supported for synthesis",
         ),
     ];
 

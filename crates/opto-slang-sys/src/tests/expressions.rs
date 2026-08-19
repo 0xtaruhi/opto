@@ -688,8 +688,13 @@ fn native_compile_inlines_early_function_returns() {
     let module = first_module(&compilation);
 
     assert_eq!(module.procedures().len(), 1);
-    assert_eq!(module.nets().len(), 2);
-    assert!(procedure_effects(module.procedures().next().unwrap()).len() >= 4);
+    assert_eq!(module.nets().len(), 1);
+    assert!(procedure_effects(module.procedures().next().unwrap()).len() >= 3);
+    assert!(
+        module
+            .nets()
+            .all(|net| !net.name().unwrap().ends_with("_returned"))
+    );
 }
 
 #[test]
@@ -701,7 +706,7 @@ fn native_compile_inlines_function_returns_from_cyclic_loops() {
     let module = first_module(&compilation);
 
     assert_eq!(module.procedures().len(), 1);
-    assert_eq!(module.nets().len(), 3);
+    assert_eq!(module.nets().len(), 2);
     let procedure = module.procedures().next().unwrap();
     assert_eq!(procedure.loop_regions().len(), 1);
     assert!(procedure_effects(procedure).len() >= 3);
