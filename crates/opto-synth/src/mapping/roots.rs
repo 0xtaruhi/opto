@@ -19,23 +19,17 @@ pub(crate) enum CanonicalPublicationBit {
     Constant(opto_ir::BitVal),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PublicationBitResolution {
-    canonical: CanonicalPublicationBit,
-    requires_artifact: bool,
-}
-
 /// Full-Word publication proof frozen before any region-local simplification.
 pub(crate) struct FullDomainRootSemantics<'a> {
     module: &'a word::WordModule,
-    drivers: crate::word::signal_driver::SignalDriverIndex,
+    connectivity: crate::word::bit_connectivity::BitConnectivity<'a>,
 }
 
 impl<'a> FullDomainRootSemantics<'a> {
     pub(crate) fn new(module: &'a word::WordModule) -> Result<Self, crate::SynthError> {
         Ok(Self {
             module,
-            drivers: crate::word::signal_driver::SignalDriverIndex::new(module)?,
+            connectivity: crate::word::bit_connectivity::BitConnectivity::new(module)?,
         })
     }
 
@@ -57,9 +51,31 @@ impl<'a> FullDomainRootSemantics<'a> {
         value: word::ValueId,
         bit: u32,
     ) -> Result<bool, crate::SynthError> {
-        Ok(self
-            .resolve_publication_bit(value, bit, &mut BTreeSet::new())?
-            .requires_artifact)
+        match self.connectivity.source(value, bit)? {
+            crate::word::bit_connectivity::BitSource::Constant(_) => Ok(false),
+            crate::word::bit_connectivity::BitSource::Value { value, .. } => {
+                let stored = self.module.value(value).ok_or_else(|| {
+                    crate::SynthError::invariant("publication bit source is unknown")
+                })?;
+                match stored.kind {
+                    word::ValueKind::Signal(reference) => {
+                        Ok(!self.signal_is_physical_boundary(reference))
+                    }
+                    word::ValueKind::Operation(operation) => {
+                        let operation = self.module.operation(operation).ok_or_else(|| {
+                            crate::SynthError::invariant("publication operation is unknown")
+                        })?;
+                        Ok(!matches!(
+                            operation.kind,
+                            word::OpKind::Register(_) | word::OpKind::Latch(_)
+                        ))
+                    }
+                    word::ValueKind::Constant(_) => Err(crate::SynthError::invariant(
+                        "constant publication bit did not resolve as a constant",
+                    )),
+                }
+            }
+        }
     }
 
     pub(crate) fn canonical_publication_bit(
@@ -67,142 +83,23 @@ impl<'a> FullDomainRootSemantics<'a> {
         value: word::ValueId,
         bit: u32,
     ) -> Result<CanonicalPublicationBit, crate::SynthError> {
-        Ok(self
-            .resolve_publication_bit(value, bit, &mut BTreeSet::new())?
-            .canonical)
-    }
-
-    fn resolve_publication_bit(
-        &self,
-        value: word::ValueId,
-        bit: u32,
-        active: &mut BTreeSet<(word::ValueId, u32)>,
-    ) -> Result<PublicationBitResolution, crate::SynthError> {
-        let stored = self.module.value(value).ok_or_else(|| {
-            crate::SynthError::invariant("publication bit references an unknown Word value")
-        })?;
-        if bit >= stored.ty.width() {
-            return Err(crate::SynthError::invariant(
-                "publication bit exceeds its Word value",
-            ));
-        }
-        if !active.insert((value, bit)) {
-            return Err(crate::SynthError::invariant(
-                "publication bit identity contains a cycle",
-            ));
-        }
-        let resolved = match &stored.kind {
-            word::ValueKind::Constant(bits) => {
-                let bit = bits.bit_lsb(bit).ok_or_else(|| {
-                    crate::SynthError::invariant("publication constant bit is absent")
-                })?;
-                PublicationBitResolution {
-                    canonical: CanonicalPublicationBit::Constant(
-                        crate::boolean::resolve_publication_bit(
-                            bit,
-                            self.module.name(),
-                            &stored.source,
-                        )?,
-                    ),
-                    requires_artifact: false,
-                }
+        match self.connectivity.source(value, bit)? {
+            crate::word::bit_connectivity::BitSource::Value { value, bit } => {
+                Ok(CanonicalPublicationBit::Value { value, bit })
             }
-            word::ValueKind::Signal(reference) => {
-                match self.drivers.resolve_reference(*reference) {
-                    Some(drivers) if !drivers.is_empty() => {
-                        let (driver, driver_bit) =
-                            drivers.get(bit as usize).copied().ok_or_else(|| {
-                                crate::SynthError::invariant(
-                                    "publication bit exceeds its resolved signal drivers",
-                                )
-                            })?;
-                        self.resolve_publication_bit(driver, driver_bit, active)?
-                    }
-                    _ => PublicationBitResolution {
-                        canonical: CanonicalPublicationBit::Value { value, bit },
-                        requires_artifact: !self.signal_is_physical_boundary(*reference),
-                    },
-                }
-            }
-            word::ValueKind::Operation(operation) => {
-                let operation = self.module.operation(*operation).ok_or_else(|| {
-                    crate::SynthError::invariant("publication operation is unknown")
+            crate::word::bit_connectivity::BitSource::Constant(bit) => {
+                let stored = self.module.value(value).ok_or_else(|| {
+                    crate::SynthError::invariant("publication constant source is unknown")
                 })?;
-                match &operation.kind {
-                    word::OpKind::Extract { value, lsb, .. } => self.resolve_publication_bit(
-                        *value,
-                        lsb.checked_add(bit).ok_or_else(|| {
-                            crate::SynthError::invariant("publication extract bit overflows")
-                        })?,
-                        active,
+                Ok(CanonicalPublicationBit::Constant(
+                    crate::boolean::resolve_publication_bit(
+                        bit,
+                        self.module.name(),
+                        &stored.source,
                     )?,
-                    word::OpKind::Concat { parts } => {
-                        let mut remaining = bit;
-                        let mut resolved = None;
-                        for &part in parts.iter().rev() {
-                            let width = self
-                                .module
-                                .value(part)
-                                .ok_or_else(|| {
-                                    crate::SynthError::invariant(
-                                        "publication concatenation part is unknown",
-                                    )
-                                })?
-                                .ty
-                                .width();
-                            if remaining < width {
-                                resolved =
-                                    Some(self.resolve_publication_bit(part, remaining, active)?);
-                                break;
-                            }
-                            remaining -= width;
-                        }
-                        resolved.ok_or_else(|| {
-                            crate::SynthError::invariant(
-                                "publication bit exceeds its concatenation",
-                            )
-                        })?
-                    }
-                    word::OpKind::Cast { kind, value, .. } => {
-                        let width = self
-                            .module
-                            .value(*value)
-                            .ok_or_else(|| {
-                                crate::SynthError::invariant("publication cast input is unknown")
-                            })?
-                            .ty
-                            .width();
-                        if bit < width {
-                            self.resolve_publication_bit(*value, bit, active)?
-                        } else if *kind == word::CastKind::SignExtend {
-                            self.resolve_publication_bit(*value, width - 1, active)?
-                        } else {
-                            PublicationBitResolution {
-                                canonical: CanonicalPublicationBit::Constant(opto_ir::BitVal::Zero),
-                                requires_artifact: false,
-                            }
-                        }
-                    }
-                    word::OpKind::Unary { .. }
-                    | word::OpKind::Binary { .. }
-                    | word::OpKind::Mux { .. }
-                    | word::OpKind::TriState { .. }
-                    | word::OpKind::DynamicExtract { .. }
-                    | word::OpKind::DynamicInsert { .. } => PublicationBitResolution {
-                        canonical: CanonicalPublicationBit::Value { value, bit },
-                        requires_artifact: true,
-                    },
-                    word::OpKind::Register(_) | word::OpKind::Latch(_) => {
-                        PublicationBitResolution {
-                            canonical: CanonicalPublicationBit::Value { value, bit },
-                            requires_artifact: false,
-                        }
-                    }
-                }
+                ))
             }
-        };
-        active.remove(&(value, bit));
-        Ok(resolved)
+        }
     }
 
     fn signal_is_physical_boundary(&self, reference: word::SignalRef) -> bool {
@@ -240,10 +137,9 @@ impl<'a> FullDomainRootSemantics<'a> {
                 )
             })?;
             let next = match stored.kind {
-                word::ValueKind::Signal(reference) => {
-                    self.drivers
-                        .exact_reference_driver(self.module, reference, stored.ty)
-                }
+                word::ValueKind::Signal(reference) => self
+                    .connectivity
+                    .exact_reference_driver(reference, stored.ty),
                 word::ValueKind::Operation(operation) => self
                     .module
                     .operation(operation)
@@ -276,16 +172,18 @@ impl<'a> FullDomainRootSemantics<'a> {
         })?;
         let result = match stored.kind {
             word::ValueKind::Constant(_) => false,
-            word::ValueKind::Signal(reference) => match self.drivers.reference_drivers(reference) {
-                Some(drivers) if !drivers.is_empty() => {
-                    let mut required = false;
-                    for driver in drivers {
-                        required |= self.prove(driver, active, proven)?;
+            word::ValueKind::Signal(reference) => {
+                match self.connectivity.reference_drivers(reference) {
+                    Some(drivers) if !drivers.is_empty() => {
+                        let mut required = false;
+                        for driver in drivers {
+                            required |= self.prove(driver, active, proven)?;
+                        }
+                        required
                     }
-                    required
+                    _ => !self.signal_is_physical_boundary(reference),
                 }
-                _ => !self.signal_is_physical_boundary(reference),
-            },
+            }
             word::ValueKind::Operation(operation) => {
                 let operation = self.module.operation(operation).ok_or_else(|| {
                     crate::SynthError::invariant("publication root operation is unknown")
@@ -316,7 +214,6 @@ impl<'a> FullDomainRootSemantics<'a> {
         Ok(result)
     }
 }
-
 /// Returns the input of a globally exact scalar pass-through operation.
 pub(crate) fn scalar_projection_input(
     module: &word::WordModule,

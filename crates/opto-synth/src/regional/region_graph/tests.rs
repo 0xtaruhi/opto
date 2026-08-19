@@ -138,6 +138,61 @@ fn deterministic_split_materializes_typed_cross_region_ports() {
 }
 
 #[test]
+fn packed_crossings_freeze_each_bit_at_its_semantic_producer() {
+    let mut module = WordModule::new("packed_bit_producers");
+    let a = input(&mut module, "a");
+    let b = input(&mut module, "b");
+    let low = module.unary(UnaryOp::BitNot, a, test_span()).unwrap();
+    let high = module.unary(UnaryOp::BitNot, b, test_span()).unwrap();
+    let pair = WordType::bits(2).unwrap();
+    let bus = module.add_wire("bus", pair, test_span()).unwrap();
+    module
+        .connect(
+            LValue::signal(bus).with_range(opto_ir::word::BitRange { msb: 0, lsb: 0 }),
+            low,
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(
+            LValue::signal(bus).with_range(opto_ir::word::BitRange { msb: 1, lsb: 1 }),
+            high,
+            test_span(),
+        )
+        .unwrap();
+    let packed = module.read_signal(bus, test_span()).unwrap();
+    let result = module.unary(UnaryOp::BitNot, packed, test_span()).unwrap();
+    let out = module
+        .add_port("y", PortDirection::Output, pair, test_span())
+        .unwrap();
+    module
+        .connect(
+            LValue::signal(module.port(out).unwrap().signal),
+            result,
+            test_span(),
+        )
+        .unwrap();
+
+    let graph =
+        super::partition::build(&module, RegionPartitionPolicy::with_target_work(1)).unwrap();
+    let consumer = graph
+        .operation_owner(operation(&module, result))
+        .unwrap()
+        .row();
+    for producer in [low, high] {
+        let owner = graph.operation_owner(operation(&module, producer)).unwrap();
+        assert!(graph.bit_flows(owner).iter().any(|flow| {
+            flow.value() == producer && flow.bit() == 0 && flow.consumer() == Some(consumer)
+        }));
+        assert!(
+            graph
+                .predecessors(graph.region(consumer).unwrap())
+                .contains(&owner.row())
+        );
+    }
+}
+
+#[test]
 fn repeated_reads_share_one_physical_boundary() {
     let mut module = WordModule::new("read_aliases");
     let first = input(&mut module, "a");

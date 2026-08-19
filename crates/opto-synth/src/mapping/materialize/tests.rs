@@ -37,6 +37,23 @@ fn cell(
     }
 }
 
+fn input_pin(name: &str) -> opto_library::TargetPin {
+    opto_library::TargetPin {
+        name: name.to_string(),
+        direction: opto_library::TargetPinDirection::Input,
+        function: None,
+        three_state: None,
+        capacitance: None,
+        rise_capacitance: None,
+        fall_capacitance: None,
+        receiver_capacitance: None,
+        fanout_load: None,
+        next_state_type: None,
+        timing_arcs: Vec::new(),
+        clock_gate_role: None,
+    }
+}
+
 fn tri_state_cell(name: &str, area: f64, active_high: bool) -> opto_library::TargetCell {
     let input = |name: &str| opto_library::TargetPin {
         name: name.to_string(),
@@ -196,6 +213,40 @@ fn publication_rejects_an_undriven_observable_output() {
         error
             .to_string()
             .contains("output 'y[0]' has no physical driver")
+    );
+}
+
+#[test]
+fn publication_rejects_an_undriven_consumed_internal_net() {
+    let mut sink = cell(
+        "SINK",
+        false,
+        opto_library::TargetCellUsage::default(),
+        false,
+    );
+    sink.pins.push(input_pin("A"));
+    let target_cells: opto_library::TargetCellSet = vec![sink].into();
+    let mut builder =
+        MappedBuilder::new("undriven_internal", opto_ir::RevisionId::INITIAL).unwrap();
+    let net = builder.add_net(Some("dangling")).unwrap();
+    builder
+        .add_cell(
+            "U1",
+            "SINK",
+            Some(0),
+            &[("A".to_string(), Some(0), ConnectionSignal::Net(net))],
+        )
+        .unwrap();
+    let mapped = builder.freeze().unwrap();
+
+    let error =
+        validate_observable_drivers(&mapped, &target_cells, &crate::ReferencePortMap::new())
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("is consumed but has no physical driver"),
+        "{error}"
     );
 }
 

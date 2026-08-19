@@ -7,6 +7,7 @@
 //! Boolean lowering, and mapping. It does not mutate Word IR or choose an
 //! implementation architecture.
 
+pub(crate) mod bit_connectivity;
 pub(crate) mod cycle;
 pub(crate) mod instances;
 pub(crate) mod signal_driver;

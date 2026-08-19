@@ -18,9 +18,8 @@ use crate::planning::regional::{
 };
 use crate::regional::RegionContractSet;
 use crate::{
-    DurableOperatorArena, RegionBoundaryPort, RegionBoundaryPortId, RegionContextKey,
-    RegionCoverPlan, RegionRowId, SynthError, SynthesisOptions, SynthesisRegion,
-    SynthesisRegionGraph,
+    DurableOperatorArena, RegionContextKey, RegionCoverPlan, RegionRowId, SynthError,
+    SynthesisOptions, SynthesisRegion, SynthesisRegionGraph,
 };
 use opto_ir::word;
 use opto_runtime::{ExecutionContext, Task, TaskKey};
@@ -31,7 +30,6 @@ const REGIONAL_ARCHITECTURE_TASK_DOMAIN: u32 = 0x5245_4741;
 struct RegionArchitectureMaterializer<'request, 'data> {
     request: &'request RegionalArchitectureRequest<'data>,
     semantics: &'request super::roots::FullDomainRootSemantics<'data>,
-    signal_drivers: crate::word::signal_driver::SignalDriverIndex,
     roots: &'request [MappingRoot],
 }
 
@@ -139,7 +137,6 @@ pub(crate) fn prepare_regional_architectures(
     let materializer = RegionArchitectureMaterializer {
         request,
         semantics: &semantics,
-        signal_drivers: crate::word::signal_driver::SignalDriverIndex::new(request.source)?,
         roots: &roots,
     };
     let lowering_work = request
@@ -273,7 +270,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         Ok((architecture, arena))
     }
 
-    fn value_belongs_to_region(
+    fn endpoint_belongs_to_region(
         &self,
         value: word::ValueId,
         region: RegionRowId,
@@ -283,72 +280,21 @@ impl RegionArchitectureMaterializer<'_, '_> {
             SynthError::invariant("regional root is absent from its source Word module")
         })?;
         match stored.kind {
-            word::ValueKind::Signal(reference) => {
-                if self
-                    .request
-                    .source
-                    .memory_read_ports()
-                    .iter()
-                    .any(|port| port.data == reference.signal && memories.contains(&port.memory))
-                {
-                    return Ok(true);
-                }
-                Ok(
-                    self.value_owner(value, &mut std::collections::BTreeSet::new())?
-                        == Some(region),
-                )
-            }
-            word::ValueKind::Operation(_) | word::ValueKind::Constant(_) => Ok(self
-                .value_owner(value, &mut std::collections::BTreeSet::new())?
-                == Some(region)),
-        }
-    }
-
-    fn value_owner(
-        &self,
-        value: word::ValueId,
-        active: &mut std::collections::BTreeSet<word::ValueId>,
-    ) -> Result<Option<RegionRowId>, SynthError> {
-        if !active.insert(value) {
-            return Err(SynthError::invariant(
-                "regional root ownership contains a static signal cycle",
-            ));
-        }
-        let stored = self.request.source.value(value).ok_or_else(|| {
-            SynthError::invariant("regional ownership references an unknown value")
-        })?;
-        let owner = match stored.kind {
+            word::ValueKind::Signal(reference) => Ok(self
+                .request
+                .source
+                .memory_read_ports()
+                .iter()
+                .any(|port| port.data == reference.signal && memories.contains(&port.memory))),
             word::ValueKind::Operation(operation) => self
                 .request
                 .operation_regions
                 .get(operation.index())
                 .copied()
-                .flatten(),
-            word::ValueKind::Signal(reference) => {
-                let Some(drivers) = self.signal_drivers.reference_drivers(reference) else {
-                    active.remove(&value);
-                    return Ok(None);
-                };
-                let mut owner = None;
-                for driver in drivers {
-                    let Some(candidate) = self.value_owner(driver, active)? else {
-                        active.remove(&value);
-                        return Ok(None);
-                    };
-                    if owner
-                        .replace(candidate)
-                        .is_some_and(|owner| owner != candidate)
-                    {
-                        active.remove(&value);
-                        return Ok(None);
-                    }
-                }
-                owner
-            }
-            word::ValueKind::Constant(_) => None,
-        };
-        active.remove(&value);
-        Ok(owner)
+                .flatten()
+                .map_or(Ok(false), |owner| Ok(owner == region)),
+            word::ValueKind::Constant(_) => Ok(false),
+        }
     }
 
     fn value_is_region_sink(&self, value: word::ValueId, region: SynthesisRegion) -> bool {
@@ -623,6 +569,19 @@ impl RegionArchitectureMaterializer<'_, '_> {
             self.request.source,
             self.semantics,
             &private.lowering.ownership,
+            &self
+                .request
+                .regions
+                .bit_flows(region)
+                .iter()
+                .filter(|flow| {
+                    self.request
+                        .source
+                        .value(flow.value())
+                        .is_some_and(|stored| matches!(stored.kind, word::ValueKind::Operation(_)))
+                })
+                .map(|flow| (flow.value(), flow.bit()))
+                .collect(),
             root_pairs,
         )?;
         let local_semantics = super::roots::FullDomainRootSemantics::new(&private.module)?;
@@ -711,37 +670,45 @@ impl RegionArchitectureMaterializer<'_, '_> {
         let mut regional_observations = Vec::new();
         let mut regional_roots = Vec::new();
         for &root in self.roots {
-            if self.value_is_region_sink(root.value, region)
-                && self.value_belongs_to_region(root.value, region.row(), memories)?
+            if !self.value_is_region_sink(root.value, region) {
+                continue;
+            }
+            let mut producers = std::collections::BTreeSet::new();
+            for value in canonical_root_producers(self.request.source, self.semantics, root.value)?
             {
-                regional_observations.push(root.value);
-                let value = self.semantics.canonical_root(root.value)?;
-                if self.value_belongs_to_region(value, region.row(), memories)? {
-                    regional_roots.push(MappingRoot {
-                        value,
-                        requires_combinational_cover: self.semantics.requires_artifact(value)?,
-                        ..root
-                    });
+                if self.endpoint_belongs_to_region(value, region.row(), memories)? {
+                    producers.insert(value);
                 }
             }
-        }
-        for &port in self.request.regions.output_ports(region) {
-            let port = self.request.regions.port(port).ok_or_else(|| {
-                SynthError::invariant("regional output references an unknown port")
-            })?;
-            regional_observations.push(port.value());
-            let value = self.semantics.canonical_root(port.value())?;
-            if self.value_belongs_to_region(value, region.row(), memories)? {
+            for value in producers {
+                regional_observations.push(value);
                 regional_roots.push(MappingRoot {
                     value,
+                    requires_combinational_cover: self.semantics.requires_artifact(value)?,
+                    ..root
+                });
+            }
+        }
+        // Packed boundary ports retain source-level identity for timing and
+        // diagnostics, but they are not implementation dependencies. A
+        // projection can span owners even though every one of its bits has an
+        // unambiguous producer. Import only the frozen bit-flow endpoints so a
+        // wrapper operation can never become a foreign regional input.
+        for flow in self.request.regions.bit_flows(region) {
+            if self
+                .semantics
+                .bit_requires_artifact(flow.value(), flow.bit())?
+            {
+                regional_observations.push(flow.value());
+                regional_roots.push(MappingRoot {
+                    value: flow.value(),
                     required_time: None,
                     output_load: None,
-                    requires_combinational_cover: self.semantics.requires_artifact(value)?,
+                    requires_combinational_cover: true,
                 });
             }
         }
         let regional_roots = merge_by_value(regional_roots);
-        let boundary_inputs = self.checked_port_values(self.request.regions.input_ports(region))?;
         let profiling = self.request.mapping_context.config.diagnostics.timing;
         let row = region.row().raw();
         let cone = {
@@ -755,7 +722,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 memories,
                 memory_implementations,
                 target_cells: &self.request.options.target_cells,
-                boundary_inputs: &boundary_inputs,
                 observations: regional_observations,
                 roots: regional_roots.iter().map(|root| root.value).collect(),
             })
@@ -816,10 +782,12 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 )
             })
         };
-        let local_boundary_inputs = boundary_inputs
+        let mut local_boundary_inputs = boundary_bindings
             .iter()
-            .map(map_source)
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|&(_, local)| local)
+            .collect::<Vec<_>>();
+        local_boundary_inputs.sort_unstable();
+        local_boundary_inputs.dedup();
         let root_pairs = regional_roots
             .iter()
             .map(|root| map_source(&root.value).map(|local| (*root, local)))
@@ -838,26 +806,26 @@ impl RegionArchitectureMaterializer<'_, '_> {
             root_pairs,
         ))
     }
+}
 
-    fn checked_port_values(
-        &self,
-        ports: &[RegionBoundaryPortId],
-    ) -> Result<Vec<word::ValueId>, SynthError> {
-        ports
-            .iter()
-            .map(|&port| {
-                self.request
-                    .regions
-                    .port(port)
-                    .map(RegionBoundaryPort::value)
-                    .ok_or_else(|| {
-                        SynthError::invariant(
-                            "synthesis region references an unknown boundary port",
-                        )
-                    })
-            })
-            .collect()
-    }
+fn canonical_root_producers(
+    module: &word::WordModule,
+    semantics: &super::roots::FullDomainRootSemantics<'_>,
+    root: word::ValueId,
+) -> Result<std::collections::BTreeSet<word::ValueId>, SynthError> {
+    let width = module
+        .value(root)
+        .ok_or_else(|| SynthError::invariant("mapping root is absent from its source Word module"))?
+        .ty
+        .width();
+    (0..width).try_fold(std::collections::BTreeSet::new(), |mut producers, bit| {
+        if let super::roots::CanonicalPublicationBit::Value { value, .. } =
+            semantics.canonical_publication_bit(root, bit)?
+        {
+            producers.insert(value);
+        }
+        Ok(producers)
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -967,10 +935,12 @@ fn expand_mapping_root_pairs(
     source: &word::WordModule,
     semantics: &super::roots::FullDomainRootSemantics<'_>,
     ownership: &LoweredRegionOwnership,
+    publication_targets: &std::collections::BTreeSet<(word::ValueId, u32)>,
     roots: Vec<(MappingRoot, word::ValueId)>,
 ) -> Result<ExpandedMappingRoots, SynthError> {
     let mut expanded = Vec::new();
     let mut publication = Vec::new();
+    let mut covered_publication_targets = std::collections::BTreeSet::new();
     let mut facts = word::KnownBitsAnalysis::new(source);
     for (root, local) in roots {
         let source_width = source
@@ -1000,9 +970,12 @@ fn expand_mapping_root_pairs(
                     .value(target)
                     .is_some_and(|stored| matches!(stored.kind, word::ValueKind::Operation(_)))
             {
+                if publication_targets.contains(&(target, target_bit)) {
+                    covered_publication_targets.insert((target, target_bit));
+                }
                 if facts.bit(source, target, target_bit) != word::KnownBit::Unknown {
                     requires_artifact = false;
-                } else if requires_artifact {
+                } else if requires_artifact && publication_targets.contains(&(target, target_bit)) {
                     publication.push(PendingRegionalPublicationBit {
                         target,
                         bit: target_bit,
@@ -1017,6 +990,15 @@ fn expand_mapping_root_pairs(
                 },
                 local,
             ));
+        }
+    }
+    for &(value, bit) in publication_targets {
+        if semantics.bit_requires_artifact(value, bit)?
+            && !covered_publication_targets.contains(&(value, bit))
+        {
+            return Err(SynthError::invariant(format!(
+                "frozen regional bit flow {value:?}[{bit}] has no producer mapping root"
+            )));
         }
     }
     Ok(ExpandedMappingRoots {
@@ -1180,6 +1162,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packed_root_publication_uses_bit_producers_not_the_wrapper_owner() {
+        let mut module = word::WordModule::new("packed_root_producers");
+        let ty = word::WordType::bits(1).unwrap();
+        let span = word::SourceSpan::default();
+        let port = module
+            .add_port("a", word::PortDirection::Input, ty, span.clone())
+            .unwrap();
+        let input = module
+            .read_signal(module.port(port).unwrap().signal, span.clone())
+            .unwrap();
+        let low = module
+            .unary(word::UnaryOp::BitNot, input, span.clone())
+            .unwrap();
+        let high = module
+            .unary(word::UnaryOp::LogicalNot, input, span.clone())
+            .unwrap();
+        let packed = module.concat(vec![high, low], span).unwrap();
+        let semantics = super::super::roots::FullDomainRootSemantics::new(&module).unwrap();
+
+        assert_eq!(
+            canonical_root_producers(&module, &semantics, packed).unwrap(),
+            [low, high].into_iter().collect()
+        );
+    }
+
+    #[test]
     fn signal_roots_do_not_enter_the_operation_publication_contract() {
         let mut module = word::WordModule::new("signal_publication");
         let port = module
@@ -1203,6 +1211,7 @@ mod tests {
             &module,
             &semantics,
             &ownership,
+            &[(value, 0)].into_iter().collect(),
             vec![(
                 MappingRoot {
                     value,

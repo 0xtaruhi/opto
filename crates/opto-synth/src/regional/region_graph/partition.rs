@@ -9,10 +9,10 @@
 //! identity and semantic connectivity, never worker count or arena position.
 
 use super::graph::{
-    BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBoundaryPort,
-    RegionBoundaryPortId, RegionGraphOwnerId, RegionPortDirection, RegionRevision, RegionRowId,
-    SynthesisRegion, SynthesisRegionGraph, SynthesisRegionKind, SynthesisRegionRevision,
-    packed_rows, remap_optional_owner_rows, remap_owner_rows,
+    BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBitFlow,
+    RegionBoundaryPort, RegionBoundaryPortId, RegionGraphOwnerId, RegionPortDirection,
+    RegionRevision, RegionRowId, SynthesisRegion, SynthesisRegionGraph, SynthesisRegionKind,
+    SynthesisRegionRevision, packed_rows, remap_optional_owner_rows, remap_owner_rows,
 };
 use crate::word::signal_driver::SignalDriverIndex;
 use opto_ir::word;
@@ -116,6 +116,14 @@ struct TempEdge {
     ty: word::WordType,
     semantic_key: [u8; 32],
     value_revision: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TempBitFlow {
+    source: usize,
+    sink: Option<usize>,
+    value: word::ValueId,
+    bit: u32,
 }
 
 impl Ord for TempEdge {
@@ -241,16 +249,15 @@ fn build_inner(
         }
     }
     let memory_signal_owner = memory_signal_owners(module, &memory_owner)?;
-    let mut edges = build_edges(
+    let (mut edges, bit_flows) = build_edges(
         module,
         &value_keys,
         &operation_owner,
         &memory_owner,
         &memory_signal_owner,
-        &drivers,
     )?;
     seal_edge_semantic_keys(module, &value_keys, &anchors, &regions, &mut edges)?;
-    seal_region_identities(module, &value_keys, &edges, &mut regions)?;
+    seal_region_identities(module, &value_keys, &edges, &bit_flows, &mut regions)?;
     canonicalize(
         module,
         regions,
@@ -258,6 +265,7 @@ fn build_inner(
         operation_owner,
         memory_owner,
         anchors.into_vec(),
+        bit_flows,
     )
 }
 
@@ -1192,40 +1200,41 @@ fn build_edges(
     operation_owner: &[Option<usize>],
     memory_owner: &[Option<usize>],
     memory_signal_owner: &BTreeMap<word::SignalId, usize>,
-    drivers: &SignalDriverIndex,
-) -> Result<Vec<TempEdge>, crate::SynthError> {
+) -> Result<(Vec<TempEdge>, Vec<TempBitFlow>), crate::SynthError> {
     let mut edges = BTreeSet::new();
-    let connectivity = ConnectivityIndex::new(
-        module,
-        value_keys,
-        operation_owner,
-        memory_signal_owner,
-        drivers,
-    );
+    let mut bit_flows = BTreeSet::new();
+    let connectivity =
+        ConnectivityIndex::new(module, value_keys, operation_owner, memory_signal_owner)?;
     for (index, operation) in module.operations().iter().enumerate() {
         let Some(sink) = operation_owner[index] else {
             continue;
         };
         for value in crate::word::operation_inputs(&operation.kind) {
-            connectivity.append_input_edge(value, sink, &mut edges)?;
+            connectivity.append_input_edge(value, sink, &mut edges, &mut bit_flows)?;
         }
     }
     for read in module.memory_read_ports() {
         let sink = memory_owner[read.memory.index()]
             .ok_or_else(|| crate::SynthError::invariant("memory read has no region owner"))?;
         for value in memory_read_inputs(read) {
-            connectivity.append_input_edge(value, sink, &mut edges)?;
+            connectivity.append_input_edge(value, sink, &mut edges, &mut bit_flows)?;
         }
     }
     for write in module.memory_write_ports() {
         let sink = memory_owner[write.memory.index()]
             .ok_or_else(|| crate::SynthError::invariant("memory write has no region owner"))?;
         for value in memory_write_inputs(write) {
-            connectivity.append_input_edge(value, sink, &mut edges)?;
+            connectivity.append_input_edge(value, sink, &mut edges, &mut bit_flows)?;
         }
     }
+    // Static connects are connectivity, not independent observations. Their
+    // producers enter the publication table only through a real cross-region
+    // dependency or a synthesis root; publishing every named intermediate
+    // would retain dead substrate aliases and can make one net appear as both
+    // a region input and output.
     for value in synthesis_root_values(module) {
-        if let Some(source) = connectivity.value_region(value) {
+        connectivity.append_bit_flows(value, None, &mut bit_flows)?;
+        if let Some(source) = connectivity.value_region(value)? {
             let stored = module.value(value).ok_or_else(|| {
                 crate::SynthError::invariant("structural root references an unknown value")
             })?;
@@ -1240,15 +1249,20 @@ fn build_edges(
             });
         }
     }
-    Ok(edges.into_iter().collect())
+    Ok((edges.into_iter().collect(), bit_flows.into_iter().collect()))
 }
 
 fn seal_region_identities(
     module: &word::WordModule,
     value_keys: &[[u8; 32]],
     edges: &[TempEdge],
+    bit_flows: &[TempBitFlow],
     regions: &mut [TempRegion],
 ) -> Result<(), crate::SynthError> {
+    let region_anchors = regions
+        .iter()
+        .map(|region| region.anchor)
+        .collect::<Vec<_>>();
     for (index, region) in regions.iter_mut().enumerate() {
         let mut local = blake3::Hasher::new();
         local.update(REGION_LOCAL_KEY_DOMAIN);
@@ -1273,6 +1287,21 @@ fn seal_region_identities(
             local.update(&[direction, u8::from(external)]);
             append_type_hash(&mut local, ty);
             local.update(&key);
+        }
+        let publications = bit_flows
+            .iter()
+            .filter(|flow| flow.source == index)
+            .collect::<Vec<_>>();
+        local.update(&(publications.len() as u64).to_le_bytes());
+        for publication in publications {
+            local.update(&value_keys[publication.value.index()]);
+            local.update(&publication.bit.to_le_bytes());
+            if let Some(sink) = publication.sink {
+                local.update(&[1]);
+                local.update(&region_anchors[sink]);
+            } else {
+                local.update(&[0]);
+            }
         }
         region.revision = RegionRevision::from_bytes(*local.finalize().as_bytes());
         let mut anchor = blake3::Hasher::new();
@@ -1430,6 +1459,7 @@ fn canonicalize(
     operation_owners: Vec<Option<usize>>,
     memory_owners: Vec<Option<usize>>,
     operation_anchors: Vec<OperationAnchorId>,
+    bit_flows: Vec<TempBitFlow>,
 ) -> Result<SynthesisRegionGraph, crate::SynthError> {
     let graph_owner = RegionGraphOwnerId::fresh();
     let mut order = (0..regions.len()).collect::<Vec<_>>();
@@ -1440,6 +1470,20 @@ fn canonicalize(
     }
     let operation_owners = remap_optional_owner_rows(operation_owners, &old_to_new);
     let memory_owners = remap_owner_rows(memory_owners, &old_to_new, "Word memory")?;
+    let mut publication_bits = vec![Vec::new(); regions.len()];
+    for flow in bit_flows {
+        let producer = old_to_new[flow.source];
+        publication_bits[producer.index()].push(RegionBitFlow {
+            producer,
+            consumer: flow.sink.map(|sink| old_to_new[sink]),
+            value: flow.value,
+            bit: flow.bit,
+        });
+    }
+    for row in &mut publication_bits {
+        row.sort_unstable();
+        row.dedup();
+    }
     let mut canonical_edges = edges
         .into_iter()
         .map(|edge| CanonicalEdge {
@@ -1501,6 +1545,14 @@ fn canonicalize(
             predecessors[sink.index()].insert(source);
         }
     }
+    for row in &publication_bits {
+        for flow in row {
+            if let Some(consumer) = flow.consumer() {
+                successors[flow.producer().index()].insert(consumer);
+                predecessors[consumer.index()].insert(flow.producer());
+            }
+        }
+    }
 
     let mut rows = Vec::with_capacity(regions.len());
     let mut operations = Vec::with_capacity(regions.len());
@@ -1540,6 +1592,19 @@ fn canonicalize(
         revision.update(&port.stable_id().bytes());
         revision.update(&port.value_revision().bytes());
     }
+    for row in &publication_bits {
+        for publication in row {
+            revision.update(&publication.producer().raw().to_le_bytes());
+            revision.update(
+                &publication
+                    .consumer()
+                    .map_or(u32::MAX, RegionRowId::raw)
+                    .to_le_bytes(),
+            );
+            revision.update(&publication.value().raw().to_le_bytes());
+            revision.update(&publication.bit().to_le_bytes());
+        }
+    }
     let graph = SynthesisRegionGraph {
         owner: graph_owner,
         revision: SynthesisRegionRevision::from_bytes(*revision.finalize().as_bytes()),
@@ -1552,6 +1617,7 @@ fn canonicalize(
         ports: ports.into_boxed_slice(),
         input_ports: packed_rows(input_ports, "region input ports")?,
         output_ports: packed_rows(output_ports, "region output ports")?,
+        bit_flows: packed_rows(publication_bits, "regional bit flows")?,
         predecessors: packed_rows(
             predecessors
                 .into_iter()
