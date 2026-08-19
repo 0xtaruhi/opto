@@ -73,6 +73,13 @@ bitstream layout is outside the synthesis profile and fails with a structured,
 source-located diagnostic. Lowering deterministically caps selected elements and
 flattened bitstream parts at 65,536 each.
 
+The frontend removes source constructs that become semantically empty after
+preprocessing and elaboration. In particular, an empty `initial` block is not
+published as a procedure. This does not admit time-zero initialization into the
+ASIC synthesis profile: any reachable assignment, declaration initializer,
+memory preload, system task, timing control, or other executable initial
+behavior remains an explicit unsupported-profile error.
+
 ## Non-Negotiable Rules
 
 - There is no fallback, legacy, shadow, or environment-selected synthesis path.

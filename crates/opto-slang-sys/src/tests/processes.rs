@@ -546,6 +546,44 @@ fn native_compile_lowers_automatic_procedural_variable_initializers() {
 }
 
 #[test]
+fn native_compile_eliminates_empty_initial_blocks() {
+    let source = NativeTestSource::new(
+        "module top(input logic a, output logic y); initial begin end assign y = a; endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+
+    assert_eq!(module.assigns().len(), 1);
+    assert_eq!(module.procedures().len(), 0);
+}
+
+#[test]
+fn native_compile_rejects_effectful_initial_blocks() {
+    let source = NativeTestSource::new(
+        "module top(input logic a, output logic y); logic state; initial state = a; assign y = state; endmodule\n",
+    );
+    let error = compile(
+        std::slice::from_ref(&source.path),
+        &SlangCompileOptions::default(),
+    )
+    .expect_err("time-zero assignment must remain outside the ASIC synthesis profile");
+
+    let SlangError::LoweringFailed(failure) = error else {
+        panic!("expected a structured module-lowering failure, got {error}");
+    };
+    assert_eq!(
+        failure.category,
+        SlangLoweringFailureCategory::UnsupportedProfile
+    );
+    assert_eq!(failure.stable_code(), "OPT-HDL-LP-0001");
+    assert!(
+        failure
+            .message
+            .contains("unsupported procedural block 'initial'")
+    );
+}
+
+#[test]
 fn native_compile_rejects_static_procedural_declaration_initialization() {
     let source = NativeTestSource::new(
         "module top(input logic a, output logic y); always_comb begin logic temporary = a; y = temporary; end endmodule\n",
