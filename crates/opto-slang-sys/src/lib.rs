@@ -346,6 +346,14 @@ pub enum SlangNetResolution {
     WiredAnd,
     /// Drivers resolve through wired OR.
     WiredOr,
+    /// Ordinary tri-state resolution with a default weak zero.
+    PullZero,
+    /// Ordinary tri-state resolution with a default weak one.
+    PullOne,
+    /// Constant supply-zero net.
+    SupplyZero,
+    /// Constant supply-one net.
+    SupplyOne,
 }
 
 /// Failure reported by the safe slang bridge.

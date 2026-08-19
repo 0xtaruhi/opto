@@ -110,12 +110,6 @@ private:
   T previous;
 };
 
-struct FunctionReturnControl {
-  const OptoSlangExpr *returned = nullptr;
-  const OptoSlangExpr *not_returned = nullptr;
-  const OptoSlangExpr *true_value = nullptr;
-};
-
 struct LoopControlFlag {
   const OptoSlangExpr *value = nullptr;
   const OptoSlangExpr *inactive = nullptr;
@@ -181,6 +175,8 @@ struct ModuleLoweringContext {
       type_layout_by_type;
   const OptoSlangTypeLayout *scalar_type_layout = nullptr;
   std::unordered_map<const ValueSymbol *, std::string> value_names;
+  std::map<std::pair<std::string, uint32_t>, std::pair<std::string, uint32_t>>
+      static_net_aliases;
   std::unordered_map<const InstanceBodySymbol *,
                      std::unordered_map<const ValueSymbol *, std::string>>
       interface_port_names;
@@ -189,7 +185,10 @@ struct ModuleLoweringContext {
   std::unordered_map<const ValueSymbol *, OptoSlangExpr *> function_values;
   std::unordered_map<const ValueSymbol *, OptoSlangExpr *> function_lvalues;
   std::vector<const VariableSymbol *> function_returns;
-  std::vector<FunctionReturnControl> function_return_controls;
+  // Builder-local activation exits for nested inlined subroutines. A source
+  // return transfers directly to the last target; task copy-out is sequenced
+  // after that block, so every exit observes the same activation-local state.
+  std::vector<uint32_t> subroutine_return_targets;
   std::vector<LoopControl> loop_controls;
   std::vector<DisableControl> disable_controls;
   uint32_t cyclic_loop_depth = 0;
@@ -252,6 +251,7 @@ struct ModuleMembers {
   std::vector<const PrimitiveInstanceSymbol *> primitives;
   std::vector<const ContinuousAssignSymbol *> assigns;
   std::vector<const ProceduralBlockSymbol *> processes;
+  std::vector<const NetAliasSymbol *> aliases;
 };
 
 struct LvalueLeaf {
@@ -449,6 +449,7 @@ OptoSlangExpr *lower_short_circuit_expression(ModuleLoweringContext &,
 bool constant_element_select_is_out_of_range(ModuleLoweringContext &,
                                              const Expression &);
 OptoSlangExpr *lower_signal_expr(ModuleLoweringContext &, const Expression &);
+void canonicalize_static_net_alias(ModuleLoweringContext &, OptoSlangExpr &);
 OptoSlangExpr *apply_rvalue_slice(ModuleLoweringContext &,
                                   const OptoSlangExpr *, uint64_t, uint32_t,
                                   const Expression &);

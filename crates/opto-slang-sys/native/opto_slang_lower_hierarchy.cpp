@@ -39,6 +39,34 @@ struct UdpAsyncControl {
   bool active_high = false;
 };
 
+using StaticAliasBit = std::pair<std::string, uint32_t>;
+
+class StaticAliasClasses {
+public:
+  StaticAliasBit find(const StaticAliasBit &bit) {
+    auto [found, inserted] = parent.emplace(bit, bit);
+    if (inserted || found->second == bit) {
+      return bit;
+    }
+    found->second = find(found->second);
+    return found->second;
+  }
+
+  void unite(const StaticAliasBit &left, const StaticAliasBit &right) {
+    auto left_root = find(left);
+    auto right_root = find(right);
+    if (left_root == right_root) {
+      return;
+    }
+    if (right_root < left_root) {
+      std::swap(left_root, right_root);
+    }
+    parent.insert_or_assign(right_root, left_root);
+  }
+
+  std::map<StaticAliasBit, StaticAliasBit> parent;
+};
+
 struct ExternalPortPart {
   const PortSymbol *port = nullptr;
   uint32_t width = 0;
@@ -575,9 +603,19 @@ lower_port_attributes(ModuleLoweringContext &design, const PortSymbol &port) {
 OptoSlangNetResolution net_resolution(const NetSymbol &net) {
   switch (net.netType.netKind) {
   case NetType::WAnd:
+  case NetType::TriAnd:
     return OPTO_SLANG_NET_WIRED_AND;
   case NetType::WOr:
+  case NetType::TriOr:
     return OPTO_SLANG_NET_WIRED_OR;
+  case NetType::Tri0:
+    return OPTO_SLANG_NET_PULL_ZERO;
+  case NetType::Tri1:
+    return OPTO_SLANG_NET_PULL_ONE;
+  case NetType::Supply0:
+    return OPTO_SLANG_NET_SUPPLY_ZERO;
+  case NetType::Supply1:
+    return OPTO_SLANG_NET_SUPPLY_ONE;
   default:
     return OPTO_SLANG_NET_SINGLE_DRIVER;
   }
@@ -782,18 +820,22 @@ void lower_primitive_instance(ModuleLoweringContext &design,
               continue;
             }
             if (primary_event_port) {
-              throw std::runtime_error(
+              throw LoweringFailure(
+                  OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE, 1,
+                  output.sourceRange.start(),
                   "edge-sensitive UDP '" + primitive + "' instance '" +
-                  copy_string(instance.name) +
-                  "' has multiple data-update transition inputs");
+                      copy_string(instance.name) +
+                      "' has multiple data-update transition inputs");
             }
             primary_event_port = port;
           }
           if (!primary_event_port) {
-            throw std::runtime_error(
+            throw LoweringFailure(
+                OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE, 1,
+                output.sourceRange.start(),
                 "edge-sensitive UDP '" + primitive + "' instance '" +
-                copy_string(instance.name) +
-                "' has no unique data-update transition input");
+                    copy_string(instance.name) +
+                    "' has no unique data-update transition input");
           }
         }
         std::vector<std::pair<size_t, OptoSlangEdge>> event_keys;
@@ -1029,7 +1071,13 @@ void validate_net_semantics(const NetSymbol &net) {
       net.netType.netKind != NetType::Tri &&
       net.netType.netKind != NetType::UWire &&
       net.netType.netKind != NetType::WAnd &&
-      net.netType.netKind != NetType::WOr) {
+      net.netType.netKind != NetType::WOr &&
+      net.netType.netKind != NetType::TriAnd &&
+      net.netType.netKind != NetType::TriOr &&
+      net.netType.netKind != NetType::Tri0 &&
+      net.netType.netKind != NetType::Tri1 &&
+      net.netType.netKind != NetType::Supply0 &&
+      net.netType.netKind != NetType::Supply1) {
     throw std::runtime_error("net type '" + copy_string(net.netType.name) +
                              "' on net '" + name +
                              "' is not supported for synthesis");
@@ -1046,6 +1094,107 @@ void validate_net_semantics(const NetSymbol &net) {
   if (net.getChargeStrength()) {
     throw std::runtime_error("charge strength on net '" + name +
                              "' is not supported for synthesis");
+  }
+}
+
+[[noreturn]] void reject_static_alias(const NetAliasSymbol &alias,
+                                      std::string message) {
+  throw LoweringFailure(OPTO_SLANG_LOWERING_UNSUPPORTED_PROFILE, 1,
+                        alias.location, std::move(message));
+}
+
+std::vector<StaticAliasBit> static_alias_bits(ModuleLoweringContext &design,
+                                              const NetAliasSymbol &alias,
+                                              const Expression &expression) {
+  std::vector<LvalueLeaf> leaves;
+  collect_lvalue_leaves(expression, leaves);
+  std::vector<StaticAliasBit> bits;
+  bits.reserve(
+      checked_width(lowered_type_width(*expression.type), "static net alias"));
+  for (auto leaf = leaves.rbegin(); leaf != leaves.rend(); ++leaf) {
+    auto *lowered = lower_signal_expr(design, *leaf->expression);
+    if (!lowered || lowered->kind != OPTO_SLANG_EXPR_SIGNAL ||
+        !lowered->signal_name) {
+      reject_static_alias(
+          alias, "static net alias contains a dynamic or non-signal selection");
+    }
+    const auto shape = design.value_shapes.find(*lowered->signal_name);
+    if (shape == design.value_shapes.end()) {
+      reject_static_alias(
+          alias, "static net alias references unknown flattened storage");
+    }
+    const auto lsb = lowered->signal_has_range
+                         ? std::min(lowered->signal_msb, lowered->signal_lsb)
+                         : 0;
+    const auto width =
+        lowered->signal_has_range
+            ? std::max(lowered->signal_msb, lowered->signal_lsb) - lsb + 1
+            : shape->second.width;
+    if (width != leaf->width) {
+      reject_static_alias(
+          alias, "static net alias leaf width changed during lowering");
+    }
+    for (uint32_t offset = 0; offset < width; ++offset) {
+      bits.emplace_back(*lowered->signal_name, lsb + offset);
+    }
+  }
+  return bits;
+}
+
+void build_static_net_aliases(ModuleLoweringContext &design,
+                              const ModuleMembers &members) {
+  if (members.aliases.empty()) {
+    return;
+  }
+  std::map<std::string, OptoSlangNetResolution> resolutions;
+  for (const auto &port : design.module.ports) {
+    resolutions.emplace(port.name, port.resolution);
+  }
+  for (const auto &net : design.module.nets) {
+    resolutions.emplace(net.name, net.resolution);
+  }
+  StaticAliasClasses classes;
+  for (const auto *alias : members.aliases) {
+    const auto references = alias->getNetReferences();
+    if (references.size() < 2) {
+      reject_static_alias(*alias,
+                          "static net alias requires at least two references");
+    }
+    const auto first = static_alias_bits(design, *alias, *references.front());
+    for (size_t index = 1; index < references.size(); ++index) {
+      const auto current =
+          static_alias_bits(design, *alias, *references[index]);
+      if (current.size() != first.size()) {
+        reject_static_alias(
+            *alias, "static net alias references have different widths");
+      }
+      for (size_t bit = 0; bit < first.size(); ++bit) {
+        const auto left = resolutions.find(first[bit].first);
+        const auto right = resolutions.find(current[bit].first);
+        if (left == resolutions.end() || right == resolutions.end()) {
+          reject_static_alias(*alias,
+                              "static net alias references non-net storage");
+        }
+        if (left->second != right->second) {
+          reject_static_alias(
+              *alias,
+              "static net alias combines incompatible resolution kinds");
+        }
+        classes.unite(first[bit], current[bit]);
+      }
+    }
+  }
+  std::map<StaticAliasBit, std::unordered_set<std::string>> class_signals;
+  for (const auto &[bit, _] : classes.parent) {
+    auto &signals = class_signals[classes.find(bit)];
+    if (!signals.insert(bit.first).second) {
+      reject_static_alias(
+          *members.aliases.front(),
+          "overlapping partial net aliases collapse distinct bits of one net");
+    }
+  }
+  for (const auto &[bit, _] : classes.parent) {
+    design.static_net_aliases.emplace(bit, classes.find(bit));
   }
 }
 
@@ -1458,6 +1607,7 @@ void lower_body(
   for (const auto &net : module.nets) {
     design.value_shapes.emplace(net.name, ValueShape{net.width, net.is_signed});
   }
+  build_static_net_aliases(design, members);
 
   // Interface instances are flattened into their enclosing module, so their
   // scalar constructor ports must become ordinary connections at the same

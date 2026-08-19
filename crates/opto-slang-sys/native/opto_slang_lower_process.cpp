@@ -1628,7 +1628,7 @@ bool statement_contains_break(const Statement &statement) {
 bool statement_has_static_loop_exit(const ModuleLoweringContext &design,
                                     const Statement &statement) {
   if (statement_contains_break(statement) ||
-      (!design.function_return_controls.empty() &&
+      (!design.subroutine_return_targets.empty() &&
        statement_contains_return(statement))) {
     return true;
   }
@@ -1817,98 +1817,6 @@ bool statement_guarantees_expression_free_break(const Statement &statement) {
   }
 }
 
-bool statement_requires_return_control(const Statement &statement) {
-  switch (statement.kind) {
-  case StatementKind::Block:
-    return statement_requires_return_control(
-        statement.as<BlockStatement>().body);
-  case StatementKind::List: {
-    bool prior_return = false;
-    for (auto *child : statement.as<StatementList>().list) {
-      if (!child || child->kind == StatementKind::Empty) {
-        continue;
-      }
-      if (prior_return || statement_requires_return_control(*child)) {
-        return true;
-      }
-      prior_return = statement_contains_return(*child);
-    }
-    return false;
-  }
-  case StatementKind::Conditional: {
-    const auto &conditional = statement.as<ConditionalStatement>();
-    return statement_requires_return_control(conditional.ifTrue) ||
-           (conditional.ifFalse &&
-            statement_requires_return_control(*conditional.ifFalse));
-  }
-  case StatementKind::Case: {
-    const auto &case_statement = statement.as<CaseStatement>();
-    return std::ranges::any_of(case_statement.items,
-                               [](const auto &item) {
-                                 return item.stmt &&
-                                        statement_requires_return_control(
-                                            *item.stmt);
-                               }) ||
-           (case_statement.defaultCase &&
-            statement_requires_return_control(*case_statement.defaultCase));
-  }
-  case StatementKind::PatternCase: {
-    const auto &case_statement = statement.as<PatternCaseStatement>();
-    return std::ranges::any_of(case_statement.items,
-                               [](const auto &item) {
-                                 return statement_requires_return_control(
-                                     *item.stmt);
-                               }) ||
-           (case_statement.defaultCase &&
-            statement_requires_return_control(*case_statement.defaultCase));
-  }
-  case StatementKind::ForLoop:
-    return statement_contains_return(statement.as<ForLoopStatement>().body) ||
-           statement_requires_return_control(
-               statement.as<ForLoopStatement>().body);
-  case StatementKind::RepeatLoop:
-    return statement_contains_return(
-               statement.as<RepeatLoopStatement>().body) ||
-           statement_requires_return_control(
-               statement.as<RepeatLoopStatement>().body);
-  case StatementKind::ForeachLoop:
-    return statement_contains_return(
-               statement.as<ForeachLoopStatement>().body) ||
-           statement_requires_return_control(
-               statement.as<ForeachLoopStatement>().body);
-  case StatementKind::WhileLoop:
-    return statement_contains_return(statement.as<WhileLoopStatement>().body) ||
-           statement_requires_return_control(
-               statement.as<WhileLoopStatement>().body);
-  case StatementKind::DoWhileLoop:
-    return statement_contains_return(
-               statement.as<DoWhileLoopStatement>().body) ||
-           statement_requires_return_control(
-               statement.as<DoWhileLoopStatement>().body);
-  case StatementKind::ForeverLoop:
-    return statement_contains_return(
-               statement.as<ForeverLoopStatement>().body) ||
-           statement_requires_return_control(
-               statement.as<ForeverLoopStatement>().body);
-  default:
-    return false;
-  }
-}
-
-CfgFragment guard_unreturned_statements(ProcedureBuilder &builder,
-                                        ModuleLoweringContext &design,
-                                        CfgFragment body,
-                                        OptoSlangSourceSpanView source) {
-  if (body.empty() || design.function_return_controls.empty()) {
-    return body;
-  }
-  const auto &control = design.function_return_controls.back();
-  if (!control.not_returned) {
-    return body;
-  }
-  return builder.guard(control.not_returned, std::move(body), source);
-}
-
 std::pair<DisableControl, CfgFragment>
 lower_disable_control(ProcedureBuilder &builder, ModuleLoweringContext &design,
                       const Symbol &target, const Expression &anchor,
@@ -1996,7 +1904,6 @@ CfgFragment lower_statement_list(ProcedureBuilder &builder,
                                  std::span<const Statement *const> statements,
                                  OptoSlangProcedureKind procedure_kind) {
   CfgFragment lowered;
-  bool prior_return = false;
   std::unordered_set<const Symbol *> prior_disable_targets;
   for (const auto *child : statements) {
     if (child) {
@@ -2006,13 +1913,8 @@ CfgFragment lower_statement_list(ProcedureBuilder &builder,
       child_lowered =
           guard_undisabled_statements(builder, design, prior_disable_targets,
                                       std::move(child_lowered), source);
-      if (prior_return) {
-        child_lowered = guard_unreturned_statements(
-            builder, design, std::move(child_lowered), source);
-      }
       lowered = builder.sequence(std::move(lowered), std::move(child_lowered),
                                  source);
-      prior_return = prior_return || statement_contains_return(*child);
       collect_disable_targets(*child, prior_disable_targets);
       if (!lowered.empty() && lowered.exits.empty()) {
         break;
@@ -2151,13 +2053,16 @@ class CyclicLoopGraph {
 public:
   CyclicLoopGraph(ProcedureBuilder &builder, ModuleLoweringContext &design,
                   const Statement &loop, const Statement &body,
-                  const Expression &anchor, OptoSlangLoopForm form)
+                  const Expression &anchor, OptoSlangLoopForm form,
+                  std::optional<uint32_t> external_exit = std::nullopt)
       : builder_(builder), design_(design), body_(body), anchor_(anchor),
         form_(form), source_(source_span(design, loop)),
         header_(builder.add_block(source_)),
         body_entry_(builder.add_block(source_)),
         continue_entry_(builder.add_block(source_)),
-        latch_(builder.add_block(source_)), exit_(builder.add_block(source_)) {
+        latch_(builder.add_block(source_)),
+        exit_(external_exit ? *external_exit : builder.add_block(source_)),
+        external_exit_(external_exit.has_value()) {
     std::optional<uint32_t> parent;
     for (auto active = design_.loop_controls.rbegin();
          active != design_.loop_controls.rend(); ++active) {
@@ -2230,7 +2135,11 @@ public:
     } else {
       builder_.jump(latch_, header_, source_);
     }
-    return {header_, {exit_}};
+    // An activation exit is a valid region target, but never ordinary loop
+    // fallthrough: exposing it would let sequence() connect a return to the
+    // statements lexically following an unconditional loop.
+    return {header_, external_exit_ ? std::vector<uint32_t>{}
+                                    : std::vector<uint32_t>{exit_}};
   }
 
 private:
@@ -2248,10 +2157,6 @@ private:
                                          condition, predicate, anchor_)
                       : predicate;
     };
-    if (statement_contains_return(body_) &&
-        !design_.function_return_controls.empty()) {
-      append(design_.function_return_controls.back().not_returned);
-    }
     std::unordered_set<const Symbol *> disable_targets;
     collect_disable_targets(body_, disable_targets);
     for (const auto &disable : design_.disable_controls) {
@@ -2273,6 +2178,7 @@ private:
   uint32_t continue_entry_;
   uint32_t latch_;
   uint32_t exit_;
+  bool external_exit_;
 };
 
 CfgFragment lower_for_loop_cyclic(ProcedureBuilder &builder,
@@ -2629,8 +2535,22 @@ CfgFragment lower_forever_loop_cyclic(ProcedureBuilder &builder,
         "procedural forever loop cannot anchor activation state at " +
         statement_location(design, loop));
   }
+  std::optional<uint32_t> activation_exit;
+  if (!design.subroutine_return_targets.empty() &&
+      statement_contains_return(loop.body) &&
+      !statement_contains_break(loop.body)) {
+    std::unordered_set<const Symbol *> disable_targets;
+    collect_disable_targets(loop.body, disable_targets);
+    const bool has_active_disable = std::ranges::any_of(
+        design.disable_controls, [&](const DisableControl &control) {
+          return control.target && disable_targets.contains(control.target);
+        });
+    if (!has_active_disable) {
+      activation_exit = design.subroutine_return_targets.back();
+    }
+  }
   CyclicLoopGraph graph(builder, design, loop, loop.body, *anchor,
-                        OPTO_SLANG_LOOP_UNCONDITIONAL);
+                        OPTO_SLANG_LOOP_UNCONDITIONAL, activation_exit);
   auto body = lower_statement(builder, design, loop.body, procedure_kind);
   auto cyclic = graph.finish(std::move(body), {});
   return cyclic;
@@ -2773,35 +2693,55 @@ CfgFragment lower_statement_impl(ProcedureBuilder &builder,
         {{found->disabled.value, found->true_value, true, source}}, source);
   }
   case StatementKind::Return: {
-    if (design.function_returns.empty()) {
+    if (design.subroutine_return_targets.empty() ||
+        design.function_stack.empty()) {
       throw std::runtime_error(
-          "return statement appears outside an inlined function");
+          "return statement appears outside an inlined subroutine at " +
+          statement_location(design, stmt));
     }
     const auto &returned = stmt.as<ReturnStatement>();
-    if (!returned.expr) {
+    const auto &subroutine = *design.function_stack.back();
+    const bool value_function =
+        subroutine.subroutineKind == SubroutineKind::Function &&
+        !subroutine.getReturnType().isVoid();
+    if (returned.expr && !value_function) {
       throw std::runtime_error(
-          "void return is not synthesizable as an expression");
+          "valued return is not permitted in task or void function '" +
+          copy_string(subroutine.name) + "' at " +
+          statement_location(design, stmt));
     }
-    const auto *return_variable = design.function_returns.back();
-    OptoSlangExpr lhs;
-    lhs.kind = OPTO_SLANG_EXPR_SIGNAL;
-    lhs.signal_name =
-        intern_string(design, registered_value_name(design, *return_variable));
+    if (!returned.expr && value_function) {
+      throw std::runtime_error(
+          "valueless return is not permitted in value-returning function '" +
+          copy_string(subroutine.name) + "' at " +
+          statement_location(design, stmt));
+    }
     const auto source = source_span(design, stmt);
     std::vector<OptoSlangEffectData> effects;
-    effects.push_back({
-        make_expr(design, std::move(lhs), *returned.expr),
-        lower_expr(design, *returned.expr),
-        true,
-        source,
-    });
-    if (!design.function_return_controls.empty()) {
-      const auto &control = design.function_return_controls.back();
-      if (control.returned) {
-        effects.push_back({control.returned, control.true_value, true, source});
+    if (returned.expr) {
+      if (design.function_returns.empty()) {
+        throw std::logic_error(
+            "value-returning activation has no return variable");
       }
+      const auto *return_variable = design.function_returns.back();
+      OptoSlangExpr lhs;
+      lhs.kind = OPTO_SLANG_EXPR_SIGNAL;
+      lhs.signal_name = intern_string(
+          design, registered_value_name(design, *return_variable));
+      effects.push_back({
+          make_expr(design, std::move(lhs), *returned.expr),
+          lower_expr(design, *returned.expr),
+          true,
+          source,
+      });
     }
-    return builder.effects(std::move(effects), source);
+    auto transfer = effects.empty()
+                        ? CfgFragment{builder.add_block(source), {}}
+                        : builder.effects(std::move(effects), source);
+    builder.jump(*transfer.entry, design.subroutine_return_targets.back(),
+                 source);
+    transfer.exits.clear();
+    return transfer;
   }
   case StatementKind::Conditional:
     return lower_conditional_statement(
@@ -3293,7 +3233,7 @@ OptoSlangExpr *lower_function_call(ModuleLoweringContext &design,
   ScopeExit leave_function([&] {
     if (return_scope_pushed) {
       design.function_returns.pop_back();
-      design.function_return_controls.pop_back();
+      design.subroutine_return_targets.pop_back();
     }
     for (auto *symbol : installed_values) {
       design.function_values.erase(symbol);
@@ -3397,7 +3337,7 @@ OptoSlangExpr *lower_function_call(ModuleLoweringContext &design,
       lowered_type_width(function.getReturnType()), function.name);
   unknown_return.constant_bits.assign(unknown_return.constant_width, 'x');
   std::vector<OptoSlangEffectData> initializers;
-  initializers.reserve(argument_initializers.size() + 2);
+  initializers.reserve(argument_initializers.size() + 1);
   initializers.push_back({
       return_lhs,
       make_expr(design, std::move(unknown_return), call),
@@ -3408,42 +3348,17 @@ OptoSlangExpr *lower_function_call(ModuleLoweringContext &design,
                       std::make_move_iterator(argument_initializers.begin()),
                       std::make_move_iterator(argument_initializers.end()));
 
-  FunctionReturnControl return_control;
-  if (statement_requires_return_control(function.getBody())) {
-    auto flag_name = allocate_function_value_name(design, function, "returned");
-    flag_name =
-        add_internal_net(design, std::move(flag_name), 1, false, process_local);
-    OptoSlangExpr returned_signal;
-    returned_signal.kind = OPTO_SLANG_EXPR_SIGNAL;
-    returned_signal.signal_name = intern_string(design, flag_name);
-    return_control.returned =
-        make_expr(design, std::move(returned_signal), call);
-    return_control.not_returned = make_unary_expr(
-        design, OPTO_SLANG_UNARY_LOGICAL_NOT, return_control.returned, call);
-    OptoSlangExpr false_value;
-    false_value.kind = OPTO_SLANG_EXPR_CONSTANT;
-    false_value.constant_has_width = true;
-    false_value.constant_width = 1;
-    false_value.constant_bits = "0";
-    auto *false_expr = make_expr(design, std::move(false_value), call);
-    OptoSlangExpr true_value;
-    true_value.kind = OPTO_SLANG_EXPR_CONSTANT;
-    true_value.constant_has_width = true;
-    true_value.constant_width = 1;
-    true_value.constant_bits = "1";
-    return_control.true_value = make_expr(design, std::move(true_value), call);
-    initializers.push_back({return_control.returned, false_expr, true, source});
-  }
-
+  const auto return_exit = builder.add_block(source);
   design.function_returns.push_back(return_variable);
-  design.function_return_controls.push_back(return_control);
+  design.subroutine_return_targets.push_back(return_exit);
   return_scope_pushed = true;
   auto initialization = builder.effects(std::move(initializers), source);
   auto lowered_body = lower_statement(builder, design, function.getBody(),
                                       OPTO_SLANG_PROCEDURE_COMB);
-  auto body = builder.sequence(std::move(initialization),
-                               std::move(lowered_body), source);
-  design.function_return_controls.pop_back();
+  auto body = builder.join_at(builder.sequence(std::move(initialization),
+                                               std::move(lowered_body), source),
+                              return_exit, source);
+  design.subroutine_return_targets.pop_back();
   design.function_returns.pop_back();
   return_scope_pushed = false;
   if (design.active_expression_prelude) {
@@ -3524,14 +3439,14 @@ CfgFragment lower_subroutine_call_statement(
   std::vector<const ValueSymbol *> installed_names;
   std::vector<CopyOut> copy_outs;
   std::vector<OptoSlangEffectData> initializers;
-  bool return_control_pushed = false;
+  bool return_target_pushed = false;
   bool disable_control_pushed = false;
   ScopeExit leave_function([&] {
     if (disable_control_pushed) {
       design.disable_controls.pop_back();
     }
-    if (return_control_pushed) {
-      design.function_return_controls.pop_back();
+    if (return_target_pushed) {
+      design.subroutine_return_targets.pop_back();
     }
     for (auto *symbol : installed_values) {
       design.function_values.erase(symbol);
@@ -3620,8 +3535,9 @@ CfgFragment lower_subroutine_call_statement(
     installed_names.push_back(local);
   }
 
-  design.function_return_controls.push_back({});
-  return_control_pushed = true;
+  const auto return_exit = builder.add_block(source);
+  design.subroutine_return_targets.push_back(return_exit);
+  return_target_pushed = true;
   auto initialization = builder.effects(std::move(initializers), source);
   CfgFragment disable_initialization;
   if (statement_disables_target(function.getBody(), function)) {
@@ -3637,13 +3553,14 @@ CfgFragment lower_subroutine_call_statement(
     design.disable_controls.pop_back();
     disable_control_pushed = false;
   }
-  auto body =
+  auto body = builder.join_at(
       builder.sequence(std::move(initialization),
                        builder.sequence(std::move(disable_initialization),
                                         std::move(lowered_body), source),
-                       source);
-  design.function_return_controls.pop_back();
-  return_control_pushed = false;
+                       source),
+      return_exit, source);
+  design.subroutine_return_targets.pop_back();
+  return_target_pushed = false;
   std::vector<OptoSlangEffectData> copy_effects;
   copy_effects.reserve(copy_outs.size());
   for (const auto &copy : copy_outs) {

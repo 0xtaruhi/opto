@@ -82,6 +82,11 @@ public:
                           CfgFragment else_body,
                           OptoSlangSourceSpanView source);
 
+  // Connects every ordinary fallthrough edge to `target` while preserving
+  // transfers that already terminated elsewhere.
+  CfgFragment join_at(CfgFragment body, uint32_t target,
+                      OptoSlangSourceSpanView source);
+
   void jump(uint32_t from, uint32_t target, OptoSlangSourceSpanView source);
 
   void branch(uint32_t from, const OptoSlangExpr *condition,

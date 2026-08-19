@@ -28,6 +28,10 @@ pub(super) fn map_net_resolution(raw: c_int) -> Result<SlangNetResolution, Slang
         0 => Ok(SlangNetResolution::SingleDriver),
         1 => Ok(SlangNetResolution::WiredAnd),
         2 => Ok(SlangNetResolution::WiredOr),
+        3 => Ok(SlangNetResolution::PullZero),
+        4 => Ok(SlangNetResolution::PullOne),
+        5 => Ok(SlangNetResolution::SupplyZero),
+        6 => Ok(SlangNetResolution::SupplyOne),
         _ => Err(unknown_enum("net resolution", raw)),
     }
 }

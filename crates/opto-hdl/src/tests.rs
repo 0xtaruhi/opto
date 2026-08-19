@@ -985,6 +985,129 @@ fn verilog_frontend_preserves_wired_net_resolution() {
 }
 
 #[test]
+fn verilog_frontend_preserves_extended_net_resolution() {
+    let source = TestSource::new(
+        "extended-resolution.sv",
+        "module top(output triand a, output trior o, output tri0 p0, output tri1 p1, output supply0 s0, output supply1 s1); endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let resolution = |name| {
+        module
+            .signal(module.signal_id(name).unwrap())
+            .unwrap()
+            .resolution
+    };
+
+    assert_eq!(resolution("a"), SignalResolution::WiredAnd);
+    assert_eq!(resolution("o"), SignalResolution::WiredOr);
+    assert_eq!(resolution("p0"), SignalResolution::PullZero);
+    assert_eq!(resolution("p1"), SignalResolution::PullOne);
+    assert_eq!(resolution("s0"), SignalResolution::SupplyZero);
+    assert_eq!(resolution("s1"), SignalResolution::SupplyOne);
+}
+
+#[test]
+fn verilog_frontend_canonicalizes_static_alias_drivers() {
+    let source = TestSource::new(
+        "static-alias.sv",
+        "module top(input wire d, output wire y); wire a, b, c; alias a = b; alias b = c; assign c = d; assign y = b; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let a = module.signal_id("a").unwrap();
+
+    assert!(
+        module
+            .connects()
+            .iter()
+            .any(|connect| connect.target.signal == a)
+    );
+    assert!(!module.connects().iter().any(|connect| {
+        ["b", "c"]
+            .into_iter()
+            .filter_map(|name| module.signal_id(name))
+            .any(|signal| connect.target.signal == signal)
+    }));
+}
+
+#[test]
+fn verilog_frontend_preserves_static_alias_slice_and_concat_bit_order() {
+    let source = TestSource::new(
+        "selected-static-alias.sv",
+        "module top(input wire [3:0] d, output wire [3:0] y); wire [3:0] a, b; wire c, e, f, g; alias a[1:0] = b[3:2]; alias {c, e} = {f, g}; assign b[3:2] = d[3:2]; assign {f, g} = d[1:0]; assign y = {a[1:0], c, e}; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let module = update.modules[0].word();
+    let signal_ref = |value| {
+        let ValueKind::Signal(reference) = module.value(value).unwrap().kind else {
+            panic!("static alias driver must remain a signal reference");
+        };
+        let signal = module.signal(reference.signal).unwrap();
+        (
+            module.name_str(signal.name.unwrap()),
+            reference.lsb,
+            reference.width(),
+        )
+    };
+
+    let a = module.signal_id("a").unwrap();
+    let a_driver = module
+        .connects()
+        .iter()
+        .find(|connect| connect.target.signal == a)
+        .expect("selected alias must drive its canonical representative");
+    assert_eq!(
+        a_driver.target.range,
+        Some(opto_ir::word::BitRange { msb: 1, lsb: 0 })
+    );
+    assert_eq!(signal_ref(a_driver.value), ("d", 2, 2));
+
+    for (target, source_bit) in [("c", 1), ("e", 0)] {
+        let signal = module.signal_id(target).unwrap();
+        let driver = module
+            .connects()
+            .iter()
+            .find(|connect| connect.target.signal == signal)
+            .unwrap_or_else(|| panic!("concatenated alias must drive canonical {target}"));
+        assert_eq!(driver.target.range, None);
+        assert_eq!(signal_ref(driver.value), ("d", source_bit, 1));
+    }
+
+    let y = module.signal_id("y").unwrap();
+    let output = module
+        .connects()
+        .iter()
+        .find(|connect| connect.target.signal == y)
+        .expect("output must observe the canonical alias values");
+    let ValueKind::Operation(operation) = module.value(output.value).unwrap().kind else {
+        panic!("alias output must retain concatenation order");
+    };
+    let OpKind::Concat { parts } = &module.operation(operation).unwrap().kind else {
+        panic!("alias output must be a concatenation");
+    };
+    assert_eq!(
+        parts.iter().copied().map(signal_ref).collect::<Vec<_>>(),
+        [("a", 0, 2), ("c", 0, 1), ("e", 0, 1)]
+    );
+}
+
+#[test]
 fn verilog_frontend_materializes_tri_state_driver_contract() {
     let source = TestSource::new(
         "wired-tristate.sv",

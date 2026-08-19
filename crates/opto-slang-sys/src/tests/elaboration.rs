@@ -332,6 +332,29 @@ fn native_compile_rejects_udp_updates_from_distinct_transition_inputs() {
 }
 
 #[test]
+fn native_compile_identifies_one_udp_data_clock_among_transition_controls() {
+    let source = NativeTestSource::new(
+        "primitive udp_dff(q, d, clk, clear); output reg q; input d, clk, clear; table ? ? r : ? : 0; 0 r 0 : ? : 0; 1 r 0 : ? : 1; endtable endprimitive module top(input logic d, clk, clear, output logic q); udp_dff u(q, d, clk, clear); endmodule\n",
+    );
+    let compilation = compile_source(&source);
+    let module = first_module(&compilation);
+    let procedure = module
+        .procedures()
+        .next()
+        .expect("UDP must lower to Proc IR");
+    let events = procedure.events().collect::<Vec<_>>();
+
+    assert_eq!(events.len(), 2);
+    for name in ["clk", "clear"] {
+        let event = events
+            .iter()
+            .find(|event| event.signal().is_ok_and(|signal| signal.name == name))
+            .unwrap_or_else(|| panic!("UDP must publish the {name} transition"));
+        assert_eq!(event.edge().unwrap(), SlangEdge::Pos);
+    }
+}
+
+#[test]
 fn native_compile_lowers_named_instance_connections_in_source_order() {
     let source = NativeTestSource::new(
         "module child(input logic a, output logic y); assign y = a; endmodule\nmodule top(input logic a, output logic y); child u_child(.a(a), .y(y)); endmodule\n",
