@@ -61,7 +61,7 @@ struct LoweredPrivateRegion {
     module: word::WordModule,
     source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
-    operation_sources: Vec<Option<word::OpId>>,
+    operation_sources: crate::planning::regional::LocalOperationProvenance,
     owned_memory_logic: Vec<RegionalMemoryLogicBinding>,
     memory_states: Vec<RegionalMemoryStateBinding>,
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
@@ -236,7 +236,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         region: SynthesisRegion,
         module: &word::WordModule,
         decisions: &ArchitectureDecisions,
-        operation_sources: &[Option<word::OpId>],
+        operation_sources: &crate::planning::regional::LocalOperationProvenance,
         source_to_local: &std::collections::BTreeMap<word::ValueId, word::ValueId>,
     ) -> Result<(PrivateArchitecturePublication, DurableOperatorArena), SynthError> {
         let sources = crate::artifact::provenance::resolve_private_operator_sources(
@@ -432,7 +432,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
             boundary_inputs,
             root_pairs,
         ) = self.prepare_private_word(memory_implementations, region)?;
-        let operation_sources = operation_sources.into_vec();
         let owned_memory_logic = owned_memory_logic.into_vec();
         let memory_states = memory_states.into_vec();
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
@@ -694,7 +693,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             mut memory_states,
             root_bindings,
         } = cone;
-        let mut operation_sources = operation_sources.into_vec();
+        let mut operation_sources = operation_sources;
         let local_changes = {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("regional_optimization.region[{row}].dataflow")
@@ -708,7 +707,9 @@ impl RegionArchitectureMaterializer<'_, '_> {
             &mut owned_memory_logic,
             &mut memory_states,
         );
-        if crate::planning::operator::share_muxed_arithmetic(&mut module)? != 0 {
+        let rewrites = crate::planning::operator::share_muxed_arithmetic(&mut module)?;
+        operation_sources.apply_rewrites(&module, &rewrites)?;
+        if !rewrites.is_empty() {
             let local_changes =
                 crate::planning::dataflow::canonicalize_combinational_dataflow(&mut module)?;
             remap_private_values(
@@ -719,7 +720,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 &mut memory_states,
             );
         }
-        operation_sources.resize(module.operations().len(), None);
+        operation_sources.inherit_appended(&module)?;
         crate::api::diagnostics::trace!(
             crate::api::diagnostics::SynthTrace::new(profiling),
             "regional.private_word",
@@ -751,7 +752,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 module,
                 source_to_local,
                 boundary_bindings,
-                operation_sources: operation_sources.into_boxed_slice(),
+                operation_sources,
                 owned_memory_logic,
                 memory_states,
                 root_bindings,

@@ -211,6 +211,11 @@ impl RegionalMapper<'_> {
         })?;
         let signals =
             WordMappedSignals::from_observations(state.module, &observed_values, &observed_nets)?;
+        let connectivity = materialize::FrozenObservableConnectivity::capture_substrate(
+            &netlist,
+            &self.config.options.target_cells,
+            self.config.reference_ports,
+        )?;
         let boundary_nets = resolve_boundary_nets(&signals, &boundary_values)?;
         let substrate_cell_count = substrate_sources.len();
         let mut cell_sources = vec![None; netlist.cell_slot_count()];
@@ -231,6 +236,7 @@ impl RegionalMapper<'_> {
         }
         let mut mapped = RegionalMappedState {
             netlist,
+            connectivity,
             cell_sources,
             implementation_census: None,
             signals,
@@ -400,6 +406,11 @@ impl RegionalMapper<'_> {
         regions: &[PreparedRegion],
         sequential: Option<&materialize::MappedSequentialArtifact>,
     ) -> Result<(), crate::SynthError> {
+        let application_kind = if sequential.is_some() {
+            "initial"
+        } else {
+            "replacement"
+        };
         let mut cells = BTreeSet::new();
         let mut nets = BTreeSet::new();
         if let Some(sequential) = sequential {
@@ -442,7 +453,7 @@ impl RegionalMapper<'_> {
             .transpose()?;
         let snapshot = mapped
             .netlist
-            .snapshot_region(cells, nets)
+            .snapshot_region(cells, nets.iter().copied())
             .map_err(crate::SynthError::from)?;
         let mut delta = RegionDelta::new(snapshot);
         let pending_sequential = sequential
@@ -468,6 +479,7 @@ impl RegionalMapper<'_> {
 
         let RegionalMappedState {
             netlist,
+            connectivity,
             cell_sources,
             implementation_census,
             footprints,
@@ -499,6 +511,17 @@ impl RegionalMapper<'_> {
                 Ok(footprint) => footprint,
                 Err(error) => return transaction.abort(error, "regional materialization"),
             };
+            let artifact = regions
+                .iter()
+                .find(|region| region.row == row)
+                .map(|region| &region.artifact)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("regional publication lost its prepared artifact")
+                })?;
+            if let Err(error) = artifact.validate_materialization(&footprint, transaction.mapped())
+            {
+                return transaction.abort(error, "regional artifact materialization");
+            }
             publications.push((row, owner, origins, footprint));
         }
 
@@ -558,6 +581,17 @@ impl RegionalMapper<'_> {
             }
         };
         transaction.commit_with("regional publication", |netlist, _| {
+            connectivity
+            .validate_affected(
+                netlist,
+                &self.config.options.target_cells,
+                nets.iter().copied(),
+            )
+            .map_err(|error| {
+                crate::SynthError::invariant(format!(
+                    "{application_kind} regional transaction produced invalid connectivity: {error}"
+                ))
+            })?;
             cell_sources.resize(netlist.cell_slot_count(), None);
             for cell in removed {
                 cell_sources[cell.index()] = None;

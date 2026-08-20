@@ -12,7 +12,10 @@ use crate::boolean::logic::{LogicInputs, LogicSignature};
 use crate::mapping::RegionPlanBinding;
 use crate::mapping::cover::{LibraryCoverBinding, LibraryCoverSource};
 use crate::mapping::library::CombinationalCellCatalog;
-use crate::mapping::materialize::{ArtifactCell, ArtifactSignal, target_pin_id};
+use crate::mapping::materialize::{
+    ArtifactCell, ArtifactNetBinding, ArtifactNetTable, ArtifactSignal, target_pin_id,
+    validate_artifact_nets,
+};
 use opto_ir::mapped::{
     AppliedRegionDelta, CellId, NetId, RegionDelta, RegionSnapshot, TempCellId, TempNetId,
 };
@@ -31,9 +34,8 @@ pub(crate) use aliases::{MappedValueSignal, WordMappedSignals, regional_binding_
 #[derive(Debug, Clone)]
 pub(crate) struct MappedRegionArtifact {
     region: crate::RegionAnchorId,
+    nets: ArtifactNetTable,
     cells: Box<[ArtifactCell<()>]>,
-    internal_net_count: usize,
-    external_nets: Box<[NetId]>,
     roots: Box<[word::ValueId]>,
     leaves: Box<[word::ValueId]>,
 }
@@ -119,9 +121,8 @@ impl MappedRegionArtifact {
             }
             return Ok(Self {
                 region: plan.region(),
+                nets: ArtifactNetTable::default(),
                 cells: Box::new([]),
-                internal_net_count: 0,
-                external_nets: Box::new([]),
                 roots: Box::new([]),
                 leaves: Box::new([]),
             });
@@ -146,16 +147,21 @@ impl MappedRegionArtifact {
             ));
         }
 
+        let mut nets = ArtifactNetTable::default();
         let input_values = binding.resolve_inputs(ownership)?;
         let inputs = input_values
             .iter()
             .copied()
-            .map(|value| mapped_values.require(value).map(ArtifactSignal::Mapped))
+            .map(|value| {
+                mapped_values
+                    .require(value)
+                    .map(|signal| nets.signal(signal))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let output_values = binding.resolve_outputs(ownership)?;
-        let mut output_targets = vec![[None::<MappedValueSignal>; 2]; cover.cells().len()];
+        let mut output_targets = vec![[None::<ArtifactSignal>; 2]; cover.cells().len()];
         for (&value, source) in output_values.iter().zip(cover.outputs()) {
-            let target = mapped_values.require(value)?;
+            let target = nets.signal(mapped_values.require(value)?);
             match *source {
                 LibraryCoverSource::Cell(index) => {
                     assign_output_target(&mut output_targets, index, 0, target)?;
@@ -164,11 +170,7 @@ impl MappedRegionArtifact {
                     assign_output_target(&mut output_targets, index, 1, target)?;
                 }
                 LibraryCoverSource::Constant(value) => {
-                    validate_frozen_output(
-                        plan.region(),
-                        target,
-                        MappedValueSignal::Constant(value),
-                    )?;
+                    validate_frozen_output(plan.region(), target, ArtifactSignal::Constant(value))?;
                 }
                 LibraryCoverSource::Input(index) => {
                     let source = inputs.get(index).copied().ok_or_else(|| {
@@ -176,44 +178,23 @@ impl MappedRegionArtifact {
                             "regional cover output references an unknown input",
                         )
                     })?;
-                    let ArtifactSignal::Mapped(source) = source else {
-                        return Err(crate::SynthError::invariant(
-                            "regional cover input is not part of the frozen substrate",
-                        ));
-                    };
                     validate_frozen_output(plan.region(), target, source)?;
                 }
             }
         }
-        detach_imported_output_targets(&inputs, &mut output_targets);
-        let mut output_owners = std::collections::BTreeSet::new();
-        for outputs in &mut output_targets {
-            for target in outputs {
-                let Some(signal) = *target else { continue };
-                if !output_owners.insert(signal) {
-                    // Correlated region inputs can make distinct local cover
-                    // nodes resolve to one global value. Keep one physical
-                    // driver; later equivalents remain available on local
-                    // nets for their own downstream cover consumers.
-                    *target = None;
-                }
-            }
-        }
-        let mut internal_net_count = 0usize;
-        let mut cell_outputs = cover
+        let cell_outputs = cover
             .cells()
             .iter()
             .enumerate()
             .map(|(index, cell)| {
-                let primary = allocate_output(output_targets[index][0], &mut internal_net_count)?;
+                let primary = allocate_output(output_targets[index][0], &mut nets)?;
                 let secondary = cell
                     .second_truth()
-                    .map(|_| allocate_output(output_targets[index][1], &mut internal_net_count))
+                    .map(|_| allocate_output(output_targets[index][1], &mut nets))
                     .transpose()?;
                 Ok([Some(primary), secondary])
             })
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
-
         let prefix = region_instance_prefix(plan.region());
         let mut cells = Vec::with_capacity(cover.cells().len());
         let mut pin_count = 0usize;
@@ -224,17 +205,9 @@ impl MappedRegionArtifact {
                 .copied()
                 .map(|source| resolve_cover_source(source, &inputs, &cell_outputs, index))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut primary = cell_outputs[index][0].ok_or_else(|| {
+            let primary = cell_outputs[index][0].ok_or_else(|| {
                 crate::SynthError::invariant("regional cell has no primary output")
             })?;
-            if sources.contains(&primary) && matches!(primary, ArtifactSignal::Mapped(_)) {
-                // The frozen substrate already proves this publication target
-                // equivalent to a cell input. A region may retain its
-                // conservative implementation artifact, but it cannot drive
-                // an equivalence class that it also imports.
-                primary = allocate_output(None, &mut internal_net_count)?;
-                cell_outputs[index][0] = Some(primary);
-            }
             let (mapped, library_cell) = match cell.binding(catalog)? {
                 LibraryCoverBinding::Single(binding) => {
                     if cell_outputs[index][1].is_some() {
@@ -258,15 +231,9 @@ impl MappedRegionArtifact {
                     )
                 }
                 LibraryCoverBinding::Joint(binding) => {
-                    let mut secondary = cell_outputs[index][1].ok_or_else(|| {
+                    let secondary = cell_outputs[index][1].ok_or_else(|| {
                         crate::SynthError::invariant("joint regional cell has no secondary output")
                     })?;
-                    if sources.contains(&secondary)
-                        && matches!(secondary, ArtifactSignal::Mapped(_))
-                    {
-                        secondary = allocate_output(None, &mut internal_net_count)?;
-                        cell_outputs[index][1] = Some(secondary);
-                    }
                     if sources.contains(&primary) || sources.contains(&secondary) {
                         return Err(crate::SynthError::invariant(format!(
                             "regional joint cover cell {index} in {:?} has a local output cycle",
@@ -319,12 +286,18 @@ impl MappedRegionArtifact {
                 "regional artifact pin count differs from its portable plan",
             ));
         }
+        validate_artifact_nets(
+            &format!("regional artifact {:?}", plan.region()),
+            &nets,
+            &cells,
+            target_cells,
+        )?;
         validate_implementation_cells(plan, &cells)?;
 
         finish_artifact(
             plan.region(),
+            nets,
             cells.into_boxed_slice(),
-            internal_net_count,
             binding,
             ownership,
         )
@@ -340,6 +313,64 @@ impl MappedRegionArtifact {
 
     pub(crate) fn leaves(&self) -> &[word::ValueId] {
         &self.leaves
+    }
+
+    pub(crate) fn validate_materialization(
+        &self,
+        footprint: &MappedRegionFootprint,
+        mapped: &opto_ir::mapped::MappedNetlist,
+    ) -> Result<(), crate::SynthError> {
+        if self.cells.len() != footprint.cells.len()
+            || self.nets.local_count() != footprint.internal_nets.len()
+        {
+            return Err(crate::SynthError::invariant(
+                "materialized regional footprint has the wrong shape",
+            ));
+        }
+        for (index, (expected, &cell)) in self.cells.iter().zip(&footprint.cells).enumerate() {
+            let actual = mapped.connections(cell).ok_or_else(|| {
+                crate::SynthError::invariant("materialized regional cell is not live")
+            })?;
+            if actual.len() != expected.connections.len() {
+                return Err(crate::SynthError::invariant(format!(
+                    "materialized regional cell {index} has {} pins instead of {}",
+                    actual.len(),
+                    expected.connections.len()
+                )));
+            }
+            for ((pin, library_pin, signal), actual) in expected.connections.iter().zip(actual) {
+                let expected_signal = match *signal {
+                    ArtifactSignal::Constant(value) => {
+                        opto_ir::mapped::ConnectionSignal::Constant(value)
+                    }
+                    ArtifactSignal::Net(id) => match self.nets.binding(id).ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "regional artifact references an unknown sealed net",
+                        )
+                    })? {
+                        ArtifactNetBinding::External { net, .. } => {
+                            opto_ir::mapped::ConnectionSignal::Net(net)
+                        }
+                        ArtifactNetBinding::Local(net) => opto_ir::mapped::ConnectionSignal::Net(
+                            *footprint.internal_nets.get(net).ok_or_else(|| {
+                                crate::SynthError::invariant(
+                                    "regional connection references an unknown materialized net",
+                                )
+                            })?,
+                        ),
+                    },
+                };
+                if mapped.pin_name(actual) != Some(pin.as_str())
+                    || actual.library_pin != *library_pin
+                    || actual.signal != expected_signal
+                {
+                    return Err(crate::SynthError::invariant(format!(
+                        "materialized regional cell {index} pin '{pin}' differs from its sealed artifact"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns every cell that the caller must include in the shared snapshot.
@@ -358,7 +389,7 @@ impl MappedRegionArtifact {
         previous: Option<&MappedRegionFootprint>,
     ) -> Result<Box<[NetId]>, crate::SynthError> {
         self.validate_previous(previous)?;
-        let mut nets = self.external_nets.to_vec();
+        let mut nets = self.nets.external_nets().collect::<Vec<_>>();
         if let Some(previous) = previous {
             nets.extend_from_slice(&previous.internal_nets);
             nets.extend_from_slice(&previous.external_nets);
@@ -386,7 +417,7 @@ impl MappedRegionArtifact {
         }
         let (internal_nets, cells) = super::append_artifact_cells(
             delta,
-            self.internal_net_count,
+            &self.nets,
             &self.cells,
             "regional artifact references an unknown local net",
             |cell, &()| cell,
@@ -395,7 +426,7 @@ impl MappedRegionArtifact {
             region: self.region,
             cells,
             internal_nets,
-            external_nets: self.external_nets.clone(),
+            external_nets: self.nets.external_nets().collect(),
         })
     }
 
@@ -418,9 +449,9 @@ impl MappedRegionArtifact {
     ) -> Result<(), crate::SynthError> {
         self.validate_previous(previous)?;
         if self
-            .external_nets
-            .iter()
-            .any(|&net| !snapshot.contains_net(net))
+            .nets
+            .external_nets()
+            .any(|net| !snapshot.contains_net(net))
         {
             return Err(crate::SynthError::invariant(
                 "regional artifact boundary net is absent from its transaction snapshot",
@@ -558,8 +589,8 @@ fn synthetic_value(index: usize) -> Result<word::ValueId, crate::SynthError> {
 
 fn validate_frozen_output(
     region: crate::RegionAnchorId,
-    target: MappedValueSignal,
-    source: MappedValueSignal,
+    target: ArtifactSignal,
+    source: ArtifactSignal,
 ) -> Result<(), crate::SynthError> {
     if target != source {
         return Err(crate::SynthError::invariant(format!(
@@ -571,10 +602,10 @@ fn validate_frozen_output(
 }
 
 fn assign_output_target(
-    targets: &mut [[Option<MappedValueSignal>; 2]],
+    targets: &mut [[Option<ArtifactSignal>; 2]],
     cell: usize,
     output: usize,
-    target: MappedValueSignal,
+    target: ArtifactSignal,
 ) -> Result<(), crate::SynthError> {
     let slot = targets
         .get_mut(cell)
@@ -589,44 +620,13 @@ fn assign_output_target(
     Ok(())
 }
 
-fn detach_imported_output_targets(
-    inputs: &[ArtifactSignal],
-    targets: &mut [[Option<MappedValueSignal>; 2]],
-) {
-    let imported_nets = inputs
-        .iter()
-        .filter_map(|signal| match signal {
-            ArtifactSignal::Mapped(signal @ MappedValueSignal::Net(_)) => Some(*signal),
-            ArtifactSignal::Mapped(MappedValueSignal::Constant(_))
-            | ArtifactSignal::LocalNet(_) => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    for target in targets.iter_mut().flatten() {
-        if target.is_some_and(|signal| imported_nets.contains(&signal)) {
-            // A frozen connectivity class can appear through both a regional
-            // input alias and an output alias. The substrate already owns that
-            // net; publishing any local path back onto it creates a physical
-            // combinational cycle even when the cover itself is acyclic.
-            *target = None;
-        }
-    }
-}
-
 fn allocate_output(
-    target: Option<MappedValueSignal>,
-    local_net_count: &mut usize,
+    target: Option<ArtifactSignal>,
+    nets: &mut ArtifactNetTable,
 ) -> Result<ArtifactSignal, crate::SynthError> {
-    if let Some(target @ MappedValueSignal::Net(_)) = target {
-        return Ok(ArtifactSignal::Mapped(target));
-    }
-    // A region output can become a canonical constant after the cover was
-    // frozen. Keep the original cell output artifact-local for any internal
-    // consumers while the substrate remains the sole constant driver.
-    let index = *local_net_count;
-    *local_net_count = local_net_count
-        .checked_add(1)
-        .ok_or_else(|| crate::SynthError::capacity("regional artifact local nets"))?;
-    Ok(ArtifactSignal::LocalNet(index))
+    // A constant or a correlated duplicate has no new boundary producer. Its
+    // implementation output remains local for downstream cover consumers.
+    nets.claim_output(target)
 }
 
 fn resolve_cover_source(
@@ -636,9 +636,7 @@ fn resolve_cover_source(
     available_cells: usize,
 ) -> Result<ArtifactSignal, crate::SynthError> {
     match source {
-        LibraryCoverSource::Constant(value) => {
-            Ok(ArtifactSignal::Mapped(MappedValueSignal::Constant(value)))
-        }
+        LibraryCoverSource::Constant(value) => Ok(ArtifactSignal::Constant(value)),
         LibraryCoverSource::Input(index) => inputs.get(index).copied().ok_or_else(|| {
             crate::SynthError::invariant("regional cover input exceeds its revision binding")
         }),
@@ -659,22 +657,11 @@ fn resolve_cover_source(
 
 fn finish_artifact(
     region: crate::RegionAnchorId,
+    nets: ArtifactNetTable,
     cells: Box<[ArtifactCell<()>]>,
-    internal_net_count: usize,
     binding: &RegionPlanBinding,
     ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
 ) -> Result<MappedRegionArtifact, crate::SynthError> {
-    let mut external_nets = cells
-        .iter()
-        .flat_map(|cell| cell.connections.iter())
-        .filter_map(|(_, _, signal)| match signal {
-            ArtifactSignal::Mapped(MappedValueSignal::Net(net)) => Some(*net),
-            ArtifactSignal::Mapped(MappedValueSignal::Constant(_))
-            | ArtifactSignal::LocalNet(_) => None,
-        })
-        .collect::<Vec<_>>();
-    external_nets.sort_unstable();
-    external_nets.dedup();
     let mut roots = binding.resolve_outputs(ownership)?;
     roots.sort_unstable();
     roots.dedup();
@@ -683,9 +670,8 @@ fn finish_artifact(
     leaves.dedup();
     Ok(MappedRegionArtifact {
         region,
+        nets,
         cells,
-        internal_net_count,
-        external_nets: external_nets.into_boxed_slice(),
         roots: roots.into_boxed_slice(),
         leaves: leaves.into_boxed_slice(),
     })
@@ -707,30 +693,19 @@ fn region_instance_prefix(region: crate::RegionAnchorId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::materialize::ArtifactNetId;
 
     #[test]
     fn canonical_constant_outputs_keep_an_artifact_local_net() {
-        let mut local_net_count = 0;
+        let mut nets = ArtifactNetTable::default();
 
-        let output = allocate_output(
-            Some(MappedValueSignal::Constant(false)),
-            &mut local_net_count,
-        )
-        .unwrap();
+        let output = allocate_output(Some(ArtifactSignal::Constant(false)), &mut nets).unwrap();
 
-        assert_eq!(output, ArtifactSignal::LocalNet(0));
-        assert_eq!(local_net_count, 1);
-    }
-
-    #[test]
-    fn imported_substrate_net_is_not_republished_through_a_local_path() {
-        let shared = MappedValueSignal::Net(NetId::from_index(3).unwrap());
-        let distinct = MappedValueSignal::Net(NetId::from_index(4).unwrap());
-        let inputs = [ArtifactSignal::Mapped(shared)];
-        let mut targets = [[None, None], [Some(shared), Some(distinct)]];
-
-        detach_imported_output_targets(&inputs, &mut targets);
-
-        assert_eq!(targets, [[None, None], [None, Some(distinct)]]);
+        assert_eq!(output, ArtifactSignal::Net(ArtifactNetId(0)));
+        assert_eq!(
+            nets.binding(ArtifactNetId(0)),
+            Some(ArtifactNetBinding::Local(0))
+        );
+        assert_eq!(nets.local_count(), 1);
     }
 }

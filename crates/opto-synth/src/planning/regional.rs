@@ -5,6 +5,7 @@
 
 mod envelope;
 mod lowering;
+mod operation_provenance;
 mod private;
 mod search;
 
@@ -13,6 +14,7 @@ pub(crate) use lowering::{
     RegionalMemoryLogicBinding, RegionalMemoryStateBinding, RegionalWordCone,
     RegionalWordConeRequest,
 };
+pub(crate) use operation_provenance::LocalOperationProvenance;
 pub(crate) use private::optimize_structure as optimize_private_structure;
 pub(crate) use search::{RegionalSearchRequest, select_architectures};
 

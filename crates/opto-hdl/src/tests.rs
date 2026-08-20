@@ -559,10 +559,42 @@ fn verilog_frontend_publishes_only_reachable_loop_memory_reads() {
 }
 
 #[test]
-fn verilog_frontend_rejects_mixed_unpacked_array_drivers() {
+fn verilog_frontend_accepts_disjoint_mixed_unpacked_array_drivers() {
     let source = TestSource::new(
         "mixed-array-drivers.sv",
         "module top(input logic [7:0] a, b, output logic [7:0] y); logic [7:0] values [0:1]; assign values[0] = a; always_comb values[1] = b; assign y = values[0] ^ values[1]; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+
+    assert!(update.modules[0].word().signal_id("values").is_some());
+}
+
+#[test]
+fn verilog_frontend_flattens_disjoint_generated_array_procedures() {
+    let source = TestSource::new(
+        "generated-array-procedures.sv",
+        "module top(input logic [15:0] a, output logic [15:0] y); logic [3:0][1:0] value [2]; for (genvar s = 0; s < 2; s++) begin always_comb begin value[s] = a[s*8 +: 8]; for (int i = 1; i < 4; i++) value[s][i] = value[s][i-1] ^ a[s*8+i*2 +: 2]; end end assign y = {value[1], value[0]}; endmodule\n",
+    );
+    let update = Frontend::read_verilog(
+        std::slice::from_ref(&source.path),
+        &FrontendOptions::default(),
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+
+    assert!(update.modules[0].word().signal_id("value").is_some());
+}
+
+#[test]
+fn verilog_frontend_rejects_overlapping_mixed_unpacked_array_drivers() {
+    let source = TestSource::new(
+        "overlapping-mixed-array-drivers.sv",
+        "module top(input logic [7:0] a, b, output logic [7:0] y); logic [7:0] values [0:1]; assign values[0] = a; always_comb values[0] = b; assign y = values[0]; endmodule\n",
     );
     let error = Frontend::read_verilog(
         std::slice::from_ref(&source.path),
@@ -577,21 +609,17 @@ fn verilog_frontend_rejects_mixed_unpacked_array_drivers() {
 }
 
 #[test]
-fn verilog_frontend_rejects_comb_and_flop_unpacked_array_drivers() {
+fn verilog_frontend_accepts_disjoint_comb_and_flop_unpacked_array_drivers() {
     let source = TestSource::new(
         "mixed-procedural-array-drivers.sv",
         "module top(input logic clk, input logic [7:0] a, b, output logic [7:0] y); logic [7:0] values [0:1]; always_comb values[0] = a; always_ff @(posedge clk) values[1] <= b; assign y = values[0] ^ values[1]; endmodule\n",
     );
-    let error = Frontend::read_verilog(
+    Frontend::read_verilog(
         std::slice::from_ref(&source.path),
         &FrontendOptions::default(),
         &opto_runtime::ExecutionContext::default(),
     )
-    .unwrap_err();
-
-    assert!(error.to_string().contains(
-        "unpacked storage 'values' has mixed combinational/latch procedural and edge-triggered procedural drivers"
-    ));
+    .unwrap();
 }
 
 #[test]
@@ -1804,8 +1832,8 @@ fn verilog_frontend_proves_and_eliminates_cyclic_constant_repeat() {
                 ProcTarget::Signal { signal, .. } if signal == y
             ))
             .count(),
-        2,
-        "loop-carried output state is copied in once and back once after local expansion"
+        4,
+        "loop expansion keeps the initial write and three source-selected live-out writes"
     );
     assert!(rtl.word().signals().iter().all(|signal| {
         signal.name.is_none_or(|name| {

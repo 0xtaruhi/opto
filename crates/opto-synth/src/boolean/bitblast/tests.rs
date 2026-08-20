@@ -193,64 +193,6 @@ fn regional_boolean_lowering_resolves_dont_care_at_publication_boundary() {
 }
 
 #[test]
-fn frozen_ownership_follows_static_signal_drivers() {
-    let mut module = word::WordModule::new("owned_connectivity");
-    let bit = word::WordType::bits(1).unwrap();
-    let input = module
-        .add_port(
-            "a",
-            word::PortDirection::Input,
-            bit,
-            word::SourceSpan::default(),
-        )
-        .unwrap();
-    let input = module
-        .read_signal(
-            module.port(input).unwrap().signal,
-            word::SourceSpan::default(),
-        )
-        .unwrap();
-    let produced = module
-        .unary(word::UnaryOp::BitNot, input, word::SourceSpan::default())
-        .unwrap();
-    let first = module
-        .add_wire("first", bit, word::SourceSpan::default())
-        .unwrap();
-    module
-        .connect(
-            word::LValue::signal(first),
-            produced,
-            word::SourceSpan::default(),
-        )
-        .unwrap();
-    let first = module
-        .read_signal(first, word::SourceSpan::default())
-        .unwrap();
-    let second = module
-        .add_wire("second", bit, word::SourceSpan::default())
-        .unwrap();
-    module
-        .connect(
-            word::LValue::signal(second),
-            first,
-            word::SourceSpan::default(),
-        )
-        .unwrap();
-    let second = module
-        .read_signal(second, word::SourceSpan::default())
-        .unwrap();
-
-    let owner = crate::RegionRowId::from_index(0).unwrap();
-    let mut ownership = LoweredRegionOwnership::new(module.values().len());
-    ownership.set(produced, owner).unwrap();
-    ownership.infer_unowned(&module).unwrap();
-
-    assert_eq!(ownership.owner(first), Some(owner));
-    assert_eq!(ownership.owner(second), Some(owner));
-    assert_eq!(ownership.owner(input), None);
-}
-
-#[test]
 fn preserves_care_free_x_constants_during_bitblast() {
     let mut module = word::WordModule::new("top");
     let ty = word::WordType::bits(1).unwrap();

@@ -388,11 +388,13 @@ side induction-variable classification. Before proof, Rust intersects blocking
 signal writes with signal reads in each top-level natural region, promotes the
 resulting recurrence state to `ProcLocalId`, and rewrites nested regions to use
 the same local. Copy-in values come from unique CFG reaching definitions when
-available, otherwise from the visible signal value. Copy-back is emitted only
-for state observed outside the natural region or through a structural module
-root. This pass owns recurrence discovery, entry-value flow, and live-out
-policy; the Slang adapter retains only lexical local allocation for `for`
-declarations and `foreach` indices.
+available, otherwise from the visible signal value. No synthetic copy-back is
+emitted. Live-out writes keep their original signal target and bit selection
+alongside the promoted local update; later loop expansion therefore
+specializes dynamic selections without inventing a whole-signal owner. This
+pass owns recurrence discovery, entry-value flow, and live-out policy; the
+Slang adapter retains only lexical local allocation for `for` declarations and
+`foreach` indices.
 
 When distinct procedures use the same otherwise unobserved module-scope
 variable solely as classic loop induction state, each procedure receives an
@@ -647,9 +649,12 @@ are lowered, otherwise-undefined bits of source-observable output ports are
 sealed with the same type-correct completion rule. The same sealing boundary
 completes holes in a partially driven internal single-driver aggregate, so a
 whole-value SSA read cannot make unused packed-layout padding look like a
-missing producer. Wholly undriven internals remain invalid; signals with a
-dynamic target, resolved nets, ports, and generated logic are never completed
-by this rule.
+missing producer. A wholly undriven internal that remains source-observable is
+likewise completed as a source-level unspecified value; an unobservable one is
+left dead. Signals with a dynamic target, resolved nets, ports, and generated
+logic are never completed by this rule. This sealing happens only at the
+source-to-Word boundary, so a producer lost by a later transformation remains
+an internal consistency failure rather than being hidden as a don't-care.
 
 Built-in `and`, `or`, `xor`, `nand`, `nor`, `xnor`, `buf`, and `not` instances
 lower to ordinary structural Word operations. `pullup` and `pulldown` lower to
@@ -1049,10 +1054,12 @@ producer bits that those plans must publish; neither owner lookup nor alias
 membership may invent or erase that set. No epoch repartitions the shell or
 attempts to rediscover private logic from its endpoints. Plan inputs may
 resolve to frozen substrate nets; plan outputs are explicit bit-flow write
-obligations. If an implementation output resolves to
-the same substrate class as one of its inputs, publication keeps the required
-cell on an artifact-local net and does not write that imported class. This is a
-write-permission rule, not an alias-conflict repair heuristic.
+obligations. Input membership never implies that the substrate owns a physical
+producer. If an output obligation and an input resolve to the same mapped bit,
+the output keeps its producer claim; the sealed artifact then proves from the
+exact Liberty pin functions that the combined bit graph remains acyclic.
+Deleting a producer or moving it to an unobservable local net is not a valid
+way to repair an alias overlap.
 Every per-bit regional write obligation carries its exact `RegionRowId`.
 Coordinator aggregation is a set operation over `(source value, bit, region)`:
 duplicate claims from the same region are idempotent, while claims from
@@ -1083,7 +1090,14 @@ immutable. Results are returned in keyed order.
 
 ### 7. Commit And Measure
 
-Every plan uses artifact-local cell and net identities. The coordinator builds
+Every plan uses artifact-local cell and net identities. A sealed artifact has
+one compact net table: each cell connection refers only to an `ArtifactNetId`,
+and the table records exactly once whether that bit binds an existing mapped
+net or a transaction-local net. External output claims live in the same table.
+Before a transaction, sealing requires one producer for every local bit,
+requires every external output pin to match one claim, and rejects physical
+combinational cycles at bit granularity by following the concrete pins named in
+each Liberty output function. The coordinator builds
 ports, retained instances, clock/memory infrastructure, lowered-value bindings,
 and static boundary aliases once. It then:
 

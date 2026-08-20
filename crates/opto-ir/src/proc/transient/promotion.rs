@@ -38,8 +38,8 @@ impl TransientProcModule {
     /// Source adapters may represent static procedural variables as persistent
     /// signals. This pass, rather than the source AST adapter, decides which of
     /// those signals are loop-carried state. It inserts copy-in effects on every
-    /// external edge to a top-level natural loop and copy-back effects at its
-    /// canonical exit. Nested loops share the enclosing promoted local.
+    /// external edge to a top-level natural loop. Live-out writes retain their
+    /// original selected targets while nested loops share the promoted local.
     ///
     /// # Errors
     ///
@@ -251,7 +251,6 @@ impl TransientProcModule {
 
         let mut expressions = self.expressions.to_vec();
         let mut copyin_values = BTreeMap::new();
-        let mut copyback_values = BTreeMap::new();
         for (&signal, candidate) in &candidates {
             let definition = word
                 .signal(signal)
@@ -263,19 +262,10 @@ impl TransientProcModule {
                 source: region.source.clone(),
             });
             copyin_values.insert(signal, copyin);
-            if live_out.contains(&signal) {
-                let value = ProcExprId::from_index(expressions.len())?;
-                expressions.push(ProcExpr {
-                    ty: definition.ty,
-                    kind: ProcExprKind::LocalRead(candidate.local),
-                    source: region.source.clone(),
-                });
-                copyback_values.insert(signal, value);
-            }
         }
         self.expressions = expressions.into_boxed_slice();
 
-        let mut prepend = BTreeMap::<usize, Vec<TransientEffect>>::new();
+        let prepend = BTreeMap::<usize, Vec<TransientEffect>>::new();
         let mut append = BTreeMap::<usize, Vec<TransientEffect>>::new();
         let mut external_promotions = BTreeMap::<usize, ProcLocalId>::new();
         for predecessor in external_predecessors {
@@ -306,19 +296,14 @@ impl TransientProcModule {
                 });
             }
         }
-        let exit_effects = prepend.entry(region.exit.index()).or_default();
-        for (&signal, &value) in &copyback_values {
-            let candidate = candidates
-                .get(&signal)
-                .expect("copy-back signal has a promoted candidate");
-            exit_effects.push(TransientEffect {
-                mode: AssignmentMode::Blocking,
-                target: TransientTarget::signal(signal),
-                value,
-                source: self.locals[candidate.local.index()].source.clone(),
-            });
-        }
-        self.rebuild_effects(&natural, &candidates, &external_promotions, prepend, append)?;
+        self.rebuild_effects(
+            &natural,
+            &candidates,
+            &live_out,
+            &external_promotions,
+            prepend,
+            append,
+        )?;
         Ok(())
     }
 
@@ -920,6 +905,7 @@ impl TransientProcModule {
         &mut self,
         natural: &BTreeSet<usize>,
         candidates: &BTreeMap<SignalId, Candidate>,
+        live_out: &BTreeSet<SignalId>,
         external_promotions: &BTreeMap<usize, ProcLocalId>,
         mut prepend: BTreeMap<usize, Vec<TransientEffect>>,
         mut append: BTreeMap<usize, Vec<TransientEffect>>,
@@ -943,6 +929,9 @@ impl TransientProcModule {
                     && let TransientTarget::Signal { signal, select } = effect.target
                     && let Some(candidate) = candidates.get(&signal)
                 {
+                    if live_out.contains(&signal) {
+                        effects.push(effect.clone());
+                    }
                     effect.target = TransientTarget::Local {
                         local: candidate.local,
                         select,

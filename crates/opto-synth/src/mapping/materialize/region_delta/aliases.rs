@@ -4,7 +4,7 @@
 //! Lowered-Word bindings resolved against the frozen global substrate.
 
 use crate::mapping::RegionPlanBinding;
-use opto_ir::mapped::{ConnectionRef, NetId};
+use opto_ir::mapped::NetId;
 use opto_ir::word;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,15 +15,6 @@ mod tests;
 pub(crate) enum MappedValueSignal {
     Net(NetId),
     Constant(bool),
-}
-
-impl MappedValueSignal {
-    pub(crate) const fn connection(self) -> ConnectionRef {
-        match self {
-            Self::Net(net) => ConnectionRef::Net(net),
-            Self::Constant(value) => ConnectionRef::Constant(value),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -9,7 +9,9 @@
 //! target instances back into that model.
 
 use super::region_delta::{MappedValueSignal, WordMappedSignals};
-use super::{ArtifactCell, ArtifactSignal, target_pin_id};
+use super::{
+    ArtifactCell, ArtifactNetTable, ArtifactSignal, target_pin_id, validate_artifact_nets,
+};
 use crate::artifact::MappedCellSource;
 use crate::mapping::MappedCell;
 use crate::mapping::library::CombinationalCellCatalog;
@@ -25,8 +27,8 @@ use std::collections::BTreeSet;
 /// the artifact to its transaction.
 #[derive(Debug, Clone)]
 pub(crate) struct MappedSequentialArtifact {
+    nets: ArtifactNetTable,
     cells: Box<[ArtifactCell<MappedCellSource>]>,
-    internal_net_count: usize,
     referenced_nets: Box<[NetId]>,
 }
 
@@ -225,6 +227,12 @@ impl MappedSequentialArtifact {
                 }
             }
         }
+        validate_artifact_nets(
+            "sequential artifact",
+            &artifact.nets,
+            &artifact.cells,
+            &config.options.target_cells,
+        )?;
         Ok(artifact.finish())
     }
 
@@ -247,7 +255,7 @@ impl MappedSequentialArtifact {
         }
         let (_, cells) = super::append_artifact_cells(
             delta,
-            self.internal_net_count,
+            &self.nets,
             &self.cells,
             "sequential artifact references an unknown internal net",
             |cell, &source| (cell, source),
@@ -260,7 +268,7 @@ struct ArtifactBuilder<'a> {
     module: &'a word::WordModule,
     state_targets: Vec<Option<word::LValue>>,
     cells: Vec<ArtifactCell<MappedCellSource>>,
-    internal_net_count: usize,
+    nets: ArtifactNetTable,
 }
 
 struct LibraryContext<'a> {
@@ -290,7 +298,7 @@ impl<'a> ArtifactBuilder<'a> {
             module,
             state_targets,
             cells: Vec::new(),
-            internal_net_count: 0,
+            nets: ArtifactNetTable::default(),
         })
     }
 
@@ -302,7 +310,7 @@ impl<'a> ArtifactBuilder<'a> {
         owner: crate::RegionAnchorId,
         register: &word::RegisterOp,
     ) -> Result<(), crate::SynthError> {
-        let output = require_output(context.mapped_values, result)?;
+        let output = require_output(&mut self.nets, context.mapped_values, result)?;
         let source = MappedCellSource::Value {
             value: result,
             owner,
@@ -418,12 +426,13 @@ impl<'a> ArtifactBuilder<'a> {
             None,
         );
         let name = self.name(operation_id, "");
+        let output = require_output(&mut self.nets, context.mapped_values, result)?;
         self.push_library_cell(
             context,
             name,
             mapped,
             &[(1, enable_signal)],
-            &[(0, require_output(context.mapped_values, result)?)],
+            &[(0, output)],
             MappedCellSource::Value {
                 value: result,
                 owner,
@@ -441,10 +450,10 @@ impl<'a> ArtifactBuilder<'a> {
         context: &LibraryContext<'_>,
     ) -> Result<ArtifactSignal, crate::SynthError> {
         if !invert {
-            return Ok(ArtifactSignal::Mapped(signal));
+            return Ok(self.nets.signal(signal));
         }
         if let MappedValueSignal::Constant(value) = signal {
-            return Ok(ArtifactSignal::Mapped(MappedValueSignal::Constant(!value)));
+            return Ok(ArtifactSignal::Constant(!value));
         }
         let binding = context
             .combinational_catalog
@@ -499,15 +508,12 @@ impl<'a> ArtifactBuilder<'a> {
                 .saturating_add(mapped.output_connections.len()),
         );
         for (index, connection) in mapped.input_connections.iter().enumerate() {
-            let signal = override_at(input_overrides, index).map_or_else(
-                || {
-                    context
-                        .mapped_values
-                        .require(connection.value)
-                        .map(ArtifactSignal::Mapped)
-                },
-                Ok,
-            )?;
+            let signal = match override_at(input_overrides, index) {
+                Some(signal) => signal,
+                None => self
+                    .nets
+                    .signal(context.mapped_values.require(connection.value)?),
+            };
             connections.push((
                 connection.pin.clone(),
                 Some(target_pin_id(target, &connection.pin)?),
@@ -515,10 +521,10 @@ impl<'a> ArtifactBuilder<'a> {
             ));
         }
         for (index, connection) in mapped.output_connections.iter().enumerate() {
-            let signal = override_at(output_overrides, index).map_or_else(
-                || require_output(context.mapped_values, connection.value),
-                Ok,
-            )?;
+            let signal = match override_at(output_overrides, index) {
+                Some(signal) => signal,
+                None => require_output(&mut self.nets, context.mapped_values, connection.value)?,
+            };
             connections.push((
                 connection.pin.clone(),
                 Some(target_pin_id(target, &connection.pin)?),
@@ -536,12 +542,7 @@ impl<'a> ArtifactBuilder<'a> {
     }
 
     fn allocate_internal_net(&mut self) -> Result<ArtifactSignal, crate::SynthError> {
-        let index = self.internal_net_count;
-        self.internal_net_count = self
-            .internal_net_count
-            .checked_add(1)
-            .ok_or_else(|| crate::SynthError::capacity("sequential internal nets"))?;
-        Ok(ArtifactSignal::LocalNet(index))
+        self.nets.allocate_local()
     }
 
     /// Names one sequential cell.
@@ -563,21 +564,10 @@ impl<'a> ArtifactBuilder<'a> {
     }
 
     fn finish(self) -> MappedSequentialArtifact {
-        let mut referenced_nets = self
-            .cells
-            .iter()
-            .flat_map(|cell| cell.connections.iter())
-            .filter_map(|(_, _, signal)| match signal {
-                ArtifactSignal::Mapped(MappedValueSignal::Net(net)) => Some(*net),
-                ArtifactSignal::Mapped(MappedValueSignal::Constant(_))
-                | ArtifactSignal::LocalNet(_) => None,
-            })
-            .collect::<Vec<_>>();
-        referenced_nets.sort_unstable();
-        referenced_nets.dedup();
+        let referenced_nets = self.nets.external_nets().collect::<Vec<_>>();
         MappedSequentialArtifact {
+            nets: self.nets,
             cells: self.cells.into_boxed_slice(),
-            internal_net_count: self.internal_net_count,
             referenced_nets: referenced_nets.into_boxed_slice(),
         }
     }
@@ -602,11 +592,15 @@ fn require_scalar(
 }
 
 fn require_output(
+    nets: &mut ArtifactNetTable,
     mapped_values: &WordMappedSignals,
     value: word::ValueId,
 ) -> Result<ArtifactSignal, crate::SynthError> {
     match mapped_values.require(value)? {
-        MappedValueSignal::Net(net) => Ok(ArtifactSignal::Mapped(MappedValueSignal::Net(net))),
+        signal @ MappedValueSignal::Net(_) => {
+            let target = nets.signal(signal);
+            nets.claim_output(Some(target))
+        }
         MappedValueSignal::Constant(_) => Err(crate::SynthError::invariant(
             "sequential output resolved to a constant substrate signal",
         )),

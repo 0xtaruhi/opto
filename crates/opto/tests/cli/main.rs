@@ -891,7 +891,8 @@ fn rejects_multiple_procedural_drivers() {
 
     assert!(!output.status.success(), "{}", output_text(&output));
     assert!(
-        output_text(&output).contains("signal 'y' bit 0 has multiple drivers"),
+        output_text(&output)
+            .contains("signal 'y' ranges 0..1 and 0..1 have multiple drivers from procedures"),
         "{}",
         output_text(&output)
     );

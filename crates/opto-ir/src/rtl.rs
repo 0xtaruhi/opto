@@ -360,9 +360,26 @@ impl RtlModule {
                             .signal(claim.signal)
                             .and_then(|signal| signal.name)
                             .map_or("<unnamed>", |name| self.word.name_str(name));
+                        let first = self
+                            .procedures
+                            .procedure(previous.owner)
+                            .map_or_else(String::new, |procedure| {
+                                source_location(&procedure.source)
+                            });
+                        let second = self
+                            .procedures
+                            .procedure(claim.owner)
+                            .map_or_else(String::new, |procedure| {
+                                source_location(&procedure.source)
+                            });
                         return Err(RtlError::new(format!(
-                            "signal '{name}' bit {} has multiple drivers",
-                            claim.start
+                            "signal '{name}' ranges {}..{} and {}..{} have multiple drivers from procedures {:?}{first} and {:?}{second}",
+                            previous.start,
+                            previous.end,
+                            claim.start,
+                            claim.end,
+                            previous.owner,
+                            claim.owner
                         )));
                     }
                     previous.end = previous.end.max(claim.end);
@@ -997,7 +1014,11 @@ mod tests {
         }
 
         let error = RtlModule::new(word, procedures.seal().unwrap()).unwrap_err();
-        assert_eq!(error.to_string(), "signal 'q' bit 0 has multiple drivers");
+        assert!(
+            error.to_string().starts_with(
+                "signal 'q' ranges 0..1 and 0..1 have multiple drivers from procedures"
+            )
+        );
     }
 
     fn procedural_child() -> RtlModule {

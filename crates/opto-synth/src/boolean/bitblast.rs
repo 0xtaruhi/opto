@@ -108,76 +108,10 @@ impl LoweredRegionOwnership {
         self.owners[value.index()].get_or_insert(owner);
     }
 
-    pub(crate) fn owner(&self, value: word::ValueId) -> Option<crate::RegionRowId> {
-        self.owners.get(value.index()).copied().flatten()
-    }
-
     pub(crate) fn lowered_bits(&self, value: word::ValueId) -> Option<&[word::ValueId]> {
         self.lowered_values
             .get(value.index())
             .and_then(Option::as_deref)
-    }
-
-    pub(crate) fn infer_unowned(
-        &mut self,
-        module: &word::WordModule,
-    ) -> Result<(), crate::SynthError> {
-        self.owners.resize(module.values().len(), None);
-        let mut consumers = vec![Vec::new(); module.values().len()];
-        let signal_drivers = crate::word::signal_driver::SignalDriverIndex::new(module)?;
-        for operation in module.operations() {
-            for input in crate::word::operation_inputs(&operation.kind) {
-                consumers[input.index()].push(operation.result);
-            }
-        }
-        loop {
-            let mut inferred = Vec::new();
-            for operation in module.operations() {
-                if self.owner(operation.result).is_some() {
-                    continue;
-                }
-                let mut adjacent = crate::word::operation_inputs(&operation.kind)
-                    .into_iter()
-                    .filter_map(|input| self.owner(input))
-                    .chain(
-                        consumers[operation.result.index()]
-                            .iter()
-                            .filter_map(|&consumer| self.owner(consumer)),
-                    );
-                let Some(owner) = adjacent.next() else {
-                    continue;
-                };
-                if adjacent.all(|candidate| candidate == owner) {
-                    inferred.push((operation.result, owner));
-                }
-            }
-            for (index, value) in module.values().iter().enumerate() {
-                let value_id = word::ValueId::from_index(index).map_err(crate::SynthError::from)?;
-                if self.owner(value_id).is_some() {
-                    continue;
-                }
-                let word::ValueKind::Signal(reference) = value.kind else {
-                    continue;
-                };
-                let Some(drivers) = signal_drivers.resolve_reference(reference) else {
-                    continue;
-                };
-                let mut owners = drivers.into_iter().map(|(driver, _)| self.owner(driver));
-                let Some(Some(owner)) = owners.next() else {
-                    continue;
-                };
-                if owners.all(|candidate| candidate == Some(owner)) {
-                    inferred.push((value_id, owner));
-                }
-            }
-            if inferred.is_empty() {
-                break;
-            }
-            for (value, owner) in inferred {
-                self.set(value, owner)?;
-            }
-        }
-        Ok(())
     }
 
     fn capture_lowered_values(

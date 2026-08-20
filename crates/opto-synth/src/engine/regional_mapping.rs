@@ -112,6 +112,7 @@ impl RegionalMappingState<'_> {
 /// artifact without renumbering any surviving object.
 struct RegionalMappedState {
     netlist: opto_ir::mapped::MappedNetlist,
+    connectivity: materialize::FrozenObservableConnectivity,
     cell_sources: Vec<Option<MappedCellSource>>,
     implementation_census: Option<ImplementationCensus>,
     signals: WordMappedSignals,

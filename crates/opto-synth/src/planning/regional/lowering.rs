@@ -12,7 +12,7 @@ pub(crate) struct RegionalWordCone {
     pub(crate) module: word::WordModule,
     pub(crate) source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     pub(crate) boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
-    pub(crate) operation_sources: Box<[Option<word::OpId>]>,
+    pub(crate) operation_sources: super::LocalOperationProvenance,
     pub(crate) owned_memory_logic: Box<[RegionalMemoryLogicBinding]>,
     pub(crate) memory_states: Box<[RegionalMemoryStateBinding]>,
     pub(crate) root_bindings: Box<[(word::ValueId, word::SignalId)]>,
@@ -74,7 +74,7 @@ impl RegionalWordCone {
             module: word::WordModule::new(format!("{}$region{}", source.name(), region.raw())),
             source_to_local: BTreeMap::new(),
             boundary_bindings: Vec::new(),
-            operation_sources: Vec::new(),
+            operation_sources: super::LocalOperationProvenance::default(),
             visiting: BTreeSet::new(),
             import_path: Vec::new(),
             source_acyclic: false,
@@ -131,7 +131,7 @@ impl RegionalWordCone {
                 .map_err(crate::SynthError::from)?;
             root_bindings.extend(roots.into_iter().map(|root| (root, sink)));
         }
-        let imported_operation_count = importer.module.operations().len();
+        importer.operation_sources.seal_import(&importer.module)?;
         let selected_memories = memory_implementations
             .iter()
             .copied()
@@ -144,7 +144,7 @@ impl RegionalWordCone {
         )?;
         importer
             .operation_sources
-            .extend((imported_operation_count..importer.module.operations().len()).map(|_| None));
+            .inherit_appended(&importer.module)?;
         let mut owned_memory_logic = Vec::new();
         let mut memory_states = Vec::new();
         for (local_memory_index, &source_memory) in memories.iter().enumerate() {
@@ -186,7 +186,7 @@ impl RegionalWordCone {
             module: importer.module,
             source_to_local: importer.source_to_local,
             boundary_bindings: importer.boundary_bindings.into_boxed_slice(),
-            operation_sources: importer.operation_sources.into_boxed_slice(),
+            operation_sources: importer.operation_sources,
             owned_memory_logic: owned_memory_logic.into_boxed_slice(),
             memory_states: memory_states.into_boxed_slice(),
             root_bindings: root_bindings.into_boxed_slice(),
@@ -202,7 +202,7 @@ struct RegionalWordImporter<'a> {
     module: word::WordModule,
     source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     boundary_bindings: Vec<(word::ValueId, word::ValueId)>,
-    operation_sources: Vec<Option<word::OpId>>,
+    operation_sources: super::LocalOperationProvenance,
     visiting: BTreeSet<word::ValueId>,
     import_path: Vec<word::ValueId>,
     source_acyclic: bool,
@@ -365,8 +365,10 @@ mod tests {
 
         assert_eq!(module.operations().len(), 1);
         assert_eq!(
-            operations.as_ref(),
-            &[Some(word::OpId::from_index(0).unwrap())]
+            operations
+                .sources(word::OpId::from_index(0).unwrap())
+                .unwrap(),
+            [word::OpId::from_index(0).unwrap()]
         );
         assert!(values.contains_key(&left));
         assert!(values.contains_key(&first));
@@ -446,8 +448,10 @@ mod tests {
 
         assert_eq!(module.operations().len(), 1);
         assert_eq!(
-            operations.as_ref(),
-            &[Some(word::OpId::from_index(0).unwrap())]
+            operations
+                .sources(word::OpId::from_index(0).unwrap())
+                .unwrap(),
+            [word::OpId::from_index(0).unwrap()]
         );
         assert_eq!(
             module
@@ -528,12 +532,16 @@ mod tests {
 
         assert_eq!(module.operations().len(), 2);
         assert_eq!(
-            operation_sources[0],
-            Some(word::OpId::from_index(1).unwrap())
+            operation_sources
+                .sources(word::OpId::from_index(0).unwrap())
+                .unwrap(),
+            [word::OpId::from_index(1).unwrap()]
         );
         assert_eq!(
-            operation_sources[1],
-            Some(word::OpId::from_index(0).unwrap())
+            operation_sources
+                .sources(word::OpId::from_index(1).unwrap())
+                .unwrap(),
+            [word::OpId::from_index(0).unwrap()]
         );
     }
 
@@ -674,10 +682,10 @@ mod tests {
         ));
         assert_eq!(
             operation_sources
-                .iter()
-                .filter_map(|source| *source)
-                .collect::<Vec<_>>(),
-            vec![word::OpId::from_index(1).unwrap()]
+                .source_sets()
+                .flat_map(|sources| sources.iter().copied())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([word::OpId::from_index(1).unwrap()])
         );
         assert!(
             boundary_bindings
@@ -773,10 +781,17 @@ mod tests {
             word::ValueKind::Operation(_)
         ));
         assert_eq!(
-            operation_sources[0],
-            Some(word::OpId::from_index(0).unwrap())
+            operation_sources
+                .sources(word::OpId::from_index(0).unwrap())
+                .unwrap(),
+            [word::OpId::from_index(0).unwrap()]
         );
-        assert!(operation_sources[1..].iter().all(Option::is_none));
+        assert!(
+            operation_sources
+                .source_sets()
+                .skip(1)
+                .all(<[word::OpId]>::is_empty)
+        );
     }
 
     #[test]
@@ -1405,14 +1420,20 @@ mod tests {
                 word::SourceSpan::default(),
             )
             .unwrap();
-        let selected = source
-            .dynamic_extract(state_value, offset, 2, word::SourceSpan::default())
-            .unwrap();
+        let selected = [(); 2].map(|()| {
+            source
+                .dynamic_extract(state_value, offset, 2, word::SourceSpan::default())
+                .unwrap()
+        });
+        let selected_operations = selected.map(|value| match source.value(value).unwrap().kind {
+            word::ValueKind::Operation(operation) => operation,
+            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => unreachable!(),
+        });
         let low = source
-            .extract(selected, 0, 1, word::SourceSpan::default())
+            .extract(selected[0], 0, 1, word::SourceSpan::default())
             .unwrap();
         let high = source
-            .extract(selected, 1, 1, word::SourceSpan::default())
+            .extract(selected[1], 1, 1, word::SourceSpan::default())
             .unwrap();
         let feedback = source
             .binary(
@@ -1474,5 +1495,10 @@ mod tests {
                 .count(),
             2
         );
+        assert!(cone.operation_sources.source_sets().any(|sources| {
+            selected_operations
+                .iter()
+                .all(|operation| sources.contains(operation))
+        }));
     }
 }

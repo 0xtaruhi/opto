@@ -2515,7 +2515,7 @@ mod tests {
     }
 
     #[test]
-    fn cfg_promotion_owns_signal_recurrence_and_copyback_policy() {
+    fn cfg_promotion_keeps_live_out_writes_at_their_source_targets() {
         let mut word = WordModule::new("top");
         let state = word.add_wire("state", nibble(), span()).unwrap();
         let output = word
@@ -2628,10 +2628,15 @@ mod tests {
                 .unwrap()
                 .any(|effect| matches!(effect.target, TransientTarget::Local { .. }))
         );
-        assert!(promoted.block_effects(exit).unwrap().any(|effect| matches!(
-            effect.target,
-            TransientTarget::Signal { signal, .. } if signal == state
-        )));
+        assert!(
+            promoted
+                .block_effects(latch)
+                .unwrap()
+                .any(|effect| matches!(
+                    effect.target,
+                    TransientTarget::Signal { signal, .. } if signal == state
+                ))
+        );
         promoted
             .prove_and_eliminate_loops(&word, LoopAnalysisLimits::default())
             .unwrap();
