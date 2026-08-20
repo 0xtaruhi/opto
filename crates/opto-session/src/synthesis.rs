@@ -107,12 +107,13 @@ impl opto_synth::SynthesisPowerEvaluator for SessionSynthesisPowerEvaluator {
         runtime: &ExecutionContext,
         scenario: &Scenario,
         model: &opto_timing::TimingModel,
-        timing_nets: &opto_timing::TimingElectricalSnapshot,
+        electrical: &dyn Fn() -> Result<opto_timing::TimingElectricalSnapshot, String>,
     ) -> Result<Option<f64>, String> {
         let Some(annotations) = power_annotations(scenario, model)? else {
             return Ok(None);
         };
-        opto_power::PowerAnalysis::analyze(runtime, model, timing_nets, &annotations)
+        let timing_nets = electrical()?;
+        opto_power::PowerAnalysis::analyze(runtime, model, &timing_nets, &annotations)
             .map(|analysis| Some(analysis.summary().dynamic_watts()))
             .map_err(|error| error.to_string())
     }
@@ -122,6 +123,9 @@ fn power_annotations(
     scenario: &Scenario,
     model: &opto_timing::TimingModel,
 ) -> Result<Option<opto_power::ActivityAnnotations>, String> {
+    if scenario.power().activity_fingerprint().is_none() {
+        return Ok(None);
+    }
     let mut targets = Vec::new();
     for (target, activity) in scenario.power().activities() {
         let activity = opto_power::SwitchingActivity::new(

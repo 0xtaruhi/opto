@@ -14,6 +14,8 @@ pub trait SynthesisPowerEvaluator: Send + Sync {
     ///
     /// `None` means that the scenario lacks complete reliable activity or
     /// characterized power units. Implementations must not invent activity.
+    /// The evaluator invokes `electrical` only after establishing that those
+    /// cheaper prerequisites permit a measurement.
     ///
     /// # Errors
     ///
@@ -24,7 +26,7 @@ pub trait SynthesisPowerEvaluator: Send + Sync {
         runtime: &opto_runtime::ExecutionContext,
         scenario: &opto_timing::Scenario,
         model: &opto_timing::TimingModel,
-        electrical: &opto_timing::TimingElectricalSnapshot,
+        electrical: &dyn Fn() -> Result<opto_timing::TimingElectricalSnapshot, String>,
     ) -> Result<Option<f64>, String>;
 }
 
@@ -39,7 +41,7 @@ impl SynthesisPowerEvaluator for NoPowerEvaluation {
         _runtime: &opto_runtime::ExecutionContext,
         _scenario: &opto_timing::Scenario,
         _model: &opto_timing::TimingModel,
-        _electrical: &opto_timing::TimingElectricalSnapshot,
+        _electrical: &dyn Fn() -> Result<opto_timing::TimingElectricalSnapshot, String>,
     ) -> Result<Option<f64>, String> {
         Ok(None)
     }

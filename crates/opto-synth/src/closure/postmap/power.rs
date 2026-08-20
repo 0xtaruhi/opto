@@ -80,12 +80,11 @@ impl MmmcPower {
             })?;
             let dynamic_watts = self
                 .evaluator
-                .dynamic_power_watts(
-                    &self.runtime,
-                    scenario,
-                    timing.model(),
-                    &timing.electrical_snapshot()?,
-                )
+                .dynamic_power_watts(&self.runtime, scenario, timing.model(), &|| {
+                    timing
+                        .electrical_snapshot()
+                        .map_err(|error| error.to_string())
+                })
                 .map_err(crate::SynthError::Power)?;
             let dynamic_watts = crate::closure::validated_dynamic_power(
                 dynamic_watts,

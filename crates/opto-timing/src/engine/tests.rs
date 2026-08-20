@@ -159,7 +159,7 @@ fn incrementally_recomputes_cell_replacements_and_rollbacks() {
 }
 
 #[test]
-fn one_pin_edit_does_not_seed_an_unchanged_high_fanout_input() {
+fn local_edits_do_not_propagate_through_an_unchanged_high_fanout_input() {
     const BRANCHES: usize = 128;
     let library = TimingLibrary {
         cells: test_cells(vec![TimingCell {
@@ -232,6 +232,15 @@ fn one_pin_edit_does_not_seed_an_unchanged_high_fanout_input() {
             ))
             .unwrap();
 
+        let edit = incremental.apply_optimization_region_delta(delta).unwrap();
+        assert_eq!(edit.recomputed_nets(), 3);
+        incremental.rollback(edit).unwrap();
+        assert_eq!(incremental.quality_summary().unwrap(), before);
+
+        let mut delta = TimingRegionDelta::new();
+        delta
+            .remove_instance(TimingInstanceId::from_raw(0))
+            .unwrap();
         let edit = incremental.apply_optimization_region_delta(delta).unwrap();
         assert_eq!(edit.recomputed_nets(), 3);
         incremental.rollback(edit).unwrap();

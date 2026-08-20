@@ -1144,16 +1144,19 @@ re-cover feature must retain the complete frozen private IR and consume the
 same explicit ownership and binding provenance; reconstructing it from the
 global shell is forbidden.
 
-One incremental region edit reuses the retained topological order and its
-dependency plan whenever the edit adds no dependency edge and no net. Removing
-an arc cannot move a net earlier than a live predecessor, and a plan that still
-lists a removed edge is conservative rather than wrong: the traversal counts
-only dependencies it actually scheduled, so an extra edge recomputes a sink from
-its live predecessors instead of deadlocking on a dead one. Appending a net does
-force a rebuild, because the plan's position arena no longer covers the graph.
-Rebuilding is `O(nets + arcs)` per edit per timing view, so making it conditional
-is what keeps post-map candidate evaluation proportional to the edit rather than
-to the design. Cell resizing and constant-register removal both reuse the plan.
+One incremental region edit reuses the retained topological order, position
+index, and dependency plan whenever the edit adds no dependency edge and no
+net. Forward arrival propagation owns one sparse frontier ordered by the
+canonical position index. It journals and evaluates a seed first, then activates
+successors only when the published arrival row actually changes; it never
+materializes the seed's complete fanout cone or a second traversal order.
+Removing an arc cannot move a net earlier than a live predecessor, and a plan
+that still lists a removed edge is conservative rather than wrong. Appending a
+net does force a rebuild, because the position and dependency arenas no longer
+cover the graph. Rebuilding is `O(nets + arcs)` per edit per timing view, so
+making it conditional keeps post-map candidate evaluation proportional to its
+actual changed frontier. Cell resizing and constant-register removal both reuse
+the retained topology.
 
 There is one MMMC fact source, but acceptance authority is deliberately scoped
 to its decision domain. Initial mapping has one total `MappedObjective` used
@@ -1256,6 +1259,12 @@ the sizing pass that follows owns drive-strength selection. Candidate generation
 admits a bounded set of structural alternatives, including region-owned cells,
 and the shared transaction objective decides whether design rules, timing,
 power, and area justify each edit.
+
+The power evaluator owns the decision that a scenario has complete usable
+activity. Timing supplies its compact electrical snapshot through a lazy
+provider, so an unmeasurable scenario cannot trigger a full-net snapshot before
+the evaluator rejects it. A measurable scenario still receives one immutable,
+generation-stamped snapshot shared by every consumer in that transaction.
 
 A register whose reachable value is one constant is removed before that
 resynthesis. The proof substitutes the register's own outputs with their reset
@@ -1385,10 +1394,12 @@ ordered sparse overflow. Scalar optimization views allocate neither a path-ID
 column nor a predecessor arena. Owned row values exist only at worker,
 publication, and rollback-journal boundaries, and dependency publication writes
 the column stores directly instead of restoring a resident object-per-net
-container. Path compaction and deferred required-time synchronization reject a
-live region edit, so neither remapped path IDs nor a recomputed backward
-frontier can cross its rollback journal. Resident accounting charges actual
-column and overflow capacities, including optional tracked-path storage.
+container. The origin arena journals an identity at its overwrite authority,
+exactly once per transaction; newly interned identities roll back by truncating
+the same arena. Path compaction and deferred required-time synchronization
+reject a live region edit, so neither remapped path IDs nor a recomputed
+backward frontier can cross its rollback journal. Resident accounting charges
+actual column and overflow capacities, including optional tracked-path storage.
 
 Session object reconciliation follows the same rule. A replayable design
 inventory keeps only canonical `NameId`/u32 order vectors and derives pin full

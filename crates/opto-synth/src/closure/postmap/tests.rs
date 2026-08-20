@@ -117,9 +117,13 @@ impl crate::SynthesisPowerEvaluator for TestPowerEvaluator {
         _runtime: &ExecutionContext,
         scenario: &opto_timing::Scenario,
         _model: &TimingModel,
-        _electrical: &opto_timing::TimingElectricalSnapshot,
+        electrical: &dyn Fn() -> Result<opto_timing::TimingElectricalSnapshot, String>,
     ) -> Result<Option<f64>, String> {
-        Ok((!scenario.power().activities().is_empty()).then_some(1.0))
+        if scenario.power().activities().is_empty() {
+            return Ok(None);
+        }
+        electrical()?;
+        Ok(Some(1.0))
     }
 }
 

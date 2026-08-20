@@ -408,7 +408,33 @@ impl OriginArena {
         key: OriginKey,
         origin: ArrivalOrigin,
     ) -> Result<OriginId, crate::TimingError> {
+        self.intern_with_journal(key, origin, None)
+    }
+
+    pub(super) fn intern_journaled(
+        &mut self,
+        key: OriginKey,
+        origin: ArrivalOrigin,
+        journal: &mut OriginJournal<'_>,
+    ) -> Result<OriginId, crate::TimingError> {
+        self.intern_with_journal(key, origin, Some(journal))
+    }
+
+    fn intern_with_journal(
+        &mut self,
+        key: OriginKey,
+        origin: ArrivalOrigin,
+        journal: Option<&mut OriginJournal<'_>>,
+    ) -> Result<OriginId, crate::TimingError> {
         if let Some(&id) = self.ids.get(&key) {
+            if let Some(journal) = journal
+                && (id.0 as usize) < journal.original_len
+                && journal.seen.insert(id)
+            {
+                journal
+                    .entries
+                    .push((id, self.values[id.0 as usize].clone()));
+            }
             self.values[id.0 as usize] = origin;
             return Ok(id);
         }
@@ -441,6 +467,29 @@ impl OriginArena {
         }
         self.values.truncate(len);
         self.ids.retain(|_, id| (id.0 as usize) < len);
+    }
+}
+
+/// Records the first pre-edit value of each overwritten stable identity.
+///
+/// Identities appended after `original_len` are restored by arena truncation
+/// and therefore must not acquire redundant value entries.
+pub(super) struct OriginJournal<'a> {
+    original_len: usize,
+    seen: BTreeSet<OriginId>,
+    entries: &'a mut Vec<(OriginId, ArrivalOrigin)>,
+}
+
+impl<'a> OriginJournal<'a> {
+    pub(super) fn new(
+        original_len: usize,
+        entries: &'a mut Vec<(OriginId, ArrivalOrigin)>,
+    ) -> Self {
+        Self {
+            original_len,
+            seen: BTreeSet::new(),
+            entries,
+        }
     }
 }
 
