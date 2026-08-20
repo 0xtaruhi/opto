@@ -109,8 +109,16 @@ impl LocalOperationProvenance {
         module: &word::WordModule,
         rewrites: &[crate::planning::operator::OperationRewrite],
     ) -> Result<(), crate::SynthError> {
-        self.inherit_appended(module)?;
+        let mut next = self.rows.len();
         for rewrite in rewrites {
+            if rewrite.created.start != next
+                || rewrite.created.start >= rewrite.created.end
+                || rewrite.created.end > module.operations().len()
+            {
+                return Err(crate::SynthError::invariant(
+                    "SSA replacement suffixes do not densely cover appended operations",
+                ));
+            }
             let mut sources = Vec::new();
             for &operation in &rewrite.replaced {
                 sources.extend(self.sources(operation).ok_or_else(|| {
@@ -121,9 +129,45 @@ impl LocalOperationProvenance {
             }
             for index in rewrite.created.clone() {
                 let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
-                self.merge(operation, sources.iter().copied())?;
+                self.set(operation, sources.iter().copied())?;
+            }
+            next = rewrite.created.end;
+        }
+        if next != module.operations().len() {
+            return Err(crate::SynthError::invariant(
+                "SSA replacements do not cover the complete appended operation suffix",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Applies the sole operation-ID remap committed by Word compaction.
+    pub(crate) fn remap(&mut self, remap: &word::NetlistRemap) -> Result<(), crate::SynthError> {
+        if remap.old_operation_count() != self.rows.len() {
+            return Err(crate::SynthError::invariant(
+                "operation provenance does not align with the compacted SSA arena",
+            ));
+        }
+        let mut rows = vec![None; remap.operation_count()];
+        for (index, row) in std::mem::take(&mut self.rows).into_iter().enumerate() {
+            let old = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+            let Some(new) = remap.operation(old) else {
+                continue;
+            };
+            if rows[new.index()].replace(row).is_some() {
+                return Err(crate::SynthError::invariant(
+                    "operation provenance remap is not one-to-one",
+                ));
             }
         }
+        self.rows = rows
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "operation provenance remap does not cover the compacted arena",
+                )
+            })?;
         Ok(())
     }
 

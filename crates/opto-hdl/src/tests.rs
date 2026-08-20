@@ -2389,6 +2389,38 @@ fn primary_files_are_independent_source_units_in_serial_and_parallel() {
 }
 
 #[test]
+fn explicit_compilation_unit_carries_preprocessor_state_in_file_order() {
+    let first = TestSource::new(
+        "compilation-unit-first.sv",
+        "`define SHARED_WIDTH 5\nmodule width_source; endmodule\n",
+    );
+    let second = TestSource::new(
+        "compilation-unit-second.sv",
+        "module top(input logic [`SHARED_WIDTH-1:0] a, \
+         output logic [`SHARED_WIDTH-1:0] y); assign y = a; endmodule\n",
+    );
+    let files = vec![first.path.clone(), second.path.clone()];
+    let options = FrontendOptions {
+        top: Some("top".to_string()),
+        compilation_unit: true,
+        ..FrontendOptions::default()
+    };
+    let run = |threads| {
+        let runtime = opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig {
+            max_threads: threads,
+        })
+        .unwrap();
+        Frontend::read_verilog(&files, &options, &runtime).unwrap()
+    };
+
+    let serial = run(1);
+    let parallel = run(4);
+    assert_eq!(parallel.modules[0].word().ports()[0].ty.width(), 5);
+    assert_eq!(parallel.modules[0].word().ports()[1].ty.width(), 5);
+    assert_eq!(parallel.modules, serial.modules);
+}
+
+#[test]
 fn missing_top_is_an_error() {
     let source = TestSource::new("missing-top.sv", "module actual; endmodule\n");
     let err = Frontend::read_verilog(

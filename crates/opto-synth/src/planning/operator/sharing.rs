@@ -13,6 +13,7 @@ use std::ops::Range;
 pub(crate) struct OperationRewrite {
     pub(crate) created: Range<usize>,
     pub(crate) replaced: Box<[word::OpId]>,
+    pub(crate) replacement: word::ValueId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

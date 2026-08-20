@@ -29,6 +29,24 @@ mod dynamic;
 mod operations;
 
 #[test]
+fn bitblast_consumes_deep_word_ssa_in_topological_order() {
+    const DEPTH: usize = 8_192;
+
+    let mut module = word::WordModule::new("deep_topological_bitblast");
+    let input = add_input(&mut module, "a", 1);
+    let mut value = read_port(&mut module, input);
+    for _ in 0..DEPTH {
+        value = module
+            .unary(word::UnaryOp::BitNot, value, word::SourceSpan::default())
+            .unwrap();
+    }
+    add_output(&mut module, "y", 1, value);
+
+    bitblast_area(&mut module).unwrap();
+    module.validate().unwrap();
+}
+
+#[test]
 fn axm_eliminates_care_free_operands_without_creating_logic() {
     let mut module = word::WordModule::new("care_free_axm_operand");
     let input = add_input(&mut module, "input", 1);

@@ -179,6 +179,7 @@ fn reconnect_updates_intrusive_adjacency_and_rollback_restores_order() {
     delta.reconnect_pin(pins[0], ConnectionRef::Net(y)).unwrap();
 
     let applied = netlist.apply_region_delta(delta).unwrap();
+    assert_eq!(applied.renamed_nets().count(), 0);
     assert_eq!(netlist.pins_on_net(a).unwrap().count(), 0);
     assert_eq!(
         netlist.pins_on_net(y).unwrap().collect::<Vec<_>>(),
@@ -194,6 +195,24 @@ fn reconnect_updates_intrusive_adjacency_and_rollback_restores_order() {
         netlist.pins_on_net(y).unwrap().collect::<Vec<_>>(),
         before_y
     );
+}
+
+#[test]
+fn applied_delta_separates_net_renames_from_adjacency_changes() {
+    let (mut netlist, cell, a, y) = fixture();
+    let snapshot = netlist.snapshot_region([cell], [a, y]).unwrap();
+    let mut delta = RegionDelta::new(snapshot);
+    delta.rename_net(a, Some("a".to_string())).unwrap();
+
+    let unchanged = netlist.apply_region_delta(delta).unwrap();
+    assert_eq!(unchanged.renamed_nets().count(), 0);
+    netlist.rollback_region_delta(unchanged).unwrap();
+
+    let snapshot = netlist.snapshot_region([], [a]).unwrap();
+    let mut delta = RegionDelta::new(snapshot);
+    delta.rename_net(a, Some("input".to_string())).unwrap();
+    let renamed = netlist.apply_region_delta(delta).unwrap();
+    assert_eq!(renamed.renamed_nets().collect::<Vec<_>>(), vec![a]);
 }
 
 #[test]

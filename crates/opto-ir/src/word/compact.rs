@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Reachability compaction for word-level value and operation arenas.
+//! Reachability compaction and topological restoration for Word SSA arenas.
 //!
 //! Structural outputs, instance bindings, and memory controls are roots.
-//! Compaction computes a complete old-to-new mapping and rewrites every stored
-//! reference atomically before replacing the dense arenas.
+//! Compaction computes one complete old-to-new mapping, restores the value
+//! arena's topological order, and rewrites every stored reference atomically.
 
 use super::{
     AnnotationTarget, MemoryReadPort, MemoryReadTiming, MemoryWritePort, OpId, OpKind, SignalId,
@@ -64,11 +64,12 @@ impl NetlistRemap {
 }
 
 impl WordModule {
-    /// Removes unreachable values and operations and densely renumbers survivors.
+    /// Removes unreachable values and topologically renumbers survivors.
     ///
     /// Roots include structural connects, instance inputs, memory addresses,
-    /// clocks, enables, data, and masks. Every stored reference is rewritten
-    /// before the old arenas are discarded.
+    /// clocks, enables, data, and masks. Stable topological renumbering restores
+    /// the SSA arena contract after a transaction appends replacements. Every
+    /// stored reference is rewritten before the old arenas are discarded.
     ///
     /// # Errors
     ///
@@ -153,26 +154,36 @@ impl WordModule {
                 .for_each_input(|input| pending.push(input));
         }
 
-        let value_remap = dense_remap(&reachable_values, "RTL value", ValueId::from_index)?;
-        let operation_remap =
-            dense_remap(&reachable_operations, "RTL operation", OpId::from_index)?;
-        let mut values = Vec::with_capacity(reachable_values.iter().filter(|&&keep| keep).count());
-        for (index, mut value) in std::mem::take(&mut self.values).into_iter().enumerate() {
-            if !reachable_values[index] {
-                continue;
-            }
+        let DenseTopologicalRemap {
+            value_remap,
+            operation_remap,
+            value_order,
+            operation_order,
+        } = dense_topological_remap(self, &reachable_values, &reachable_operations)?;
+        let mut old_values = std::mem::take(&mut self.values)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let mut values = Vec::with_capacity(value_order.len());
+        for index in value_order {
+            let mut value = old_values[index]
+                .take()
+                .ok_or_else(|| WordError::new("topological value order contains a duplicate"))?;
             if let ValueKind::Operation(operation) = &mut value.kind {
                 *operation = remap_operation(*operation, &operation_remap)?;
             }
             values.push(value);
         }
 
-        let mut operations =
-            Vec::with_capacity(reachable_operations.iter().filter(|&&keep| keep).count());
-        for (index, mut operation) in std::mem::take(&mut self.operations).into_iter().enumerate() {
-            if !reachable_operations[index] {
-                continue;
-            }
+        let mut old_operations = std::mem::take(&mut self.operations)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let mut operations = Vec::with_capacity(operation_order.len());
+        for index in operation_order {
+            let mut operation = old_operations[index].take().ok_or_else(|| {
+                WordError::new("topological operation order contains a duplicate")
+            })?;
             remap_operation_kind(&mut operation.kind, &value_remap)?;
             operation.result = remap_value(operation.result, &value_remap)?;
             operations.push(operation);
@@ -372,23 +383,93 @@ fn write_port_values(port: &MemoryWritePort) -> impl Iterator<Item = ValueId> {
     .flatten()
 }
 
-fn dense_remap<T: Copy>(
-    reachable: &[bool],
-    kind: &str,
-    make_id: impl Fn(usize) -> Result<T, WordError>,
-) -> Result<Vec<Option<T>>, WordError> {
-    let mut next = 0usize;
-    let mut remap = vec![None; reachable.len()];
-    for (index, &keep) in reachable.iter().enumerate() {
-        if !keep {
+struct DenseTopologicalRemap {
+    value_remap: Vec<Option<ValueId>>,
+    operation_remap: Vec<Option<OpId>>,
+    value_order: Vec<usize>,
+    operation_order: Vec<usize>,
+}
+
+fn dense_topological_remap(
+    module: &WordModule,
+    reachable_values: &[bool],
+    reachable_operations: &[bool],
+) -> Result<DenseTopologicalRemap, WordError> {
+    let mut value_remap = vec![None; module.values.len()];
+    let mut operation_remap = vec![None; module.operations.len()];
+    let mut value_order = Vec::with_capacity(reachable_values.iter().filter(|&&keep| keep).count());
+    let mut operation_order =
+        Vec::with_capacity(reachable_operations.iter().filter(|&&keep| keep).count());
+    let mut state = vec![0u8; module.values.len()];
+    let mut stack = Vec::new();
+    for start in 0..module.values.len() {
+        if !reachable_values[start] || state[start] == 2 {
             continue;
         }
-        remap[index] = Some(make_id(next)?);
-        next = next
-            .checked_add(1)
-            .ok_or_else(|| WordError::new(format!("exhausted {kind} ID space")))?;
+        stack.push((start, false));
+        while let Some((index, finish)) = stack.pop() {
+            if finish {
+                if state[index] != 1 {
+                    return Err(WordError::new("RTL topological traversal lost its state"));
+                }
+                state[index] = 2;
+                value_remap[index] = Some(ValueId::from_index(value_order.len())?);
+                value_order.push(index);
+                if let ValueKind::Operation(operation) = module.values[index].kind {
+                    operation_remap[operation.index()] =
+                        Some(OpId::from_index(operation_order.len())?);
+                    operation_order.push(operation.index());
+                }
+                continue;
+            }
+            match state[index] {
+                2 => continue,
+                1 => return Err(WordError::new("RTL value dependencies contain a cycle")),
+                0 => state[index] = 1,
+                _ => return Err(WordError::new("RTL topological state is invalid")),
+            }
+            stack.push((index, true));
+            let ValueKind::Operation(operation) = module.values[index].kind else {
+                continue;
+            };
+            let stored = module.operations.get(operation.index()).ok_or_else(|| {
+                WordError::new("reachable RTL value references an unknown operation")
+            })?;
+            if stored.result.index() != index
+                || !reachable_operations
+                    .get(operation.index())
+                    .copied()
+                    .unwrap_or(false)
+            {
+                return Err(WordError::new(
+                    "reachable RTL value disagrees with its producing operation",
+                ));
+            }
+            let mut inputs = Vec::new();
+            stored
+                .kind
+                .for_each_input(|input| inputs.push(input.index()));
+            for input in inputs.into_iter().rev() {
+                if !reachable_values.get(input).copied().unwrap_or(false) {
+                    return Err(WordError::new(
+                        "reachable RTL operation has an unreachable input",
+                    ));
+                }
+                stack.push((input, false));
+            }
+        }
     }
-    Ok(remap)
+    if operation_order.len() != reachable_operations.iter().filter(|&&keep| keep).count() {
+        return Err(WordError::new(
+            "reachable operation arena disagrees with reachable values",
+        ));
+    }
+    Ok(DenseTopologicalRemap {
+        value_remap,
+        operation_remap,
+        value_order,
+        operation_order,
+    })
 }
 
 fn remap_id<T: Copy>(index: usize, remap: &[Option<T>], kind: &str) -> Result<T, WordError> {
@@ -560,5 +641,48 @@ mod tests {
                 == AnnotationTarget::Operation(remap.operation(live_operation).unwrap())
                 && module.name_str(annotation.name) == "live_operation"
         }));
+    }
+
+    #[test]
+    fn restores_topological_order_after_transactional_forward_rewrite() {
+        let mut module = WordModule::new("top");
+        let ty = WordType::bits(1).unwrap();
+        let input = module
+            .add_port("input", PortDirection::Input, ty, SourceSpan::default())
+            .unwrap();
+        let output = module
+            .add_port("output", PortDirection::Output, ty, SourceSpan::default())
+            .unwrap();
+        let input = module
+            .read_signal(module.port(input).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let earlier = module
+            .unary(UnaryOp::BitNot, input, SourceSpan::default())
+            .unwrap();
+        let later = module
+            .unary(UnaryOp::LogicalNot, input, SourceSpan::default())
+            .unwrap();
+        let ValueKind::Operation(earlier_operation) = module.value(earlier).unwrap().kind else {
+            panic!("unary result must reference an operation");
+        };
+        let OpKind::Unary { arg, .. } = &mut module.operation_mut(earlier_operation).unwrap().kind
+        else {
+            panic!("unary operation changed kind");
+        };
+        *arg = later;
+        module
+            .connect(
+                LValue::signal(module.port(output).unwrap().signal),
+                earlier,
+                SourceSpan::default(),
+            )
+            .unwrap();
+        assert!(module.validate().is_err());
+
+        let remap = module.compact_netlist().unwrap();
+
+        module.validate().unwrap();
+        assert!(remap.value(later).unwrap().index() < remap.value(earlier).unwrap().index());
+        assert_eq!(remap.operation(earlier_operation).unwrap().index(), 1);
     }
 }

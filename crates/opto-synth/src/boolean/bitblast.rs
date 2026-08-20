@@ -172,6 +172,7 @@ pub(crate) fn bitblast_module_with_regions(
         freeze_publication_contract(module, operation_regions, regional_publication, scope)?;
     let observability =
         crate::word::uses::netlist_observability_with_values(module, required_values)?;
+    let lowering_order = observable_operation_results(module, plan, &observability)?;
     let connects = module.take_connects();
     let instance_connections = crate::word::instances::snapshot(module);
     let mut blaster = BitBlaster::<WordBackend>::new(
@@ -188,6 +189,12 @@ pub(crate) fn bitblast_module_with_regions(
             publication_contract,
         },
     )?;
+    // Word operation order is the canonical SSA topology. Materializing the
+    // live prefix in that order keeps dependency lookup cache-only for ordinary
+    // operation edges instead of making call-stack depth depend on RTL depth.
+    for value in lowering_order {
+        blaster.value(value)?;
+    }
     for (index, connect) in connects.into_iter().enumerate() {
         if !observability.observes_connect(index)? {
             continue;
@@ -254,6 +261,11 @@ pub(crate) fn lower_local_region_boolean(
     } = request;
     operators.validate_decisions(plan, module.operations().len())?;
     let operation_regions = vec![Some(owner); module.operations().len()];
+    let mut observed_values = roots.to_vec();
+    observed_values.extend_from_slice(tracked_values);
+    let observability =
+        crate::word::uses::netlist_observability_with_values(module, &observed_values)?;
+    let lowering_order = observable_operation_results(module, plan, &observability)?;
     let mut blaster = BitBlaster::<AxmBackend>::new(
         module,
         BitBlasterRequest {
@@ -268,6 +280,9 @@ pub(crate) fn lower_local_region_boolean(
             publication_contract: FrozenPublicationContract::default(),
         },
     )?;
+    for value in lowering_order {
+        blaster.value(value)?;
+    }
     for &root in roots {
         blaster.value(root)?;
     }
@@ -361,6 +376,28 @@ pub(crate) fn lower_local_region_boolean(
             inputs,
         },
     })
+}
+
+fn observable_operation_results(
+    module: &word::WordModule,
+    plan: &ArchitectureDecisions,
+    observability: &crate::word::uses::NetlistObservability,
+) -> Result<Vec<word::ValueId>, crate::SynthError> {
+    let mut order = Vec::new();
+    for (index, operation) in module.operations().iter().enumerate() {
+        let id = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
+        let is_operator_root = plan
+            .operator_for_source_operation(id)
+            .and_then(|operator| plan.operator(operator))
+            .is_none_or(|operator| operator.result() == operation.result);
+        if is_operator_root
+            && !matches!(operation.kind, word::OpKind::TriState { .. })
+            && observability.observes_value(operation.result)?
+        {
+            order.push(operation.result);
+        }
+    }
+    Ok(order)
 }
 
 fn binding_represents_original_bit(

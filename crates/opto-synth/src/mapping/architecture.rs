@@ -108,6 +108,85 @@ fn remap_private_values(
     }
 }
 
+fn commit_operation_rewrites(
+    module: &mut word::WordModule,
+    rewrites: &[crate::planning::operator::OperationRewrite],
+    operation_sources: &mut crate::planning::regional::LocalOperationProvenance,
+    source_to_local: &mut BTreeMap<word::ValueId, word::ValueId>,
+    boundary_bindings: &mut [(word::ValueId, word::ValueId)],
+    owned_memory_logic: &mut [RegionalMemoryLogicBinding],
+    memory_states: &mut [RegionalMemoryStateBinding],
+) -> Result<(), SynthError> {
+    if rewrites.is_empty() && module.validate().is_ok() {
+        return Ok(());
+    }
+    let mut replacements = BTreeMap::new();
+    for rewrite in rewrites {
+        for &operation in &rewrite.replaced {
+            let result = module
+                .operation(operation)
+                .ok_or_else(|| {
+                    SynthError::invariant("SSA rewrite references an unknown operation")
+                })?
+                .result;
+            replacements.insert(result, rewrite.replacement);
+        }
+    }
+    let resolve = |mut value: word::ValueId| -> Result<word::ValueId, SynthError> {
+        for _ in 0..=replacements.len() {
+            let Some(&replacement) = replacements.get(&value) else {
+                return Ok(value);
+            };
+            value = replacement;
+        }
+        Err(SynthError::invariant(
+            "SSA rewrite side-database replacements contain a cycle",
+        ))
+    };
+    for local in source_to_local
+        .values_mut()
+        .chain(boundary_bindings.iter_mut().map(|(_, local)| local))
+    {
+        *local = resolve(*local)?;
+    }
+    for binding in owned_memory_logic.iter_mut() {
+        binding.local = resolve(binding.local)?;
+    }
+    for binding in memory_states.iter_mut() {
+        binding.local = resolve(binding.local)?;
+    }
+    let roots = source_to_local
+        .values()
+        .copied()
+        .chain(boundary_bindings.iter().map(|&(_, local)| local))
+        .chain(owned_memory_logic.iter().map(|binding| binding.local))
+        .chain(memory_states.iter().map(|binding| binding.local))
+        .collect::<Vec<_>>();
+    let remap = module
+        .compact_netlist_with_roots(&roots)
+        .map_err(SynthError::from)?;
+    let map = |value: &mut word::ValueId| -> Result<(), SynthError> {
+        *value = remap.value(*value).ok_or_else(|| {
+            SynthError::invariant("SSA transaction dropped a retained side-database value")
+        })?;
+        Ok(())
+    };
+    for local in source_to_local
+        .values_mut()
+        .chain(boundary_bindings.iter_mut().map(|(_, local)| local))
+    {
+        map(local)?;
+    }
+    for binding in owned_memory_logic {
+        map(&mut binding.local)?;
+    }
+    for binding in memory_states {
+        map(&mut binding.local)?;
+    }
+    operation_sources.remap(&remap)?;
+    module.validate().map_err(SynthError::from)
+}
+
 /// Builds every selected construction in a task-local Word module and publishes
 /// only its portable plan and source binding.
 #[expect(
@@ -709,6 +788,15 @@ impl RegionArchitectureMaterializer<'_, '_> {
         );
         let rewrites = crate::planning::operator::share_muxed_arithmetic(&mut module)?;
         operation_sources.apply_rewrites(&module, &rewrites)?;
+        commit_operation_rewrites(
+            &mut module,
+            &rewrites,
+            &mut operation_sources,
+            &mut source_to_local,
+            &mut boundary_bindings,
+            &mut owned_memory_logic,
+            &mut memory_states,
+        )?;
         if !rewrites.is_empty() {
             let local_changes =
                 crate::planning::dataflow::canonicalize_combinational_dataflow(&mut module)?;
@@ -719,6 +807,15 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 &mut owned_memory_logic,
                 &mut memory_states,
             );
+            commit_operation_rewrites(
+                &mut module,
+                &[],
+                &mut operation_sources,
+                &mut source_to_local,
+                &mut boundary_bindings,
+                &mut owned_memory_logic,
+                &mut memory_states,
+            )?;
         }
         operation_sources.inherit_appended(&module)?;
         crate::api::diagnostics::trace!(

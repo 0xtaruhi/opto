@@ -199,6 +199,7 @@ impl MappedNetlist {
             names,
             added_nets,
             added_cells,
+            renamed_nets: BTreeSet::new(),
         };
 
         for operation in operations {
@@ -317,12 +318,21 @@ impl MappedNetlist {
                 }
                 ResolvedOperation::RenameNet { net, name } => {
                     save_net(self, &mut applied, net);
+                    applied.renamed_nets.insert(net);
                     let slot = &mut self.nets[net.index()];
                     slot.name = name.map(|name| interned[&name]);
                     slot.version = next_revision;
                 }
             }
         }
+        applied.renamed_nets.retain(|net| {
+            let old = applied
+                .old_nets
+                .get(net)
+                .expect("renamed nets are saved before mutation");
+            let current = &self.nets[net.index()];
+            current.live && old.name != current.name
+        });
         self.live_net_count = next_net_count;
         self.live_cell_count = next_cell_count;
         self.edit_revision = next_revision;

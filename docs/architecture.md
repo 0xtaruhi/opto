@@ -1369,6 +1369,14 @@ Closure endpoint adjacency uses the same packed-row representation for both
 net and stable-instance lookups. Region edits materialize only touched rows and
 retain stable typed endpoint IDs across rollback.
 
+Mapped region transactions keep three distinct footprints: the optimistic
+read set in `RegionSnapshot`, the exact changed cell/net set in
+`AppliedRegionDelta`, and the subset of nets whose names changed. Timing
+invalidation is derived from changed instance payloads, while only a renamed
+net expands through all incident cells to refresh name-based bindings. Rollback
+journals and unchanged pins are never propagation seeds; this keeps a local pin
+edit local even when another pin of the same cell is a whole-design fanout.
+
 Each timing view keeps propagated arrival and required state in
 `ArrivalSlotStore` and `RequiredSlotStore`. A checked u32 slot identifies one
 net edge; the common first state lives in dense SoA tag/origin/value columns,
@@ -1628,7 +1636,11 @@ defect.
   RFC 0010 is the normative command-design policy.
 - **One HDL frontend lifecycle.** Rust and Tcl callers ingest source units and
   then elaborate a named top. Test fixtures use that same two-stage path; no
-  one-shot parse-and-publish frontend remains alongside it.
+  one-shot parse-and-publish frontend remains alongside it. Primary files are
+  independent SystemVerilog compilation units by default. A single
+  `read_hdl -compilation_unit` invocation explicitly groups its ordered files
+  into one compilation unit when macro state must cross primary-file
+  boundaries; separate invocations remain separate units.
 - **Command failures remain failures.** `read_sdc` rolls back the constraint
   checkpoint and raises a Tcl error when any command in the file fails. The
   caller cannot accidentally continue after a malformed or unsupported
