@@ -12,25 +12,12 @@ enum OperandImport {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ScaledDynamicExtractBit {
+struct DynamicBarrel {
+    source: word::OpId,
     value: word::ValueId,
-    selector: word::ValueId,
-    scale: u128,
-    maximum_selector: u128,
-    width: u32,
-    bit: u32,
-}
-
-fn dynamic_choice_bounds(
-    range: Option<word::UnsignedValueRange>,
-    available_offsets: u32,
-) -> (u128, u128) {
-    (
-        range.map_or(0, word::UnsignedValueRange::minimum),
-        range.map_or(u128::from(available_offsets), |range| {
-            range.maximum().min(u128::from(available_offsets))
-        }),
-    )
+    offset: word::ValueId,
+    input_width: u32,
+    maximum_offset: u32,
 }
 
 impl RegionalWordImporter<'_> {
@@ -423,7 +410,7 @@ impl RegionalWordImporter<'_> {
                     )?;
                     return self.extract_local_bit(local, bit, span);
                 }
-                let operation = self
+                let operation_kind = self
                     .source
                     .operation(operation)
                     .map(|operation| operation.kind.clone())
@@ -432,7 +419,7 @@ impl RegionalWordImporter<'_> {
                             "active region-local bit references an unknown operation",
                         )
                     })?;
-                self.import_active_operation_bit(operation, bit, span)
+                self.import_active_operation_bit(operation, operation_kind, bit, span)
             }
             word::ValueKind::Constant(_) | word::ValueKind::Operation(_) => {
                 let local =
@@ -444,6 +431,7 @@ impl RegionalWordImporter<'_> {
 
     fn import_active_operation_bit(
         &mut self,
+        source: word::OpId,
         operation: word::OpKind,
         bit: u32,
         span: &word::SourceSpan,
@@ -569,159 +557,161 @@ impl RegionalWordImporter<'_> {
                     } else {
                         self.constant_bit(false, span)
                     }
-                } else if let Some(crate::word::ScaledDynamicOffset {
-                    selector,
-                    scale,
-                    maximum_selector,
-                }) =
-                    crate::word::scaled_dynamic_offset(self.source, &mut self.known_bits, offset)
-                {
-                    self.import_scaled_dynamic_extract_bit(
-                        ScaledDynamicExtractBit {
-                            value,
-                            selector,
-                            scale,
-                            maximum_selector,
-                            width: width.get(),
-                            bit,
-                        },
-                        span,
-                    )
                 } else {
-                    self.import_variable_dynamic_extract_bit(value, offset, width.get(), bit, span)
+                    self.import_dynamic_extract_bit(source, value, offset, width.get(), bit, span)
                 }
             }
-            operation => {
-                let local = self.import_operation_kind(&operation, span, OperandImport::Bits)?;
-                self.extract_local_bit(local, bit, span)
-            }
+            operation => self.import_shared_active_operation_bit(source, &operation, bit, span),
         }
     }
 
-    fn import_scaled_dynamic_extract_bit(
+    fn import_shared_active_operation_bit(
         &mut self,
-        selection: ScaledDynamicExtractBit,
+        source: word::OpId,
+        operation: &word::OpKind,
+        bit: u32,
         span: &word::SourceSpan,
     ) -> Result<word::ValueId, crate::SynthError> {
-        let ScaledDynamicExtractBit {
-            value,
-            selector,
-            scale,
-            maximum_selector,
-            width,
-            bit,
-        } = selection;
-        let selector_ty = self.source_value_type(selector)?;
-        let local_selector = self.import_dynamic_selector(selector, selector_ty, span)?;
-        let input_width = self.source_value_type(value)?.width();
-        let available_offsets = input_width.checked_sub(width).ok_or_else(|| {
-            crate::SynthError::invariant("scaled dynamic extract width exceeds its input")
-        })?;
-        let maximum_selector = maximum_selector.min(u128::from(available_offsets) / scale);
-        let mut result = self.constant_bit(false, span)?;
-        for choice in (0..=maximum_selector).rev() {
-            let offset = choice.checked_mul(scale).ok_or_else(|| {
-                crate::SynthError::invariant("scaled dynamic extract offset overflow")
-            })?;
-            let selected = offset.checked_add(u128::from(bit)).ok_or_else(|| {
-                crate::SynthError::invariant("scaled dynamic extract selected bit overflow")
-            })?;
-            let selected = self.import_value_bit(
-                value,
-                u32::try_from(selected).map_err(|_| {
-                    crate::SynthError::capacity("scaled dynamic extract selected bit")
-                })?,
-                span,
-            )?;
-            let matches = self.import_dynamic_choice_match(
-                selector,
-                local_selector,
-                choice,
-                selector_ty,
-                span,
-            )?;
-            result = self
-                .module
-                .mux(matches, selected, result, span.clone())
-                .map_err(crate::SynthError::from)?;
-            self.record_generated_operation(result)?;
+        if let Some(&local) = self.active_operations.get(&source) {
+            self.extend_generated_operation_sources(local)?;
+            return self.extract_local_bit(local, bit, span);
         }
-        Ok(result)
+        let local = self.import_operation_kind(operation, span, OperandImport::Bits)?;
+        self.active_operations.insert(source, local);
+        self.extract_local_bit(local, bit, span)
     }
 
-    fn import_variable_dynamic_extract_bit(
+    fn import_dynamic_extract_bit(
         &mut self,
+        source: word::OpId,
         value: word::ValueId,
         offset: word::ValueId,
         width: u32,
         bit: u32,
         span: &word::SourceSpan,
     ) -> Result<word::ValueId, crate::SynthError> {
-        let offset_ty = self.source_value_type(offset)?;
-        let range = self.unsigned_values.range(self.source, offset);
-        let local_offset = self.import_dynamic_selector(offset, offset_ty, span)?;
         let input_width = self.source_value_type(value)?.width();
-        let available_offsets = input_width.checked_sub(width).ok_or_else(|| {
+        let offset_width = self.source_value_type(offset)?.width();
+        let stages = offset_width.min(u32::BITS - input_width.leading_zeros());
+        let maximum_offset = input_width.checked_sub(width).ok_or_else(|| {
             crate::SynthError::invariant("dynamic extract width exceeds its input")
         })?;
-        let (first, last) = dynamic_choice_bounds(range, available_offsets);
-        let mut result = self.constant_bit(false, span)?;
-        if first > last {
-            return Ok(result);
+        let barrel = DynamicBarrel {
+            source,
+            value,
+            offset,
+            input_width,
+            maximum_offset,
+        };
+        let selected = self.import_dynamic_barrel_bit(barrel, stages, bit, 0, span)?;
+        if stages == offset_width {
+            return Ok(selected);
         }
-        for choice in (first..=last).rev() {
-            let selected = choice
-                .checked_add(u128::from(bit))
-                .and_then(|selected| u32::try_from(selected).ok())
-                .ok_or_else(|| crate::SynthError::capacity("dynamic extract selected bit"))?;
-            let selected = self.import_value_bit(value, selected, span)?;
-            let matches =
-                self.import_dynamic_choice_match(offset, local_offset, choice, offset_ty, span)?;
-            result = self
-                .module
-                .mux(matches, selected, result, span.clone())
-                .map_err(crate::SynthError::from)?;
-            self.record_generated_operation(result)?;
-        }
-        Ok(result)
+        let high = if let Some(&high) = self.dynamic_high_bits.get(&source) {
+            self.extend_generated_operation_sources(high)?;
+            high
+        } else {
+            let mut high = None;
+            for selector_bit in stages..offset_width {
+                let bit = match self.known_bits.bit(self.source, offset, selector_bit) {
+                    word::KnownBit::Zero => continue,
+                    word::KnownBit::One => {
+                        high = Some(self.constant_bit(true, span)?);
+                        break;
+                    }
+                    word::KnownBit::Unknown => self.import_value_bit(offset, selector_bit, span)?,
+                };
+                high = Some(if let Some(previous) = high {
+                    let combined = self
+                        .module
+                        .binary(word::BinaryOp::BitOr, previous, bit, span.clone())
+                        .map_err(crate::SynthError::from)?;
+                    self.record_generated_operation(combined)?;
+                    combined
+                } else {
+                    bit
+                });
+            }
+            let high = match high {
+                Some(high) => high,
+                None => self.constant_bit(false, span)?,
+            };
+            self.dynamic_high_bits.insert(source, high);
+            high
+        };
+        let zero = self.constant_bit(false, span)?;
+        let selected = self
+            .module
+            .mux(high, zero, selected, span.clone())
+            .map_err(crate::SynthError::from)?;
+        self.record_generated_operation(selected)?;
+        Ok(selected)
     }
 
-    fn import_dynamic_selector(
+    fn import_dynamic_barrel_bit(
         &mut self,
-        source: word::ValueId,
-        ty: word::WordType,
+        barrel: DynamicBarrel,
+        stage: u32,
+        bit: u32,
+        base_offset: u64,
         span: &word::SourceSpan,
     ) -> Result<word::ValueId, crate::SynthError> {
-        if let Some(local) = self.dynamic_selectors.get(&source).copied() {
+        if base_offset > u64::from(barrel.maximum_offset) {
+            return self.constant_bit(false, span);
+        }
+        let maximum_remaining = (1u64 << stage) - 1;
+        let fully_valid = base_offset
+            .checked_add(maximum_remaining)
+            .is_some_and(|offset| offset <= u64::from(barrel.maximum_offset));
+        if fully_valid
+            && let Some(&local) = self.dynamic_barrel_bits.get(&(barrel.source, stage, bit))
+        {
             self.extend_generated_operation_sources(local)?;
             return Ok(local);
         }
-        let local = self.import_active_value(source, ty, span)?;
-        self.dynamic_selectors.insert(source, local);
-        Ok(local)
-    }
-
-    fn import_dynamic_choice_match(
-        &mut self,
-        source: word::ValueId,
-        local: word::ValueId,
-        choice: u128,
-        ty: word::WordType,
-        span: &word::SourceSpan,
-    ) -> Result<word::ValueId, crate::SynthError> {
-        if let Some(matches) = self.dynamic_choice_matches.get(&(source, choice)).copied() {
-            self.extend_generated_operation_sources(matches)?;
-            return Ok(matches);
+        let local = if stage == 0 {
+            self.import_value_bit(barrel.value, bit, span)?
+        } else {
+            let selector_bit = stage - 1;
+            let shift = 1u32 << selector_bit;
+            let known = self
+                .known_bits
+                .bit(self.source, barrel.offset, selector_bit);
+            let mut branch = |upper| {
+                let bit = if upper {
+                    bit.checked_add(shift)
+                        .filter(|&bit| bit < barrel.input_width)
+                } else {
+                    Some(bit)
+                };
+                let base_offset = base_offset + u64::from(upper) * u64::from(shift);
+                bit.map(|bit| {
+                    self.import_dynamic_barrel_bit(barrel, selector_bit, bit, base_offset, span)
+                })
+                .transpose()?
+                .map_or_else(|| self.constant_bit(false, span), Ok)
+            };
+            match known {
+                word::KnownBit::Zero => branch(false)?,
+                word::KnownBit::One => branch(true)?,
+                word::KnownBit::Unknown => {
+                    let lower = branch(false)?;
+                    let upper = branch(true)?;
+                    let select = self.import_value_bit(barrel.offset, selector_bit, span)?;
+                    let local = self
+                        .module
+                        .mux(select, upper, lower, span.clone())
+                        .map_err(crate::SynthError::from)?;
+                    self.record_generated_operation(local)?;
+                    local
+                }
+            }
+        };
+        if fully_valid {
+            self.dynamic_barrel_bits
+                .insert((barrel.source, stage, bit), local);
         }
-        let constant = crate::word::unsigned_constant(&mut self.module, choice, ty, span.clone())?;
-        let matches = self
-            .module
-            .binary(word::BinaryOp::Eq, local, constant, span.clone())
-            .map_err(crate::SynthError::from)?;
-        self.record_generated_operation(matches)?;
-        self.dynamic_choice_matches
-            .insert((source, choice), matches);
-        Ok(matches)
+        Ok(local)
     }
 
     fn import_extended_value_bit(
@@ -1159,13 +1149,5 @@ impl RegionalWordImporter<'_> {
             active_high: reset.active_high,
             reset_value: self.import_operand(reset.reset_value, span, operands)?,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn unbounded_dynamic_choice_covers_every_legal_offset() {
-        assert_eq!(super::dynamic_choice_bounds(None, 86), (0, 86));
     }
 }

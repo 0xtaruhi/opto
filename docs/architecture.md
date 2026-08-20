@@ -246,6 +246,12 @@ sorted set of stable source-operation anchors, and a deterministic same-key
 ordinal. Source spans are diagnostics only and never infer ownership or
 provenance. This keeps one explicit provenance relation while allowing one
 source operation to contribute to multiple generated semantic operators. The
+global and region-private publication paths derive their source results and
+inputs through the same boundary rule: results are every internal value not
+consumed by the source-operation set, and inputs are every external value
+entering that set. Results are sorted, while inputs retain semantic operand
+order before deterministic structural completion; publication never invents a
+representative when shared logic has multiple source exits. The
 operator-occurrence identity change increments the synthesis-cache ABI, so a
 checkpoint produced with the former anchor semantics is rejected rather than
 reinterpreted.
@@ -892,7 +898,13 @@ Every worker imports only its owned dependency cone and explicit boundary
 values into a private `WordModule`. Owned registers and latches remain in the
 unique sequential shell: `Q` is imported as a typed boundary input, and `D`
 plus controls are private observable roots. No placeholder or backpatch is
-used. The worker then performs, in that module:
+used. Packed signal reconstruction follows the validated bit-dependency graph
+when a coarse whole-value edge appears recursive. A source operation rebuilt
+on that path is shared once, and variable extracts use one memoized barrel DAG;
+known selector bits remove unreachable branches before they can import false
+feedback. Work is bounded by value width times selector width rather than
+result width times every legal offset. The worker then performs, in that
+module:
 
 1. dataflow canonicalization, constant/known-bit/liveness optimization, and
    priority-mux rebalancing;
