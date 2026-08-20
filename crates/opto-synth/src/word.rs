@@ -20,31 +20,6 @@ pub(crate) struct ScaledDynamicOffset {
     pub(crate) maximum_selector: u128,
 }
 
-pub(crate) fn unsigned_constant(
-    module: &mut opto_ir::word::WordModule,
-    value: u128,
-    ty: opto_ir::word::WordType,
-    source: opto_ir::word::SourceSpan,
-) -> Result<opto_ir::word::ValueId, crate::SynthError> {
-    let bits = (0..ty.width())
-        .rev()
-        .map(|bit| {
-            if bit < u128::BITS && value & (1u128 << bit) != 0 {
-                opto_ir::BitVal::One
-            } else {
-                opto_ir::BitVal::Zero
-            }
-        })
-        .collect();
-    module
-        .constant(
-            opto_ir::ConstBits::from_bits(bits).map_err(crate::SynthError::from)?,
-            ty,
-            source,
-        )
-        .map_err(crate::SynthError::from)
-}
-
 pub(crate) fn known_u32(
     module: &opto_ir::word::WordModule,
     known_bits: &mut opto_ir::word::KnownBitsAnalysis,

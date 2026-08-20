@@ -86,7 +86,7 @@ struct PublishedOperator {
     owner: Option<crate::RegionAnchorId>,
     source_operations: Box<[word::OpId]>,
     source_inputs: Box<[word::ValueId]>,
-    source_result: word::ValueId,
+    source_results: Box<[word::ValueId]>,
     width: u32,
     lines: Box<[Option<u32>]>,
     file: Option<Box<str>>,
@@ -99,6 +99,59 @@ struct PublishedOperator {
 
 pub(crate) struct PrivateArchitecturePublication {
     operators: Box<[PublishedOperator]>,
+}
+
+struct SourceBoundary {
+    inputs: Box<[word::ValueId]>,
+    results: Box<[word::ValueId]>,
+}
+
+fn source_boundary(
+    source: &word::WordModule,
+    uses: &[u32],
+    operations: &[word::OpId],
+    input_candidates: impl IntoIterator<Item = word::ValueId>,
+) -> Result<SourceBoundary, crate::SynthError> {
+    let mut internal_results = std::collections::BTreeSet::new();
+    let mut internal_uses = std::collections::BTreeMap::<_, u32>::new();
+    for &operation in operations {
+        let operation = source.operation(operation).ok_or_else(|| {
+            crate::SynthError::invariant(
+                "published architecture references an unknown source operation",
+            )
+        })?;
+        internal_results.insert(operation.result);
+        for input in crate::word::operation_inputs(&operation.kind) {
+            *internal_uses.entry(input).or_default() += 1;
+        }
+    }
+    let results = internal_results
+        .iter()
+        .filter(|result| {
+            let internal = internal_uses.get(result).copied().unwrap_or(0);
+            internal == 0 || uses[result.index()] > internal
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if results.is_empty() {
+        return Err(crate::SynthError::invariant(
+            "published semantic operator has no source result",
+        ));
+    }
+    let mut inputs = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for input in input_candidates
+        .into_iter()
+        .chain(internal_uses.into_keys())
+    {
+        if !internal_results.contains(&input) && seen.insert(input) {
+            inputs.push(input);
+        }
+    }
+    Ok(SourceBoundary {
+        inputs: inputs.into_boxed_slice(),
+        results: results.into_boxed_slice(),
+    })
 }
 
 pub(crate) fn resolve_private_operator_sources(
@@ -189,44 +242,17 @@ impl PrivateArchitecturePublication {
                 .or_default()
                 .push(source);
         }
+        let uses = crate::word::uses::value_use_counts(source)?;
         let mut published = Vec::with_capacity(decisions.operators().len());
         for (semantic, source_operations) in decisions.operators().iter().zip(resolved_sources) {
-            let source_operation = source_operations[0];
-            let source_result = source
-                .operation(source_operation)
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "private architecture source operation is outside the source module",
-                    )
-                })?
-                .result;
-            let internal_results = source_operations
-                .iter()
-                .filter_map(|&operation| {
-                    source
-                        .operation(operation)
-                        .map(|operation| operation.result)
-                })
-                .collect::<std::collections::BTreeSet<_>>();
-            let mut source_inputs = decisions
-                .operator_inputs(*semantic)
-                .flat_map(|value| {
-                    source_values_by_local
-                        .get(&value)
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                })
-                .collect::<std::collections::BTreeSet<_>>();
-            if source_inputs.is_empty() {
-                source_inputs.extend(source_operations.iter().flat_map(|&operation| {
-                    source
-                        .operation(operation)
-                        .into_iter()
-                        .flat_map(|operation| crate::word::operation_inputs(&operation.kind))
-                }));
-                source_inputs.retain(|value| !internal_results.contains(value));
-            }
+            let input_candidates = decisions.operator_inputs(*semantic).flat_map(|value| {
+                source_values_by_local
+                    .get(&value)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+            });
+            let boundary = source_boundary(source, &uses, source_operations, input_candidates)?;
             let candidate = decisions.selected_candidate(semantic.id()).ok_or_else(|| {
                 crate::SynthError::invariant("private semantic operator has no selected candidate")
             })?;
@@ -241,8 +267,8 @@ impl PrivateArchitecturePublication {
                 candidate: candidate.id(),
                 owner: Some(owner),
                 source_operations: source_operations.clone(),
-                source_inputs: source_inputs.into_iter().collect(),
-                source_result,
+                source_inputs: boundary.inputs,
+                source_results: boundary.results,
                 width: semantic.width(),
                 lines: spans.iter().map(|span| span.line()).collect(),
                 file: first.and_then(word::SourceSpan::file).map(Into::into),
@@ -297,6 +323,7 @@ impl ProvenanceBuilder {
         let empty = OriginSetId::EMPTY;
         let mut origin_ids = HashMap::new();
         origin_ids.insert(implementation_origin_hash(&[]), smallvec![empty]);
+        let uses = crate::word::uses::value_use_counts(module)?;
         let mut operators = Vec::with_capacity(plan.operators().len());
         for operator in plan.operators() {
             if operator.id().raw() as usize != operators.len() {
@@ -311,6 +338,12 @@ impl ProvenanceBuilder {
                 ))
             })?;
             let source_operations = plan.source_operations(operator.id());
+            let boundary = source_boundary(
+                module,
+                &uses,
+                source_operations,
+                plan.operator_inputs(*operator),
+            )?;
             let spans = source_operations
                 .iter()
                 .map(|operation| {
@@ -325,8 +358,8 @@ impl ProvenanceBuilder {
                 candidate: candidate.id(),
                 owner: None,
                 source_operations: source_operations.into(),
-                source_inputs: plan.operator_inputs(*operator).collect(),
-                source_result: operator.result(),
+                source_inputs: boundary.inputs,
+                source_results: boundary.results,
                 width: operator.width(),
                 lines: spans
                     .iter()
@@ -589,13 +622,12 @@ impl ProvenanceBuilder {
                     operator: operator.id,
                     candidate: operator.candidate,
                     synthesis_region,
-                    source_operation: operator.source_operations[0],
-                    source_result: operator.source_result,
                     width: operator.width,
                 },
                 ImplementationRegionSource {
                     operations: &operator.source_operations,
                     inputs: operator.source_inputs.to_vec(),
+                    results: operator.source_results.to_vec(),
                     lines: operator.lines.to_vec(),
                 },
                 ImplementationRegionMetadata {
@@ -729,6 +761,22 @@ mod tests {
         SourceSpan::stable("test")
     }
 
+    fn input(module: &mut WordModule, name: &str, ty: WordType) -> word::ValueId {
+        let port = module
+            .add_port(name, PortDirection::Input, ty, test_span())
+            .unwrap();
+        module
+            .read_signal(module.port(port).unwrap().signal, test_span())
+            .unwrap()
+    }
+
+    fn operation(module: &WordModule, value: word::ValueId) -> word::OpId {
+        match module.value(value).unwrap().kind {
+            word::ValueKind::Operation(operation) => operation,
+            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => unreachable!(),
+        }
+    }
+
     #[test]
     fn records_each_arithmetic_operator_without_global_fusion() {
         let mut module = WordModule::new("sum");
@@ -779,23 +827,30 @@ mod tests {
     }
 
     #[test]
+    fn derives_escaping_source_results_and_the_complete_boundary() {
+        let mut source = WordModule::new("boundary");
+        let ty = WordType::bits(8).unwrap();
+        let inputs = ["a", "b", "c"].map(|name| input(&mut source, name, ty));
+        let intermediate = source
+            .binary(BinaryOp::Add, inputs[0], inputs[1], test_span())
+            .unwrap();
+        let result = source
+            .binary(BinaryOp::Mul, intermediate, inputs[2], test_span())
+            .unwrap();
+        let _outside = source
+            .unary(word::UnaryOp::BitNot, intermediate, test_span())
+            .unwrap();
+        let operations = [intermediate, result].map(|value| operation(&source, value));
+        let uses = crate::word::uses::value_use_counts(&source).unwrap();
+
+        let boundary = source_boundary(&source, &uses, &operations, [inputs[0]]).unwrap();
+
+        assert_eq!(boundary.results.as_ref(), &[intermediate, result]);
+        assert_eq!(boundary.inputs.as_ref(), inputs.as_slice());
+    }
+
+    #[test]
     fn resolves_generated_operators_only_through_explicit_provenance() {
-        fn input(module: &mut WordModule, name: &str, ty: WordType) -> word::ValueId {
-            let port = module
-                .add_port(name, PortDirection::Input, ty, test_span())
-                .unwrap();
-            module
-                .read_signal(module.port(port).unwrap().signal, test_span())
-                .unwrap()
-        }
-
-        fn operation(module: &WordModule, value: word::ValueId) -> word::OpId {
-            match module.value(value).unwrap().kind {
-                word::ValueKind::Operation(operation) => operation,
-                word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => unreachable!(),
-            }
-        }
-
         let ty = WordType::bits(8).unwrap();
         let mut source = WordModule::new("source");
         let source_inputs = ["a", "b", "c", "d"].map(|name| input(&mut source, name, ty));

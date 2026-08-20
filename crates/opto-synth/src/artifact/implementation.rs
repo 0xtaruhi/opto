@@ -47,11 +47,10 @@ pub struct ImplementationRegion {
     operator: OperatorId,
     candidate: ImplementationCandidateId,
     synthesis_region: RegionAnchorId,
-    source_operation: word::OpId,
     source_operations: Box<[word::OpId]>,
     source_lines: Box<[Option<u32>]>,
     source_inputs: Box<[word::ValueId]>,
-    source_result: word::ValueId,
+    source_results: Box<[word::ValueId]>,
     width: u32,
     recipe: Box<str>,
     implementation: Box<str>,
@@ -77,14 +76,13 @@ pub(crate) struct ImplementationRegionIdentity {
     pub(crate) operator: OperatorId,
     pub(crate) candidate: ImplementationCandidateId,
     pub(crate) synthesis_region: RegionAnchorId,
-    pub(crate) source_operation: word::OpId,
-    pub(crate) source_result: word::ValueId,
     pub(crate) width: u32,
 }
 
 pub(crate) struct ImplementationRegionSource<'a> {
     pub(crate) operations: &'a [word::OpId],
     pub(crate) inputs: Vec<word::ValueId>,
+    pub(crate) results: Vec<word::ValueId>,
     pub(crate) lines: Vec<Option<u32>>,
 }
 
@@ -101,11 +99,10 @@ impl ImplementationRegion {
             operator: identity.operator,
             candidate: identity.candidate,
             synthesis_region: identity.synthesis_region,
-            source_operation: identity.source_operation,
             source_operations: source.operations.into(),
             source_lines: source.lines.into_boxed_slice(),
             source_inputs: source.inputs.into_boxed_slice(),
-            source_result: identity.source_result,
+            source_results: source.results.into_boxed_slice(),
             width: identity.width,
             recipe: metadata.recipe.into(),
             implementation: metadata.implementation.into(),
@@ -144,7 +141,7 @@ impl ImplementationRegion {
     #[must_use]
     /// Return the representative source operation for diagnostics.
     pub fn source_operation(&self) -> word::OpId {
-        self.source_operation
+        self.source_operations[0]
     }
 
     /// Return all source operations absorbed by the implementation.
@@ -165,10 +162,10 @@ impl ImplementationRegion {
         &self.source_inputs
     }
 
+    /// Return every source value produced by the implementation region.
     #[must_use]
-    /// Return the source value produced by the semantic operator.
-    pub fn source_result(&self) -> word::ValueId {
-        self.source_result
+    pub fn source_results(&self) -> &[word::ValueId] {
+        &self.source_results
     }
 
     /// Return mapped cells currently carrying this operator's provenance.
@@ -230,6 +227,9 @@ impl ImplementationRegion {
             ))
             .saturating_add(resident::slice_bytes::<word::ValueId>(
                 self.source_inputs.len(),
+            ))
+            .saturating_add(resident::slice_bytes::<word::ValueId>(
+                self.source_results.len(),
             ))
             .saturating_add(resident::allocation_bytes(self.recipe.len()))
             .saturating_add(resident::allocation_bytes(self.implementation.len()))
@@ -630,7 +630,9 @@ impl ImplementationDb {
         for (index, region) in self.regions.iter().enumerate() {
             if region.id.0 as usize != index
                 || region.operator.raw() as usize != index
+                || region.source_operations.is_empty()
                 || region.source_operations.len() != region.source_lines.len()
+                || region.source_results.is_empty()
                 || region
                     .mapped_cells
                     .windows(2)

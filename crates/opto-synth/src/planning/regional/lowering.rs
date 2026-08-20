@@ -81,12 +81,12 @@ impl RegionalWordCone {
             recursive_boundaries: BTreeMap::new(),
             memory_signals: BTreeMap::new(),
             imported_bits: BTreeMap::new(),
-            dynamic_selectors: BTreeMap::new(),
-            dynamic_choice_matches: BTreeMap::new(),
+            active_operations: BTreeMap::new(),
+            dynamic_barrel_bits: BTreeMap::new(),
+            dynamic_high_bits: BTreeMap::new(),
             boundary_signals: BTreeMap::new(),
             boundary_port_signals: BTreeMap::new(),
             known_bits: word::KnownBitsAnalysis::new(source),
-            unsigned_values: word::UnsignedValueAnalysis::new(source),
         };
         importer.import_memories(memories)?;
         let observations = observations.into_iter().collect::<BTreeSet<_>>();
@@ -209,12 +209,12 @@ struct RegionalWordImporter<'a> {
     recursive_boundaries: BTreeMap<word::ValueId, word::ValueId>,
     memory_signals: BTreeMap<word::SignalId, word::SignalId>,
     imported_bits: BTreeMap<(word::ValueId, u32), word::ValueId>,
-    dynamic_selectors: BTreeMap<word::ValueId, word::ValueId>,
-    dynamic_choice_matches: BTreeMap<(word::ValueId, u128), word::ValueId>,
+    active_operations: BTreeMap<word::OpId, word::ValueId>,
+    dynamic_barrel_bits: BTreeMap<(word::OpId, u32, u32), word::ValueId>,
+    dynamic_high_bits: BTreeMap<word::OpId, word::ValueId>,
     boundary_signals: BTreeMap<word::SignalRef, (word::WordType, word::ValueId)>,
     boundary_port_signals: BTreeMap<word::SignalId, word::SignalId>,
     known_bits: word::KnownBitsAnalysis,
-    unsigned_values: word::UnsignedValueAnalysis,
 }
 
 #[cfg(test)]
@@ -1362,13 +1362,13 @@ mod tests {
     }
 
     #[test]
-    fn shares_dynamic_selector_matches_across_active_result_bits() {
+    fn uses_a_bounded_guarded_barrel_across_active_result_bits() {
         let mut source = word::WordModule::new("shared_dynamic_selector");
         let selector_port = source
             .add_port(
                 "selector",
                 word::PortDirection::Input,
-                word::WordType::bits(1).unwrap(),
+                word::WordType::bits(2).unwrap(),
                 word::SourceSpan::default(),
             )
             .unwrap();
@@ -1396,44 +1396,18 @@ mod tests {
                 word::SourceSpan::default(),
             )
             .unwrap();
-        let offset_ty = word::WordType::bits(2).unwrap();
-        let selector = source
-            .cast(
-                word::CastKind::ZeroExtend,
-                selector,
-                offset_ty,
-                word::SourceSpan::default(),
-            )
+        let selected = source
+            .dynamic_extract(state_value, selector, 3, word::SourceSpan::default())
             .unwrap();
-        let scale = source
-            .constant(
-                opto_ir::ConstBits::from_bin_str("10").unwrap(),
-                offset_ty,
-                word::SourceSpan::default(),
-            )
-            .unwrap();
-        let offset = source
-            .binary(
-                word::BinaryOp::Mul,
-                selector,
-                scale,
-                word::SourceSpan::default(),
-            )
-            .unwrap();
-        let selected = [(); 2].map(|()| {
-            source
-                .dynamic_extract(state_value, offset, 2, word::SourceSpan::default())
-                .unwrap()
-        });
-        let selected_operations = selected.map(|value| match source.value(value).unwrap().kind {
+        let selected_operation = match source.value(selected).unwrap().kind {
             word::ValueKind::Operation(operation) => operation,
             word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => unreachable!(),
-        });
+        };
         let low = source
-            .extract(selected[0], 0, 1, word::SourceSpan::default())
+            .extract(selected, 0, 1, word::SourceSpan::default())
             .unwrap();
         let high = source
-            .extract(selected[1], 1, 1, word::SourceSpan::default())
+            .extract(selected, 1, 1, word::SourceSpan::default())
             .unwrap();
         let feedback = source
             .binary(
@@ -1479,26 +1453,32 @@ mod tests {
         })
         .unwrap();
 
+        let dynamic_muxes = cone
+            .module
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation.kind, word::OpKind::Mux { .. }))
+            .count();
+        assert_eq!(dynamic_muxes, 9);
         assert_eq!(
             cone.module
                 .operations()
                 .iter()
-                .filter(|operation| {
-                    matches!(
-                        operation.kind,
-                        word::OpKind::Binary {
-                            op: word::BinaryOp::Eq,
-                            ..
-                        }
-                    )
-                })
+                .filter(|operation| matches!(operation.kind, word::OpKind::DynamicExtract { .. }))
                 .count(),
-            2
+            1
         );
-        assert!(cone.operation_sources.source_sets().any(|sources| {
-            selected_operations
-                .iter()
-                .all(|operation| sources.contains(operation))
-        }));
+        assert!(!cone.module.operations().iter().any(|operation| matches!(
+            operation.kind,
+            word::OpKind::Binary {
+                op: word::BinaryOp::Eq,
+                ..
+            }
+        )));
+        assert!(
+            cone.operation_sources
+                .source_sets()
+                .any(|sources| sources.contains(&selected_operation))
+        );
     }
 }
