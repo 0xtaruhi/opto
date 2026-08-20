@@ -26,6 +26,32 @@ fn read_hdl_accepts_preprocessor_options() {
 }
 
 #[test]
+fn read_hdl_can_group_files_into_one_compilation_unit() {
+    let first = temp_script_path("read-hdl-compilation-unit-first.sv");
+    let second = temp_script_path("read-hdl-compilation-unit-second.sv");
+    std::fs::write(&first, "`define SHARED_WIDTH 6\n").unwrap();
+    std::fs::write(
+        &second,
+        "module top(input logic [`SHARED_WIDTH-1:0] a, output logic [`SHARED_WIDTH-1:0] y); assign y = a; endmodule\n",
+    )
+    .unwrap();
+    let mut runtime = Runtime::new(Session::new()).unwrap();
+    runtime.register_commands().unwrap();
+
+    let result = runtime
+        .eval(&format!(
+            "read_hdl -compilation_unit {} {}; elaborate top",
+            tcl_path_word(&first),
+            tcl_path_word(&second)
+        ))
+        .unwrap();
+    std::fs::remove_file(first).unwrap();
+    std::fs::remove_file(second).unwrap();
+
+    assert!(matches!(result, EvalResult::Complete(value) if value == "1"));
+}
+
+#[test]
 fn read_hdl_rejects_unknown_options() {
     let mut runtime = Runtime::new(Session::new()).unwrap();
     runtime.register_commands().unwrap();

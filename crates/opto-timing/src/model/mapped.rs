@@ -332,8 +332,9 @@ impl TimingRegionDelta {
 
     /// Converts an applied mapped edit into the exact timing-domain delta.
     ///
-    /// The conversion includes cells incident to affected nets so pin
-    /// capacitance and arc topology cannot remain stale across region boundaries.
+    /// The conversion refreshes directly changed cells and expands through
+    /// incident cells only for renamed nets, whose name-based timing bindings
+    /// change despite stable mapped connectivity.
     ///
     /// # Errors
     ///
@@ -359,6 +360,17 @@ impl TimingRegionDelta {
             mapped_generation: Some(netlist.generation_id()),
             ..Self::new()
         };
+        for net in edit.renamed_nets() {
+            let pins = netlist
+                .pins_on_net(net)
+                .ok_or(crate::TimingModelError::MissingNetAdjacency { net })?;
+            for pin in pins {
+                let cell = netlist
+                    .pin_owner(pin)
+                    .ok_or(crate::TimingModelError::OwnerlessPin { net, pin })?;
+                affected_cells.insert(cell);
+            }
+        }
         for net in affected_nets {
             if !netlist.is_live_net(net) {
                 delta.bind_mapped_net(net, None)?;
@@ -369,15 +381,6 @@ impl TimingRegionDelta {
                 continue;
             }
             delta.bind_mapped_net(net, Some(mapped_net_name(netlist, net)))?;
-            let pins = netlist
-                .pins_on_net(net)
-                .ok_or(crate::TimingModelError::MissingNetAdjacency { net })?;
-            for pin in pins {
-                let cell = netlist
-                    .pin_owner(pin)
-                    .ok_or(crate::TimingModelError::OwnerlessPin { net, pin })?;
-                affected_cells.insert(cell);
-            }
         }
         for cell in affected_cells {
             let id = TimingInstanceId::from_raw(u32::try_from(cell.index()).map_err(|_| {
@@ -399,7 +402,9 @@ impl TimingRegionDelta {
 mod tests {
     use super::*;
     use crate::test_library::{TimingArc, TimingCell, test_cells};
-    use opto_ir::mapped::{ConnectionSignal, MappedBuilder, PortDirection};
+    use opto_ir::mapped::{
+        ConnectionRef, ConnectionSignal, MappedBuilder, PortDirection, RegionDelta,
+    };
 
     fn timing_library(cells: &[&str]) -> TimingLibrary {
         TimingLibrary {
@@ -571,5 +576,63 @@ mod tests {
             ambiguous,
             crate::TimingError::Model(crate::TimingModelError::AmbiguousCell { .. })
         ));
+    }
+
+    #[test]
+    fn pin_reconnect_does_not_refresh_unchanged_high_fanout_cells() {
+        const BRANCHES: usize = 64;
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let shared = builder.add_net(Some("shared")).unwrap();
+        let replacement = builder.add_net(Some("replacement")).unwrap();
+        let mut cells = Vec::new();
+        for index in 0..BRANCHES {
+            let input = builder.add_net(Some(&format!("b{index}"))).unwrap();
+            let output = builder.add_net(Some(&format!("y{index}"))).unwrap();
+            cells.push(
+                builder
+                    .add_cell(
+                        &format!("U{index}"),
+                        "AND2",
+                        None,
+                        &[
+                            ("A".to_string(), None, ConnectionSignal::Net(shared)),
+                            ("B".to_string(), None, ConnectionSignal::Net(input)),
+                            ("Y".to_string(), None, ConnectionSignal::Net(output)),
+                        ],
+                    )
+                    .unwrap(),
+            );
+        }
+        let mut mapped = builder.freeze().unwrap();
+        let library = TimingLibrary {
+            cells: test_cells(vec![TimingCell {
+                name: "AND2".to_string(),
+                arcs: vec![
+                    TimingArc::scalar("A", "Y", 0.1),
+                    TimingArc::scalar("B", "Y", 0.1),
+                ],
+                ..TimingCell::default()
+            }]),
+            ..TimingLibrary::default()
+        };
+        let model = TimingModel::from_mapped(
+            &mapped,
+            crate::test_design_id(),
+            &crate::PortBindings::new([]),
+            library,
+        )
+        .unwrap();
+        let pin = mapped.pin_ids(cells[0]).unwrap().next().unwrap();
+        let snapshot = mapped
+            .snapshot_region([cells[0]], [shared, replacement])
+            .unwrap();
+        let mut edit = RegionDelta::new(snapshot);
+        edit.reconnect_pin(pin, ConnectionRef::Net(replacement))
+            .unwrap();
+        let applied = mapped.apply_region_delta(edit).unwrap();
+
+        let timing = TimingRegionDelta::from_mapped_region(&mapped, &applied, &model).unwrap();
+        assert_eq!(timing.updates.len(), 1);
+        assert!(timing.updates.contains_key(&TimingInstanceId::from_raw(0)));
     }
 }

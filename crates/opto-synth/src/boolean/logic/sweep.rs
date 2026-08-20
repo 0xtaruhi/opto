@@ -30,6 +30,9 @@ const MAX_ROUND_PAIRS: usize = 4_000;
 /// Total pair budget for one subject.
 const MAX_PROOF_PAIRS: usize = 24_000;
 
+/// Largest transitive logic cone admitted to one incremental SAT instance.
+const MAX_PROOF_ENCODING_NODES: usize = 8_192;
+
 /// Classes per proof shard; each shard owns one solver encoding.
 const SHARD_CLASSES: usize = 12;
 
@@ -94,6 +97,7 @@ pub(super) fn reduce(
         budget = budget.saturating_sub(round.attempted());
         metrics.proved += round.proved;
         metrics.refuted += round.refutations.len();
+        metrics.budget_exhausted |= round.encoding_budget_exhausted;
         if round.proved != 0 {
             let product = rebuild(subject, &live, &substitutions);
             signatures = signatures.projected(&product.remap, product.network.node_count());
@@ -368,6 +372,7 @@ fn shard_quota(max_pairs: usize, shard_count: usize, shard: usize) -> usize {
 struct Round {
     proved: usize,
     refutations: Vec<opto_formal::BoundaryRefutation>,
+    encoding_budget_exhausted: bool,
 }
 
 impl Round {
@@ -413,6 +418,7 @@ fn prove(
                 &literals[start..end],
                 MAX_REPRESENTATIVE_ROUNDS,
                 shard_quota(max_pairs, shard_count, shard),
+                MAX_PROOF_ENCODING_NODES,
                 &mut shard_refutations,
             )
             .map_err(|error| {
@@ -420,13 +426,22 @@ fn prove(
                     "AXM functional reduction proof failed: {error}"
                 ))
             })?;
-            Ok::<_, crate::SynthError>((partitions, shard_refutations))
+            let encoding_budget_exhausted = partitions.is_none();
+            let partitions = partitions.unwrap_or_else(|| {
+                literals[start..end]
+                    .iter()
+                    .map(|class| vec![None; class.len()])
+                    .collect()
+            });
+            Ok::<_, crate::SynthError>((partitions, shard_refutations, encoding_budget_exhausted))
         })?;
     let mut partitions = Vec::with_capacity(classes.len());
     let mut refutations = Vec::new();
-    for (shard_partitions, shard_refutations) in shards {
+    let mut encoding_budget_exhausted = false;
+    for (shard_partitions, shard_refutations, shard_budget_exhausted) in shards {
         partitions.extend(shard_partitions);
         refutations.extend(shard_refutations);
+        encoding_budget_exhausted |= shard_budget_exhausted;
     }
 
     let mut proved = 0usize;
@@ -451,6 +466,7 @@ fn prove(
     Ok(Round {
         proved,
         refutations,
+        encoding_budget_exhausted,
     })
 }
 

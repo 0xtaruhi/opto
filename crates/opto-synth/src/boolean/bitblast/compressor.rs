@@ -239,15 +239,15 @@ impl<B: BitBackend> BitBlaster<'_, B> {
         while columns.iter().any(|column| column.len() > 2) {
             let mut next = vec![BitColumn::new(); columns.len()];
             for (index, column) in columns.into_iter().enumerate() {
-                let mut chunks = column.chunks_exact(3);
-                for chunk in &mut chunks {
+                let (chunks, remainder) = column.as_chunks::<3>();
+                for chunk in chunks {
                     let (sum, carry) = self.full_adder(chunk[0], chunk[1], chunk[2], source)?;
                     next[index].push(sum);
                     if index + 1 < next.len() {
                         next[index + 1].push(carry);
                     }
                 }
-                next[index].extend_from_slice(chunks.remainder());
+                next[index].extend_from_slice(remainder);
             }
             columns = next;
         }

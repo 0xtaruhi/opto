@@ -18,6 +18,7 @@ pub(super) fn materialize_groups(
         rewrites.push(super::OperationRewrite {
             created: first..module.operations().len(),
             replaced: group.iter().map(|candidate| candidate.operation).collect(),
+            replacement: shared,
         });
         for candidate in &group {
             replacements[candidate.result.index()] = Some(shared);

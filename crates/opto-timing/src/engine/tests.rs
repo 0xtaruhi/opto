@@ -159,6 +159,87 @@ fn incrementally_recomputes_cell_replacements_and_rollbacks() {
 }
 
 #[test]
+fn one_pin_edit_does_not_seed_an_unchanged_high_fanout_input() {
+    const BRANCHES: usize = 128;
+    let library = TimingLibrary {
+        cells: test_cells(vec![TimingCell {
+            name: "AND2".to_string(),
+            arcs: vec![
+                TimingArc::scalar("A", "Y", 0.1),
+                TimingArc::scalar("B", "Y", 0.1),
+            ],
+            ..TimingCell::default()
+        }]),
+        ..TimingLibrary::default()
+    };
+    let mut ports = vec![test_port("shared", TimingPortDirection::Input)];
+    ports.extend(
+        (0..=BRANCHES).map(|index| test_port(&format!("b{index}"), TimingPortDirection::Input)),
+    );
+    ports.extend((0..BRANCHES).map(|index| TimingPort {
+        id: test_port_id(&format!("y{index}")),
+        name: format!("y{index}"),
+        net: crate::TimingNet::named(format!("y{index}")),
+        direction: TimingPortDirection::Output,
+    }));
+    let instances = (0..BRANCHES)
+        .map(|index| TimingInstance {
+            id: TimingInstanceId::from_raw(u32::try_from(index).unwrap()),
+            name: format!("U{index}"),
+            cell: "AND2".to_string(),
+            connections: vec![
+                crate::TimingConnection {
+                    pin: "A".to_string(),
+                    net: "shared".to_string(),
+                },
+                crate::TimingConnection {
+                    pin: "B".to_string(),
+                    net: format!("b{index}"),
+                },
+                crate::TimingConnection {
+                    pin: "Y".to_string(),
+                    net: format!("y{index}"),
+                },
+            ],
+        })
+        .collect::<Vec<_>>();
+    let design = TimingDesign {
+        id: test_design_id(),
+        name: "top".to_string(),
+        ports,
+        instances,
+    };
+
+    for max_threads in [1, 4] {
+        let runtime =
+            opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads })
+                .unwrap();
+        let mut incremental = IncrementalTiming::new_for_optimization(
+            TimingContext::new(),
+            TimingModel::new(design.clone(), library.clone()).unwrap(),
+            ReportTimingOptions::default(),
+            runtime,
+        )
+        .unwrap();
+        let before = incremental.quality_summary().unwrap();
+        let mut delta = TimingRegionDelta::new();
+        delta
+            .set_instance(test_instance(
+                0,
+                "U0",
+                "AND2",
+                [("A", "shared"), ("B", "b128"), ("Y", "y0")],
+            ))
+            .unwrap();
+
+        let edit = incremental.apply_optimization_region_delta(delta).unwrap();
+        assert_eq!(edit.recomputed_nets(), 3);
+        incremental.rollback(edit).unwrap();
+        assert_eq!(incremental.quality_summary().unwrap(), before);
+    }
+}
+
+#[test]
 fn multi_seed_closures_match_full_recomputation_in_every_execution_mode() {
     for (first, last) in [("FAST_BUF", "BUF"), ("BUF", "FAST_BUF")] {
         let base = long_chain_model();

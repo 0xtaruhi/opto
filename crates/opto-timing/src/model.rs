@@ -59,25 +59,21 @@ struct TopologyDigestSum([u64; 4]);
 
 impl TopologyDigestSum {
     fn add(&mut self, digest: [u8; 32]) {
-        for (sum, bytes) in self.0.iter_mut().zip(digest.chunks_exact(8)) {
-            *sum = sum.wrapping_add(u64::from_le_bytes(
-                bytes.try_into().expect("digest chunks are eight bytes"),
-            ));
+        for (sum, bytes) in self.0.iter_mut().zip(digest.as_chunks::<8>().0) {
+            *sum = sum.wrapping_add(u64::from_le_bytes(*bytes));
         }
     }
 
     fn remove(&mut self, digest: [u8; 32]) {
-        for (sum, bytes) in self.0.iter_mut().zip(digest.chunks_exact(8)) {
-            *sum = sum.wrapping_sub(u64::from_le_bytes(
-                bytes.try_into().expect("digest chunks are eight bytes"),
-            ));
+        for (sum, bytes) in self.0.iter_mut().zip(digest.as_chunks::<8>().0) {
+            *sum = sum.wrapping_sub(u64::from_le_bytes(*bytes));
         }
     }
 
     fn bytes(self) -> [u8; 32] {
         let mut bytes = [0; 32];
-        for (chunk, value) in bytes.chunks_exact_mut(8).zip(self.0) {
-            chunk.copy_from_slice(&value.to_le_bytes());
+        for (chunk, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(self.0) {
+            *chunk = value.to_le_bytes();
         }
         bytes
     }

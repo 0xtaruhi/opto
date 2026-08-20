@@ -119,6 +119,11 @@ append batches in command order. Include directories and defines are explicit
 typed options or root database properties; there is no logical WORK-library
 setup ceremony.
 
+Primary files are independent SystemVerilog compilation units by default.
+`read_hdl -compilation_unit rtl/defines.sv rtl/top.sv` groups the ordered files
+from that invocation into one compilation unit so preprocessor state can cross
+primary-file boundaries.
+
 `read_hdl` is the single HDL-ingestion command and never performs elaboration.
 VHDL options are not advertised until a real VHDL frontend and mixed-language
 model exist.

@@ -78,7 +78,9 @@ impl BoundaryRefutation {
 
 /// Partitions candidate literal classes with one budgeted incremental SAT instance.
 /// Returned representatives are earlier and proved equivalent; counterexamples
-/// are appended to `refutations` for caller-owned stimulus refinement.
+/// are appended to `refutations` for caller-owned stimulus refinement. Returns
+/// `None` without invoking the solver when the shared encoding exceeds
+/// `max_encoded_nodes`.
 ///
 /// # Errors
 ///
@@ -89,14 +91,17 @@ pub fn prove_logic_literal_partitions(
     classes: &[Vec<opto_ir::logic::Lit>],
     max_representatives: usize,
     max_pairs: usize,
+    max_encoded_nodes: usize,
     refutations: &mut Vec<BoundaryRefutation>,
-) -> Result<Vec<Vec<Option<usize>>>, FormalError> {
+) -> Result<Option<Vec<Vec<Option<usize>>>>, FormalError> {
     let outputs = classes.iter().flatten().copied().collect::<Vec<_>>();
     if outputs.is_empty() || max_representatives == 0 || max_pairs == 0 {
-        return Ok(classes
-            .iter()
-            .map(|class| vec![None; class.len()])
-            .collect());
+        return Ok(Some(
+            classes
+                .iter()
+                .map(|class| vec![None; class.len()])
+                .collect(),
+        ));
     }
 
     let mut class_offsets = Vec::with_capacity(classes.len());
@@ -109,6 +114,9 @@ pub fn prove_logic_literal_partitions(
     }
     let mut encoder = LogicMiter::new();
     let encoded_literals = encoder.encode_network(network, &outputs)?;
+    if encoder.encoded_nodes > max_encoded_nodes {
+        return Ok(None);
+    }
     let mut representatives = classes
         .iter()
         .map(|class| vec![None; class.len()])
@@ -131,7 +139,7 @@ pub fn prove_logic_literal_partitions(
             for &alternative in &unresolved[class_index][1..] {
                 if pair_count == max_pairs {
                     encoder.solver.assume(&[]);
-                    return Ok(representatives);
+                    return Ok(Some(representatives));
                 }
                 pair_count += 1;
                 let base = class_offsets[class_index];
@@ -153,7 +161,7 @@ pub fn prove_logic_literal_partitions(
         }
     }
     encoder.solver.assume(&[]);
-    Ok(representatives)
+    Ok(Some(representatives))
 }
 
 fn prove_encoded_literal_equivalence(

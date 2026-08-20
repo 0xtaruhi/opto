@@ -36,6 +36,8 @@ pub struct FrontendOptions {
     pub include_paths: Vec<PathBuf>,
     /// Preprocessor definitions as `(name, optional value)` pairs.
     pub defines: Vec<(String, Option<String>)>,
+    /// Treat all primary files as one ordered `SystemVerilog` compilation unit.
+    pub compilation_unit: bool,
     /// Source-language revision.
     pub language: VerilogLanguage,
 }
@@ -100,10 +102,11 @@ pub struct Frontend;
 impl Frontend {
     /// Ingests source units without selecting a top.
     ///
-    /// Primary files are independent compilation units, matching normal
-    /// `SystemVerilog` file-scope macro semantics. Shared command-line defines
-    /// and include paths apply to every unit; include dependencies are captured
-    /// in the returned [`VerilogSourceSet`].
+    /// Primary files are independent compilation units by default. When
+    /// [`FrontendOptions::compilation_unit`] is set, they form one ordered unit
+    /// and preprocessor state carries between files. Shared command-line
+    /// defines and include paths apply to every unit; include dependencies are
+    /// captured in the returned [`VerilogSourceSet`].
     ///
     /// # Errors
     ///
@@ -205,10 +208,15 @@ fn slang_source_units(
                     source,
                 })
         })?;
-    Ok(sources
+    let source_batches = if options.compilation_unit {
+        vec![sources]
+    } else {
+        sources.into_iter().map(|source| vec![source]).collect()
+    };
+    Ok(source_batches
         .into_iter()
-        .map(|source| SlangSourceUnit {
-            files: vec![source],
+        .map(|files| SlangSourceUnit {
+            files,
             dependencies: Vec::new(),
             include_paths: options.include_paths.clone(),
             defines: slang_defines(options),

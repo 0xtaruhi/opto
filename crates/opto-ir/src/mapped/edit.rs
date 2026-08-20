@@ -546,6 +546,7 @@ pub struct AppliedRegionDelta {
     names: NameCheckpoint,
     added_nets: BTreeMap<TempNetId, NetId>,
     added_cells: BTreeMap<TempCellId, CellId>,
+    renamed_nets: BTreeSet<NetId>,
 }
 
 impl AppliedRegionDelta {
@@ -596,6 +597,16 @@ impl AppliedRegionDelta {
             .keys()
             .copied()
             .chain(self.added_nets.values().copied())
+    }
+
+    /// Iterates live nets whose names changed across the applied edit.
+    ///
+    /// Unlike adjacency edits, a rename requires name-based consumers to
+    /// refresh every incident object even when their stable net IDs did not
+    /// change. Keeping this set separate prevents rollback/read footprints
+    /// from becoming invalidation frontiers.
+    pub fn renamed_nets(&self) -> impl Iterator<Item = NetId> + '_ {
+        self.renamed_nets.iter().copied()
     }
 }
 

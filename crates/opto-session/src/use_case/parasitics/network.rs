@@ -156,7 +156,7 @@ fn pin_capacitance(
     let scalar = pin
         .capacitance()
         .or(match (pin.rise_capacitance(), pin.fall_capacitance()) {
-            (Some(rise), Some(fall)) => Some((rise + fall) * 0.5),
+            (Some(rise), Some(fall)) => Some(f64::midpoint(rise, fall)),
             (Some(value), None) | (None, Some(value)) => Some(value),
             (None, None) => None,
         })

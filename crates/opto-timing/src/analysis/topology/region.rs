@@ -48,6 +48,109 @@ impl InstanceRegionGraphEdit {
 }
 
 impl TimingGraph {
+    /// Derives the exact arrival-propagation seeds from instance payload
+    /// changes, independently of the wider graph rows journaled for rollback.
+    ///
+    /// Replacing one instance rebuilds all of its graph rows, but unchanged
+    /// connections are not timing changes. In particular, seeding an unchanged
+    /// high-fanout input would turn a one-pin edit into a whole-design update.
+    fn instance_region_dirty_nets(
+        &self,
+        library: &TimingLibrary,
+        old_instances: &[TimingInstance],
+        new_instances: &[TimingInstance],
+    ) -> Result<BTreeSet<usize>, crate::TimingError> {
+        let old_by_id = old_instances
+            .iter()
+            .map(|instance| (instance.id, instance))
+            .collect::<BTreeMap<_, _>>();
+        let new_by_id = new_instances
+            .iter()
+            .map(|instance| (instance.id, instance))
+            .collect::<BTreeMap<_, _>>();
+        let ids = old_by_id
+            .keys()
+            .chain(new_by_id.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut dirty = BTreeSet::new();
+
+        for id in ids {
+            let old = old_by_id.get(&id).copied();
+            let new = new_by_id.get(&id).copied();
+            match (old, new) {
+                (Some(old), Some(new)) if old == new => {}
+                (Some(old), Some(new)) if old.name == new.name && old.cell == new.cell => {
+                    let old_connections = old
+                        .connections
+                        .iter()
+                        .map(|connection| (connection.pin.as_str(), connection.net.as_str()))
+                        .collect::<BTreeMap<_, _>>();
+                    let new_connections = new
+                        .connections
+                        .iter()
+                        .map(|connection| (connection.pin.as_str(), connection.net.as_str()))
+                        .collect::<BTreeMap<_, _>>();
+                    let changed_pins = old_connections
+                        .keys()
+                        .chain(new_connections.keys())
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .filter(|pin| old_connections.get(pin) != new_connections.get(pin))
+                        .collect::<BTreeSet<_>>();
+                    for pin in &changed_pins {
+                        for net in [old_connections.get(pin), new_connections.get(pin)]
+                            .into_iter()
+                            .flatten()
+                        {
+                            dirty.insert(self.net_id(net).expect(
+                                "region connections resolve after missing nets are inserted",
+                            ));
+                        }
+                    }
+                    if !changed_pins.is_empty() {
+                        let cell = self.library_cells.resolve(library, new)?;
+                        let cell = super::LibraryCellIndex::cell(library, cell);
+                        for pin in cell.pins().filter(|pin| {
+                            matches!(
+                                pin.direction(),
+                                TargetPinDirection::Output | TargetPinDirection::Inout
+                            )
+                        }) {
+                            for net in [
+                                old_connections.get(pin.name()),
+                                new_connections.get(pin.name()),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            {
+                                dirty.insert(self.net_id(net).expect(
+                                    "region connections resolve after missing nets are inserted",
+                                ));
+                            }
+                        }
+                    }
+                }
+                (old, new) => {
+                    for net in old
+                        .into_iter()
+                        .chain(new)
+                        .flat_map(|instance| &instance.connections)
+                        .map(|connection| connection.net.as_str())
+                    {
+                        dirty.insert(
+                            self.net_id(net).expect(
+                                "region connections resolve after missing nets are inserted",
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(dirty)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "region replacement is a preflighted graph transaction whose journal must cover \
@@ -129,7 +232,7 @@ impl TimingGraph {
             .flat_map(|instance| &instance.connections)
             .filter_map(|connection| self.net_id(&connection.net))
             .collect::<BTreeSet<_>>();
-        let dirty = touched.clone();
+        let dirty = self.instance_region_dirty_nets(library, old_instances, new_instances)?;
         let old_nets = touched
             .iter()
             .filter(|&&net| net < old_net_len)

@@ -388,10 +388,30 @@ fn partitions_simulation_candidates_with_incremental_sat() {
             &[vec![xor, and, sop, demorgan_and]],
             4,
             64,
+            usize::MAX,
             &mut Vec::new()
         )
         .unwrap(),
-        vec![vec![None, None, Some(0), Some(1)]]
+        Some(vec![vec![None, None, Some(0), Some(1)]])
+    );
+}
+
+#[test]
+fn literal_partition_proof_skips_an_oversized_encoding() {
+    let mut builder = opto_ir::logic::LogicBuilder::new();
+    let a = builder.input(1).unwrap();
+    let b = builder.input(2).unwrap();
+    let left = builder.and(a, b, 0).unwrap();
+    let right = builder
+        .or(a.inverted(), b.inverted(), 0)
+        .unwrap()
+        .inverted();
+    let network = builder.freeze();
+
+    assert_eq!(
+        prove_logic_literal_partitions(&network, &[vec![left, right]], 2, 2, 1, &mut Vec::new(),)
+            .unwrap(),
+        None
     );
 }
 

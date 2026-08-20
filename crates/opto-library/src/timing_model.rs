@@ -592,7 +592,7 @@ impl ArcDelayModel {
         let mut accumulated = 0.0;
         for index in 1..current.coordinates.len() {
             let step = current.coordinates[index] - current.coordinates[index - 1];
-            accumulated += 0.5 * (current.values[index - 1] + current.values[index]) * step;
+            accumulated += f64::midpoint(current.values[index - 1], current.values[index]) * step;
             charge.push(accumulated);
         }
         let final_charge = *charge.last()?;
@@ -768,7 +768,7 @@ fn strictly_monotonic(values: &[f64]) -> bool {
 
 fn average_optional(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     match (left, right) {
-        (Some(left), Some(right)) => Some(0.5 * (left + right)),
+        (Some(left), Some(right)) => Some(f64::midpoint(left, right)),
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
     }
