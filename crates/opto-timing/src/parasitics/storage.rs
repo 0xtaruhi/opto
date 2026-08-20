@@ -429,9 +429,10 @@ impl Parasitics {
                 connections
                     .iter()
                     .map(|connection| {
-                        (connection.pin_capacitance_farads[0]
-                            + connection.pin_capacitance_farads[1])
-                            * 0.5
+                        f64::midpoint(
+                            connection.pin_capacitance_farads[0],
+                            connection.pin_capacitance_farads[1],
+                        )
                     })
                     .sum::<f64>()
                     / self.capacitance_unit_farads
