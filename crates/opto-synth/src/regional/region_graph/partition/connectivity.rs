@@ -257,7 +257,7 @@ impl<'a> ConnectivityIndex<'a> {
                         .filter(|connect| connect.target.signal == reference.signal)
                         .count();
                     Err(crate::SynthError::invariant(format!(
-                        "live internal signal '{name}' slice {:?}[{}:{}] has no semantic producer ({connects} structural drivers)",
+                        "live internal signal '{name}' slice {:?}[{}:{}] has no semantic producer ({connects} structural drivers on the signal)",
                         reference.signal,
                         reference.lsb + reference.width() - 1,
                         reference.lsb

@@ -356,6 +356,7 @@ impl RegionalWordImporter<'_> {
         span: &word::SourceSpan,
     ) -> Result<word::ValueId, crate::SynthError> {
         if let Some(&local) = self.imported_bits.get(&(source, bit)) {
+            self.extend_generated_operation_sources(local)?;
             return Ok(local);
         }
         let source_ty = self.source_value_type(source)?;
@@ -692,6 +693,7 @@ impl RegionalWordImporter<'_> {
         span: &word::SourceSpan,
     ) -> Result<word::ValueId, crate::SynthError> {
         if let Some(local) = self.dynamic_selectors.get(&source).copied() {
+            self.extend_generated_operation_sources(local)?;
             return Ok(local);
         }
         let local = self.import_active_value(source, ty, span)?;
@@ -844,18 +846,14 @@ impl RegionalWordImporter<'_> {
         &mut self,
         value: word::ValueId,
     ) -> Result<(), crate::SynthError> {
-        let operation = self
-            .module
-            .value(value)
-            .and_then(|stored| match stored.kind {
-                word::ValueKind::Operation(operation) => Some(operation),
-                word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
-            })
-            .ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "cached region-local generated value has no operation provenance",
-                )
-            })?;
+        let stored = self.module.value(value).ok_or_else(|| {
+            crate::SynthError::invariant(
+                "cached region-local generated value disappeared during import",
+            )
+        })?;
+        let word::ValueKind::Operation(operation) = stored.kind else {
+            return Ok(());
+        };
         let additional = self.current_operation_sources();
         self.operation_sources.merge(operation, additional)
     }

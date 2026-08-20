@@ -1420,14 +1420,20 @@ mod tests {
                 word::SourceSpan::default(),
             )
             .unwrap();
-        let selected = source
-            .dynamic_extract(state_value, offset, 2, word::SourceSpan::default())
-            .unwrap();
+        let selected = [(); 2].map(|()| {
+            source
+                .dynamic_extract(state_value, offset, 2, word::SourceSpan::default())
+                .unwrap()
+        });
+        let selected_operations = selected.map(|value| match source.value(value).unwrap().kind {
+            word::ValueKind::Operation(operation) => operation,
+            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => unreachable!(),
+        });
         let low = source
-            .extract(selected, 0, 1, word::SourceSpan::default())
+            .extract(selected[0], 0, 1, word::SourceSpan::default())
             .unwrap();
         let high = source
-            .extract(selected, 1, 1, word::SourceSpan::default())
+            .extract(selected[1], 1, 1, word::SourceSpan::default())
             .unwrap();
         let feedback = source
             .binary(
@@ -1489,5 +1495,10 @@ mod tests {
                 .count(),
             2
         );
+        assert!(cone.operation_sources.source_sets().any(|sources| {
+            selected_operations
+                .iter()
+                .all(|operation| sources.contains(operation))
+        }));
     }
 }
