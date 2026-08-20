@@ -212,7 +212,6 @@ pub struct KnownBitsAnalysis {
     values: Vec<FactState>,
     signals: Vec<FactState>,
     arena: Vec<FactWord>,
-    derivation_stack: Vec<FactNode>,
     dependents: BTreeMap<FactNode, Vec<FactNode>>,
     drivers: SignalDrivers,
     external_signals: Vec<bool>,
@@ -233,7 +232,6 @@ impl KnownBitsAnalysis {
             values: vec![FactState::Uncomputed; module.values().len()],
             signals: vec![FactState::Uncomputed; module.signals().len()],
             arena: Vec::new(),
-            derivation_stack: Vec::new(),
             dependents: BTreeMap::new(),
             drivers: SignalDrivers::build(module),
             external_signals,
@@ -274,10 +272,7 @@ impl KnownBitsAnalysis {
         self.invalidate(changed_signals.into_iter().map(FactNode::Signal));
     }
 
-    fn record_dependency(&mut self, dependency: FactNode) {
-        let Some(&dependent) = self.derivation_stack.last() else {
-            return;
-        };
+    fn record_dependency(&mut self, dependency: FactNode, dependent: FactNode) {
         let dependents = self.dependents.entry(dependency).or_default();
         if !dependents.contains(&dependent) {
             dependents.push(dependent);
@@ -364,108 +359,205 @@ fn derive_value(
     id: ValueId,
     analysis: &mut KnownBitsAnalysis,
 ) -> Option<FactRange> {
-    let node = FactNode::Value(id);
-    analysis.record_dependency(node);
-    let width = module.value(id)?.ty.width();
-    match analysis.values.get(id.index()).copied()? {
-        FactState::Computed(facts) => return Some(facts),
-        FactState::Computing => return Some(FactRange::unknown(width)),
-        FactState::Uncomputed => {}
-    }
-    analysis.values[id.index()] = FactState::Computing;
-    analysis.derivation_stack.push(node);
-    let facts = (|| {
-        let value = module.value(id)?;
-        Some(match &value.kind {
-            ValueKind::Signal(reference) => {
-                let signal = derive_signal(module, reference.signal, analysis)?;
-                slice_facts(signal, reference.lsb, reference.width(), analysis)
-            }
-            ValueKind::Constant(bits) => store_bits(
-                bits.as_slice().iter().rev().map(|bit| match bit {
-                    BitVal::Zero => KnownBit::Zero,
-                    BitVal::One => KnownBit::One,
-                    BitVal::X | BitVal::Z => KnownBit::Unknown,
-                }),
-                bits.width(),
-                &mut analysis.arena,
-            ),
-            ValueKind::Operation(operation) => {
-                let operation = module.operation(*operation)?;
-                derive_operation(module, &operation.kind, value.ty, analysis)
-            }
-        })
-    })();
-    let popped = analysis.derivation_stack.pop();
-    debug_assert_eq!(popped, Some(node));
-    let facts = facts?;
-    analysis.values[id.index()] = FactState::Computed(facts);
-    Some(facts)
+    derive_node(module, FactNode::Value(id), analysis)
 }
 
-fn derive_signal(
+fn derive_node(
+    module: &WordModule,
+    root: FactNode,
+    analysis: &mut KnownBitsAnalysis,
+) -> Option<FactRange> {
+    node_width(module, root)?;
+    let mut pending = vec![(root, false)];
+    while let Some((node, exiting)) = pending.pop() {
+        if exiting {
+            let facts = evaluate_node(module, node, analysis)
+                .unwrap_or_else(|| FactRange::unknown(node_width(module, node).unwrap_or(0)));
+            set_node_state(analysis, node, FactState::Computed(facts))?;
+            continue;
+        }
+        match node_state(analysis, node)? {
+            FactState::Computed(_) | FactState::Computing => continue,
+            FactState::Uncomputed => set_node_state(analysis, node, FactState::Computing)?,
+        }
+        pending.push((node, true));
+        for dependency in node_dependencies(module, node, analysis)?.into_iter().rev() {
+            analysis.record_dependency(dependency, node);
+            if matches!(
+                node_state(analysis, dependency),
+                Some(FactState::Uncomputed)
+            ) {
+                pending.push((dependency, false));
+            }
+        }
+    }
+    match node_state(analysis, root)? {
+        FactState::Computed(facts) => Some(facts),
+        FactState::Uncomputed | FactState::Computing => None,
+    }
+}
+
+fn node_width(module: &WordModule, node: FactNode) -> Option<u32> {
+    match node {
+        FactNode::Value(value) => module.value(value).map(|stored| stored.ty.width()),
+        FactNode::Signal(signal) => module.signal(signal).map(|stored| stored.ty.width()),
+    }
+}
+
+fn node_state(analysis: &KnownBitsAnalysis, node: FactNode) -> Option<FactState> {
+    match node {
+        FactNode::Value(value) => analysis.values.get(value.index()).copied(),
+        FactNode::Signal(signal) => analysis.signals.get(signal.index()).copied(),
+    }
+}
+
+fn set_node_state(
+    analysis: &mut KnownBitsAnalysis,
+    node: FactNode,
+    state: FactState,
+) -> Option<()> {
+    match node {
+        FactNode::Value(value) => *analysis.values.get_mut(value.index())? = state,
+        FactNode::Signal(signal) => *analysis.signals.get_mut(signal.index())? = state,
+    }
+    Some(())
+}
+
+fn node_dependencies(
+    module: &WordModule,
+    node: FactNode,
+    analysis: &KnownBitsAnalysis,
+) -> Option<Vec<FactNode>> {
+    match node {
+        FactNode::Value(value) => match &module.value(value)?.kind {
+            ValueKind::Signal(reference) => Some(vec![FactNode::Signal(reference.signal)]),
+            ValueKind::Constant(_) => Some(Vec::new()),
+            ValueKind::Operation(operation) => {
+                let mut dependencies = Vec::new();
+                module
+                    .operation(*operation)?
+                    .kind
+                    .for_each_input(|input| dependencies.push(FactNode::Value(input)));
+                Some(dependencies)
+            }
+        },
+        FactNode::Signal(signal) => {
+            let connects = analysis.drivers.for_signal(signal).collect::<Vec<_>>();
+            if analysis.external_signals.get(signal.index()).copied()?
+                || connects.is_empty()
+                || connects.iter().any(|&index| {
+                    module
+                        .connects()
+                        .get(index)
+                        .is_some_and(|connect| connect.target.dynamic.is_some())
+                })
+            {
+                return Some(Vec::new());
+            }
+            connects
+                .into_iter()
+                .map(|index| {
+                    module
+                        .connects()
+                        .get(index)
+                        .map(|connect| FactNode::Value(connect.value))
+                })
+                .collect()
+        }
+    }
+}
+
+fn evaluate_node(
+    module: &WordModule,
+    node: FactNode,
+    analysis: &mut KnownBitsAnalysis,
+) -> Option<FactRange> {
+    match node {
+        FactNode::Value(id) => {
+            let value = module.value(id)?;
+            Some(match &value.kind {
+                ValueKind::Signal(reference) => {
+                    let signal = node_facts(module, FactNode::Signal(reference.signal), analysis)?;
+                    slice_facts(signal, reference.lsb, reference.width(), analysis)
+                }
+                ValueKind::Constant(bits) => store_bits(
+                    bits.as_slice().iter().rev().map(|bit| match bit {
+                        BitVal::Zero => KnownBit::Zero,
+                        BitVal::One => KnownBit::One,
+                        BitVal::X | BitVal::Z => KnownBit::Unknown,
+                    }),
+                    bits.width(),
+                    &mut analysis.arena,
+                ),
+                ValueKind::Operation(operation) => {
+                    let operation = module.operation(*operation)?;
+                    derive_operation(module, &operation.kind, value.ty, analysis)
+                }
+            })
+        }
+        FactNode::Signal(signal) => evaluate_signal(module, signal, analysis),
+    }
+}
+
+fn evaluate_signal(
     module: &WordModule,
     signal: SignalId,
     analysis: &mut KnownBitsAnalysis,
 ) -> Option<FactRange> {
-    let node = FactNode::Signal(signal);
-    analysis.record_dependency(node);
     let width = module.signal(signal)?.ty.width();
-    match analysis.signals.get(signal.index()).copied()? {
-        FactState::Computed(facts) => return Some(facts),
-        FactState::Computing => return Some(FactRange::unknown(width)),
-        FactState::Uncomputed => {}
-    }
-    analysis.signals[signal.index()] = FactState::Computing;
-    analysis.derivation_stack.push(node);
     let connect_indices = analysis.drivers.for_signal(signal).collect::<Vec<_>>();
     let external = analysis.external_signals[signal.index()];
-    let facts = (|| {
-        if external
-            || connect_indices.is_empty()
-            || connect_indices.iter().any(|&index| {
-                module
-                    .connects()
-                    .get(index)
-                    .is_some_and(|connect| connect.target.dynamic.is_some())
-            })
-        {
-            Some(FactRange::unknown(width))
-        } else {
-            let words = word_count(width);
-            let mut assigned = vec![0u64; words];
-            let mut bits = vec![FactWord::default(); words];
-            for index in connect_indices {
-                let connect = module.connects().get(index)?;
-                let source = derive_value(module, connect.value, analysis)?;
-                let target_width = connect
-                    .target
-                    .range
-                    .map_or(width, super::model::BitRange::width);
-                for offset in 0..target_width {
-                    let target = match connect.target.range {
-                        Some(range) if range.msb >= range.lsb => range.lsb.checked_add(offset)?,
-                        Some(range) => range.lsb.checked_sub(offset)?,
-                        None => offset,
-                    };
-                    let word = target as usize / u64::BITS as usize;
-                    let mask = 1u64 << (target % u64::BITS);
-                    if assigned[word] & mask == 0 {
-                        assigned[word] |= mask;
-                        set_bit(&mut bits, target, source.bit(&analysis.arena, offset));
-                    } else {
-                        set_bit(&mut bits, target, KnownBit::Unknown);
-                    }
-                }
+    if external
+        || connect_indices.is_empty()
+        || connect_indices.iter().any(|&index| {
+            module
+                .connects()
+                .get(index)
+                .is_some_and(|connect| connect.target.dynamic.is_some())
+        })
+    {
+        return Some(FactRange::unknown(width));
+    }
+    let words = word_count(width);
+    let mut assigned = vec![0u64; words];
+    let mut bits = vec![FactWord::default(); words];
+    for index in connect_indices {
+        let connect = module.connects().get(index)?;
+        let source = node_facts(module, FactNode::Value(connect.value), analysis)?;
+        let target_width = connect
+            .target
+            .range
+            .map_or(width, super::model::BitRange::width);
+        for offset in 0..target_width {
+            let target = match connect.target.range {
+                Some(range) if range.msb >= range.lsb => range.lsb.checked_add(offset)?,
+                Some(range) => range.lsb.checked_sub(offset)?,
+                None => offset,
+            };
+            let word = target as usize / u64::BITS as usize;
+            let mask = 1u64 << (target % u64::BITS);
+            if assigned[word] & mask == 0 {
+                assigned[word] |= mask;
+                set_bit(&mut bits, target, source.bit(&analysis.arena, offset));
+            } else {
+                set_bit(&mut bits, target, KnownBit::Unknown);
             }
-            Some(store_words(bits, width, &mut analysis.arena))
         }
-    })();
-    let popped = analysis.derivation_stack.pop();
-    debug_assert_eq!(popped, Some(node));
-    let facts = facts?;
-    analysis.signals[signal.index()] = FactState::Computed(facts);
-    Some(facts)
+    }
+    Some(store_words(bits, width, &mut analysis.arena))
+}
+
+fn node_facts(
+    module: &WordModule,
+    node: FactNode,
+    analysis: &KnownBitsAnalysis,
+) -> Option<FactRange> {
+    match node_state(analysis, node)? {
+        FactState::Computed(facts) => Some(facts),
+        FactState::Computing | FactState::Uncomputed => {
+            Some(FactRange::unknown(node_width(module, node)?))
+        }
+    }
 }
 
 #[allow(
@@ -819,7 +911,7 @@ fn compare_facts(
 }
 
 fn value_facts(module: &WordModule, value: ValueId, analysis: &mut KnownBitsAnalysis) -> FactRange {
-    derive_value(module, value, analysis).unwrap_or_else(|| {
+    node_facts(module, FactNode::Value(value), analysis).unwrap_or_else(|| {
         FactRange::unknown(module.value(value).map_or(0, |stored| stored.ty.width()))
     })
 }
@@ -1528,5 +1620,25 @@ mod tests {
         assert_eq!(packed.bit(u128::BITS - 1), KnownBit::One);
         assert_eq!(facts.packed128(&module, over_limit), None);
         assert_eq!(facts.bit(&module, over_limit, u128::BITS), KnownBit::One);
+    }
+
+    #[test]
+    fn evaluates_deep_ssa_chains_without_using_the_call_stack() {
+        let mut module = WordModule::new("deep");
+        let mut value = module
+            .constant(
+                ConstBits::from_bin_str("0").unwrap(),
+                ty(1),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        for _ in 0..20_000 {
+            value = module
+                .unary(UnaryOp::BitNot, value, SourceSpan::default())
+                .unwrap();
+        }
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(facts.bit(&module, value, 0), KnownBit::Zero);
     }
 }

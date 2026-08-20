@@ -127,7 +127,7 @@ fn lower_module(module: &SlangMaterializedModule<'_>) -> Result<RtlModule, HdlEr
             && (direction == PortDirection::Inout
                 || writes
                     .get(name)
-                    .is_some_and(WriteClasses::requires_tri_state_resolution))
+                    .is_some_and(WriteClaims::requires_tri_state_resolution))
         {
             SignalResolution::TriState
         } else {
@@ -156,7 +156,7 @@ fn lower_module(module: &SlangMaterializedModule<'_>) -> Result<RtlModule, HdlEr
             .as_ref()
             .is_some_and(TypeLayoutSpec::contains_unpacked_array);
         let writes = writes.get(name).cloned().unwrap_or_default();
-        if has_unpacked && writes.is_mixed() {
+        if has_unpacked && writes.has_mixed_overlap() {
             return Err(HdlError::unsupported(format!(
                 "verilog frontend: unpacked storage '{name}' has mixed {} drivers",
                 writes.description()
@@ -167,7 +167,7 @@ fn lower_module(module: &SlangMaterializedModule<'_>) -> Result<RtlModule, HdlEr
         // shape; selectors on every other legal layout use the canonical
         // signal extract/insert path below.
         let first_class_memory_shape = if has_unpacked
-            && writes.contains(WriteClass::Flop)
+            && writes.has_only(WriteClass::Flop)
             && !writes.has_multi_event_flop()
             && !net.is_process_local()
         {
@@ -448,57 +448,83 @@ enum WriteClass {
     Flop,
 }
 
-impl WriteClass {
-    const fn bit(self) -> u8 {
-        match self {
-            Self::Continuous => 1,
-            Self::Combinational => 2,
-            Self::Flop => 4,
+#[derive(Clone, Copy)]
+enum WriteTarget {
+    Whole,
+    Static { lsb: u32, width: u32 },
+    Dynamic,
+}
+
+impl WriteTarget {
+    const fn overlaps(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Whole | Self::Dynamic, _) | (_, Self::Whole | Self::Dynamic) => true,
+            (
+                Self::Static {
+                    lsb: left_lsb,
+                    width: left_width,
+                },
+                Self::Static {
+                    lsb: right_lsb,
+                    width: right_width,
+                },
+            ) => {
+                left_lsb < right_lsb.saturating_add(right_width)
+                    && right_lsb < left_lsb.saturating_add(left_width)
+            }
         }
     }
 }
 
-#[derive(Clone, Default)]
-struct WriteClasses {
-    classes: u8,
-    multi_event_flop: bool,
-    tri_state_driver: bool,
+#[derive(Clone, Copy)]
+struct WriteClaim {
+    class: WriteClass,
+    target: WriteTarget,
+    tri_state: bool,
+    multi_event: bool,
 }
 
-impl WriteClasses {
-    fn insert(&mut self, class: WriteClass) {
-        self.classes |= class.bit();
+#[derive(Clone, Default)]
+struct WriteClaims(Vec<WriteClaim>);
+
+impl WriteClaims {
+    fn insert(
+        &mut self,
+        class: WriteClass,
+        target: WriteTarget,
+        tri_state: bool,
+        multi_event: bool,
+    ) {
+        self.0.push(WriteClaim {
+            class,
+            target,
+            tri_state,
+            multi_event,
+        });
     }
 
-    fn insert_flop(&mut self, multi_event: bool) {
-        self.insert(WriteClass::Flop);
-        self.multi_event_flop |= multi_event;
+    fn contains(&self, class: WriteClass) -> bool {
+        self.0.iter().any(|claim| claim.class == class)
     }
 
-    fn insert_continuous(&mut self, tri_state: bool) {
-        self.insert(WriteClass::Continuous);
-        self.tri_state_driver |= tri_state;
+    fn has_multi_event_flop(&self) -> bool {
+        self.0.iter().any(|claim| claim.multi_event)
     }
 
-    fn insert_procedural(&mut self, class: WriteClass, tri_state: bool) {
-        self.insert(class);
-        self.tri_state_driver |= tri_state;
+    fn has_only(&self, class: WriteClass) -> bool {
+        !self.0.is_empty() && self.0.iter().all(|claim| claim.class == class)
     }
 
-    const fn contains(&self, class: WriteClass) -> bool {
-        self.classes & class.bit() != 0
+    fn has_mixed_overlap(&self) -> bool {
+        self.0.iter().enumerate().any(|(index, claim)| {
+            self.0[index + 1..]
+                .iter()
+                .any(|other| claim.class != other.class && claim.target.overlaps(other.target))
+        })
     }
 
-    const fn has_multi_event_flop(&self) -> bool {
-        self.multi_event_flop
-    }
-
-    const fn is_mixed(&self) -> bool {
-        self.classes.count_ones() > 1
-    }
-
-    const fn requires_tri_state_resolution(&self) -> bool {
-        self.tri_state_driver
+    fn requires_tri_state_resolution(&self) -> bool {
+        self.0.iter().any(|claim| claim.tri_state)
     }
 
     fn description(&self) -> String {
@@ -519,12 +545,19 @@ impl WriteClasses {
 
 fn classify_writes<'a>(
     module: &'a SlangMaterializedModule<'_>,
-) -> Result<HashMap<&'a str, WriteClasses>, HdlError> {
-    let mut writes: HashMap<&str, WriteClasses> = HashMap::new();
+) -> Result<HashMap<&'a str, WriteClaims>, HdlError> {
+    let mut writes: HashMap<&str, WriteClaims> = HashMap::new();
     for assignment in module.assigns() {
-        if let Some(name) = assignment_signal_name(assignment.lhs().map_err(frontend_error)?)? {
+        if let Some((name, target)) =
+            assignment_signal_target(assignment.lhs().map_err(frontend_error)?)?
+        {
             let tri_state = is_tri_state_expression(assignment.rhs().map_err(frontend_error)?)?;
-            writes.entry(name).or_default().insert_continuous(tri_state);
+            writes.entry(name).or_default().insert(
+                WriteClass::Continuous,
+                target,
+                tri_state,
+                false,
+            );
         }
     }
 
@@ -539,15 +572,12 @@ fn classify_writes<'a>(
         let multi_event_flop = kind == SlangProcedureKind::Flop && procedure.events().len() > 1;
         for block in procedure.blocks() {
             for effect in block.effects() {
-                if let Some(name) = assignment_signal_name(effect.lhs().map_err(frontend_error)?)? {
+                if let Some((name, target)) =
+                    assignment_signal_target(effect.lhs().map_err(frontend_error)?)?
+                {
                     let writes = writes.entry(name).or_default();
                     let tri_state = is_tri_state_expression(effect.rhs().map_err(frontend_error)?)?;
-                    if class == WriteClass::Flop {
-                        writes.insert_flop(multi_event_flop);
-                        writes.tri_state_driver |= tri_state;
-                    } else {
-                        writes.insert_procedural(class, tri_state);
-                    }
+                    writes.insert(class, target, tri_state, multi_event_flop);
                 }
             }
         }
@@ -555,11 +585,34 @@ fn classify_writes<'a>(
     Ok(writes)
 }
 
-fn assignment_signal_name(expression: SlangExpression<'_>) -> Result<Option<&str>, HdlError> {
+fn assignment_signal_target(
+    expression: SlangExpression<'_>,
+) -> Result<Option<(&str, WriteTarget)>, HdlError> {
     match expression.kind().map_err(frontend_error)? {
-        SlangExpressionKind::Signal(signal) => Ok(Some(signal.name)),
-        SlangExpressionKind::Extract { value, .. }
-        | SlangExpressionKind::DynamicExtract { value, .. } => assignment_signal_name(value),
+        SlangExpressionKind::Signal(signal) => Ok(Some((
+            signal.name,
+            signal
+                .range
+                .map_or(WriteTarget::Whole, |range| WriteTarget::Static {
+                    lsb: range.msb.min(range.lsb),
+                    width: range.msb.abs_diff(range.lsb) + 1,
+                }),
+        ))),
+        SlangExpressionKind::Extract { value, lsb, width } => Ok(assignment_signal_target(value)?
+            .map(|(name, target)| {
+                let target = match target {
+                    WriteTarget::Whole => WriteTarget::Static { lsb, width },
+                    WriteTarget::Static { lsb: base_lsb, .. } => WriteTarget::Static {
+                        lsb: base_lsb.saturating_add(lsb),
+                        width,
+                    },
+                    WriteTarget::Dynamic => WriteTarget::Dynamic,
+                };
+                (name, target)
+            })),
+        SlangExpressionKind::DynamicExtract { value, .. } => {
+            Ok(assignment_signal_target(value)?.map(|(name, _)| (name, WriteTarget::Dynamic)))
+        }
         _ => Ok(None),
     }
 }

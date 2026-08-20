@@ -30,24 +30,117 @@ pub(crate) use sequential_delta::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ArtifactNetId(usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactNetBinding {
+    External { net: NetId, producer: bool },
+    Local(usize),
+}
+
+/// The authoritative net namespace of one sealed mapped artifact.
+///
+/// Cells refer only to compact artifact IDs. Whether an ID binds an existing
+/// mapped net or a transaction-local net is recorded exactly once here, so net
+/// identity cannot silently acquire or lose producer ownership while a region
+/// is materialized.
+#[derive(Debug, Clone, Default)]
+struct ArtifactNetTable {
+    bindings: Vec<ArtifactNetBinding>,
+    external: BTreeMap<NetId, ArtifactNetId>,
+    local_count: usize,
+}
+
+impl ArtifactNetTable {
+    fn signal(&mut self, signal: region_delta::MappedValueSignal) -> ArtifactSignal {
+        match signal {
+            region_delta::MappedValueSignal::Constant(value) => ArtifactSignal::Constant(value),
+            region_delta::MappedValueSignal::Net(net) => {
+                let id = if let Some(&id) = self.external.get(&net) {
+                    id
+                } else {
+                    let id = ArtifactNetId(self.bindings.len());
+                    self.bindings.push(ArtifactNetBinding::External {
+                        net,
+                        producer: false,
+                    });
+                    self.external.insert(net, id);
+                    id
+                };
+                ArtifactSignal::Net(id)
+            }
+        }
+    }
+
+    fn allocate_local(&mut self) -> Result<ArtifactSignal, crate::SynthError> {
+        let local = self.local_count;
+        self.local_count = self
+            .local_count
+            .checked_add(1)
+            .ok_or_else(|| crate::SynthError::capacity("artifact local nets"))?;
+        let id = ArtifactNetId(self.bindings.len());
+        self.bindings.push(ArtifactNetBinding::Local(local));
+        Ok(ArtifactSignal::Net(id))
+    }
+
+    /// Claims the sole artifact-local producer for an external boundary net.
+    ///
+    /// Correlated outputs can name the same frozen mapped bit. The first cover
+    /// output in stable cell order owns publication; later implementations stay
+    /// local. The claim lives beside net identity and is checked against the
+    /// sealed output pins before publication.
+    fn claim_output(
+        &mut self,
+        target: Option<ArtifactSignal>,
+    ) -> Result<ArtifactSignal, crate::SynthError> {
+        if let Some(target @ ArtifactSignal::Net(id)) = target
+            && let Some(ArtifactNetBinding::External { producer, .. }) = self.bindings.get_mut(id.0)
+            && !*producer
+        {
+            *producer = true;
+            return Ok(target);
+        }
+        self.allocate_local()
+    }
+
+    fn local_count(&self) -> usize {
+        self.local_count
+    }
+
+    fn external_nets(&self) -> impl Iterator<Item = NetId> + '_ {
+        self.external.keys().copied()
+    }
+
+    fn binding(&self, id: ArtifactNetId) -> Option<ArtifactNetBinding> {
+        self.bindings.get(id.0).copied()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ArtifactSignal {
-    Mapped(region_delta::MappedValueSignal),
-    LocalNet(usize),
+    Constant(bool),
+    Net(ArtifactNetId),
 }
 
 impl ArtifactSignal {
     fn connection(
         self,
+        nets: &ArtifactNetTable,
         local_nets: &[TempNetId],
         missing_local_net: &'static str,
     ) -> Result<ConnectionRef, crate::SynthError> {
         match self {
-            Self::Mapped(signal) => Ok(signal.connection()),
-            Self::LocalNet(index) => local_nets
-                .get(index)
-                .copied()
-                .map(ConnectionRef::NewNet)
-                .ok_or_else(|| crate::SynthError::invariant(missing_local_net)),
+            Self::Constant(value) => Ok(ConnectionRef::Constant(value)),
+            Self::Net(id) => match nets.binding(id).ok_or_else(|| {
+                crate::SynthError::invariant("artifact connection references an unknown net")
+            })? {
+                ArtifactNetBinding::External { net, .. } => Ok(ConnectionRef::Net(net)),
+                ArtifactNetBinding::Local(index) => local_nets
+                    .get(index)
+                    .copied()
+                    .map(ConnectionRef::NewNet)
+                    .ok_or_else(|| crate::SynthError::invariant(missing_local_net)),
+            },
         }
     }
 }
@@ -65,12 +158,12 @@ type AppendedArtifactCells<O> = (Box<[TempNetId]>, Box<[O]>);
 
 fn append_artifact_cells<M, O>(
     delta: &mut RegionDelta,
-    local_net_count: usize,
+    nets: &ArtifactNetTable,
     cells: &[ArtifactCell<M>],
     missing_local_net: &'static str,
     output: impl Fn(TempCellId, &M) -> O,
 ) -> Result<AppendedArtifactCells<O>, crate::SynthError> {
-    let local_nets = (0..local_net_count)
+    let local_nets = (0..nets.local_count())
         .map(|_| delta.add_net(None).map_err(crate::SynthError::from))
         .collect::<Result<Box<[_]>, _>>()?;
     let cells = cells
@@ -81,7 +174,7 @@ fn append_artifact_cells<M, O>(
                 spec = spec.connect(
                     pin,
                     *library_pin,
-                    signal.connection(&local_nets, missing_local_net)?,
+                    signal.connection(nets, &local_nets, missing_local_net)?,
                 );
             }
             delta
@@ -91,6 +184,153 @@ fn append_artifact_cells<M, O>(
         })
         .collect::<Result<Box<[_]>, _>>()?;
     Ok((local_nets, cells))
+}
+
+/// Seals one artifact's bit-level connectivity and producer claims.
+///
+/// Every target-library connection is scalar, so artifact nets are physical
+/// bits. Validation therefore follows the exact pins referenced by each
+/// combinational output function instead of treating an aggregate signal or a
+/// whole cell as the cycle-detection unit.
+fn validate_artifact_nets<M>(
+    label: &str,
+    nets: &ArtifactNetTable,
+    cells: &[ArtifactCell<M>],
+    target_cells: &opto_library::TargetCellSet,
+) -> Result<(), crate::SynthError> {
+    let mut drivers = vec![0u32; nets.bindings.len()];
+    let mut edges = vec![Vec::<ArtifactNetId>::new(); nets.bindings.len()];
+
+    for (cell_index, cell) in cells.iter().enumerate() {
+        let library = cell
+            .library_cell
+            .and_then(|index| target_cells.get(index as usize))
+            .ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "{label} cell {cell_index} is absent from the target library"
+                ))
+            })?;
+        let pin_signal = cell
+            .connections
+            .iter()
+            .map(|(name, _, signal)| (name.as_str(), *signal))
+            .collect::<BTreeMap<_, _>>();
+        for (name, library_pin, signal) in &cell.connections {
+            let pin = artifact_pin(label, cell_index, name, *library_pin, library)?;
+            let ArtifactSignal::Net(id) = *signal else {
+                continue;
+            };
+            if matches!(
+                pin.direction(),
+                opto_library::TargetPinDirection::Output | opto_library::TargetPinDirection::Inout
+            ) {
+                drivers[id.0] = drivers[id.0].saturating_add(1);
+            }
+        }
+        if library.sequential().next().is_some() {
+            continue;
+        }
+        for (name, library_pin, output) in &cell.connections {
+            let pin = artifact_pin(label, cell_index, name, *library_pin, library)?;
+            let ArtifactSignal::Net(output) = *output else {
+                continue;
+            };
+            if !matches!(
+                pin.direction(),
+                opto_library::TargetPinDirection::Output | opto_library::TargetPinDirection::Inout
+            ) {
+                continue;
+            }
+            for function in [pin.function(), pin.three_state()].into_iter().flatten() {
+                function.for_each_pin(&mut |source_name| {
+                    if let Some(ArtifactSignal::Net(source)) = pin_signal.get(source_name).copied()
+                    {
+                        edges[source.0].push(output);
+                    }
+                });
+            }
+        }
+    }
+
+    for (index, binding) in nets.bindings.iter().copied().enumerate() {
+        match binding {
+            ArtifactNetBinding::External { net, producer } => {
+                if drivers[index] > 1 {
+                    return Err(crate::SynthError::invariant(format!(
+                        "{label} external bit {net:?} has {} artifact producers",
+                        drivers[index]
+                    )));
+                }
+                if producer != (drivers[index] == 1) {
+                    return Err(crate::SynthError::invariant(format!(
+                        "{label} external bit {net:?} producer claim does not match its output pin"
+                    )));
+                }
+            }
+            ArtifactNetBinding::Local(local) => {
+                if drivers[index] != 1 {
+                    return Err(crate::SynthError::invariant(format!(
+                        "{label} local bit {local} has {} producers instead of one",
+                        drivers[index]
+                    )));
+                }
+            }
+        }
+    }
+
+    for targets in &mut edges {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+    let mut indegree = vec![0usize; edges.len()];
+    for targets in &edges {
+        for target in targets {
+            indegree[target.0] = indegree[target.0].saturating_add(1);
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &degree)| (degree == 0).then_some(ArtifactNetId(index)))
+        .collect::<Vec<_>>();
+    let mut visited = 0usize;
+    while let Some(source) = ready.pop() {
+        visited += 1;
+        for target in &edges[source.0] {
+            indegree[target.0] -= 1;
+            if indegree[target.0] == 0 {
+                ready.push(*target);
+            }
+        }
+    }
+    if visited != edges.len() {
+        let cyclic = indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &degree)| (degree != 0).then_some(nets.bindings[index]))
+            .collect::<Vec<_>>();
+        return Err(crate::SynthError::invariant(format!(
+            "{label} contains a physical bit-level combinational cycle through {cyclic:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn artifact_pin<'a>(
+    label: &str,
+    cell: usize,
+    name: &str,
+    index: Option<u16>,
+    library: opto_library::TargetCellRef<'a>,
+) -> Result<opto_library::TargetPinRef<'a>, crate::SynthError> {
+    index
+        .and_then(|index| library.pins().nth(index as usize))
+        .or_else(|| library.pins().find(|pin| pin.name() == name))
+        .ok_or_else(|| {
+            crate::SynthError::invariant(format!(
+                "{label} cell {cell} pin '{name}' is absent from its target cell"
+            ))
+        })
 }
 
 #[derive(Debug)]
@@ -125,11 +365,65 @@ pub(crate) struct FrozenObservableConnectivity {
     source_sink_pins: BTreeSet<PinId>,
 }
 
+fn mapped_target_pin<'a>(
+    mapped: &MappedNetlist,
+    target_cells: &'a opto_library::TargetCellSet,
+    pin: PinId,
+) -> Result<Option<opto_library::TargetPinRef<'a>>, crate::SynthError> {
+    let cell = mapped
+        .pin_owner(pin)
+        .ok_or_else(|| crate::SynthError::invariant("mapped pin has no live owner"))?;
+    let stored = mapped
+        .cell(cell)
+        .ok_or_else(|| crate::SynthError::invariant("mapped pin owner is unknown"))?;
+    let Some(library_index) = stored.library_cell else {
+        return Ok(None);
+    };
+    let connection = mapped
+        .connection(pin)
+        .ok_or_else(|| crate::SynthError::invariant("mapped pin has no binding"))?;
+    let library = target_cells.get(library_index as usize).ok_or_else(|| {
+        crate::SynthError::invariant("mapped cell is absent from the target library")
+    })?;
+    connection
+        .library_pin
+        .and_then(|index| library.pins().nth(index as usize))
+        .or_else(|| {
+            mapped
+                .pin_name(connection)
+                .and_then(|name| library.pins().find(|pin| pin.name() == name))
+        })
+        .map(Some)
+        .ok_or_else(|| {
+            crate::SynthError::invariant("mapped pin is absent from its target-library cell")
+        })
+}
+
 impl FrozenObservableConnectivity {
     pub(crate) fn capture(
         mapped: &MappedNetlist,
         target_cells: &opto_library::TargetCellSet,
         reference_ports: &crate::ReferencePortMap,
+    ) -> Result<Self, crate::SynthError> {
+        Self::capture_model(mapped, target_cells, reference_ports, true)
+    }
+
+    /// Captures immutable port/source direction data before regional producers
+    /// are installed. The caller must validate the affected bits as artifacts
+    /// are committed.
+    pub(crate) fn capture_substrate(
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+        reference_ports: &crate::ReferencePortMap,
+    ) -> Result<Self, crate::SynthError> {
+        Self::capture_model(mapped, target_cells, reference_ports, false)
+    }
+
+    fn capture_model(
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+        reference_ports: &crate::ReferencePortMap,
+        validate: bool,
     ) -> Result<Self, crate::SynthError> {
         let mut boundary_nets = BTreeSet::new();
         let mut resolved_nets = BTreeSet::new();
@@ -205,31 +499,12 @@ impl FrozenObservableConnectivity {
             static_driver_counts[net.index()] = static_driver_counts[net.index()].saturating_add(1);
         }
         for cell in mapped.cell_ids() {
-            let stored = mapped
-                .cell(cell)
-                .ok_or_else(|| crate::SynthError::invariant("mapped cell is unknown"))?;
-            let Some(library_index) = stored.library_cell else {
-                continue;
-            };
-            let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
-                crate::SynthError::invariant("mapped cell is absent from the target library")
-            })?;
             for pin in mapped.pin_ids(cell).into_iter().flatten() {
                 let connection = mapped.connection(pin).ok_or_else(|| {
                     crate::SynthError::invariant("mapped cell has no pin binding")
                 })?;
-                let library_pin = match connection.library_pin {
-                    Some(pin) => library_cell.pins().nth(pin as usize),
-                    None => mapped
-                        .pin_name(connection)
-                        .and_then(|name| library_cell.pins().find(|pin| pin.name() == name)),
-                }
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "mapped pin is absent from its target-library cell",
-                    )
-                })?;
-                if library_pin.three_state().is_some()
+                if mapped_target_pin(mapped, target_cells, pin)?
+                    .is_some_and(|pin| pin.three_state().is_some())
                     && let ConnectionSignal::Net(net) = connection.signal
                 {
                     resolved_nets.insert(net);
@@ -246,8 +521,43 @@ impl FrozenObservableConnectivity {
             source_driver_pins,
             source_sink_pins,
         };
-        frozen.validate(mapped, target_cells)?;
+        if validate {
+            frozen.validate(mapped, target_cells)?;
+        }
         Ok(frozen)
+    }
+
+    pub(crate) fn validate_affected(
+        &self,
+        mapped: &MappedNetlist,
+        target_cells: &opto_library::TargetCellSet,
+        affected_nets: impl IntoIterator<Item = NetId>,
+    ) -> Result<(), crate::SynthError> {
+        for net in affected_nets.into_iter().collect::<BTreeSet<_>>() {
+            if self.boundary_nets.contains(&net) && !mapped.is_live_net(net) {
+                return Err(crate::SynthError::invariant(format!(
+                    "mapped publication boundary bit {net:?} was removed"
+                )));
+            }
+            if !mapped.is_live_net(net) || !self.net_is_required(mapped, target_cells, net)? {
+                continue;
+            }
+            let drivers = self.driver_count(mapped, target_cells, net)?;
+            if drivers == 1 || (drivers > 0 && self.resolved_nets.contains(&net)) {
+                continue;
+            }
+            let name = mapped.net_name(net).unwrap_or("<unnamed>");
+            if drivers == 0 {
+                return Err(crate::SynthError::invariant(format!(
+                    "mapped bit '{name}' ({net:?}) is consumed but has no physical producer"
+                )));
+            }
+            return Err(crate::SynthError::invariant(format!(
+                "mapped bit '{name}' ({net:?}) has {drivers} physical producers ({})",
+                self.driver_sources(mapped, target_cells, net)?.join(", ")
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn preserves_affected(
@@ -363,34 +673,13 @@ impl FrozenObservableConnectivity {
             if self.source_sink_pins.contains(&pin) {
                 return Ok(true);
             }
-            let cell = mapped.pin_owner(pin).ok_or_else(|| {
-                crate::SynthError::invariant("mapped consumer pin has no live owner")
-            })?;
-            let stored = mapped
-                .cell(cell)
-                .ok_or_else(|| crate::SynthError::invariant("mapped consumer cell is unknown"))?;
-            let Some(library_index) = stored.library_cell else {
-                continue;
-            };
-            let connection = mapped.connection(pin).ok_or_else(|| {
-                crate::SynthError::invariant("mapped consumer cell has no pin binding")
-            })?;
-            let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
-                crate::SynthError::invariant("mapped cell is absent from the target library")
-            })?;
-            let library_pin = match connection.library_pin {
-                Some(pin) => library_cell.pins().nth(pin as usize),
-                None => mapped
-                    .pin_name(connection)
-                    .and_then(|name| library_cell.pins().find(|pin| pin.name() == name)),
-            }
-            .ok_or_else(|| {
-                crate::SynthError::invariant("mapped pin is absent from its target-library cell")
-            })?;
-            if matches!(
-                library_pin.direction(),
-                opto_library::TargetPinDirection::Input | opto_library::TargetPinDirection::Inout
-            ) {
+            if mapped_target_pin(mapped, target_cells, pin)?.is_some_and(|pin| {
+                matches!(
+                    pin.direction(),
+                    opto_library::TargetPinDirection::Input
+                        | opto_library::TargetPinDirection::Inout
+                )
+            }) {
                 return Ok(true);
             }
         }
@@ -416,36 +705,13 @@ impl FrozenObservableConnectivity {
                 count = count.saturating_add(1);
                 continue;
             }
-            let cell = mapped.pin_owner(pin).ok_or_else(|| {
-                crate::SynthError::invariant("mapped boundary pin has no live owner")
-            })?;
-            let stored = mapped
-                .cell(cell)
-                .ok_or_else(|| crate::SynthError::invariant("mapped boundary cell is unknown"))?;
-            let Some(library_index) = stored.library_cell else {
-                continue;
-            };
-            let connection = mapped.connection(pin).ok_or_else(|| {
-                crate::SynthError::invariant("mapped driver cell has no pin binding")
-            })?;
-            let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
-                crate::SynthError::invariant("mapped driver cell is absent from the target library")
-            })?;
-            let library_pin = match connection.library_pin {
-                Some(pin) => library_cell.pins().nth(pin as usize),
-                None => mapped
-                    .pin_name(connection)
-                    .and_then(|name| library_cell.pins().find(|pin| pin.name() == name)),
-            }
-            .ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "mapped target-cell pin is absent from its target-library cell",
+            if mapped_target_pin(mapped, target_cells, pin)?.is_some_and(|pin| {
+                matches!(
+                    pin.direction(),
+                    opto_library::TargetPinDirection::Output
+                        | opto_library::TargetPinDirection::Inout
                 )
-            })?;
-            if matches!(
-                library_pin.direction(),
-                opto_library::TargetPinDirection::Output | opto_library::TargetPinDirection::Inout
-            ) {
+            }) {
                 count = count.saturating_add(1);
             }
         }
@@ -480,30 +746,18 @@ impl FrozenObservableConnectivity {
                 ));
                 continue;
             }
-            let Some(library_index) = mapped
-                .cell(cell)
-                .ok_or_else(|| crate::SynthError::invariant("mapped boundary cell is unknown"))?
-                .library_cell
-            else {
-                continue;
-            };
-            let library_cell = target_cells.get(library_index as usize).ok_or_else(|| {
-                crate::SynthError::invariant("mapped driver cell is absent from the target library")
-            })?;
-            let library_pin = match connection.library_pin {
-                Some(pin) => library_cell.pins().nth(pin as usize),
-                None => library_cell.pins().find(|pin| pin.name() == pin_name),
-            }
-            .ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "mapped target-cell pin is absent from its target-library cell",
+            if mapped_target_pin(mapped, target_cells, pin)?.is_some_and(|pin| {
+                matches!(
+                    pin.direction(),
+                    opto_library::TargetPinDirection::Output
+                        | opto_library::TargetPinDirection::Inout
                 )
-            })?;
-            if matches!(
-                library_pin.direction(),
-                opto_library::TargetPinDirection::Output | opto_library::TargetPinDirection::Inout
-            ) {
-                sources.push(format!("{}.{}", library_cell.name(), pin_name));
+            }) {
+                sources.push(format!(
+                    "{}.{}",
+                    mapped.cell_type(cell).unwrap_or("<target-cell>"),
+                    pin_name
+                ));
             }
         }
         Ok(sources)

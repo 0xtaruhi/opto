@@ -106,7 +106,7 @@ pub(crate) fn resolve_private_operator_sources(
     local: &word::WordModule,
     decisions: &ArchitectureDecisions,
     owned_operations: &[word::OpId],
-    operation_sources: &[Option<word::OpId>],
+    operation_sources: &crate::planning::regional::LocalOperationProvenance,
 ) -> Result<Box<[Box<[word::OpId]>]>, crate::SynthError> {
     let owned_operations = owned_operations
         .iter()
@@ -130,8 +130,10 @@ pub(crate) fn resolve_private_operator_sources(
                 if !visited.insert(operation_id) {
                     continue;
                 }
-                if let Some(Some(source_operation)) = operation_sources.get(operation_id.index()) {
-                    sources.insert(*source_operation);
+                if let Some(source_operations) = operation_sources.sources(operation_id)
+                    && !source_operations.is_empty()
+                {
+                    sources.extend(source_operations.iter().copied());
                     continue;
                 }
                 let operation = local.operation(operation_id).ok_or_else(|| {
@@ -836,16 +838,23 @@ mod tests {
             .unwrap();
 
         let decisions = ArchitectureDecisions::for_module(&local).unwrap();
+        let mut operation_sources = crate::planning::regional::LocalOperationProvenance::default();
+        operation_sources
+            .set(operation(&local, copied), [represented])
+            .unwrap();
+        operation_sources
+            .set(operation(&local, generated), [represented, unrelated])
+            .unwrap();
         let sources = resolve_private_operator_sources(
             &source,
             &local,
             &decisions,
             &[represented, unrelated],
-            &[Some(represented), None],
+            &operation_sources,
         )
         .unwrap();
 
-        assert_eq!(sources.as_ref(), &[Box::from([represented])]);
+        assert_eq!(sources.as_ref(), &[Box::from([represented, unrelated])]);
     }
 
     #[test]

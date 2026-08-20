@@ -16,4 +16,4 @@ pub use durable::{
     OperatorOccurrenceId, OperatorShape, OperatorSignature, OperatorSignatureId, OperatorTermShape,
     PreservedOperatorInstance,
 };
-pub(crate) use sharing::share_muxed_arithmetic;
+pub(crate) use sharing::{OperationRewrite, share_muxed_arithmetic};

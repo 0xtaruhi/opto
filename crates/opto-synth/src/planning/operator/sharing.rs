@@ -7,6 +7,13 @@ mod rewrite;
 use activation::{Activation, UseIndex};
 use opto_ir::word;
 use std::collections::BTreeMap;
+use std::ops::Range;
+
+/// One SSA suffix that implements a replacement for existing operations.
+pub(crate) struct OperationRewrite {
+    pub(crate) created: Range<usize>,
+    pub(crate) replaced: Box<[word::OpId]>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::planning::operator::sharing) enum ArithmeticKind {
@@ -43,7 +50,7 @@ pub(in crate::planning::operator::sharing) struct ShareCandidate {
 
 pub(crate) fn share_muxed_arithmetic(
     module: &mut word::WordModule,
-) -> Result<usize, crate::SynthError> {
+) -> Result<Box<[OperationRewrite]>, crate::SynthError> {
     let region = crate::RegionRowId::from_index(0)?;
     let owners = vec![Some(region); module.operations().len()];
     share_muxed_arithmetic_by_region(module, &owners)
@@ -53,14 +60,14 @@ pub(crate) fn share_muxed_arithmetic(
 fn share_muxed_arithmetic_in_regions(
     module: &mut word::WordModule,
     operation_regions: &[Option<crate::RegionRowId>],
-) -> Result<usize, crate::SynthError> {
+) -> Result<Box<[OperationRewrite]>, crate::SynthError> {
     share_muxed_arithmetic_by_region(module, operation_regions)
 }
 
 fn share_muxed_arithmetic_by_region(
     module: &mut word::WordModule,
     operation_regions: &[Option<crate::RegionRowId>],
-) -> Result<usize, crate::SynthError> {
+) -> Result<Box<[OperationRewrite]>, crate::SynthError> {
     let uses = UseIndex::build(module)?;
     let mut buckets = BTreeMap::<SourceKey, Vec<ShareCandidate>>::new();
     for (index, &region) in operation_regions.iter().enumerate() {
@@ -257,14 +264,18 @@ mod tests {
             vec![Some(crate::RegionRowId::from_index(0).unwrap()); module.operations().len()];
         split_regions[1] = Some(crate::RegionRowId::from_index(1).unwrap());
         assert_eq!(
-            share_muxed_arithmetic_in_regions(&mut split, &split_regions).unwrap(),
+            share_muxed_arithmetic_in_regions(&mut split, &split_regions)
+                .unwrap()
+                .len(),
             0
         );
 
         let regions =
             vec![Some(crate::RegionRowId::from_index(0).unwrap()); module.operations().len()];
         assert_eq!(
-            share_muxed_arithmetic_in_regions(&mut module, &regions).unwrap(),
+            share_muxed_arithmetic_in_regions(&mut module, &regions)
+                .unwrap()
+                .len(),
             1
         );
         let plan = crate::planning::operator::ArchitectureDecisions::for_private_region(

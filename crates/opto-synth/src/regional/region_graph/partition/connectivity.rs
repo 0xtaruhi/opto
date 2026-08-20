@@ -246,8 +246,18 @@ impl<'a> ConnectivityIndex<'a> {
                 {
                     Ok(None)
                 } else {
+                    let name = signal
+                        .name
+                        .and_then(|name| self.module.resolve_name(name))
+                        .unwrap_or("<unnamed>");
+                    let connects = self
+                        .module
+                        .connects()
+                        .iter()
+                        .filter(|connect| connect.target.signal == reference.signal)
+                        .count();
                     Err(crate::SynthError::invariant(format!(
-                        "live internal signal slice {:?}[{}:{}] has no semantic producer",
+                        "live internal signal '{name}' slice {:?}[{}:{}] has no semantic producer ({connects} structural drivers)",
                         reference.signal,
                         reference.lsb + reference.width() - 1,
                         reference.lsb

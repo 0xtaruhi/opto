@@ -37,21 +37,90 @@ fn cell(
     }
 }
 
+fn buffer_cell() -> opto_library::TargetCell {
+    let mut cell = cell("BUF", false, opto_library::TargetCellUsage::default(), true);
+    let mut input = cell.pins[0].clone();
+    input.name = "A".to_string();
+    input.direction = opto_library::TargetPinDirection::Input;
+    cell.pins[0].function = Some(opto_library::BooleanFunction::parse("A").unwrap());
+    cell.pins.insert(0, input);
+    cell
+}
+
 fn input_pin(name: &str) -> opto_library::TargetPin {
-    opto_library::TargetPin {
-        name: name.to_string(),
-        direction: opto_library::TargetPinDirection::Input,
-        function: None,
-        three_state: None,
-        capacitance: None,
-        rise_capacitance: None,
-        fall_capacitance: None,
-        receiver_capacitance: None,
-        fanout_load: None,
-        next_state_type: None,
-        timing_arcs: Vec::new(),
-        clock_gate_role: None,
-    }
+    let mut pin = cell("", false, opto_library::TargetCellUsage::default(), true)
+        .pins
+        .pop()
+        .unwrap();
+    pin.name = name.to_string();
+    pin.direction = opto_library::TargetPinDirection::Input;
+    pin
+}
+
+#[test]
+fn sealed_artifact_allows_one_external_producer_with_independent_consumers() {
+    let target_cells: opto_library::TargetCellSet = vec![buffer_cell()].into();
+    let mut nets = ArtifactNetTable::default();
+    let external = nets.signal(region_delta::MappedValueSignal::Net(
+        NetId::from_index(0).unwrap(),
+    ));
+    let produced = nets.claim_output(Some(external)).unwrap();
+    let local = nets.allocate_local().unwrap();
+    let cells = [
+        ArtifactCell {
+            name: "producer".to_string(),
+            cell_type: "BUF".to_string(),
+            library_cell: Some(0),
+            connections: vec![
+                ("A".to_string(), Some(0), ArtifactSignal::Constant(false)),
+                ("Y".to_string(), Some(1), produced),
+            ]
+            .into_boxed_slice(),
+            metadata: (),
+        },
+        ArtifactCell {
+            name: "consumer".to_string(),
+            cell_type: "BUF".to_string(),
+            library_cell: Some(0),
+            connections: vec![
+                ("A".to_string(), Some(0), external),
+                ("Y".to_string(), Some(1), local),
+            ]
+            .into_boxed_slice(),
+            metadata: (),
+        },
+    ];
+
+    validate_artifact_nets("test artifact", &nets, &cells, &target_cells).unwrap();
+}
+
+#[test]
+fn sealed_artifact_rejects_a_bit_level_external_feedback_cycle() {
+    let target_cells: opto_library::TargetCellSet = vec![buffer_cell()].into();
+    let mut nets = ArtifactNetTable::default();
+    let external = nets.signal(region_delta::MappedValueSignal::Net(
+        NetId::from_index(0).unwrap(),
+    ));
+    let produced = nets.claim_output(Some(external)).unwrap();
+    let cells = [ArtifactCell {
+        name: "feedback".to_string(),
+        cell_type: "BUF".to_string(),
+        library_cell: Some(0),
+        connections: vec![
+            ("A".to_string(), Some(0), external),
+            ("Y".to_string(), Some(1), produced),
+        ]
+        .into_boxed_slice(),
+        metadata: (),
+    }];
+
+    let error = validate_artifact_nets("test artifact", &nets, &cells, &target_cells).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("physical bit-level combinational cycle"),
+        "{error}"
+    );
 }
 
 fn tri_state_cell(name: &str, area: f64, active_high: bool) -> opto_library::TargetCell {

@@ -9,17 +9,22 @@ use opto_ir::word;
 pub(super) fn materialize_groups(
     module: &mut word::WordModule,
     groups: Vec<Vec<ShareCandidate>>,
-) -> Result<usize, crate::SynthError> {
+) -> Result<Box<[super::OperationRewrite]>, crate::SynthError> {
     let mut replacements = vec![None; module.values().len()];
-    let group_count = groups.len();
+    let mut rewrites = Vec::with_capacity(groups.len());
     for group in groups {
+        let first = module.operations().len();
         let shared = materialize_group(module, &group)?;
+        rewrites.push(super::OperationRewrite {
+            created: first..module.operations().len(),
+            replaced: group.iter().map(|candidate| candidate.operation).collect(),
+        });
         for candidate in &group {
             replacements[candidate.result.index()] = Some(shared);
         }
     }
     rewrite_uses(module, &replacements)?;
-    Ok(group_count)
+    Ok(rewrites.into_boxed_slice())
 }
 
 fn materialize_group(

@@ -68,6 +68,7 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
     let source_to_local =
         std::collections::BTreeMap::from([(source_input, local_input), (source_root, local_input)]);
     let ownership = crate::boolean::bitblast::LoweredRegionOwnership::new(local.values().len());
+    let operation_sources = crate::planning::regional::LocalOperationProvenance::default();
 
     let candidate = build_candidate_binding(
         CandidateBindingDomain {
@@ -77,7 +78,7 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
             boundary_bindings: &[(source_input, local_input)],
             owned_memory_logic: &[],
             memory_states: &[],
-            operation_sources: &[],
+            operation_sources: &operation_sources,
             root_bindings: &[(source_root, root_signal)],
             ownership: &ownership,
         },
@@ -157,6 +158,7 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
         (source_root, local_input),
     ]);
     let ownership = crate::boolean::bitblast::LoweredRegionOwnership::new(local.values().len());
+    let operation_sources = crate::planning::regional::LocalOperationProvenance::default();
 
     let candidate = build_candidate_binding(
         CandidateBindingDomain {
@@ -166,7 +168,7 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
             boundary_bindings: &[(port_value, local_input)],
             owned_memory_logic: &[],
             memory_states: &[],
-            operation_sources: &[],
+            operation_sources: &operation_sources,
             root_bindings: &[(source_root, root_signal)],
             ownership: &ownership,
         },

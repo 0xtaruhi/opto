@@ -11,8 +11,10 @@ use opto_ir::{BitVal, ConstBits, word};
 /// This is a source-semantic completion step, not a driver repair. After all
 /// source drivers have been lowered, it completes holes in partially driven
 /// internal single-driver aggregates and otherwise-undefined output bits.
-/// Wholly undriven internals, dynamic targets, resolved nets, and generated
-/// drivers remain invalid or retain their existing boundary semantics.
+/// Observable wholly undriven internals are source-level unspecified values,
+/// not malformed ownership, and receive the same completion. Unobservable
+/// internals are left dead. Dynamic targets and resolved nets retain their
+/// existing boundary semantics.
 pub(super) fn seal_observable_dont_cares(
     module: &mut word::WordModule,
     reference_ports: &ReferencePortMap,
@@ -77,28 +79,26 @@ pub(super) fn seal_observable_dont_cares(
         mark_range(&mut driven, connect.target.signal, lsb, width)?;
     }
 
-    let internal = module
-        .signals()
-        .iter()
-        .enumerate()
-        .filter(|(index, signal)| {
-            matches!(
-                signal.kind,
-                word::SignalKind::Wire | word::SignalKind::Register
-            ) && signal.resolution == word::SignalResolution::SingleDriver
-                && !has_dynamic_target[*index]
-                && driven[*index].iter().any(|bit| *bit)
-                && driven[*index].iter().any(|bit| !*bit)
-        })
-        .map(|(index, signal)| {
-            Ok((
-                word::SignalId::from_index(index).map_err(crate::SynthError::from)?,
+    let observability = crate::word::uses::netlist_observability(module)?;
+    let mut internal = Vec::new();
+    for (index, signal) in module.signals().iter().enumerate() {
+        let signal_id = word::SignalId::from_index(index).map_err(crate::SynthError::from)?;
+        if matches!(
+            signal.kind,
+            word::SignalKind::Wire | word::SignalKind::Register
+        ) && signal.resolution == word::SignalResolution::SingleDriver
+            && !has_dynamic_target[index]
+            && driven[index].iter().any(|bit| !*bit)
+            && (driven[index].iter().any(|bit| *bit) || observability.observes_signal(signal_id)?)
+        {
+            internal.push((
+                signal_id,
                 signal.ty,
                 signal.source.clone(),
                 missing_ranges(&driven[index])?,
-            ))
-        })
-        .collect::<Result<Vec<_>, crate::SynthError>>()?;
+            ));
+        }
+    }
     for (signal, ty, source, ranges) in internal {
         seal_ranges(module, signal, ty, &source, ranges)?;
     }

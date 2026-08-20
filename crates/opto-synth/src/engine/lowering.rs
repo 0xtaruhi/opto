@@ -116,7 +116,7 @@ pub(super) fn lower_logic(
     let operator_manifest = crate::OperatorManifest::capture(
         prepared_regions.iter().map(|prepared| &prepared.operators),
     )?;
-    let (provenance, mut region_ownership, mut regional_plans) = {
+    let (provenance, region_ownership, mut regional_plans) = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.global_bitblast".to_string()
         });
@@ -161,7 +161,6 @@ pub(super) fn lower_logic(
     }
     ledger.lowered_values = source.values().len();
     ledger.lowered_operations = source.operations().len();
-    region_ownership.infer_unowned(&source)?;
     Ok(LoweredState {
         environment,
         ledger,

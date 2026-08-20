@@ -349,7 +349,7 @@ pub(crate) struct CandidateBindingDomain<'a> {
     pub(crate) boundary_bindings: &'a [(word::ValueId, word::ValueId)],
     pub(crate) owned_memory_logic: &'a [RegionalMemoryLogicBinding],
     pub(crate) memory_states: &'a [RegionalMemoryStateBinding],
-    pub(crate) operation_sources: &'a [Option<word::OpId>],
+    pub(crate) operation_sources: &'a crate::planning::regional::LocalOperationProvenance,
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
     pub(crate) ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
 }
@@ -504,7 +504,8 @@ pub(crate) fn build_candidate_binding<'a>(
         &mut local_to_outputs,
     )?;
     for (index, operation) in local_module.operations().iter().enumerate() {
-        let Some(source_operation) = operation_sources.get(index).copied().flatten() else {
+        let local_operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+        let Some([source_operation]) = operation_sources.sources(local_operation) else {
             continue;
         };
         for (role, value) in sequential_inputs(&operation.kind)? {
@@ -515,7 +516,7 @@ pub(crate) fn build_candidate_binding<'a>(
                 let bit = u32::try_from(bit)
                     .map_err(|_| crate::SynthError::capacity("regional sequential bit index"))?;
                 let binding = RegionPlanValueBinding::SequentialInputBit {
-                    operation: source_operation,
+                    operation: *source_operation,
                     role,
                     bit,
                 };

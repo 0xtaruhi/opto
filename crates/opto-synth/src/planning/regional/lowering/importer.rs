@@ -708,6 +708,7 @@ impl RegionalWordImporter<'_> {
         span: &word::SourceSpan,
     ) -> Result<word::ValueId, crate::SynthError> {
         if let Some(matches) = self.dynamic_choice_matches.get(&(source, choice)).copied() {
+            self.extend_generated_operation_sources(matches)?;
             return Ok(matches);
         }
         let constant = crate::word::unsigned_constant(&mut self.module, choice, ty, span.clone())?;
@@ -813,13 +814,50 @@ impl RegionalWordImporter<'_> {
                 ));
             }
         };
-        if operation.index() != self.operation_sources.len() {
-            return Err(crate::SynthError::invariant(
-                "region-local generated operation source rows are not dense",
-            ));
-        }
-        self.operation_sources.push(None);
-        Ok(())
+        let sources = self.current_operation_sources();
+        self.operation_sources.set(operation, sources)
+    }
+
+    fn current_operation_sources(&self) -> Vec<word::OpId> {
+        let mut sources = self
+            .import_path
+            .iter()
+            .filter_map(|&value| {
+                let word::ValueKind::Operation(operation) = self.source.value(value)?.kind else {
+                    return None;
+                };
+                (self
+                    .operation_regions
+                    .get(operation.index())
+                    .copied()
+                    .flatten()
+                    == Some(self.region))
+                .then_some(operation)
+            })
+            .collect::<Vec<_>>();
+        sources.sort_unstable();
+        sources.dedup();
+        sources
+    }
+
+    fn extend_generated_operation_sources(
+        &mut self,
+        value: word::ValueId,
+    ) -> Result<(), crate::SynthError> {
+        let operation = self
+            .module
+            .value(value)
+            .and_then(|stored| match stored.kind {
+                word::ValueKind::Operation(operation) => Some(operation),
+                word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+            })
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "cached region-local generated value has no operation provenance",
+                )
+            })?;
+        let additional = self.current_operation_sources();
+        self.operation_sources.merge(operation, additional)
     }
 
     fn operation_is_state(&self, operation: word::OpId) -> bool {
@@ -969,13 +1007,7 @@ impl RegionalWordImporter<'_> {
                 "region-local operation builder returned a non-operation value",
             ));
         };
-        let provenance = self
-            .operation_sources
-            .get_mut(local_operation.index())
-            .ok_or_else(|| {
-                crate::SynthError::invariant("region-local operation source rows are not dense")
-            })?;
-        *provenance = Some(source);
+        self.operation_sources.set(local_operation, [source])?;
         Ok(local)
     }
 

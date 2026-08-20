@@ -132,6 +132,67 @@ fn parallel_cfg_analysis_preserves_serial_word_ir() {
 }
 
 #[test]
+fn unreachable_flop_write_has_explicit_dont_care_producer() {
+    let mut module = WordModule::new("unreachable_flop_write");
+    let clock = input(&mut module, "clock");
+    let data = input(&mut module, "data");
+    let storage = module.add_wire("storage", bit(), span()).unwrap();
+    let observed = output(&mut module, "observed");
+    let storage_value = read(&mut module, storage);
+    module
+        .connect(word::LValue::signal(observed), storage_value, span())
+        .unwrap();
+    let data = read(&mut module, data);
+    let never = module
+        .constant(ConstBits::from_bin_str("0").unwrap(), bit(), span())
+        .unwrap();
+
+    let mut cfg = ProcBuilder::new();
+    let procedure = cfg
+        .add_clocked_procedure([sensitivity(&mut module, clock, word::Edge::Pos)], span())
+        .unwrap();
+    let entry = cfg.add_block(procedure, span()).unwrap();
+    let update = cfg.add_block(procedure, span()).unwrap();
+    let exit = cfg.add_block(procedure, span()).unwrap();
+    cfg.terminate_branch(entry, never, update, exit, span())
+        .unwrap();
+    cfg.assign(
+        update,
+        AssignmentMode::Nonblocking,
+        ProcTarget::signal(storage),
+        data,
+        span(),
+    )
+    .unwrap();
+    cfg.terminate_jump(update, exit, span()).unwrap();
+    cfg.terminate_return(exit, span()).unwrap();
+
+    let lowered = lower_to_validated_word(
+        RtlModule::new(module, cfg.seal().unwrap()).unwrap(),
+        &crate::ReferencePortMap::new(),
+        crate::test_runtime(),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    let driver = lowered
+        .connects()
+        .iter()
+        .find(|connect| connect.target.signal == storage)
+        .expect("unreachable procedural target has an SSA producer");
+    assert!(matches!(
+        lowered.value(driver.value).unwrap().kind,
+        word::ValueKind::Constant(ref bits) if bits.as_slice() == [opto_ir::BitVal::X]
+    ));
+    assert!(
+        lowered
+            .operations()
+            .iter()
+            .all(|operation| !matches!(operation.kind, word::OpKind::Register(_)))
+    );
+}
+
+#[test]
 fn latch_procedure_supports_per_target_assignment_scheduling() {
     let mut module = WordModule::new("mixed_latch_scheduling");
     let gate_signal = input(&mut module, "gate");
