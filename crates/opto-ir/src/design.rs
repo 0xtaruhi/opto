@@ -381,6 +381,9 @@ where
             if !self.contains(entity) {
                 return Err(DesignError::UnknownReplacement(entity));
             }
+            if !delta.reads.contains(entity) {
+                return Err(DesignError::IncompleteReadFootprint(entity));
+            }
         }
         validate_unique_cells(&delta.cells)?;
         validate_unique_nets(&delta.nets)?;
@@ -401,13 +404,38 @@ where
             }
         }
         for &input in &delta.semantic.inputs {
-            if self.net(input).is_none() && !delta.nets.iter().any(|net| net.id == input) {
+            if self.net(input).is_none() {
                 return Err(DesignError::UnknownBoundaryNet(input));
+            }
+            if !delta.reads.contains(EntityId::NetBit(input)) {
+                return Err(DesignError::IncompleteReadFootprint(EntityId::NetBit(
+                    input,
+                )));
             }
         }
         for &output in &delta.semantic.outputs {
             if !delta.replaces.contains(EntityId::NetBit(output)) {
                 return Err(DesignError::UnclaimedBoundaryOutput(output));
+            }
+            let previous = self
+                .net(output)
+                .expect("replacement validation established the boundary net");
+            let Some(replacement) = delta.nets.iter().find(|net| net.id == output) else {
+                return Err(DesignError::MissingBoundaryOutput(output));
+            };
+            if replacement.state != previous.state {
+                return Err(DesignError::BoundaryStateMismatch(output));
+            }
+        }
+        for cell in &delta.cells {
+            for &input in &cell.inputs {
+                let entity = EntityId::NetBit(input);
+                if self.net(input).is_some()
+                    && !delta.replaces.contains(entity)
+                    && !delta.reads.contains(entity)
+                {
+                    return Err(DesignError::IncompleteReadFootprint(entity));
+                }
             }
         }
         Ok(())
@@ -653,6 +681,9 @@ pub enum DesignError {
     /// One declared replacement does not exist in the base revision.
     #[error("rewrite delta replaces unknown entity {0:?}")]
     UnknownReplacement(EntityId),
+    /// A base entity used or replaced by the fragment was omitted from reads.
+    #[error("rewrite delta omits base dependency {0:?} from its read footprint")]
+    IncompleteReadFootprint(EntityId),
     /// Two transactions in one ordinary wave replace the same entity.
     #[error("rewrite deltas overlap at replacement entity {0:?}")]
     OverlappingReplacement(EntityId),
@@ -665,6 +696,12 @@ pub enum DesignError {
     /// A driven boundary output was not declared writable.
     #[error("rewrite boundary output {0:?} is outside the replacement footprint")]
     UnclaimedBoundaryOutput(NetBitId),
+    /// A boundary output is removed instead of receiving its replacement driver.
+    #[error("rewrite fragment omits replacement boundary output {0:?}")]
+    MissingBoundaryOutput(NetBitId),
+    /// A replacement changes the logical state domain of a stable boundary bit.
+    #[error("rewrite fragment changes the state domain of boundary output {0:?}")]
+    BoundaryStateMismatch(NetBitId),
     /// A cell references a missing net.
     #[error("design cell {cell:?} references unknown net {net:?}")]
     UnknownCellNet {
@@ -754,7 +791,11 @@ mod tests {
         RewriteDelta {
             id: RewriteDeltaId::from_bytes(digest(id)),
             base,
-            reads: set(vec![EntityId::NetBit(NetBitId::from_bytes(digest(10)))]),
+            reads: set(vec![
+                EntityId::Cell(CellId::from_bytes(digest(1))),
+                EntityId::NetBit(NetBitId::from_bytes(digest(10))),
+                EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+            ]),
             replaces: set(vec![
                 EntityId::Cell(CellId::from_bytes(digest(1))),
                 EntityId::NetBit(NetBitId::from_bytes(digest(11))),
@@ -818,6 +859,33 @@ mod tests {
     }
 
     #[test]
+    fn commit_rejects_an_incomplete_read_footprint() {
+        let base = base_design();
+        let mut replacement = delta(20, base.revision(), "missing-read");
+        replacement.reads = set(vec![
+            EntityId::NetBit(NetBitId::from_bytes(digest(10))),
+            EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+        ]);
+
+        assert!(matches!(
+            base.commit(vec![replacement], |_| Ok(())),
+            Err(DesignError::IncompleteReadFootprint(EntityId::Cell(_)))
+        ));
+    }
+
+    #[test]
+    fn stable_boundary_cannot_change_state_domain() {
+        let base = base_design();
+        let mut replacement = delta(20, base.revision(), "four-state");
+        replacement.nets[0].state = LogicStateKind::FourState;
+
+        assert_eq!(
+            base.commit(vec![replacement], |_| Ok(())).unwrap_err(),
+            DesignError::BoundaryStateMismatch(NetBitId::from_bytes(digest(11)))
+        );
+    }
+
+    #[test]
     fn ordinary_wave_rejects_overlapping_write_footprints() {
         let base = base_design();
         let first = delta(20, base.revision(), "first");
@@ -839,7 +907,10 @@ mod tests {
                 vec![RewriteDelta {
                     id: RewriteDeltaId::from_bytes(digest(20)),
                     base: base.revision(),
-                    reads: set(vec![]),
+                    reads: set(vec![
+                        EntityId::Cell(CellId::from_bytes(digest(1))),
+                        EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                    ]),
                     replaces: set(vec![
                         EntityId::Cell(CellId::from_bytes(digest(1))),
                         EntityId::NetBit(NetBitId::from_bytes(digest(11))),
@@ -900,7 +971,11 @@ mod tests {
         let second = RewriteDelta {
             id: RewriteDeltaId::from_bytes(digest(30)),
             base: base.revision(),
-            reads: set(vec![EntityId::NetBit(NetBitId::from_bytes(digest(12)))]),
+            reads: set(vec![
+                EntityId::Cell(CellId::from_bytes(digest(3))),
+                EntityId::NetBit(NetBitId::from_bytes(digest(12))),
+                EntityId::NetBit(NetBitId::from_bytes(digest(13))),
+            ]),
             replaces: set(vec![
                 EntityId::Cell(CellId::from_bytes(digest(3))),
                 EntityId::NetBit(NetBitId::from_bytes(digest(13))),
