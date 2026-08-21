@@ -57,7 +57,6 @@ pub(crate) struct CoverTiming<'a> {
 #[cfg(test)]
 pub(crate) fn cover_logic_network(
     network: &LogicGraph,
-    _cuts: &CutDatabase,
     outputs: &[LogicNodeId],
     catalog: &CombinationalCellCatalog,
     timing_constraints: CoverTiming<'_>,

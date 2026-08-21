@@ -300,10 +300,8 @@ fn ignores_choice_graph_fanout_outside_the_active_root_cone() {
     ]);
     let runtime = ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 2 }).unwrap();
     let map = |network: &LogicGraph, output| {
-        let cuts = CutDatabase::build(network, MAX_MATCH_INPUTS);
         cover_logic_network(
             network,
-            &cuts,
             &[output],
             &catalog,
             CoverTiming {
@@ -337,7 +335,6 @@ fn shares_multi_fanout_cones_instead_of_duplicating() {
     let left = network.and(shared, c);
     let right = network.and(shared, d);
     network.freeze();
-    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
     let matcher = matcher(vec![
         target_cell(
             "AND2",
@@ -367,7 +364,6 @@ fn shares_multi_fanout_cones_instead_of_duplicating() {
 
     let cover = cover_logic_network(
         &network,
-        &cuts,
         &[left, right],
         &matcher,
         CoverTiming {
@@ -405,7 +401,6 @@ fn duplicates_multi_fanout_cones_when_crossing_is_cheaper() {
     let left = network.and(shared, c);
     let right = network.and(shared, d);
     network.freeze();
-    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
     let matcher = matcher(vec![
         target_cell(
             "AND2",
@@ -435,7 +430,6 @@ fn duplicates_multi_fanout_cones_when_crossing_is_cheaper() {
 
     let cover = cover_logic_network(
         &network,
-        &cuts,
         &[left, right],
         &matcher,
         CoverTiming {
@@ -517,7 +511,6 @@ fn absorbs_output_inversions_into_matching_cells() {
     let and = network.and(a, b);
     let output = LogicGraph::not(and);
     network.freeze();
-    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
     let matcher = matcher(vec![
         target_cell(
             "AND2",
@@ -546,7 +539,6 @@ fn absorbs_output_inversions_into_matching_cells() {
 
     let cover = cover_logic_network(
         &network,
-        &cuts,
         &[output],
         &matcher,
         CoverTiming {
@@ -583,7 +575,6 @@ fn covers_mixed_gates_with_matching_truth_tables() {
     let conjunction = network.and(a, c);
     let output = network.mux(s, parity, conjunction);
     network.freeze();
-    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
     let matcher = matcher(vec![
         target_cell(
             "AND2",
@@ -631,7 +622,6 @@ fn covers_mixed_gates_with_matching_truth_tables() {
 
     let cover = cover_logic_network(
         &network,
-        &cuts,
         &[output],
         &matcher,
         CoverTiming {
@@ -666,7 +656,6 @@ fn ties_cell_inputs_to_reach_cheaper_implementations() {
     let first = network.mux(selector, first_true, first_false);
     let second = network.mux(selector, second_true, second_false);
     network.freeze();
-    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
     let matcher = matcher(vec![
         target_cell(
             "O22AI",
@@ -698,7 +687,6 @@ fn ties_cell_inputs_to_reach_cheaper_implementations() {
 
     let cover = cover_logic_network(
         &network,
-        &cuts,
         &[first, second],
         &matcher,
         CoverTiming {
@@ -740,7 +728,6 @@ fn covers_sum_and_carry_with_one_full_adder() {
     let propagate = network.and(partial, carry_in);
     let carry = network.or(generate, propagate);
     network.freeze();
-    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
     let matcher = matcher(vec![
         target_cell(
             "NAND2",
@@ -784,7 +771,6 @@ fn covers_sum_and_carry_with_one_full_adder() {
 
     let cover = cover_logic_network(
         &network,
-        &cuts,
         &[sum, carry],
         &matcher,
         CoverTiming {
@@ -834,7 +820,6 @@ fn exact_recovery_scores_shared_full_adder_outputs_without_reference_drift() {
     }
     outputs.push(carry);
     network.freeze();
-    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
     let matcher = matcher(vec![
         target_cell(
             "NAND2",
@@ -878,7 +863,6 @@ fn exact_recovery_scores_shared_full_adder_outputs_without_reference_drift() {
 
     let cover = cover_logic_network(
         &network,
-        &cuts,
         &outputs,
         &matcher,
         CoverTiming {
@@ -910,7 +894,6 @@ fn reports_unmatchable_networks_as_uncoverable() {
     let b = network.variable(1).unwrap();
     let output = network.xor(a, b);
     network.freeze();
-    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
     let matcher = matcher(vec![target_cell(
         "AND2",
         1.0,
@@ -924,7 +907,6 @@ fn reports_unmatchable_networks_as_uncoverable() {
     assert!(
         cover_logic_network(
             &network,
-            &cuts,
             &[output],
             &matcher,
             CoverTiming {
