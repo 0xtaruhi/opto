@@ -10,6 +10,7 @@ use opto_ir::design::{
 use opto_ir::word;
 use opto_runtime::{Task, TaskKey};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 const WORK_TASK_DOMAIN: u32 = 0x574f_524b;
 const COARSE_GROUP_SHARDS: usize = 16;
@@ -136,7 +137,9 @@ pub(crate) struct CompilationShard {
 
 #[derive(Debug)]
 pub(crate) struct WorkGraph {
-    design: DesignRevisionId,
+    design: Arc<WorkDesign>,
+    regions: Arc<crate::SynthesisRegionGraph>,
+    item_regions: Box<[crate::RegionRowId]>,
     items: Box<[WorkItem]>,
     shards: Box<[CompilationShard]>,
     coarse_groups: opto_core::PackedRows<CompilationShardId>,
@@ -144,45 +147,42 @@ pub(crate) struct WorkGraph {
     successors: opto_core::PackedRows<WorkItemId>,
 }
 
-/// Dense Word-region rows confined to the adapter invocation that built a graph.
-pub(crate) struct WorkBinding(Box<[crate::RegionRowId]>);
-
 impl WorkGraph {
     pub(crate) fn build(
         module: &word::WordModule,
-        regions: &crate::SynthesisRegionGraph,
-        design: &WorkDesign,
+        regions: Arc<crate::SynthesisRegionGraph>,
+        design: Arc<WorkDesign>,
         contexts: &[WorkContextKey],
         runtime: &opto_runtime::ExecutionContext,
-    ) -> Result<(Self, WorkBinding), crate::SynthError> {
+    ) -> Result<Self, crate::SynthError> {
         if contexts.len() != regions.regions().len() {
             return Err(crate::SynthError::invariant(
                 "work contexts do not cover the sealed region graph",
             ));
         }
-        let design = &design.0;
+        let revision = &design.0;
         let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
         let rows = runtime.analyze_indexed(regions.regions().len(), |index| {
             let region = regions.regions()[index];
-            let cells = region_cells(module, regions, region)?;
+            let cells = region_cells(module, regions.as_ref(), region)?;
             let mut core = region_value_entities(
                 module,
-                regions,
+                regions.as_ref(),
                 &connectivity,
                 region,
                 crate::RegionPortDirection::Output,
-                &design,
+                revision,
             )?;
             let mut halo = region_value_entities(
                 module,
-                regions,
+                regions.as_ref(),
                 &connectivity,
                 region,
                 crate::RegionPortDirection::Input,
-                &design,
+                revision,
             )?;
             for cell in cells {
-                let stored = design.cell(cell).ok_or_else(|| {
+                let stored = revision.cell(cell).ok_or_else(|| {
                     crate::SynthError::invariant(
                         "work item cell is absent from the logical revision",
                     )
@@ -206,7 +206,7 @@ impl WorkGraph {
                 EntitySet::new(core.into_iter().collect()).map_err(|error| design_error(&error))?;
             let halo =
                 EntitySet::new(halo.into_iter().collect()).map_err(|error| design_error(&error))?;
-            let id = work_item_id(design.revision(), region.id());
+            let id = work_item_id(revision.revision(), region.id());
             let estimated_memory = u64::try_from(core.as_slice().len() + halo.as_slice().len())
                 .unwrap_or(u64::MAX)
                 .max(1);
@@ -220,7 +220,7 @@ impl WorkGraph {
             };
             Ok::<_, crate::SynthError>((id, region.row(), item))
         })?;
-        let binding = WorkBinding(rows.iter().map(|row| row.1).collect());
+        let item_regions = rows.iter().map(|row| row.1).collect();
         let items = rows.into_iter().map(|row| row.2).collect::<Vec<_>>();
         let dependency_rows = |predecessors: bool| -> Result<Vec<Vec<_>>, crate::SynthError> {
             runtime.analyze_indexed(items.len(), |index| {
@@ -238,7 +238,9 @@ impl WorkGraph {
         let successors = opto_core::PackedRows::try_from_rows(dependency_rows(false)?)
             .map_err(|_| crate::SynthError::capacity("work-item successors"))?;
         let mut graph = Self {
-            design: design.revision(),
+            design,
+            regions,
+            item_regions,
             items: items.into_boxed_slice(),
             shards: Box::new([]),
             coarse_groups: opto_core::PackedRows::try_from_rows(Vec::<Vec<_>>::new())
@@ -248,7 +250,7 @@ impl WorkGraph {
         };
         graph.rebatch(1)?;
         graph.validate()?;
-        Ok((graph, binding))
+        Ok(graph)
     }
 
     /// Deterministically changes only scheduler batching, never semantic items.
@@ -265,7 +267,7 @@ impl WorkGraph {
                     total.saturating_add(self.items[index].estimated_memory)
                 });
                 CompilationShard {
-                    id: shard_id(self.design, indices, &self.items),
+                    id: shard_id(self.design.0.revision(), indices, &self.items),
                     items: indices.into(),
                     estimated_work,
                     estimated_memory,
@@ -309,9 +311,18 @@ impl WorkGraph {
             .map(|shard| shard.items.iter().map(|&item| (item, &self.items[item])))
     }
 
+    pub(crate) fn regions(&self) -> &crate::SynthesisRegionGraph {
+        &self.regions
+    }
+
+    pub(crate) fn region(&self, item: usize) -> Option<crate::RegionRowId> {
+        self.item_regions.get(item).copied()
+    }
+
     fn validate(&self) -> Result<(), crate::SynthError> {
         if self.predecessors.row_count() != self.items.len()
             || self.successors.row_count() != self.items.len()
+            || self.item_regions.len() != self.items.len()
             || self.coarse_groups.value_count() != self.shards.len()
         {
             return Err(crate::SynthError::invariant(
@@ -336,7 +347,7 @@ impl WorkGraph {
         if scheduled != (0..self.items.len()).collect::<Vec<_>>()
             || self.shards.iter().any(|shard| {
                 shard.items.is_empty()
-                    || shard.id != shard_id(self.design, &shard.items, &self.items)
+                    || shard.id != shard_id(self.design.0.revision(), &shard.items, &self.items)
                     || shard.estimated_work
                         != shard.items.iter().fold(0_u64, |total, &item| {
                             total.saturating_add(self.items[item].estimated_work)
@@ -376,12 +387,6 @@ impl WorkDesign {
         regions: &crate::SynthesisRegionGraph,
     ) -> Result<Self, crate::SynthError> {
         seal_logical_design(module, regions).map(Self)
-    }
-}
-
-impl WorkBinding {
-    pub(crate) fn region(&self, item: usize) -> Option<crate::RegionRowId> {
-        self.0.get(item).copied()
     }
 }
 
@@ -1323,19 +1328,26 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let design = WorkDesign::seal(&module, &regions).unwrap();
+        let design = Arc::new(WorkDesign::seal(&module, &regions).unwrap());
+        let regions = Arc::new(regions);
         let runtime =
             opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 4 })
                 .unwrap();
-        let (mut work, binding) =
-            WorkGraph::build(&module, &regions, &design, &contexts, &runtime).unwrap();
+        let mut work = WorkGraph::build(
+            &module,
+            Arc::clone(&regions),
+            Arc::clone(&design),
+            &contexts,
+            &runtime,
+        )
+        .unwrap();
 
-        assert_eq!(work.design, design.0.revision());
+        assert_eq!(work.design.0.revision(), design.0.revision());
         assert!(design.0.cell_count() >= regions.regions().len());
         assert_eq!(work.items.len(), regions.regions().len());
         assert_eq!(work.tasks().len(), regions.regions().len());
         for (index, &region) in regions.regions().iter().enumerate() {
-            assert_eq!(binding.region(index), Some(region.row()));
+            assert_eq!(work.region(index), Some(region.row()));
             for &operation in regions.operations(region) {
                 let _ = logical_operation(&module, operation).unwrap();
                 assert!(
@@ -1350,9 +1362,15 @@ mod tests {
         let serial =
             opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 })
                 .unwrap();
-        let (serial_work, serial_binding) =
-            WorkGraph::build(&module, &regions, &design, &contexts, &serial).unwrap();
-        assert_eq!(serial_binding.0, binding.0);
+        let serial_work = WorkGraph::build(
+            &module,
+            Arc::clone(&regions),
+            Arc::clone(&design),
+            &contexts,
+            &serial,
+        )
+        .unwrap();
+        assert_eq!(serial_work.item_regions, work.item_regions);
         assert!(
             serial_work
                 .items
@@ -1377,7 +1395,7 @@ mod tests {
             semantic_items
         );
         for (index, &region) in regions.regions().iter().enumerate() {
-            assert_eq!(binding.region(index), Some(region.row()));
+            assert_eq!(work.region(index), Some(region.row()));
         }
     }
 

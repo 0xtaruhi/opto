@@ -12,8 +12,7 @@ pub(super) fn lower_logic(
         normalized,
         mapping_context,
         target_model,
-        regions,
-        design,
+        work,
         contracts,
     } = planned;
     let NormalizedState {
@@ -23,6 +22,7 @@ pub(super) fn lower_logic(
         source_instances,
         synthesized: mut source,
     } = normalized;
+    let regions = work.regions();
     let memory_regions = regions.memory_region_rows();
     let operation_regions = regions.operation_region_rows();
     let profiling = execution.engine.config.diagnostics.timing;
@@ -35,8 +35,7 @@ pub(super) fn lower_logic(
                 source: &source,
                 operation_regions,
                 decisions: &ledger.regional_cache_records,
-                regions: &regions,
-                design: &design,
+                work: &work,
                 contracts: &contracts,
                 options: &environment.options,
                 clock_gating: environment.clock_gating,
@@ -171,7 +170,7 @@ pub(super) fn lower_logic(
         ledger,
         source_instances,
         mapping_context,
-        regions,
+        work,
         region_binding,
         contracts,
         regional_plans: regional_plans.into_boxed_slice(),

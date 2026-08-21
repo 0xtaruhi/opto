@@ -11,7 +11,7 @@ use crate::artifact::provenance::{ProvenanceBuilder, SourceInstanceProvenance};
 use crate::mapping::{MappingConfig, TargetMappingContext, TargetMappingContextKey};
 use crate::{
     ImplementationDb, IncrementalSnapshot, SourceChangeMetrics, SourceSnapshot, StageId,
-    SynthesisEffort, SynthesisOptions, SynthesisProgress, SynthesisRegionGraph, SynthesisResult,
+    SynthesisEffort, SynthesisOptions, SynthesisProgress, SynthesisResult,
 };
 use opto_ir::{rtl::RtlModule, word};
 use opto_runtime::ExecutionContext;
@@ -543,8 +543,7 @@ struct PlannedState {
     normalized: NormalizedState,
     mapping_context: Arc<TargetMappingContext>,
     target_model: crate::planning::regional::StructuralTargetModel,
-    regions: SynthesisRegionGraph,
-    design: crate::regional::WorkDesign,
+    work: crate::regional::WorkGraph,
     contracts: crate::regional::RegionContractSet,
 }
 
@@ -553,7 +552,7 @@ struct LoweredState {
     ledger: SynthesisLedger,
     source_instances: SourceInstanceProvenance,
     mapping_context: Arc<TargetMappingContext>,
-    regions: SynthesisRegionGraph,
+    work: crate::regional::WorkGraph,
     region_binding: crate::boolean::bitblast::LoweredRegionBinding,
     contracts: crate::regional::RegionContractSet,
     regional_plans: Box<[regional_mapping::RegionalPlanRow]>,
@@ -688,12 +687,25 @@ fn plan_regions(
         execution.runtime,
     )?;
     normalized.previous_regional_cache_records = Arc::from([]);
+    let contexts = normalized
+        .ledger
+        .regional_cache_records
+        .iter()
+        .map(|record| record.context().into())
+        .collect::<Vec<_>>();
+    let mut work = crate::regional::WorkGraph::build(
+        &normalized.synthesized,
+        Arc::new(regions),
+        Arc::new(design),
+        &contexts,
+        execution.runtime,
+    )?;
+    work.rebatch_for_workers(execution.runtime.parallelism())?;
     Ok(PlannedState {
         normalized,
         mapping_context,
         target_model,
-        regions,
-        design,
+        work,
         contracts,
     })
 }
@@ -712,7 +724,7 @@ fn map_initial_logic(
         regional_mapping::RegionalMappingRequest {
             module: &lowered.synthesized,
             provenance: &mut lowered.provenance,
-            regions: &lowered.regions,
+            regions: lowered.work.regions(),
             region_binding: &lowered.region_binding,
             contracts: &lowered.contracts,
             regional_plans: &lowered.regional_plans,
@@ -766,7 +778,7 @@ fn build_mapped_artifact(
         &lowered.environment.reference_ports,
     )?;
     let implementations = lowered.provenance.finish(
-        &lowered.regions,
+        lowered.work.regions(),
         &lowered.synthesized,
         &netlist,
         &cell_sources,

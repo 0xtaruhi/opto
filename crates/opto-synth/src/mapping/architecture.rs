@@ -19,7 +19,7 @@ use crate::planning::regional::{
 use crate::regional::RegionContractSet;
 use crate::{
     DurableOperatorArena, RegionContextKey, RegionCoverPlan, RegionRowId, SynthError,
-    SynthesisOptions, SynthesisRegion, SynthesisRegionGraph,
+    SynthesisOptions, SynthesisRegion,
 };
 use opto_ir::word;
 use opto_runtime::ExecutionContext;
@@ -36,8 +36,7 @@ pub(crate) struct RegionalArchitectureRequest<'a> {
     pub(crate) source: &'a word::WordModule,
     pub(crate) operation_regions: &'a [Option<RegionRowId>],
     pub(crate) decisions: &'a [crate::incremental::RegionalCacheRecord],
-    pub(crate) regions: &'a SynthesisRegionGraph,
-    pub(crate) design: &'a crate::regional::WorkDesign,
+    pub(crate) work: &'a crate::regional::WorkGraph,
     pub(crate) contracts: &'a RegionContractSet,
     pub(crate) options: &'a SynthesisOptions,
     pub(crate) clock_gating: Option<crate::ClockGatingStyle>,
@@ -238,19 +237,21 @@ pub(crate) fn prepare_regional_architectures(
     ),
     SynthError,
 > {
-    if request.decisions.len() != request.regions.regions().len() {
+    let regions = request.work.regions();
+    if request.decisions.len() != regions.regions().len() {
         return Err(SynthError::invariant(
             "regional architecture plan does not align with the region graph",
         ));
     }
     let semantics = super::roots::FullDomainRootSemantics::new(request.source)?;
     let source_cells = request
-        .regions
+        .work
+        .regions()
         .regions()
         .iter()
-        .flat_map(|&region| request.regions.operations(region).iter().copied())
+        .flat_map(|&region| regions.operations(region).iter().copied())
         .map(|operation| {
-            crate::regional::logical_operation_cell_id(request.regions, operation)
+            crate::regional::logical_operation_cell_id(regions, operation)
                 .map(|cell| (operation, cell))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
@@ -264,19 +265,7 @@ pub(crate) fn prepare_regional_architectures(
         roots: &roots,
         source_cells: &source_cells,
     };
-    let contexts = request
-        .decisions
-        .iter()
-        .map(|record| record.context().into())
-        .collect::<Vec<_>>();
-    let (mut work, binding) = crate::regional::WorkGraph::build(
-        request.source,
-        request.regions,
-        request.design,
-        &contexts,
-        runtime,
-    )?;
-    work.rebatch_for_workers(runtime.parallelism())?;
+    let work = request.work;
     let tasks = work.tasks();
     let profiling = request.mapping_context.config.diagnostics.timing;
     let mapped_shards = runtime.map_ordered_composite(tasks, |shard, regional_runtime| {
@@ -285,14 +274,14 @@ pub(crate) fn prepare_regional_architectures(
         })?;
         items
             .map(|(item, work_item)| {
-                let region_row = binding.region(item).ok_or_else(|| {
+                let region_row = work.region(item).ok_or_else(|| {
                     SynthError::invariant("regional work item has no local import binding")
                 })?;
                 let region_index = region_row.index();
                 let _region_profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                     format!("logic_lowering.region[{region_index}]")
                 });
-                let region = request.regions.regions()[region_index];
+                let region = regions.regions()[region_index];
                 let decision = &request.decisions[region_index];
                 if work_item.context() != decision.context().into() {
                     return Err(SynthError::invariant(
@@ -330,7 +319,7 @@ pub(crate) fn prepare_regional_architectures(
             .collect::<Result<Vec<_>, SynthError>>()
     })?;
     let mut mapped_regions = std::iter::repeat_with(|| None)
-        .take(request.regions.regions().len())
+        .take(regions.regions().len())
         .collect::<Vec<_>>();
     for (item, memories, mapped) in mapped_shards.into_iter().flatten() {
         if mapped_regions[item].replace((memories, mapped)).is_some() {
@@ -344,13 +333,13 @@ pub(crate) fn prepare_regional_architectures(
     for (row, result) in mapped_regions.into_iter().enumerate() {
         let (memory_implementations, mapped) =
             result.ok_or_else(|| SynthError::invariant("regional work item produced no result"))?;
-        let region = request.regions.regions()[row];
+        let region = regions.regions()[row];
         if mapped.plan.region() != region.id() {
             return Err(SynthError::invariant(
                 "regional architecture result belongs to another region",
             ));
         }
-        let memories = request.regions.memories(region);
+        let memories = regions.memories(region);
         if memories.len() != memory_implementations.len() {
             return Err(SynthError::invariant(
                 "selected memory implementations do not align with region ownership",
@@ -395,7 +384,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             self.request.source,
             module,
             decisions,
-            self.request.regions.operations(region),
+            self.request.work.regions().operations(region),
             operation_sources,
         )?;
         let architecture = PrivateArchitecturePublication::capture_resolved(
@@ -405,7 +394,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
         )?;
         let arena = DurableOperatorArena::capture(module, decisions, &sources, |operation| {
             self.request
-                .regions
+                .work
+                .regions()
                 .operation_anchor(operation)
                 .ok_or_else(|| {
                     SynthError::invariant("durable operator source has no stable occurrence anchor")
@@ -886,7 +876,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
             &private.lowering.binding,
             &self
                 .request
-                .regions
+                .work
+                .regions()
                 .bit_flows(region)
                 .iter()
                 .filter(|flow| {
@@ -984,7 +975,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         ),
         SynthError,
     > {
-        let memories = self.request.regions.memories(region);
+        let memories = self.request.work.regions().memories(region);
         if memory_implementations.len() != memories.len() {
             return Err(SynthError::invariant(
                 "regional memory decision does not match region ownership",
@@ -1014,7 +1005,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         // projection can span owners even though every one of its bits has an
         // unambiguous producer. Import only the frozen bit-flow endpoints so a
         // wrapper operation can never become a foreign regional input.
-        for flow in self.request.regions.bit_flows(region) {
+        for flow in self.request.work.regions().bit_flows(region) {
             if self
                 .semantics
                 .bit_requires_artifact(flow.value(), flow.bit())?
