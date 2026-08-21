@@ -70,6 +70,8 @@ struct LoweredPrivateRegion {
     operators: DurableOperatorArena,
     lowering: LocalRegionBooleanLowering,
     state_operations: Box<[super::materialize::SequentialRegionBinding]>,
+    mapping_roots: Box<[MappingRoot]>,
+    sequential_timing: super::sequential::SequentialTimingProjection,
 }
 
 struct OptimizedPrivateRegion {
@@ -466,6 +468,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
             operators,
             lowering,
             state_operations,
+            mapping_roots: _,
+            sequential_timing: _,
         } = private;
         let empty_port_bindings = opto_timing::PortBindings::new([]);
         let LocalRegionBooleanLowering {
@@ -670,6 +674,27 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 }),
             );
         }
+        let sequential_timing = super::sequential::SequentialTimingProjection::build(
+            &module,
+            &self.request.mapping_context.sequential_catalog,
+            &self.request.mapping_context.combinational_catalog,
+        )?;
+        let empty_port_bindings = opto_timing::PortBindings::new([]);
+        let mut mapping_roots = combinational_mapping_roots(
+            &module,
+            self.request.timing,
+            &empty_port_bindings,
+            Some(&sequential_timing),
+        )?;
+        mapping_roots.extend(super::roots::state_mapping_roots(
+            &module,
+            lowered_sequential.iter().map(|state| state.operation),
+            self.request.timing,
+            &empty_port_bindings,
+            Some(&sequential_timing),
+        )?);
+        let mapping_roots = merge_by_value(mapping_roots);
+        tracked_values.extend(mapping_roots.iter().map(|root| root.value));
         tracked_values.sort_unstable();
         tracked_values.dedup();
         let lowering = {
@@ -701,6 +726,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 operators,
                 lowering,
                 state_operations: lowered_sequential,
+                mapping_roots: mapping_roots.into_boxed_slice(),
+                sequential_timing,
             },
             root_pairs,
         ))
@@ -952,32 +979,12 @@ impl RegionArchitectureMaterializer<'_, '_> {
             &substrate_outputs,
             &mut root_pairs,
         )?;
-        let sequential_timing = super::sequential::SequentialTimingProjection::build(
-            &private.module,
-            &self.request.mapping_context.sequential_catalog,
-            &self.request.mapping_context.combinational_catalog,
-        )?;
-        let empty_port_bindings = opto_timing::PortBindings::new([]);
-        let mut roots = combinational_mapping_roots(
-            &private.module,
-            self.request.timing,
-            &empty_port_bindings,
-            Some(&sequential_timing),
-        )?;
-        roots.extend(super::roots::state_mapping_roots(
-            &private.module,
-            private.state_operations.iter().map(|state| state.operation),
-            self.request.timing,
-            &empty_port_bindings,
-            Some(&sequential_timing),
-        )?);
-        let roots = merge_by_value(roots);
         append_local_mapping_roots(
             &private.module,
             &local_semantics,
             &private.lowering.binding,
             &substrate_outputs,
-            roots,
+            private.mapping_roots.iter().copied(),
             &mut root_pairs,
         )?;
         let root_pairs = merge_mapping_root_pairs(&private.module, &local_semantics, root_pairs)?;
@@ -1000,7 +1007,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             &pending_publication,
             region.row(),
         )?;
-        slice.project_sequential_timing(&sequential_timing);
+        slice.project_sequential_timing(&private.sequential_timing);
         Ok(PreparedRegionCover {
             slice,
             decision_key,
@@ -1311,7 +1318,7 @@ fn append_local_mapping_roots(
     semantics: &super::roots::FullDomainRootSemantics<'_>,
     binding: &LoweredRegionBinding,
     substrate_outputs: &std::collections::BTreeSet<MappingRootPairKey>,
-    roots: Vec<MappingRoot>,
+    roots: impl IntoIterator<Item = MappingRoot>,
     root_pairs: &mut Vec<(MappingRoot, word::ValueId)>,
 ) -> Result<(), SynthError> {
     for root in roots {

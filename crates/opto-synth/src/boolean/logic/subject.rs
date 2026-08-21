@@ -57,14 +57,18 @@ impl ChoiceGraph {
         let root_entries = roots
             .iter()
             .zip(requirements)
-            .filter_map(|(&root, &requirement)| {
-                subject
+            .map(|(&root, &requirement)| {
+                let index = subject
                     .value_nodes
                     .binary_search_by_key(&root, |&(value, _)| value)
-                    .ok()
-                    .map(|index| (root, subject.value_nodes[index].1, requirement))
+                    .map_err(|_| {
+                        crate::SynthError::invariant(format!(
+                            "Boolean compilation root {root:?} has no canonical subject binding"
+                        ))
+                    })?;
+                Ok((root, subject.value_nodes[index].1, requirement))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, crate::SynthError>>()?;
         let root_nodes = root_entries
             .iter()
             .map(|&(_, node, _)| node)
@@ -161,6 +165,36 @@ impl ChoiceGraph {
 mod tests {
     use super::*;
     use crate::boolean::logic::cuts::{CutDatabase, CutTruthDatabase};
+
+    #[test]
+    fn rejects_a_root_outside_the_frozen_subject() {
+        let mut network = LogicGraph::new();
+        let input = network.variable(0).unwrap();
+        network.freeze();
+        let bound = word::ValueId::FIRST;
+        let missing = word::ValueId::from_index(1).unwrap();
+        let runtime = ExecutionContext::default();
+        let error = ChoiceGraph::from_canonical(
+            CanonicalRegionLogic {
+                network,
+                value_nodes: vec![(bound, input)].into_boxed_slice(),
+                dont_care_values: Box::new([]),
+                inputs: Box::new([]),
+            },
+            &[missing],
+            &[None],
+            RegionLogicOptions {
+                optimize: false,
+                config: crate::SynthesisConfig::default(),
+                runtime: &runtime,
+                incremental: None,
+            },
+        )
+        .err()
+        .expect("a missing frozen root is rejected");
+
+        assert!(error.to_string().contains("no canonical subject binding"));
+    }
 
     #[test]
     fn compiled_cuts_reach_a_proved_alternative_cone() {
