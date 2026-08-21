@@ -137,7 +137,7 @@ impl RegionalWordCone {
             .copied()
             .map(Some)
             .collect::<Vec<_>>();
-        let memory_ownership = crate::planning::memory::lower_selected_memories(
+        let memory_binding = crate::planning::memory::lower_selected_memories(
             &mut importer.module,
             &selected_memories,
             target_cells,
@@ -150,7 +150,7 @@ impl RegionalWordCone {
         for (local_memory_index, &source_memory) in memories.iter().enumerate() {
             let local_memory =
                 word::MemoryId::from_index(local_memory_index).map_err(crate::SynthError::from)?;
-            let local_states = memory_ownership
+            let local_states = memory_binding
                 .state_values()
                 .filter_map(|(local, owner)| (owner == local_memory).then_some(local))
                 .collect::<Vec<_>>();
@@ -163,7 +163,7 @@ impl RegionalWordCone {
                     })?,
                 });
             }
-            for (ordinal, (operation, _)) in memory_ownership
+            for (ordinal, (operation, _)) in memory_binding
                 .operations()
                 .filter(|&(_, owner)| owner == local_memory)
                 .enumerate()

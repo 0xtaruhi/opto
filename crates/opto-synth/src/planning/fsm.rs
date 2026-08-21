@@ -4,4 +4,4 @@
 mod optimization;
 mod symbolic;
 
-pub(crate) use optimization::optimize_derived_fsms_in_regions;
+pub(crate) use optimization::optimize_derived_fsms;

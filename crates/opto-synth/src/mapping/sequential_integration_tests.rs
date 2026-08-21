@@ -236,20 +236,30 @@ fn synthesize_maps_semantic_clock_enable_to_an_enable_dff_pin() {
 }
 
 #[test]
-fn synthesize_recovers_a_lowered_feedback_mux_without_general_feedback_search() {
+fn synthesize_keeps_a_lowered_feedback_mux_as_ordinary_logic() {
     let mut module = module_with_lowered_feedback_mux_flop();
     let options = SynthesisOptions {
-        target_cells: vec![simple_dff_target_cell(), enable_dff_target_cell()].into(),
+        target_cells: vec![
+            simple_dff_target_cell(),
+            enable_dff_target_cell(),
+            mux_target_cell(1.0),
+        ]
+        .into(),
     };
 
     let report = synthesize_test_module(&mut module, options).unwrap();
     let text = report.mapped_verilog();
 
-    assert_eq!(report.report.cells, 1, "{text}");
+    assert_eq!(report.report.cells, 2, "{text}");
     assert!(
-        text.contains("EDFD1 q_reg(.D(d), .DE(en), .CP(clk), .Q(q));"),
+        text.contains("MUX2 U1(.I0(q), .I1(d), .S(en), .Z(n1));"),
         "{text}"
     );
+    assert!(
+        text.contains("DFD1 q_reg(.D(n1), .CP(clk), .Q(q));"),
+        "{text}"
+    );
+    assert!(!text.contains("EDFD1"), "{text}");
 }
 
 #[test]
@@ -295,12 +305,12 @@ fn synthesize_composes_sync_reset_with_a_retained_enable_pin() {
 
     assert_eq!(report.report.cells, 3, "{text}");
     assert!(
-        text.contains("OR2 U1(.A(en), .B(reset), .Z(n2));")
-            || text.contains("OR2 U1(.A(reset), .B(en), .Z(n2));"),
+        text.contains("OR2 U2(.A(en), .B(reset), .Z(n2));")
+            || text.contains("OR2 U2(.A(reset), .B(en), .Z(n2));"),
         "{text}"
     );
     assert!(
-        text.contains("ANR2 U2(.D(d), .R(reset), .Z(n1));"),
+        text.contains("ANR2 U1(.D(d), .R(reset), .Z(n1));"),
         "{text}"
     );
     assert!(

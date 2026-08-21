@@ -15,7 +15,7 @@ pub(crate) use lowering::{
     RegionalWordConeRequest,
 };
 pub(crate) use operation_provenance::LocalOperationProvenance;
-pub(crate) use private::optimize_structure as optimize_private_structure;
+pub(crate) use private::optimize_private_structure;
 pub(crate) use search::{RegionalSearchRequest, select_architectures};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

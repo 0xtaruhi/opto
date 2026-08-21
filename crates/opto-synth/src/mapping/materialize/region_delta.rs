@@ -103,8 +103,8 @@ impl PendingMappedRegion {
 impl MappedRegionArtifact {
     pub(crate) fn from_library_plan(
         plan: &crate::RegionCoverPlan,
-        binding: &RegionPlanBinding,
-        ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+        plan_binding: &RegionPlanBinding,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
         mapped_values: &WordMappedSignals,
         catalog: &CombinationalCellCatalog,
         target_cells: &opto_library::TargetCellSet,
@@ -113,7 +113,7 @@ impl MappedRegionArtifact {
             if plan.local_cell_count() != 0
                 || plan.local_net_count() != 0
                 || plan.local_pin_count() != 0
-                || !binding.is_empty()
+                || !plan_binding.is_empty()
             {
                 return Err(crate::SynthError::invariant(
                     "non-empty regional plan has no portable topology",
@@ -130,7 +130,7 @@ impl MappedRegionArtifact {
 
         let cover = super::super::cover::decode_portable_cover(plan.payload())?;
         if cover.cells().len() != plan.local_cell_count() as usize
-            || cover.outputs().len() != binding.outputs.len()
+            || cover.outputs().len() != plan_binding.outputs.len()
         {
             return Err(crate::SynthError::invariant(
                 "portable regional plan does not match its revision binding",
@@ -148,7 +148,7 @@ impl MappedRegionArtifact {
         }
 
         let mut nets = ArtifactNetTable::default();
-        let input_values = binding.resolve_inputs(ownership)?;
+        let input_values = plan_binding.resolve_inputs(region_binding)?;
         let inputs = input_values
             .iter()
             .copied()
@@ -158,7 +158,7 @@ impl MappedRegionArtifact {
                     .map(|signal| nets.signal(signal))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let output_values = binding.resolve_outputs(ownership)?;
+        let output_values = plan_binding.resolve_outputs(region_binding)?;
         let mut output_targets = vec![[None::<ArtifactSignal>; 2]; cover.cells().len()];
         for (&value, source) in output_values.iter().zip(cover.outputs()) {
             let target = nets.signal(mapped_values.require(value)?);
@@ -298,8 +298,8 @@ impl MappedRegionArtifact {
             plan.region(),
             nets,
             cells.into_boxed_slice(),
-            binding,
-            ownership,
+            plan_binding,
+            region_binding,
         )
     }
 
@@ -659,13 +659,13 @@ fn finish_artifact(
     region: crate::RegionAnchorId,
     nets: ArtifactNetTable,
     cells: Box<[ArtifactCell<()>]>,
-    binding: &RegionPlanBinding,
-    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+    plan_binding: &RegionPlanBinding,
+    region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
 ) -> Result<MappedRegionArtifact, crate::SynthError> {
-    let mut roots = binding.resolve_outputs(ownership)?;
+    let mut roots = plan_binding.resolve_outputs(region_binding)?;
     roots.sort_unstable();
     roots.dedup();
-    let mut leaves = binding.resolve_inputs(ownership)?;
+    let mut leaves = plan_binding.resolve_inputs(region_binding)?;
     leaves.sort_unstable();
     leaves.dedup();
     Ok(MappedRegionArtifact {

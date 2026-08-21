@@ -85,7 +85,7 @@ impl RegionPlanBinding {
     pub(crate) fn resolve_memory_sources(
         &mut self,
         module: &word::WordModule,
-        memories: &crate::planning::memory::MemoryLoweringOwnership,
+        memories: &crate::planning::memory::MemoryLoweringBinding,
     ) -> Result<(), crate::SynthError> {
         let resolve = |binding: &mut RegionPlanValueBinding| -> Result<(), crate::SynthError> {
             let (value, bit) = match *binding {
@@ -178,8 +178,8 @@ impl RegionPlanBinding {
     pub(crate) fn materialize_source_bits(
         &mut self,
         module: &word::WordModule,
-        ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
-        memories: &crate::planning::memory::MemoryLoweringOwnership,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
+        memories: &crate::planning::memory::MemoryLoweringBinding,
     ) -> Result<(), crate::SynthError> {
         let endpoint_bits = module
             .values()
@@ -266,7 +266,7 @@ impl RegionPlanBinding {
             {
                 value
             } else {
-                ownership
+                region_binding
                     .lowered_bits(value)
                     .and_then(|bits| bits.get(bit as usize))
                     .copied()
@@ -310,23 +310,23 @@ impl RegionPlanBinding {
 
     pub(crate) fn resolve_inputs(
         &self,
-        ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
     ) -> Result<Vec<word::ValueId>, crate::SynthError> {
         self.inputs
             .iter()
             .copied()
-            .map(|binding| resolve_plan_value(binding, ownership))
+            .map(|binding| resolve_plan_value(binding, region_binding))
             .collect()
     }
 
     pub(crate) fn resolve_outputs(
         &self,
-        ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
     ) -> Result<Vec<word::ValueId>, crate::SynthError> {
         self.outputs
             .iter()
             .copied()
-            .map(|binding| resolve_plan_value(binding, ownership))
+            .map(|binding| resolve_plan_value(binding, region_binding))
             .collect()
     }
 }
@@ -351,7 +351,7 @@ pub(crate) struct CandidateBindingDomain<'a> {
     pub(crate) memory_states: &'a [RegionalMemoryStateBinding],
     pub(crate) operation_sources: &'a crate::planning::regional::LocalOperationProvenance,
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
-    pub(crate) ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
+    pub(crate) region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
 }
 
 type BindingMap = std::collections::BTreeMap<word::ValueId, Vec<RegionPlanValueBinding>>;
@@ -371,7 +371,7 @@ fn bind_root_outputs(
     local_module: &word::WordModule,
     source_to_local: &std::collections::BTreeMap<word::ValueId, word::ValueId>,
     root_bindings: &[(word::ValueId, word::SignalId)],
-    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+    region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
     local_to_sources: &mut std::collections::BTreeMap<word::ValueId, Vec<RegionPlanValueBinding>>,
 ) -> Result<(), crate::SynthError> {
     let semantics = super::roots::FullDomainRootSemantics::new(local_module)?;
@@ -390,18 +390,18 @@ fn bind_root_outputs(
                 "regional root binding is absent from its frozen private cone",
             )
         })?;
-        let bits = match ownership.lowered_bits(local) {
+        let bits = match region_binding.lowered_bits(local) {
             Some(bits) => bits,
             None if width == 1 => std::slice::from_ref(&local),
             None => {
                 return Err(crate::SynthError::invariant(
-                    "regional root binding is absent from scalar ownership",
+                    "regional root binding is absent from scalar lowering",
                 ));
             }
         };
         if bits.len() != width as usize {
             return Err(crate::SynthError::invariant(
-                "regional root binding width differs from scalar ownership",
+                "regional root binding width differs from scalar lowering",
             ));
         }
         for (bit, &target) in bits.iter().enumerate() {
@@ -433,7 +433,7 @@ pub(crate) fn build_candidate_binding<'a>(
         memory_states,
         operation_sources,
         root_bindings,
-        ownership,
+        region_binding,
     } = domain;
     let output_values = output_values.into_iter().collect::<Vec<_>>();
     let mut local_to_sources = BindingMap::new();
@@ -444,7 +444,7 @@ pub(crate) fn build_candidate_binding<'a>(
     // owned roots and sequential endpoints.
     let mut local_to_outputs = BindingMap::new();
     for &(source, local) in boundary_bindings {
-        let bits = match ownership.lowered_bits(local) {
+        let bits = match region_binding.lowered_bits(local) {
             Some(bits) => bits,
             None if local_module
                 .value(local)
@@ -464,7 +464,7 @@ pub(crate) fn build_candidate_binding<'a>(
         }
     }
     for memory_state in memory_states {
-        let Some(bits) = ownership.lowered_bits(memory_state.local) else {
+        let Some(bits) = region_binding.lowered_bits(memory_state.local) else {
             continue;
         };
         for (bit, &lowered) in bits.iter().enumerate() {
@@ -479,7 +479,7 @@ pub(crate) fn build_candidate_binding<'a>(
         }
     }
     for memory_logic in owned_memory_logic {
-        let Some(bits) = ownership.lowered_bits(memory_logic.local) else {
+        let Some(bits) = region_binding.lowered_bits(memory_logic.local) else {
             continue;
         };
         for (bit, &lowered) in bits.iter().enumerate() {
@@ -500,7 +500,7 @@ pub(crate) fn build_candidate_binding<'a>(
         local_module,
         source_to_local,
         root_bindings,
-        ownership,
+        region_binding,
         &mut local_to_outputs,
     )?;
     for (index, operation) in local_module.operations().iter().enumerate() {
@@ -509,7 +509,7 @@ pub(crate) fn build_candidate_binding<'a>(
             continue;
         };
         for (role, value) in sequential_inputs(&operation.kind)? {
-            let Some(bits) = ownership.lowered_bits(value) else {
+            let Some(bits) = region_binding.lowered_bits(value) else {
                 continue;
             };
             for (bit, &lowered) in bits.iter().enumerate() {
@@ -637,7 +637,7 @@ pub(crate) fn build_candidate_binding<'a>(
             let bindings = locate_all(*value)?;
             if bindings.is_empty() {
                 return Err(crate::SynthError::invariant(
-                    "regional publication obligation has no owner binding",
+                    "regional publication obligation has no source binding",
                 ));
             }
             output_widths.push(bindings.len());
@@ -853,7 +853,7 @@ fn sequential_role_key(role: SequentialInputRole) -> u32 {
 
 fn resolve_plan_value(
     binding: RegionPlanValueBinding,
-    _ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+    _region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
 ) -> Result<word::ValueId, crate::SynthError> {
     match binding {
         RegionPlanValueBinding::Lowered(value) => Ok(value),

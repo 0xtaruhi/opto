@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-static NEXT_REGION_GRAPH_OWNER: AtomicU64 = AtomicU64::new(1);
+static NEXT_REGION_GRAPH_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 macro_rules! digest_id {
     ($name:ident, $doc:literal) => {
@@ -52,16 +52,16 @@ digest_id!(
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct RegionGraphOwnerId(NonZeroU64);
+pub(super) struct RegionGraphGenerationId(NonZeroU64);
 
-impl RegionGraphOwnerId {
+impl RegionGraphGenerationId {
     pub(super) fn fresh() -> Self {
-        let raw = NEXT_REGION_GRAPH_OWNER
+        let raw = NEXT_REGION_GRAPH_GENERATION
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             })
-            .expect("synthesis-region graph owner space is exhausted");
-        Self(NonZeroU64::new(raw).expect("synthesis-region graph owners start at one"))
+            .expect("synthesis-region graph generation space is exhausted");
+        Self(NonZeroU64::new(raw).expect("synthesis-region graph generations start at one"))
     }
 }
 
@@ -98,7 +98,7 @@ impl RegionRowId {
     }
 
     #[must_use]
-    /// Return the compact row number within the owning region graph.
+    /// Return the compact row number within its region graph.
     pub const fn raw(self) -> u32 {
         self.0
     }
@@ -110,13 +110,13 @@ impl RegionRowId {
     }
 }
 
-pub(super) fn remap_optional_owner_rows(
-    owners: Vec<Option<usize>>,
+pub(super) fn remap_optional_region_rows(
+    regions: Vec<Option<usize>>,
     remap: &[RegionRowId],
 ) -> Box<[Option<RegionRowId>]> {
-    owners
+    regions
         .into_iter()
-        .map(|owner| owner.and_then(|owner| remap.get(owner).copied()))
+        .map(|region| region.and_then(|region| remap.get(region).copied()))
         .collect()
 }
 
@@ -140,7 +140,7 @@ impl RegionBoundaryPortId {
     }
 
     #[must_use]
-    /// Return the compact port number within the owning region graph.
+    /// Return the compact port number within its region graph.
     pub const fn raw(self) -> u32 {
         self.0
     }
@@ -165,11 +165,11 @@ pub enum SynthesisRegionKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
-/// Direction of one value at the owning region boundary.
+/// Direction of one value at its region boundary.
 pub enum RegionPortDirection {
-    /// Value consumed by the owning region.
+    /// Value consumed by the region.
     Input,
-    /// Value produced by the owning region.
+    /// Value produced by the region.
     Output,
 }
 
@@ -177,10 +177,10 @@ pub enum RegionPortDirection {
 /// One explicit value crossing a hard synthesis boundary.
 ///
 /// `peer` is absent at the root interface. Internal edges have one output row
-/// and one input row, each owned by exactly one region.
+/// and one input row, each attached to exactly one region.
 pub struct RegionBoundaryPort {
     pub(super) id: RegionBoundaryPortId,
-    pub(super) owner: RegionRowId,
+    pub(super) region: RegionRowId,
     pub(super) peer: Option<RegionRowId>,
     pub(super) direction: RegionPortDirection,
     pub(super) value: word::ValueId,
@@ -230,15 +230,15 @@ impl RegionBitFlow {
 
 impl RegionBoundaryPort {
     #[must_use]
-    /// Return the dense boundary-port ID within the owning graph.
+    /// Return the dense boundary-port ID within its graph.
     pub const fn id(self) -> RegionBoundaryPortId {
         self.id
     }
 
     #[must_use]
-    /// Return the row of the region that owns this port.
-    pub const fn owner(self) -> RegionRowId {
-        self.owner
+    /// Return the row containing this port.
+    pub const fn region(self) -> RegionRowId {
+        self.region
     }
 
     #[must_use]
@@ -250,7 +250,7 @@ impl RegionBoundaryPort {
     }
 
     #[must_use]
-    /// Return the direction from the owning region's perspective.
+    /// Return the direction from the containing region's perspective.
     pub const fn direction(self) -> RegionPortDirection {
         self.direction
     }
@@ -326,7 +326,7 @@ impl SynthesisRegionRevision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Compact metadata for one region row.
 pub struct SynthesisRegion {
-    pub(super) graph_owner: RegionGraphOwnerId,
+    pub(super) graph_generation: RegionGraphGenerationId,
     pub(super) row: RegionRowId,
     pub(super) partition_anchor: [u8; 32],
     pub(super) id: RegionAnchorId,
@@ -339,7 +339,7 @@ pub struct SynthesisRegion {
 
 impl SynthesisRegion {
     #[must_use]
-    /// Return the compact row within the owning graph.
+    /// Return the compact row within its graph.
     pub const fn row(self) -> RegionRowId {
         self.row
     }
@@ -348,12 +348,6 @@ impl SynthesisRegion {
     /// Return the content-anchored identity stable across compatible revisions.
     pub const fn id(self) -> RegionAnchorId {
         self.id
-    }
-
-    #[must_use]
-    /// Return the stable partition anchor recorded when the region was formed.
-    pub(crate) const fn partition_anchor(self) -> [u8; 32] {
-        self.partition_anchor
     }
 
     #[must_use]
@@ -387,14 +381,14 @@ impl SynthesisRegion {
 /// Immutable Word-revision partition with packed membership, typed ports, and
 /// exact predecessor/successor CSR.
 pub struct SynthesisRegionGraph {
-    pub(super) owner: RegionGraphOwnerId,
+    pub(super) generation: RegionGraphGenerationId,
     pub(super) revision: SynthesisRegionRevision,
     pub(super) regions: Box<[SynthesisRegion]>,
     pub(super) operations: opto_core::PackedRows<word::OpId>,
     pub(super) operation_anchors: Box<[OperationAnchorId]>,
-    pub(super) operation_owners: Box<[Option<RegionRowId>]>,
+    pub(super) operation_regions: Box<[Option<RegionRowId>]>,
     pub(super) memories: opto_core::PackedRows<word::MemoryId>,
-    pub(super) memory_owners: Box<[Option<RegionRowId>]>,
+    pub(super) memory_regions: Box<[Option<RegionRowId>]>,
     pub(super) ports: Box<[RegionBoundaryPort]>,
     pub(super) input_ports: opto_core::PackedRows<RegionBoundaryPortId>,
     pub(super) output_ports: opto_core::PackedRows<RegionBoundaryPortId>,
@@ -438,20 +432,20 @@ impl SynthesisRegionGraph {
 
     fn checked_row(&self, region: SynthesisRegion) -> usize {
         assert_eq!(
-            region.graph_owner, self.owner,
+            region.graph_generation, self.generation,
             "synthesis region belongs to another graph"
         );
         let row = region.row().index();
         assert_eq!(
             self.regions.get(row),
             Some(&region),
-            "synthesis region metadata does not match its owning graph row"
+            "synthesis region metadata does not match its graph row"
         );
         row
     }
 
     #[must_use]
-    /// Return source operations owned by `region` in canonical ID order.
+    /// Return source operations assigned to `region` in canonical ID order.
     pub fn operations(&self, region: SynthesisRegion) -> &[word::OpId] {
         &self.operations[self.checked_row(region)]
     }
@@ -463,8 +457,8 @@ impl SynthesisRegionGraph {
     }
 
     #[must_use]
-    pub(crate) fn operation_owner(&self, operation: word::OpId) -> Option<SynthesisRegion> {
-        self.operation_owners
+    pub(crate) fn operation_region(&self, operation: word::OpId) -> Option<SynthesisRegion> {
+        self.operation_regions
             .get(operation.index())
             .copied()
             .flatten()
@@ -472,8 +466,8 @@ impl SynthesisRegionGraph {
     }
 
     #[must_use]
-    pub(crate) fn operation_owner_rows(&self) -> &[Option<RegionRowId>] {
-        &self.operation_owners
+    pub(crate) fn operation_region_rows(&self) -> &[Option<RegionRowId>] {
+        &self.operation_regions
     }
 
     #[must_use]
@@ -483,8 +477,8 @@ impl SynthesisRegionGraph {
     }
 
     #[must_use]
-    pub(crate) fn memory_owner_rows(&self) -> &[Option<RegionRowId>] {
-        &self.memory_owners
+    pub(crate) fn memory_region_rows(&self) -> &[Option<RegionRowId>] {
+        &self.memory_regions
     }
 
     #[must_use]
@@ -527,13 +521,13 @@ impl SynthesisRegionGraph {
         &self,
         module: &word::WordModule,
     ) -> Result<(), crate::SynthError> {
-        if self.operation_owners.len() != module.operations().len()
-            || self.memory_owners.len() != module.memories().len()
-            || self.operations.value_count() != self.operation_owners.iter().flatten().count()
-            || self.memories.value_count() != self.memory_owners.iter().flatten().count()
+        if self.operation_regions.len() != module.operations().len()
+            || self.memory_regions.len() != module.memories().len()
+            || self.operations.value_count() != self.operation_regions.iter().flatten().count()
+            || self.memories.value_count() != self.memory_regions.iter().flatten().count()
         {
             return Err(crate::SynthError::invariant(
-                "region reverse-owner columns do not match the Word arenas",
+                "region membership columns do not match the Word arenas",
             ));
         }
         if self.bit_flows.row_count() != self.regions.len() {
@@ -541,15 +535,15 @@ impl SynthesisRegionGraph {
                 "regional bit-flow rows do not match the region arena",
             ));
         }
-        let memory_data_owners = module
+        let memory_data_regions = module
             .memory_read_ports()
             .iter()
             .filter_map(|read| {
-                self.memory_owners
+                self.memory_regions
                     .get(read.memory.index())
                     .copied()
                     .flatten()
-                    .map(|owner| (read.data, owner))
+                    .map(|region| (read.data, region))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         for region in &self.regions {
@@ -576,7 +570,7 @@ impl SynthesisRegionGraph {
                 }
                 match stored.kind {
                     word::ValueKind::Operation(operation) => {
-                        if self.operation_owners.get(operation.index())
+                        if self.operation_regions.get(operation.index())
                             != Some(&Some(publication.producer()))
                         {
                             return Err(crate::SynthError::invariant(
@@ -585,8 +579,8 @@ impl SynthesisRegionGraph {
                         }
                     }
                     word::ValueKind::Signal(reference) => {
-                        let memory_owner = memory_data_owners.get(&reference.signal).copied();
-                        if memory_owner != Some(publication.producer()) {
+                        let memory_region = memory_data_regions.get(&reference.signal).copied();
+                        if memory_region != Some(publication.producer()) {
                             return Err(crate::SynthError::invariant(
                                 "regional bit flow disagrees with memory placement",
                             ));
@@ -603,7 +597,7 @@ impl SynthesisRegionGraph {
         for region in &self.regions {
             if region.row().index() >= self.regions.len() {
                 return Err(crate::SynthError::invariant(
-                    "region row is outside its owning graph",
+                    "region row is outside its graph",
                 ));
             }
             if self
@@ -620,39 +614,39 @@ impl SynthesisRegionGraph {
                 ));
             }
             for &operation in self.operations(*region) {
-                if self.operation_owners.get(operation.index()) != Some(&Some(region.row())) {
+                if self.operation_regions.get(operation.index()) != Some(&Some(region.row())) {
                     return Err(crate::SynthError::invariant(
-                        "region operation CSR disagrees with its reverse-owner column",
+                        "region operation CSR disagrees with its membership column",
                     ));
                 }
             }
             for &memory in self.memories(*region) {
-                if self.memory_owners.get(memory.index()) != Some(&Some(region.row())) {
+                if self.memory_regions.get(memory.index()) != Some(&Some(region.row())) {
                     return Err(crate::SynthError::invariant(
-                        "region memory CSR disagrees with its reverse-owner column",
+                        "region memory CSR disagrees with its membership column",
                     ));
                 }
             }
         }
         if self
-            .operation_owners
+            .operation_regions
             .iter()
             .flatten()
-            .any(|owner| owner.index() >= self.regions.len())
+            .any(|region| region.index() >= self.regions.len())
             || self
-                .memory_owners
+                .memory_regions
                 .iter()
                 .flatten()
-                .any(|owner| owner.index() >= self.regions.len())
+                .any(|region| region.index() >= self.regions.len())
         {
             return Err(crate::SynthError::invariant(
-                "region reverse-owner column contains an unknown row",
+                "region membership column contains an unknown row",
             ));
         }
         for (index, port) in self.ports.iter().copied().enumerate() {
-            if port.id().index() != index || port.owner().index() >= self.regions.len() {
+            if port.id().index() != index || port.region().index() >= self.regions.len() {
                 return Err(crate::SynthError::invariant(
-                    "boundary port identity or owner is invalid",
+                    "boundary port identity or region is invalid",
                 ));
             }
             if port
@@ -663,16 +657,16 @@ impl SynthesisRegionGraph {
                     "boundary port peer is outside the region graph",
                 ));
             }
-            let owner = self.region(port.owner()).ok_or_else(|| {
-                crate::SynthError::invariant("boundary port owner is outside the region graph")
+            let region = self.region(port.region()).ok_or_else(|| {
+                crate::SynthError::invariant("boundary port region is outside the region graph")
             })?;
-            let owner_ports = match port.direction() {
-                RegionPortDirection::Input => self.input_ports(owner),
-                RegionPortDirection::Output => self.output_ports(owner),
+            let region_ports = match port.direction() {
+                RegionPortDirection::Input => self.input_ports(region),
+                RegionPortDirection::Output => self.output_ports(region),
             };
-            if owner_ports.binary_search(&port.id()).is_err() {
+            if region_ports.binary_search(&port.id()).is_err() {
                 return Err(crate::SynthError::invariant(
-                    "boundary port is absent from its owner CSR",
+                    "boundary port is absent from its region CSR",
                 ));
             }
         }

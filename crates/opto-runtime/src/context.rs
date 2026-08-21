@@ -8,7 +8,7 @@ use crate::error::RuntimeError;
 use crate::indexed::Task;
 use rayon::prelude::*;
 use std::any::Any;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,6 +21,7 @@ type CompositeCompletion<O, E> = Result<Result<O, E>, Box<dyn Any + Send>>;
 pub struct ExecutionContext {
     pub(crate) inner: Arc<ExecutionContextInner>,
     parallelism_limit: Option<NonZeroUsize>,
+    memory_limit: Option<NonZeroU64>,
 }
 
 #[derive(Debug)]
@@ -64,6 +65,7 @@ impl ExecutionContext {
                 completed_batches: AtomicU64::new(0),
             }),
             parallelism_limit: None,
+            memory_limit: None,
         })
     }
 
@@ -74,6 +76,18 @@ impl ExecutionContext {
         let mut limited = self.clone();
         limited.parallelism_limit = Some(
             self.parallelism_limit
+                .map_or(maximum, |current| current.min(maximum)),
+        );
+        limited
+    }
+
+    /// Returns a handle that admits composite tasks only while their summed
+    /// private-memory estimates fit `maximum`.
+    #[must_use]
+    pub fn with_memory_limit(&self, maximum: NonZeroU64) -> Self {
+        let mut limited = self.clone();
+        limited.memory_limit = Some(
+            self.memory_limit
                 .map_or(maximum, |current| current.min(maximum)),
         );
         limited
@@ -130,14 +144,13 @@ impl ExecutionContext {
         self.map_ordered_in_scope(tasks, operation)
     }
 
-    /// Evaluates weighted composite tasks with bounded outer concurrency.
+    /// Evaluates weighted moldable tasks on one shared work-stealing pool.
     ///
-    /// The heaviest tasks launch first. At most the square root of the worker
-    /// count are in flight, and every callback receives a shared-pool context
-    /// sized for the complementary inner dimension. Completed outer slots are
-    /// refilled immediately, while returned values and errors remain ordered by
-    /// [`TaskKey`](crate::TaskKey). This keeps nested work stealable without admitting an
-    /// unbounded number of large per-task working sets.
+    /// The heaviest tasks launch first with at most one outer callback per
+    /// worker. Every callback receives the complete shared runtime: when the
+    /// ready outer queue is deep, workers naturally execute separate tasks;
+    /// when it drains, nested Rayon work can occupy the idle workers. Returned
+    /// values and errors remain ordered by [`TaskKey`](crate::TaskKey).
     ///
     /// # Errors
     ///
@@ -159,6 +172,18 @@ impl ExecutionContext {
             return Ok(Vec::new());
         }
         let workers = self.parallelism().max(1);
+        let memory_limit = self.memory_limit.map_or(u64::MAX, NonZeroU64::get);
+        if let Some(task) = tasks
+            .iter()
+            .find(|task| task.estimated_memory > memory_limit)
+        {
+            return Err(RuntimeError::TaskMemoryExceedsLimit {
+                task: task.key,
+                estimated: task.estimated_memory,
+                limit: memory_limit,
+            }
+            .into());
+        }
         if workers == 1 {
             return tasks
                 .into_iter()
@@ -166,11 +191,8 @@ impl ExecutionContext {
                 .collect();
         }
 
-        let outer_parallelism = workers.isqrt().max(1).min(tasks.len());
-        let inner_parallelism = workers.div_ceil(outer_parallelism);
-        let inner_runtime = self.with_parallelism_limit(
-            NonZeroUsize::new(inner_parallelism).unwrap_or(NonZeroUsize::MIN),
-        );
+        let outer_parallelism = workers.min(tasks.len());
+        let inner_runtime = self;
         let mut launch_order = tasks
             .iter()
             .enumerate()
@@ -180,6 +202,10 @@ impl ExecutionContext {
         let launch_order = launch_order
             .into_iter()
             .map(|(_, _, index)| index)
+            .collect::<Vec<_>>();
+        let task_memory = tasks
+            .iter()
+            .map(|task| task.estimated_memory)
             .collect::<Vec<_>>();
         let mut tasks = tasks.into_iter().map(Some).collect::<Vec<_>>();
         let mut results = std::iter::repeat_with(|| None)
@@ -213,8 +239,15 @@ impl ExecutionContext {
                     Ok(())
                 };
                 let mut next = 0usize;
-                for &index in launch_order.iter().take(outer_parallelism) {
+                let mut active = 0usize;
+                let mut admitted_memory = 0u64;
+                while active < outer_parallelism
+                    && let Some(&index) = launch_order.get(next)
+                    && admitted_memory.saturating_add(task_memory[index]) <= memory_limit
+                {
                     launch(index)?;
+                    admitted_memory = admitted_memory.saturating_add(task_memory[index]);
+                    active += 1;
                     next += 1;
                 }
                 for _ in 0..launch_order.len() {
@@ -225,8 +258,15 @@ impl ExecutionContext {
                                 detail: "composite worker stopped without returning its result",
                             })?;
                     results[index] = Some(result);
-                    if let Some(&index) = launch_order.get(next) {
+                    admitted_memory = admitted_memory.saturating_sub(task_memory[index]);
+                    active -= 1;
+                    while active < outer_parallelism
+                        && let Some(&index) = launch_order.get(next)
+                        && admitted_memory.saturating_add(task_memory[index]) <= memory_limit
+                    {
                         launch(index)?;
+                        admitted_memory = admitted_memory.saturating_add(task_memory[index]);
+                        active += 1;
                         next += 1;
                     }
                 }

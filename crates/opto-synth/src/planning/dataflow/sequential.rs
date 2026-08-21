@@ -10,7 +10,6 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SequentialKey {
     Register {
-        region: crate::RegionRowId,
         d: word::ValueId,
         clock: word::ValueId,
         edge: word::Edge,
@@ -18,31 +17,15 @@ enum SequentialKey {
         resets: Box<[word::Reset]>,
     },
     Latch {
-        region: crate::RegionRowId,
         d: word::ValueId,
         enable: word::Enable,
         resets: Box<[word::Reset]>,
     },
 }
 
-#[cfg(test)]
-pub(crate) fn share_equivalent_sequential_values_in_regions(
-    module: &mut word::WordModule,
-    runtime: &ExecutionContext,
-    operation_regions: &[Option<crate::RegionRowId>],
-) -> Result<DataflowChanges, crate::SynthError> {
-    if operation_regions.len() != module.operations().len() {
-        return Err(crate::SynthError::invariant(
-            "regional sequential sharing has incomplete operation ownership",
-        ));
-    }
-    share_equivalent_sequential_values_by(module, runtime, operation_regions, |value| value)
-}
-
 pub(crate) fn share_equivalent_sequential_values_by(
     module: &mut word::WordModule,
     runtime: &ExecutionContext,
-    operation_regions: &[Option<crate::RegionRowId>],
     canonical_value: impl Fn(word::ValueId) -> word::ValueId,
 ) -> Result<DataflowChanges, crate::SynthError> {
     let mut canonical_signals = HashMap::new();
@@ -76,10 +59,7 @@ pub(crate) fn share_equivalent_sequential_values_by(
     }
     let mut representatives = HashMap::<SequentialKey, word::ValueId>::new();
     let mut aliases = Vec::new();
-    for (index, operation) in module.operations().iter().enumerate() {
-        let Some(region) = operation_regions[index] else {
-            continue;
-        };
+    for operation in module.operations() {
         let Some(target) = sequential_targets.get(&operation.result) else {
             continue;
         };
@@ -88,7 +68,6 @@ pub(crate) fn share_equivalent_sequential_values_by(
         }
         let key = match &operation.kind {
             word::OpKind::Register(register) => SequentialKey::Register {
-                region,
                 d: canonical_value(register.d),
                 clock: canonical_value(register.clock),
                 edge: register.edge,
@@ -107,7 +86,6 @@ pub(crate) fn share_equivalent_sequential_values_by(
                     .collect(),
             },
             word::OpKind::Latch(latch) => SequentialKey::Latch {
-                region,
                 d: canonical_value(latch.d),
                 enable: word::Enable {
                     value: canonical_value(latch.enable.value),
@@ -172,12 +150,7 @@ pub(crate) fn share_equivalent_sequential_values_by(
     let connects = module.take_connects();
     for mut connect in connects {
         if let Some(representative) = replacements.get(connect.value.index()).copied().flatten() {
-            let target = sequential_targets.get(&representative).ok_or_else(|| {
-                crate::SynthError::invariant(format!(
-                    "shared sequential value {representative:?} has no signal target"
-                ))
-            })?;
-            connect.value = read_static_target(module, target, &connect.source)?;
+            connect.value = representative;
         }
         if let Some(dynamic) = &mut connect.target.dynamic {
             dynamic.offset = replacements
@@ -217,33 +190,9 @@ pub(crate) fn share_equivalent_sequential_values_by(
     DataflowChanges::from_aliases(module.values().len(), &aliases)
 }
 
-fn read_static_target(
-    module: &mut word::WordModule,
-    target: &word::LValue,
-    source: &word::SourceSpan,
-) -> Result<word::ValueId, crate::SynthError> {
-    if target.dynamic.is_some() {
-        return Err(crate::SynthError::invariant(
-            "shared sequential value has a dynamic signal target",
-        ));
-    }
-    match target.range {
-        Some(range) => module
-            .read_signal_slice(target.signal, range.lsb, range.width(), source.clone())
-            .map_err(Into::into),
-        None => module
-            .read_signal(target.signal, source.clone())
-            .map_err(Into::into),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn one_region(module: &word::WordModule) -> Vec<Option<crate::RegionRowId>> {
-        vec![Some(crate::RegionRowId::from_index(0).unwrap()); module.operations().len()]
-    }
 
     #[test]
     fn shares_registers_with_identical_data_and_controls() {
@@ -292,36 +241,16 @@ mod tests {
             .connect(word::LValue::signal(q1_signal), q1, source)
             .unwrap();
 
-        let mut split = module.clone();
-        let split_regions = vec![
-            Some(crate::RegionRowId::from_index(0).unwrap()),
-            Some(crate::RegionRowId::from_index(1).unwrap()),
-        ];
-        assert!(
-            !share_equivalent_sequential_values_in_regions(
-                &mut split,
-                crate::test_runtime(),
-                &split_regions,
-            )
-            .unwrap()
-            .has_equivalences()
-        );
-
-        let regions = one_region(&module);
-        let changes = share_equivalent_sequential_values_in_regions(
-            &mut module,
-            crate::test_runtime(),
-            &regions,
-        )
-        .unwrap();
+        let changes =
+            share_equivalent_sequential_values_by(&mut module, crate::test_runtime(), |value| {
+                value
+            })
+            .unwrap();
 
         assert!(changes.has_equivalences());
         assert_eq!(changes.representatives()[q1.index()], q0);
         assert_eq!(module.connects()[0].value, q0);
-        assert!(matches!(
-            module.value(module.connects()[1].value).unwrap().kind,
-            word::ValueKind::Signal(reference) if reference.signal == q0_signal
-        ));
+        assert_eq!(module.connects()[1].value, q0);
         module.compact_netlist().unwrap();
         assert_eq!(
             module
@@ -374,13 +303,11 @@ mod tests {
             }
         }
 
-        let regions = one_region(&module);
-        let changes = share_equivalent_sequential_values_in_regions(
-            &mut module,
-            crate::test_runtime(),
-            &regions,
-        )
-        .unwrap();
+        let changes =
+            share_equivalent_sequential_values_by(&mut module, crate::test_runtime(), |value| {
+                value
+            })
+            .unwrap();
 
         assert!(!changes.has_equivalences());
         assert_eq!(
@@ -422,13 +349,11 @@ mod tests {
                 .unwrap();
         }
 
-        let regions = one_region(&module);
-        let changes = share_equivalent_sequential_values_in_regions(
-            &mut module,
-            crate::test_runtime(),
-            &regions,
-        )
-        .unwrap();
+        let changes =
+            share_equivalent_sequential_values_by(&mut module, crate::test_runtime(), |value| {
+                value
+            })
+            .unwrap();
         assert!(!changes.has_equivalences());
     }
 
@@ -471,16 +396,12 @@ mod tests {
                 .unwrap();
         }
 
-        let regions = one_region(&module);
-        let canonical =
-            super::super::optimize_owned_combinational_dataflow(&mut module, &regions).unwrap();
-        let changes = share_equivalent_sequential_values_by(
-            &mut module,
-            crate::test_runtime(),
-            &regions,
-            |value| canonical.representatives()[value.index()],
-        )
-        .unwrap();
+        let canonical = super::super::canonicalize_combinational_dataflow(&mut module).unwrap();
+        let changes =
+            share_equivalent_sequential_values_by(&mut module, crate::test_runtime(), |value| {
+                canonical.representatives()[value.index()]
+            })
+            .unwrap();
 
         assert!(changes.has_equivalences());
         assert_eq!(

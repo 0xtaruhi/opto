@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Owner-confined structural preparation followed by one final region freeze.
+//! Minimal sealing followed by one private structural transaction.
 
 use opto_ir::word;
 
-pub(crate) fn optimize_structure(
+pub(crate) fn optimize_private_structure(
     module: &mut word::WordModule,
     mapping: &crate::mapping::TargetMappingContext,
     clock_gating: Option<crate::ClockGatingStyle>,
@@ -13,44 +13,49 @@ pub(crate) fn optimize_structure(
     timing: &opto_timing::TimingContext,
     port_bindings: &opto_timing::PortBindings,
     runtime: &opto_runtime::ExecutionContext,
-) -> Result<crate::SynthesisRegionGraph, crate::SynthError> {
+) -> Result<(crate::SynthesisRegionGraph, crate::regional::WorkDesign), crate::SynthError> {
     crate::planning::dataflow::coalesce_static_wire_drivers(module)?;
     crate::planning::dataflow::resolve_static_connect_aliases(module)?;
-    let provisional = crate::regional::region_graph::partition::build(
+    let initial_regions = crate::regional::region_graph::partition::build(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
     )?;
-    let mut ownership = crate::regional::StructuralOwnershipProvenance::new(module, &provisional)?;
+    let initial_design = crate::regional::WorkDesign::seal(&initial_regions)?;
+    let work = crate::regional::WorkGraph::build_structural(&initial_regions, &initial_design)?;
+    if work.tasks().is_empty() {
+        return Ok((initial_regions, initial_design));
+    }
 
-    crate::planning::fsm::optimize_derived_fsms_in_regions(
-        module,
-        &mut ownership,
-        timing,
-        port_bindings,
-        runtime,
-    )?;
-    let canonical_values =
-        crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
-    crate::planning::dataflow::share_equivalent_sequential_values_by(
-        module,
-        runtime,
-        ownership.owners(),
-        |value| {
-            canonical_values
-                .representatives()
-                .get(value.index())
-                .copied()
-                .unwrap_or(value)
-        },
-    )?;
-    mapping.publish_owned_preparation(module, clock_gating, target_mapping, &mut ownership)?;
-    crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
+    let [(optimized, proof)] = runtime
+        .map_ordered_composite(work.tasks(), |_, task_runtime| {
+            let mut private = module.clone();
+            let proof = crate::planning::fsm::optimize_derived_fsms(
+                &mut private,
+                timing,
+                port_bindings,
+                task_runtime,
+            )?;
+            let canonical =
+                crate::planning::dataflow::optimize_combinational_dataflow(&mut private)?;
+            crate::planning::dataflow::share_equivalent_sequential_values_by(
+                &mut private,
+                task_runtime,
+                |value| canonical.representatives()[value.index()],
+            )?;
+            mapping.prepare_private_structure(&mut private, clock_gating, target_mapping)?;
+            crate::planning::dataflow::optimize_combinational_dataflow(&mut private)?;
+            private.compact_netlist().map_err(crate::SynthError::Word)?;
+            private.validate().map_err(crate::SynthError::Word)?;
+            Ok::<_, crate::SynthError>((private, proof))
+        })?
+        .try_into()
+        .map_err(|_| crate::SynthError::invariant("structural reduce task produced no result"))?;
+    *module = optimized;
 
-    let final_partition = crate::regional::region_graph::partition::build_with_ownership(
+    let regions = crate::regional::region_graph::partition::build(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
-        &ownership,
     )?;
-    ownership.verify_frozen(module, &final_partition)?;
-    Ok(final_partition)
+    let design = initial_design.rewrite_all(&regions, proof)?;
+    Ok((regions, design))
 }

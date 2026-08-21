@@ -4,6 +4,63 @@
 use super::*;
 use opto_ir::word::{self, BinaryOp, PortDirection, SourceSpan, WordModule, WordType};
 
+fn binary_fragment(
+    name: &str,
+    operator: BinaryOp,
+) -> (WordModule, [word::ValueId; 2], word::ValueId) {
+    let mut module = WordModule::new(name);
+    let bit = WordType::bits(1).unwrap();
+    let inputs = ["a", "b"].map(|name| {
+        let port = module
+            .add_port(name, PortDirection::Input, bit, SourceSpan::default())
+            .unwrap();
+        module
+            .read_signal(module.port(port).unwrap().signal, SourceSpan::default())
+            .unwrap()
+    });
+    let output = module
+        .binary(operator, inputs[0], inputs[1], SourceSpan::default())
+        .unwrap();
+    (module, inputs, output)
+}
+
+#[test]
+fn cross_module_miter_shares_only_the_explicit_stable_cut() {
+    let (reference, reference_inputs, reference_output) =
+        binary_fragment("reference", BinaryOp::BitXor);
+    let (equivalent, equivalent_inputs, equivalent_output) =
+        binary_fragment("equivalent", BinaryOp::BitXor);
+    let (wrong, wrong_inputs, wrong_output) = binary_fragment("wrong", BinaryOp::BitAnd);
+
+    prove_module_values_equivalent_at_cut(
+        &reference,
+        &[reference_output],
+        &equivalent,
+        &[equivalent_output],
+        &reference_inputs
+            .into_iter()
+            .zip(equivalent_inputs)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap()
+    .require_proved()
+    .unwrap();
+    assert!(matches!(
+        prove_module_values_equivalent_at_cut(
+            &reference,
+            &[reference_output],
+            &wrong,
+            &[wrong_output],
+            &reference_inputs
+                .into_iter()
+                .zip(wrong_inputs)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+        ProofOutcome::Disproved(_)
+    ));
+}
+
 #[test]
 fn proves_equivalent_xor_structures_and_rejects_wrong_logic() {
     let mut module = WordModule::new("proof");

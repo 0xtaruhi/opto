@@ -70,42 +70,35 @@ pub(crate) enum GlobalBitblastScope {
 }
 
 #[derive(Debug)]
-pub(crate) struct LoweredRegionOwnership {
-    owners: Vec<Option<crate::RegionRowId>>,
+pub(crate) struct LoweredRegionBinding {
+    regions: Vec<Option<crate::RegionRowId>>,
     lowered_values: Vec<Option<Box<[word::ValueId]>>>,
 }
 
-impl LoweredRegionOwnership {
+impl LoweredRegionBinding {
     pub(crate) fn new(value_count: usize) -> Self {
         Self {
-            owners: vec![None; value_count],
+            regions: vec![None; value_count],
             lowered_values: vec![None; value_count],
         }
     }
 
-    fn set(
+    fn bind(
         &mut self,
         value: word::ValueId,
-        owner: crate::RegionRowId,
+        region: crate::RegionRowId,
     ) -> Result<(), crate::SynthError> {
-        if self.owners.len() <= value.index() {
-            self.owners.resize(value.index() + 1, None);
+        if self.regions.len() <= value.index() {
+            self.regions.resize(value.index() + 1, None);
         }
-        let slot = &mut self.owners[value.index()];
-        if slot.is_some_and(|current| current != owner) {
+        let slot = &mut self.regions[value.index()];
+        if slot.is_some_and(|current| current != region) {
             return Err(crate::SynthError::invariant(
-                "lowered value crosses synthesis-region ownership",
+                "lowered value is bound to conflicting synthesis regions",
             ));
         }
-        *slot = Some(owner);
+        *slot = Some(region);
         Ok(())
-    }
-
-    fn claim(&mut self, value: word::ValueId, owner: crate::RegionRowId) {
-        if self.owners.len() <= value.index() {
-            self.owners.resize(value.index() + 1, None);
-        }
-        self.owners[value.index()].get_or_insert(owner);
     }
 
     pub(crate) fn lowered_bits(&self, value: word::ValueId) -> Option<&[word::ValueId]> {
@@ -135,7 +128,7 @@ impl LoweredRegionOwnership {
                     .map(|&bit| {
                         backend.word_value(bit).ok_or_else(|| {
                             crate::SynthError::invariant(
-                                "non-Word backend cannot publish scalar Word ownership",
+                                "non-Word backend cannot publish a scalar Word binding",
                             )
                         })
                     })
@@ -154,7 +147,7 @@ pub(crate) fn bitblast_module_with_regions(
     required_values: &[word::ValueId],
     regional_publication: &[RegionalPublicationBit],
     scope: GlobalBitblastScope,
-) -> Result<LoweredRegionOwnership, crate::SynthError> {
+) -> Result<LoweredRegionBinding, crate::SynthError> {
     if !module.memories().is_empty()
         || !module.memory_read_ports().is_empty()
         || !module.memory_write_ports().is_empty()
@@ -165,7 +158,7 @@ pub(crate) fn bitblast_module_with_regions(
     }
     if !operation_regions.is_empty() && operation_regions.len() != module.operations().len() {
         return Err(crate::SynthError::invariant(
-            "source operation ownership does not cover the lowering module",
+            "source operation region binding does not cover the lowering module",
         ));
     }
     let publication_contract =
@@ -179,7 +172,6 @@ pub(crate) fn bitblast_module_with_regions(
         module,
         BitBlasterRequest {
             plan,
-            operator_lookup: OperatorLookup::Decisions,
             provenance,
             operation_regions,
             boundary_inputs: &[],
@@ -212,16 +204,16 @@ pub(crate) fn bitblast_module_with_regions(
     for &value in required_values {
         blaster.value(value)?;
     }
-    blaster.lowered_owners.capture_lowered_values(
+    blaster.lowered_regions.capture_lowered_values(
         &blaster.cache,
         &blaster.arena,
         &blaster.backend,
     )?;
-    Ok(blaster.lowered_owners)
+    Ok(blaster.lowered_regions)
 }
 
 pub(crate) struct LocalRegionBooleanLowering {
-    pub(crate) ownership: LoweredRegionOwnership,
+    pub(crate) binding: LoweredRegionBinding,
     pub(crate) subject: crate::boolean::logic::CanonicalRegionLogic,
 }
 
@@ -229,7 +221,7 @@ pub(crate) struct LocalRegionBooleanLowering {
 pub(crate) struct RegionalPublicationBit {
     pub(crate) target: word::ValueId,
     pub(crate) bit: u32,
-    /// The one region authorized to publish this source bit.
+    /// The region containing the source bit producer.
     pub(crate) producer: crate::RegionRowId,
 }
 
@@ -237,7 +229,7 @@ pub(crate) struct LocalRegionBooleanRequest<'a> {
     pub(crate) plan: &'a ArchitectureDecisions,
     pub(crate) operators: &'a crate::DurableOperatorArena,
     pub(crate) provenance: &'a mut ProvenanceBuilder,
-    pub(crate) owner: crate::RegionRowId,
+    pub(crate) region: crate::RegionRowId,
     pub(crate) boundary_inputs: &'a [word::ValueId],
     pub(crate) roots: &'a [word::ValueId],
     /// Values whose scalar identities must remain addressable after lowering.
@@ -254,13 +246,13 @@ pub(crate) fn lower_local_region_boolean(
         plan,
         operators,
         provenance,
-        owner,
+        region,
         boundary_inputs,
         roots,
         tracked_values,
     } = request;
-    operators.validate_decisions(plan, module.operations().len())?;
-    let operation_regions = vec![Some(owner); module.operations().len()];
+    operators.validate_decisions(plan)?;
+    let operation_regions = vec![Some(region); module.operations().len()];
     let mut observed_values = roots.to_vec();
     observed_values.extend_from_slice(tracked_values);
     let observability =
@@ -270,7 +262,6 @@ pub(crate) fn lower_local_region_boolean(
         module,
         BitBlasterRequest {
             plan,
-            operator_lookup: OperatorLookup::Durable(operators),
             provenance,
             operation_regions: &operation_regions,
             boundary_inputs,
@@ -348,19 +339,19 @@ pub(crate) fn lower_local_region_boolean(
                     ));
                 }
             };
-            blaster.lowered_owners.set(handle, owner)?;
+            blaster.lowered_regions.bind(handle, region)?;
             lowered.push(handle);
             if let Some(node) = node {
                 value_nodes.push((handle, node));
             }
         }
-        if blaster.lowered_owners.lowered_values.len() <= original.index() {
+        if blaster.lowered_regions.lowered_values.len() <= original.index() {
             blaster
-                .lowered_owners
+                .lowered_regions
                 .lowered_values
                 .resize(original.index() + 1, None);
         }
-        blaster.lowered_owners.lowered_values[original.index()] = Some(lowered.into_boxed_slice());
+        blaster.lowered_regions.lowered_values[original.index()] = Some(lowered.into_boxed_slice());
     }
     value_nodes.sort_by_key(|&(value, _)| value);
     value_nodes.dedup_by_key(|(value, _)| *value);
@@ -368,7 +359,7 @@ pub(crate) fn lower_local_region_boolean(
     dont_care_values.dedup();
     let (network, inputs) = std::mem::take(&mut blaster.backend).finish();
     Ok(LocalRegionBooleanLowering {
-        ownership: blaster.lowered_owners,
+        binding: blaster.lowered_regions,
         subject: crate::boolean::logic::CanonicalRegionLogic {
             network,
             value_nodes: value_nodes.into_boxed_slice(),
@@ -444,11 +435,11 @@ enum FrozenPublicationBit {
     SubstrateConstant(BitVal),
 }
 
-/// Immutable per-bit ownership at the regional publication boundary.
+/// Immutable per-bit binding at the regional publication boundary.
 ///
 /// This contract is captured from the complete Word design before lowering
 /// mutates connectivity. Regional shell endpoints and the mapped substrate
-/// consume it directly; neither may rediscover ownership from a partial view.
+/// consume it directly; neither may rediscover membership from a partial view.
 #[derive(Default)]
 struct FrozenPublicationContract {
     bits: BTreeMap<word::ValueId, Box<[FrozenPublicationBit]>>,
@@ -513,22 +504,22 @@ fn freeze_publication_contract(
             // root analysis never emits a signal or constant target.
             word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => continue,
         };
-        let owner = operation_regions
+        let region = operation_regions
             .get(operation.index())
             .copied()
             .flatten()
             .ok_or_else(|| {
-                crate::SynthError::invariant("regional publication target is not owned by a region")
+                crate::SynthError::invariant("regional publication target has no region binding")
             })?;
-        if owner != publication.producer {
+        if region != publication.producer {
             return Err(crate::SynthError::invariant(format!(
                 "regional publication {:?}[{}] names producer {:?}, but the source operation belongs to {:?}",
-                publication.target, publication.bit, publication.producer, owner,
+                publication.target, publication.bit, publication.producer, region,
             )));
         }
         let contract = bits.get(&publication.target).ok_or_else(|| {
             crate::SynthError::invariant(format!(
-                "regional publication contract target {:?}[{}] from producer {:?} has no frozen shell owner ({:?})",
+                "regional publication contract target {:?}[{}] from producer {:?} has no frozen shell binding ({:?})",
                 publication.target,
                 publication.bit,
                 publication.producer,
@@ -571,7 +562,6 @@ impl BitSpan {
 pub(super) struct BitBlaster<'a, B: BitBackend = WordBackend> {
     module: &'a mut word::WordModule,
     plan: &'a ArchitectureDecisions,
-    operator_lookup: OperatorLookup<'a>,
     provenance: &'a mut ProvenanceBuilder,
     active_operator: Option<OperatorId>,
     active_region: Option<crate::RegionRowId>,
@@ -580,7 +570,7 @@ pub(super) struct BitBlaster<'a, B: BitBackend = WordBackend> {
     signal_drivers: crate::word::signal_driver::SignalDriverIndex,
     known_bits: word::KnownBitsAnalysis,
     active_values: BTreeSet<word::ValueId>,
-    lowered_owners: LoweredRegionOwnership,
+    lowered_regions: LoweredRegionBinding,
     arena: Vec<ScalarBit>,
     cache: Vec<Option<BitSpan>>,
     constants: [Option<ScalarBit>; 8],
@@ -593,7 +583,6 @@ pub(super) struct BitBlaster<'a, B: BitBackend = WordBackend> {
 
 struct BitBlasterRequest<'a> {
     plan: &'a ArchitectureDecisions,
-    operator_lookup: OperatorLookup<'a>,
     provenance: &'a mut ProvenanceBuilder,
     operation_regions: &'a [Option<crate::RegionRowId>],
     boundary_inputs: &'a [word::ValueId],
@@ -603,12 +592,6 @@ struct BitBlasterRequest<'a> {
     publication_contract: FrozenPublicationContract,
 }
 
-#[derive(Clone, Copy)]
-enum OperatorLookup<'a> {
-    Decisions,
-    Durable(&'a crate::DurableOperatorArena),
-}
-
 impl<'a, B: BitBackend> BitBlaster<'a, B> {
     fn new(
         module: &'a mut word::WordModule,
@@ -616,7 +599,6 @@ impl<'a, B: BitBackend> BitBlaster<'a, B> {
     ) -> Result<Self, crate::SynthError> {
         let BitBlasterRequest {
             plan,
-            operator_lookup,
             provenance,
             operation_regions,
             boundary_inputs,
@@ -631,7 +613,6 @@ impl<'a, B: BitBackend> BitBlaster<'a, B> {
         Ok(Self {
             module,
             plan,
-            operator_lookup,
             provenance,
             active_operator: None,
             active_region: None,
@@ -640,7 +621,7 @@ impl<'a, B: BitBackend> BitBlaster<'a, B> {
             signal_drivers,
             known_bits,
             active_values: BTreeSet::new(),
-            lowered_owners: LoweredRegionOwnership::new(value_count),
+            lowered_regions: LoweredRegionBinding::new(value_count),
             arena: Vec::new(),
             cache: Vec::new(),
             constants: [None; 8],
@@ -670,10 +651,7 @@ impl<'a, B: BitBackend> BitBlaster<'a, B> {
         &self,
         operation: word::OpId,
     ) -> Option<OperatorId> {
-        match self.operator_lookup {
-            OperatorLookup::Decisions => self.plan.operator_for_source_operation(operation),
-            OperatorLookup::Durable(operators) => operators.operator_for_local_operation(operation),
-        }
+        self.plan.operator_for_source_operation(operation)
     }
 
     pub(super) fn local_source_value(

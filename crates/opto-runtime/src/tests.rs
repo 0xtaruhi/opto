@@ -70,11 +70,11 @@ fn explicit_indexed_grain_changes_only_scheduling() {
 }
 
 #[test]
-fn composite_scheduler_bounds_outer_work_and_preserves_order() {
+fn composite_scheduler_elastically_shares_one_pool_and_preserves_order() {
     let runtime = runtime(16);
     let active = AtomicUsize::new(0);
     let peak = AtomicUsize::new(0);
-    let initial_wave = Barrier::new(4);
+    let initial_wave = Barrier::new(15);
     let outputs = runtime
         .map_ordered_composite(
             (0_u64..40)
@@ -85,10 +85,13 @@ fn composite_scheduler_bounds_outer_work_and_preserves_order() {
                 })
                 .collect(),
             |index, nested| {
-                assert_eq!(nested.parallelism(), 4);
+                assert!(runtime.is_same_runtime(nested));
+                assert_eq!(nested.parallelism(), 16);
                 let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(now, Ordering::SeqCst);
-                initial_wave.wait();
+                if index >= 25 {
+                    initial_wave.wait();
+                }
                 active.fetch_sub(1, Ordering::SeqCst);
                 Ok::<_, RuntimeError>(index)
             },
@@ -96,7 +99,46 @@ fn composite_scheduler_bounds_outer_work_and_preserves_order() {
         .unwrap();
 
     assert_eq!(outputs, (0_u64..40).collect::<Vec<_>>());
-    assert_eq!(peak.load(Ordering::SeqCst), 4);
+    assert!(peak.load(Ordering::SeqCst) >= 15);
+}
+
+#[test]
+fn composite_scheduler_admits_tasks_within_the_memory_limit() {
+    let runtime = runtime(4).with_memory_limit(std::num::NonZeroU64::new(10).unwrap());
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let wave = Barrier::new(2);
+    let outputs = runtime
+        .map_ordered_composite(
+            (0_u64..4)
+                .map(|index| Task::new(TaskKey::new(12, index), index).with_estimated_memory(5))
+                .collect(),
+            |index, _| {
+                let now = active.fetch_add(5, Ordering::SeqCst) + 5;
+                peak.fetch_max(now, Ordering::SeqCst);
+                wave.wait();
+                active.fetch_sub(5, Ordering::SeqCst);
+                Ok::<_, RuntimeError>(index)
+            },
+        )
+        .unwrap();
+
+    assert_eq!(outputs, (0_u64..4).collect::<Vec<_>>());
+    assert_eq!(peak.load(Ordering::SeqCst), 10);
+}
+
+#[test]
+fn composite_scheduler_rejects_an_oversized_task_before_execution() {
+    let runtime = runtime(2).with_memory_limit(std::num::NonZeroU64::new(4).unwrap());
+    let error = runtime
+        .map_ordered_composite(
+            vec![Task::new(TaskKey::new(12, 0), ()).with_estimated_memory(5)],
+            |(), _| Ok::<_, RuntimeError>(()),
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, RuntimeError::TaskMemoryExceedsLimit { .. }));
+    assert_eq!(runtime.metrics().completed_task_callbacks, 0);
 }
 
 #[test]

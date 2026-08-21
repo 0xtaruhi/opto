@@ -5,7 +5,7 @@ mod canonical;
 mod priority;
 mod sequential;
 
-use canonical::{canonicalize_values, canonicalize_values_by};
+use canonical::canonicalize_values;
 pub(crate) use sequential::share_equivalent_sequential_values_by;
 
 use opto_core::PackedRows;
@@ -239,15 +239,15 @@ impl DataflowChanges {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn optimize_combinational_dataflow(
     module: &mut word::WordModule,
-) -> Result<(), crate::SynthError> {
-    canonicalize_combinational_dataflow(module)?;
+) -> Result<DataflowChanges, crate::SynthError> {
+    let changes = canonicalize_combinational_dataflow(module)?;
     if priority::rebalance_constant_priority_muxes(module)? {
-        canonicalize_combinational_dataflow(module)?;
+        canonicalize_combinational_dataflow(module)
+    } else {
+        Ok(changes)
     }
-    Ok(())
 }
 
 pub(crate) fn canonicalize_combinational_dataflow(
@@ -262,134 +262,6 @@ pub(crate) fn resolve_static_connect_aliases(
     let drivers = DriverIndex::build(module)?;
     let resolved_values = resolve_connect_aliases(module, &drivers)?;
     apply_representatives(module, &drivers, resolved_values, |_, _| true)
-}
-
-pub(crate) fn optimize_owned_combinational_dataflow(
-    module: &mut word::WordModule,
-    owners: &[Option<crate::RegionRowId>],
-) -> Result<DataflowChanges, crate::SynthError> {
-    if owners.len() != module.operations().len() {
-        return Err(crate::SynthError::invariant(
-            "owned dataflow ownership does not align with the operation arena",
-        ));
-    }
-    let drivers = DriverIndex::build(module)?;
-    let mut resolver = AliasResolver::new(module, &drivers);
-    let mut representatives = (0..module.values().len())
-        .map(|index| {
-            let value = word::ValueId::from_index(index).map_err(crate::SynthError::Word)?;
-            resolver.resolve(value)
-        })
-        .collect::<Result<Vec<_>, crate::SynthError>>()?;
-    drop(resolver);
-    canonicalize_values_by(module, &mut representatives, |operation| {
-        owners[operation.index()].map(|owner| u64::from(owner.raw()) + 1)
-    })?;
-    close_representatives(&mut representatives)?;
-
-    let initial_representatives = representatives.clone();
-    let value_scope = |value: word::ValueId| {
-        let terminal = initial_representatives[value.index()];
-        match module.value(terminal).map(|value| &value.kind) {
-            Some(word::ValueKind::Constant(_)) => Some(None),
-            Some(word::ValueKind::Operation(operation)) => {
-                owners.get(operation.index()).copied().flatten().map(Some)
-            }
-            Some(word::ValueKind::Signal(_)) | None => None,
-        }
-    };
-    for (index, representative) in representatives.iter_mut().enumerate() {
-        let original = word::ValueId::from_index(index).map_err(crate::SynthError::Word)?;
-        let original_scope = module.value(original).and_then(|_| value_scope(original));
-        let replacement_scope = value_scope(*representative);
-        let permitted = match (original_scope, replacement_scope) {
-            (Some(None | Some(_)), Some(None)) => true,
-            (Some(Some(left)), Some(Some(right))) => left == right,
-            _ => false,
-        };
-        if !permitted {
-            *representative = original;
-        }
-    }
-    close_representatives(&mut representatives)?;
-    let changed = representatives
-        .iter()
-        .enumerate()
-        .any(|(index, value)| value.index() != index);
-
-    let read_bits = read_signal_bits(module, &drivers, &representatives)?;
-    let removable_connects = module
-        .connects()
-        .iter()
-        .map(|connect| {
-            let owned = match module.value(connect.value).map(|value| &value.kind) {
-                Some(word::ValueKind::Operation(operation)) => {
-                    owners.get(operation.index()).copied().flatten().is_some()
-                }
-                Some(word::ValueKind::Signal(_) | word::ValueKind::Constant(_)) | None => false,
-            };
-            Ok(owned && drivers.is_removable(module, connect, &read_bits)?)
-        })
-        .collect::<Result<Vec<_>, crate::SynthError>>()?;
-
-    commit_representatives(module, &representatives, &removable_connects)?;
-    Ok(DataflowChanges {
-        representatives: representatives.into_boxed_slice(),
-        changed,
-    })
-}
-
-pub(crate) fn rebalance_priority_muxes_in_regions(
-    module: &mut word::WordModule,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
-) -> Result<bool, crate::SynthError> {
-    if ownership.len() != module.operations().len() {
-        return Err(crate::SynthError::invariant(
-            "priority-mux ownership does not align with the operation arena",
-        ));
-    }
-    let value_owners = module
-        .values()
-        .iter()
-        .map(|value| match value.kind {
-            word::ValueKind::Operation(operation) => ownership.owner(operation),
-            word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
-        })
-        .collect::<Vec<_>>();
-    let result = priority::rebalance_constant_priority_muxes_by(module, |nodes| {
-        let owner = nodes
-            .first()
-            .and_then(|value| value_owners.get(value.index()).copied().flatten())?;
-        nodes
-            .iter()
-            .all(|value| value_owners.get(value.index()).copied().flatten() == Some(owner))
-            .then_some(owner)
-    })?;
-    for generated in result.generated {
-        if generated.range.start != ownership.len()
-            || generated.range.end > module.operations().len()
-        {
-            return Err(crate::SynthError::invariant(
-                "priority-mux generated ownership does not align with the operation arena",
-            ));
-        }
-        ownership.claim_range(
-            module,
-            generated.range.start,
-            generated.range.end,
-            &generated.sources,
-        )?;
-    }
-    Ok(result.changed)
-}
-
-pub(crate) fn optimize_owned_priority_dataflow(
-    module: &mut word::WordModule,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
-) -> Result<DataflowChanges, crate::SynthError> {
-    optimize_owned_combinational_dataflow(module, ownership.owners())?;
-    rebalance_priority_muxes_in_regions(module, ownership)?;
-    optimize_owned_combinational_dataflow(module, ownership.owners())
 }
 
 pub(crate) fn optimize_combinational_dataflow_by(

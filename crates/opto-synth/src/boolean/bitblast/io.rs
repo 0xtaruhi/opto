@@ -480,17 +480,6 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                                 &operation.source,
                             )?
                         };
-                    if let Some(owner) = self.active_region {
-                        for &bit in &bits {
-                            // Width-only operations may forward an already-owned
-                            // producer bit across a hard region boundary. The
-                            // producer remains its unique owner; freshly emitted
-                            // values were assigned strictly when constructed.
-                            if let Some(value) = self.backend.word_value(bit) {
-                                self.lowered_owners.claim(value, owner);
-                            }
-                        }
-                    }
                     self.active_region = previous_region;
                     bits
                 }

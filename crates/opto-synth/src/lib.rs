@@ -19,7 +19,7 @@
 //! sparse timing scenarios drive immutable boundary contracts, bounded closure
 //! epochs, and transactional max/min MMMC post-map repair.
 //! [`ImplementationDb`] records which source operators each mapped cell
-//! implements and which stable source synthesis regions own that cell, so
+//! implements and which immutable artifact fragment contains that cell, so
 //! incremental compilation, repair, and reports do not reconstruct provenance
 //! from names.
 
@@ -45,8 +45,8 @@ pub use api::{
     check_definition_with_references, check_design_with_references,
 };
 pub use artifact::{
-    BoundaryEdgeId, ImplementationDb, ImplementationRegion, ImplementationRegionId,
-    MappedCellOwnership,
+    FragmentFootprint, ImplementationDb, ImplementationRegion, ImplementationRegionId,
+    MappedFragmentId,
 };
 pub use closure::{NoPowerEvaluation, SynthesisPowerEvaluator};
 #[cfg(test)]

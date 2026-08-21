@@ -3,6 +3,19 @@
 
 use super::*;
 
+#[test]
+fn lowered_value_rejects_conflicting_region_bindings() {
+    let mut binding = LoweredRegionBinding::new(1);
+    let value = word::ValueId::from_index(0).unwrap();
+    let first = crate::RegionRowId::from_index(0).unwrap();
+    let second = crate::RegionRowId::from_index(1).unwrap();
+
+    binding.bind(value, first).unwrap();
+    let error = binding.bind(value, second).unwrap_err();
+
+    assert!(error.to_string().contains("conflicting synthesis regions"));
+}
+
 mod multiplier;
 
 fn bitblast_area(module: &mut word::WordModule) -> Result<(), crate::SynthError> {
@@ -124,7 +137,7 @@ fn regional_boolean_lowering_builds_axm_without_scalar_boolean_word_ops() {
     let mut provenance =
         crate::artifact::provenance::ProvenanceBuilder::for_regional_candidate(&module);
     let original_operations = module.operations().len();
-    let owner = crate::RegionRowId::from_index(0).unwrap();
+    let region = crate::RegionRowId::from_index(0).unwrap();
 
     let lowered = lower_local_region_boolean(
         &mut module,
@@ -132,7 +145,7 @@ fn regional_boolean_lowering_builds_axm_without_scalar_boolean_word_ops() {
             plan: &plan,
             operators: &operators,
             provenance: &mut provenance,
-            owner,
+            region,
             boundary_inputs: &[a, b],
             roots: &[shifted],
             tracked_values: &[a, b, result, scalar_cast, shifted],
@@ -141,8 +154,8 @@ fn regional_boolean_lowering_builds_axm_without_scalar_boolean_word_ops() {
     .unwrap();
 
     assert_eq!(lowered.subject.inputs.len(), 16);
-    assert_eq!(lowered.ownership.lowered_bits(result).unwrap().len(), 8);
-    assert_eq!(lowered.ownership.lowered_bits(shifted).unwrap(), &[shifted]);
+    assert_eq!(lowered.binding.lowered_bits(result).unwrap().len(), 8);
+    assert_eq!(lowered.binding.lowered_bits(shifted).unwrap(), &[shifted]);
     assert!(lowered.subject.network.node_count() > lowered.subject.inputs.len());
     assert!(
         module.operations()[original_operations..]
@@ -175,7 +188,7 @@ fn regional_boolean_lowering_resolves_dont_care_at_publication_boundary() {
     .unwrap();
     let mut provenance =
         crate::artifact::provenance::ProvenanceBuilder::for_regional_candidate(&module);
-    let owner = crate::RegionRowId::from_index(0).unwrap();
+    let region = crate::RegionRowId::from_index(0).unwrap();
 
     let lowered = lower_local_region_boolean(
         &mut module,
@@ -183,7 +196,7 @@ fn regional_boolean_lowering_resolves_dont_care_at_publication_boundary() {
             plan: &plan,
             operators: &operators,
             provenance: &mut provenance,
-            owner,
+            region,
             boundary_inputs: &[],
             roots: &[root],
             tracked_values: &[],
@@ -191,7 +204,7 @@ fn regional_boolean_lowering_resolves_dont_care_at_publication_boundary() {
     )
     .unwrap();
 
-    let [published] = lowered.ownership.lowered_bits(root).unwrap() else {
+    let [published] = lowered.binding.lowered_bits(root).unwrap() else {
         panic!("one-bit don't-care root must retain one physical binding");
     };
     let value = module.value(*published).unwrap();

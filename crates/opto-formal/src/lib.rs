@@ -25,7 +25,7 @@ pub use outcome::{Counterexample, ProofOutcome};
 pub use word_miter::{
     FiniteTransitionRelation, enumerate_finite_signal_register_transitions,
     enumerate_finite_signal_transitions, enumerate_finite_transitions,
-    prove_partitioned_register_successor_equivalence,
+    prove_module_values_equivalent_at_cut, prove_partitioned_register_successor_equivalence,
     prove_register_equivalence_between_signal_assignments, prove_value_against_logic_at_cut,
     prove_value_bits, prove_value_bits_at_cut, prove_value_constant,
     prove_value_equivalence_under_assumptions, prove_value_prefix_at_cut,

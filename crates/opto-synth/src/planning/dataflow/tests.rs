@@ -805,8 +805,8 @@ fn preserves_alias_chain_when_its_resolved_driver_follows_an_operation_use() {
 }
 
 #[test]
-fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
-    let mut module = word::WordModule::new("priority_owner");
+fn priority_rebalancing_is_self_contained_in_private_word() {
+    let mut module = word::WordModule::new("priority_private");
     let bit = word::WordType::bits(1).unwrap();
     let source = word::SourceSpan::stable("priority assignment");
     let inputs = (0..4)
@@ -839,12 +839,10 @@ fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
         })
         .collect::<Vec<_>>();
     let mut selected = zero;
-    let mut chain_nodes = Vec::new();
     for condition in &conditions {
         selected = module
             .mux(*condition, one, selected, source.clone())
             .unwrap();
-        chain_nodes.push(selected);
     }
     let output = module
         .add_port("selected", word::PortDirection::Output, bit, source.clone())
@@ -857,30 +855,10 @@ fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
         )
         .unwrap();
 
-    let boundary_owner = crate::RegionRowId::from_index(0).unwrap();
-    let chain_owner = crate::RegionRowId::from_index(1).unwrap();
-    let mut owners = vec![None; module.operations().len()];
-    for (values, owner) in [(&conditions, boundary_owner), (&chain_nodes, chain_owner)] {
-        for value in values {
-            let word::ValueKind::Operation(operation) = module.value(*value).unwrap().kind else {
-                panic!("test value must be operation-backed");
-            };
-            owners[operation.index()] = Some(owner);
-        }
-    }
-    let original_operations = owners.len();
-
-    let mut ownership =
-        crate::regional::StructuralOwnershipProvenance::from_owners_for_test(&module, owners)
-            .unwrap();
-    optimize_owned_priority_dataflow(&mut module, &mut ownership).unwrap();
-    assert_eq!(ownership.len(), module.operations().len());
-    assert!(ownership.len() > original_operations);
-    assert!(
-        ownership.owners()[original_operations..]
-            .iter()
-            .all(|owner| *owner == Some(chain_owner))
-    );
+    let original_operations = module.operations().len();
+    optimize_combinational_dataflow(&mut module).unwrap();
+    module.validate().unwrap();
+    assert_ne!(module.operations().len(), original_operations);
 }
 
 #[test]
@@ -911,12 +889,7 @@ fn keeps_a_driver_for_a_wire_read_only_by_an_instance() {
         )
         .unwrap();
 
-    let word::ValueKind::Operation(operation) = module.value(driver).unwrap().kind else {
-        panic!("test driver must be operation-backed");
-    };
-    let mut owners = vec![None; module.operations().len()];
-    owners[operation.index()] = Some(crate::RegionRowId::from_index(0).unwrap());
-    optimize_owned_combinational_dataflow(&mut module, &owners).unwrap();
+    optimize_combinational_dataflow(&mut module).unwrap();
 
     // The wire's only reader was the instance, so dropping its connect is
     // legitimate only if the instance was substituted onto the driver too.

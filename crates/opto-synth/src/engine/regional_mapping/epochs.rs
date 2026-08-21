@@ -178,7 +178,7 @@ impl RegionalMapper<'_> {
         &self,
         state: &mut RegionalMappingState<'_>,
     ) -> Result<RegionalMappedState, crate::SynthError> {
-        let boundary_values = boundary_observation_values(self.regions, state.region_ownership)?;
+        let boundary_values = boundary_observation_values(self.regions, state.region_binding)?;
         let mut observed_values = materialize::region_delta::regional_binding_values(
             state.rows.iter().map(|row| &row.binding),
         )
@@ -354,7 +354,7 @@ impl RegionalMapper<'_> {
             ));
         }
         let module = state.module;
-        let region_ownership = state.region_ownership;
+        let region_binding = state.region_binding;
         let plan_rows = &state.rows;
         let provenance = &mut *state.provenance;
         let mut prepared_regions = Vec::with_capacity(materialization_rows.len());
@@ -371,7 +371,7 @@ impl RegionalMapper<'_> {
                 let artifact = MappedRegionArtifact::from_library_plan(
                     &state_row.plan,
                     &state_row.binding,
-                    region_ownership,
+                    region_binding,
                     &mapped.signals,
                     self.combinational_catalog(),
                     &self.config.options.target_cells,
@@ -532,7 +532,7 @@ impl RegionalMapper<'_> {
                     cell,
                     MappedCellSource::Region {
                         origins: *origins,
-                        owner: *owner,
+                        region: *owner,
                     },
                 )
             }));

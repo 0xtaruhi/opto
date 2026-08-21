@@ -67,7 +67,7 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
         .unwrap();
     let source_to_local =
         std::collections::BTreeMap::from([(source_input, local_input), (source_root, local_input)]);
-    let ownership = crate::boolean::bitblast::LoweredRegionOwnership::new(local.values().len());
+    let region_binding = crate::boolean::bitblast::LoweredRegionBinding::new(local.values().len());
     let operation_sources = crate::planning::regional::LocalOperationProvenance::default();
 
     let candidate = build_candidate_binding(
@@ -80,7 +80,7 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
             memory_states: &[],
             operation_sources: &operation_sources,
             root_bindings: &[(source_root, root_signal)],
-            ownership: &ownership,
+            region_binding: &region_binding,
         },
         &[local_input],
         [std::slice::from_ref(&local_input)],
@@ -157,7 +157,7 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
         (observation, local_input),
         (source_root, local_input),
     ]);
-    let ownership = crate::boolean::bitblast::LoweredRegionOwnership::new(local.values().len());
+    let region_binding = crate::boolean::bitblast::LoweredRegionBinding::new(local.values().len());
     let operation_sources = crate::planning::regional::LocalOperationProvenance::default();
 
     let candidate = build_candidate_binding(
@@ -170,7 +170,7 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
             memory_states: &[],
             operation_sources: &operation_sources,
             root_bindings: &[(source_root, root_signal)],
-            ownership: &ownership,
+            region_binding: &region_binding,
         },
         &[local_input],
         [std::slice::from_ref(&local_input)],
@@ -227,7 +227,7 @@ fn root_publication_replaces_the_private_memory_state_handle() {
         &local,
         &std::collections::BTreeMap::from([(source_root, local_root)]),
         &[(source_root, root_signal)],
-        &crate::boolean::bitblast::LoweredRegionOwnership::new(local.values().len()),
+        &crate::boolean::bitblast::LoweredRegionBinding::new(local.values().len()),
         &mut outputs,
     )
     .unwrap();

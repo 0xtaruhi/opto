@@ -97,7 +97,7 @@ pub(crate) fn frozen_sequential_operations(
 /// emitted by global bit lowering while preserving their frozen region owner.
 pub(crate) fn lowered_sequential_operations(
     module: &word::WordModule,
-    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+    binding: &crate::boolean::bitblast::LoweredRegionBinding,
     source_operations: &[FrozenSequentialOperation],
 ) -> Result<Box<[FrozenSequentialOperation]>, crate::SynthError> {
     let mut lowered = std::collections::BTreeMap::new();
@@ -105,7 +105,7 @@ pub(crate) fn lowered_sequential_operations(
         let source = module.operation(frozen.operation).ok_or_else(|| {
             crate::SynthError::invariant("frozen source sequential operation disappeared")
         })?;
-        let values = ownership.lowered_bits(source.result).ok_or_else(|| {
+        let values = binding.lowered_bits(source.result).ok_or_else(|| {
             crate::SynthError::invariant(format!(
                 "frozen sequential operation {:?} has no lowered state values",
                 frozen.operation
@@ -313,7 +313,7 @@ impl<'a> ArtifactBuilder<'a> {
         let output = require_output(&mut self.nets, context.mapped_values, result)?;
         let source = MappedCellSource::Value {
             value: result,
-            owner,
+            region: owner,
         };
         if let Some(enable) = register.enable {
             let enable_signal = context.mapped_values.require(enable.value)?;
@@ -435,7 +435,7 @@ impl<'a> ArtifactBuilder<'a> {
             &[(0, output)],
             MappedCellSource::Value {
                 value: result,
-                owner,
+                region: owner,
             },
         )
     }
@@ -475,7 +475,10 @@ impl<'a> ArtifactBuilder<'a> {
             mapped,
             &[],
             &[(0, internal)],
-            MappedCellSource::Value { value, owner },
+            MappedCellSource::Value {
+                value,
+                region: owner,
+            },
         )?;
         Ok(internal)
     }

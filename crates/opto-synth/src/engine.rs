@@ -544,6 +544,7 @@ struct PlannedState {
     mapping_context: Arc<TargetMappingContext>,
     target_model: crate::planning::regional::StructuralTargetModel,
     regions: SynthesisRegionGraph,
+    design: crate::regional::WorkDesign,
     contracts: crate::regional::RegionContractSet,
 }
 
@@ -553,7 +554,7 @@ struct LoweredState {
     source_instances: SourceInstanceProvenance,
     mapping_context: Arc<TargetMappingContext>,
     regions: SynthesisRegionGraph,
-    region_ownership: crate::boolean::bitblast::LoweredRegionOwnership,
+    region_binding: crate::boolean::bitblast::LoweredRegionBinding,
     contracts: crate::regional::RegionContractSet,
     regional_plans: Box<[regional_mapping::RegionalPlanRow]>,
     sequential_operations: Box<[crate::mapping::materialize::FrozenSequentialOperation]>,
@@ -626,7 +627,7 @@ fn plan_regions(
     let mapping_context = execution
         .engine
         .mapping_context(&normalized.environment.options);
-    let regions = crate::planning::regional::optimize_private_structure(
+    let (regions, design) = crate::planning::regional::optimize_private_structure(
         &mut normalized.synthesized,
         &mapping_context,
         normalized.environment.clock_gating,
@@ -699,6 +700,7 @@ fn plan_regions(
         mapping_context,
         target_model,
         regions,
+        design,
         contracts,
     })
 }
@@ -718,7 +720,7 @@ fn map_initial_logic(
             module: &lowered.synthesized,
             provenance: &mut lowered.provenance,
             regions: &lowered.regions,
-            region_ownership: &lowered.region_ownership,
+            region_binding: &lowered.region_binding,
             contracts: &lowered.contracts,
             regional_plans: &lowered.regional_plans,
             sequential_operations: &lowered.sequential_operations,
@@ -845,18 +847,18 @@ fn optimize_postmap(
         execution.engine.config,
         &mut *execution.observer,
     )?;
-    let owner_impact = mapped.implementations.take_committed_owner_impact();
-    if !outcome.changed && !owner_impact.is_empty() {
+    let fragment_impact = mapped.implementations.take_committed_fragment_impact();
+    if !outcome.changed && !fragment_impact.is_empty() {
         return Err(crate::SynthError::invariant(
-            "post-map provenance recorded owner changes without a committed replacement",
+            "post-map provenance recorded fragment changes without a committed replacement",
         ));
     }
-    if !owner_impact.unknown_cells().is_empty() {
-        return Err(crate::SynthError::UnknownMappedOwners {
-            cells: owner_impact.unknown_cells().iter().copied().collect(),
+    if !fragment_impact.unknown_cells().is_empty() {
+        return Err(crate::SynthError::UnknownMappedFragments {
+            cells: fragment_impact.unknown_cells().iter().copied().collect(),
         });
     }
-    let touched_regions = owner_impact.regions();
+    let touched_regions = fragment_impact.regions();
     for record in &mut mapped.ledger.regional_cache_records {
         if record
             .plan_region()

@@ -134,7 +134,7 @@ pub(super) fn clone_driver_forest_delta(
                 "clone forest contains duplicate source nets",
             ));
         }
-        let groups = buffering::group_sink_pins_by_owner(
+        let groups = buffering::group_sink_pins_by_fragment(
             mapped,
             implementations,
             plan.branch.iter().copied(),

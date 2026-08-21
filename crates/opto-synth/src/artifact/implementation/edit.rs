@@ -1,22 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Transactional implementation-provenance updates for mapped region edits.
+//! Transactional provenance and fragment-containment updates for mapped edits.
 
-use super::{
-    BoundaryEdge, BoundaryEdgeId, ImplementationDb, MappedCellOwnership, MappedOwnerId,
-    MappedOwnerImpact, OriginSetId, RegionOwnerId,
-};
-use crate::{OperatorId, RegionAnchorId};
+use super::{FragmentFootprint, FragmentImpact, ImplementationDb, MappedFragmentId, OriginSetId};
+use crate::OperatorId;
 use opto_ir::mapped::{AppliedRegionDelta, CellId, MappedGenerationId, MappedNetlist, TempCellId};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl ImplementationDb {
-    /// Correlates an applied mapped delta with explicit semantic lineage.
-    ///
-    /// Preparation is read-only: it validates generation identity, proves that
-    /// every temporary addition has exactly one lineage, and computes owner
-    /// invalidation without mutating the durable implementation database.
+    /// Validates one applied mapped delta and prepares its durable metadata.
     pub(crate) fn prepare_region_edit(
         &self,
         mapped: &MappedNetlist,
@@ -50,6 +43,14 @@ impl ImplementationDb {
                     "implementation lineage targets non-live mapped cell {cell:?}"
                 )));
             }
+            if matches!(
+                lineage.fragment,
+                FragmentFootprint::Boundary { driver, sink } if driver == sink
+            ) {
+                return Err(crate::SynthError::invariant(
+                    "mapped boundary fragment has identical endpoints",
+                ));
+            }
             let mut operators = Vec::new();
             for &source in &lineage.semantic_sources {
                 let source_operators = self.operators_for_cell(source).ok_or_else(|| {
@@ -64,7 +65,7 @@ impl ImplementationDb {
             additions.push(PreparedImplementationAddition {
                 cell,
                 operators: operators.into_boxed_slice(),
-                ownership: self.prepare_ownership(&lineage.ownership)?,
+                fragment: lineage.fragment,
             });
         }
         if let Some(temporary) = lineage
@@ -84,42 +85,25 @@ impl ImplementationDb {
         removals.sort_unstable();
         removals.dedup();
 
-        let mut owner_impact = MappedOwnerImpact::default();
-        // A pin reconnection is part of the boundary artifact's exact
-        // footprint, not a replacement of the sink region. Only a removed or
-        // payload-changed existing cell invalidates its own region plan.
+        let mut fragment_impact = FragmentImpact::default();
         for (cell, previous) in applied.previous_live_cells() {
             if mapped.cell(cell) != Some(previous) {
-                owner_impact.record(cell, self.cell_ownership(cell)?);
+                fragment_impact.record(cell, self.cell_fragment(cell).map(|row| row.1));
             }
         }
         for addition in &additions {
-            match addition.ownership {
-                PreparedOwnership::Global => {
-                    owner_impact.record(addition.cell, MappedCellOwnership::Global);
-                }
-                PreparedOwnership::Region(region) => {
-                    owner_impact.record(addition.cell, MappedCellOwnership::Region(region));
-                }
-                PreparedOwnership::Boundary(edge) => {
-                    owner_impact.record_boundary(edge.driver, edge.sink);
-                }
-            }
+            fragment_impact.record(addition.cell, Some(addition.fragment));
         }
 
         Ok(PreparedImplementationEdit {
             generation: mapped.generation_id(),
             removals,
             additions,
-            owner_impact,
+            fragment_impact,
         })
     }
 
-    /// Publishes a prepared provenance and ownership edit.
-    ///
-    /// All arena and tagged-owner capacity checks precede mutation. Cell-origin
-    /// rows, reverse boundary footprints, per-operator footprints, and pending
-    /// owner impact are then updated as one generation-bound operation.
+    /// Atomically publishes prepared provenance and fragment containment.
     pub(crate) fn commit_region_edit(
         &mut self,
         edit: PreparedImplementationEdit,
@@ -129,7 +113,7 @@ impl ImplementationDb {
             generation: _,
             removals,
             additions,
-            owner_impact,
+            fragment_impact,
         } = edit;
         let mut affected_operators = removals
             .iter()
@@ -167,66 +151,41 @@ impl ImplementationDb {
             .len()
             .saturating_sub(1)
             .checked_add(pending_origins.len())
-            .ok_or_else(|| {
-                crate::SynthError::invariant("implementation origin-set count overflow")
-            })?;
+            .ok_or_else(|| crate::SynthError::capacity("implementation origin-set count"))?;
         if final_set_count > u32::MAX as usize {
-            return Err(crate::SynthError::invariant(
-                "implementation origin-set ID exceeds capacity",
+            return Err(crate::SynthError::capacity(
+                "implementation origin-set count",
             ));
         }
         let additional_operators = pending_origins.iter().try_fold(0usize, |total, set| {
-            total.checked_add(set.len()).ok_or_else(|| {
-                crate::SynthError::invariant("implementation origin operator count overflow")
-            })
+            total
+                .checked_add(set.len())
+                .ok_or_else(|| crate::SynthError::capacity("implementation origin operators"))
         })?;
-        let final_operator_count = self
+        if self
             .origin_operators
             .len()
             .checked_add(additional_operators)
-            .ok_or_else(|| {
-                crate::SynthError::invariant("implementation origin operator count overflow")
-            })?;
-        if final_operator_count > u32::MAX as usize {
-            return Err(crate::SynthError::invariant(
-                "implementation origin operator table exceeds capacity",
+            .is_none_or(|count| count > u32::MAX as usize)
+        {
+            return Err(crate::SynthError::capacity(
+                "implementation origin operators",
             ));
         }
-        let mut pending_owners = additions
+        let mut pending_fragments = additions
             .iter()
-            .filter_map(|addition| match &addition.ownership {
-                PreparedOwnership::Region(owner) => Some(*owner),
-                PreparedOwnership::Global | PreparedOwnership::Boundary(_) => None,
-            })
-            .filter(|owners| !self.region_owner_ids.contains_key(owners))
+            .map(|addition| addition.fragment)
+            .filter(|fragment| !self.fragment_ids.contains_key(fragment))
             .collect::<Vec<_>>();
-        pending_owners.sort_unstable();
-        pending_owners.dedup();
-        let final_owner_count = self
-            .region_owners
+        pending_fragments.sort_unstable();
+        pending_fragments.dedup();
+        if self
+            .fragments
             .len()
-            .checked_add(pending_owners.len())
-            .ok_or_else(|| crate::SynthError::invariant("mapped region-owner count overflow"))?;
-        if final_owner_count >= MappedOwnerId::BOUNDARY_TAG as usize {
-            return Err(crate::SynthError::capacity("mapped region-owner count"));
-        }
-        let mut pending_edges = additions
-            .iter()
-            .filter_map(|addition| match addition.ownership {
-                PreparedOwnership::Boundary(edge) => Some(edge),
-                PreparedOwnership::Global | PreparedOwnership::Region(_) => None,
-            })
-            .filter(|edge| !self.boundary_edge_ids.contains_key(edge))
-            .collect::<Vec<_>>();
-        pending_edges.sort_unstable();
-        pending_edges.dedup();
-        let final_edge_count = self
-            .boundary_edges
-            .len()
-            .checked_add(pending_edges.len())
-            .ok_or_else(|| crate::SynthError::invariant("mapped boundary-edge count overflow"))?;
-        if final_edge_count >= MappedOwnerId::BOUNDARY_TAG as usize {
-            return Err(crate::SynthError::capacity("mapped boundary-edge count"));
+            .checked_add(pending_fragments.len())
+            .is_none_or(|count| count > u32::MAX as usize)
+        {
+            return Err(crate::SynthError::capacity("mapped fragment count"));
         }
 
         for operators in pending_origins {
@@ -241,77 +200,48 @@ impl ImplementationDb {
             );
             self.insert_origin_id(id);
         }
-        for owner in pending_owners {
-            let id = RegionOwnerId(
-                u32::try_from(self.region_owners.len() + 1)
-                    .map_err(|_| crate::SynthError::capacity("mapped region owner count"))?,
-            );
-            self.region_owners.push(owner);
-            self.region_owner_ids.insert(owner, id);
-        }
-        for edge in pending_edges {
-            let id = BoundaryEdgeId(
-                u32::try_from(self.boundary_edges.len())
-                    .map_err(|_| crate::SynthError::capacity("mapped boundary-edge count"))?,
-            );
-            self.boundary_edges.push(edge);
-            self.boundary_edge_cells.push(Vec::new());
-            self.boundary_edge_ids.insert(edge, id);
+        for fragment in pending_fragments {
+            let id = MappedFragmentId::from_index(self.fragments.len())?;
+            self.fragments.push(fragment);
+            self.fragment_ids.insert(fragment, id);
+            self.fragment_cells.push(Vec::new());
         }
 
         let assignments = additions
             .iter()
             .map(|addition| {
-                let origin = self
-                    .origin_id(&addition.operators)
-                    .expect("implementation origin was preinterned");
-                let owner = match &addition.ownership {
-                    PreparedOwnership::Global => MappedOwnerId::region(RegionOwnerId::GLOBAL)?,
-                    PreparedOwnership::Region(owner) => MappedOwnerId::region(
-                        *self
-                            .region_owner_ids
-                            .get(owner)
-                            .expect("mapped region owner was preinterned"),
-                    )?,
-                    PreparedOwnership::Boundary(edge) => MappedOwnerId::boundary(
-                        *self
-                            .boundary_edge_ids
-                            .get(edge)
-                            .expect("mapped boundary edge was preinterned"),
-                    )?,
-                };
-                Ok((addition.cell, origin, owner))
+                (
+                    addition.cell,
+                    self.origin_id(&addition.operators)
+                        .expect("implementation origin was preinterned"),
+                    self.fragment_ids[&addition.fragment],
+                )
             })
-            .collect::<Result<Vec<_>, crate::SynthError>>()?;
+            .collect::<Vec<_>>();
         let required_slots = assignments
             .iter()
             .map(|(cell, _, _)| cell.index() + 1)
             .max()
             .unwrap_or(self.cell_origins.len());
         self.cell_origins.resize(required_slots, OriginSetId::EMPTY);
-        self.cell_owners.resize(required_slots, None);
-        let mut touched_edges = BTreeSet::new();
+        self.cell_fragments.resize(required_slots, None);
+        let mut touched_fragments = BTreeSet::new();
         for &cell in &removals {
-            if let Some(edge) = self
-                .owner_for_cell(cell)
-                .and_then(MappedOwnerId::boundary_id)
-            {
-                self.boundary_edge_cells[edge.0 as usize].retain(|&owned| owned != cell);
-                touched_edges.insert(edge);
+            if let Some(fragment) = self.cell_fragments[cell.index()] {
+                self.fragment_cells[fragment.raw() as usize].retain(|&stored| stored != cell);
+                touched_fragments.insert(fragment);
             }
             self.cell_origins[cell.index()] = OriginSetId::EMPTY;
-            self.cell_owners[cell.index()] = None;
+            self.cell_fragments[cell.index()] = None;
         }
-        for &(cell, origin, owner) in &assignments {
+        for &(cell, origin, fragment) in &assignments {
             self.cell_origins[cell.index()] = origin;
-            self.cell_owners[cell.index()] = Some(owner);
-            if let Some(edge) = owner.boundary_id() {
-                self.boundary_edge_cells[edge.0 as usize].push(cell);
-                touched_edges.insert(edge);
-            }
+            self.cell_fragments[cell.index()] = Some(fragment);
+            self.fragment_cells[fragment.raw() as usize].push(cell);
+            touched_fragments.insert(fragment);
         }
-        for edge in touched_edges {
-            let cells = &mut self.boundary_edge_cells[edge.0 as usize];
+        for fragment in touched_fragments {
+            let cells = &mut self.fragment_cells[fragment.raw() as usize];
             cells.sort_unstable();
             cells.dedup();
         }
@@ -331,77 +261,8 @@ impl ImplementationDb {
             region.mapped_cells.sort_unstable();
             region.mapped_cells.dedup();
         }
-        self.committed_owner_impact.merge(owner_impact);
+        self.committed_fragment_impact.merge(fragment_impact);
         Ok(())
-    }
-
-    fn prepare_ownership(
-        &self,
-        lineage: &OwnershipLineage,
-    ) -> Result<PreparedOwnership, crate::SynthError> {
-        match lineage {
-            OwnershipLineage::Inherited(sources) => self.inherited_ownership(sources),
-            OwnershipLineage::Boundary { drivers, sink } => {
-                let mut driver = None;
-                for &source in drivers {
-                    let endpoint = self.ownership_endpoint(source)?;
-                    if let Some(endpoint) = endpoint
-                        && driver.replace(endpoint).is_some_and(|old| old != endpoint)
-                    {
-                        return Err(crate::SynthError::invariant(
-                            "boundary artifact has more than one driver-region endpoint",
-                        ));
-                    }
-                }
-                let driver = driver.ok_or_else(|| {
-                    crate::SynthError::invariant("boundary artifact has no driver-region endpoint")
-                })?;
-                let sink = self.ownership_endpoint(*sink)?.ok_or_else(|| {
-                    crate::SynthError::invariant("boundary artifact has no sink-region endpoint")
-                })?;
-                if driver == sink {
-                    return Err(crate::SynthError::invariant(
-                        "boundary artifact endpoints belong to the same region",
-                    ));
-                }
-                Ok(PreparedOwnership::Boundary(BoundaryEdge { driver, sink }))
-            }
-        }
-    }
-
-    fn inherited_ownership(
-        &self,
-        sources: &[CellId],
-    ) -> Result<PreparedOwnership, crate::SynthError> {
-        if sources.is_empty() {
-            return Err(crate::SynthError::invariant(
-                "ownership lineage requires at least one mapped source cell",
-            ));
-        }
-        let mut owner = None;
-        for &source in sources {
-            let candidate = match self.cell_ownership(source)? {
-                MappedCellOwnership::Region(region) => PreparedOwnership::Region(region),
-                MappedCellOwnership::Boundary { driver, sink, .. } => {
-                    PreparedOwnership::Boundary(BoundaryEdge { driver, sink })
-                }
-                MappedCellOwnership::Global => PreparedOwnership::Global,
-                MappedCellOwnership::Removed | MappedCellOwnership::Unknown => {
-                    return Err(crate::SynthError::invariant(format!(
-                        "ownership lineage references non-live mapped cell {source:?}"
-                    )));
-                }
-            };
-            if owner
-                .replace(candidate.clone())
-                .is_some_and(|old| old != candidate)
-            {
-                return Err(crate::SynthError::invariant(
-                    "one mapped artifact cannot inherit more than one owner atom",
-                ));
-            }
-        }
-        owner.ok_or_else(|| crate::SynthError::invariant("ownership lineage is empty"))
     }
 }
 
@@ -428,41 +289,11 @@ impl ImplementationDelta {
         &mut self,
         added: TempCellId,
         semantic_sources: impl IntoIterator<Item = CellId>,
-        ownership_sources: impl IntoIterator<Item = CellId>,
-    ) -> Result<(), crate::SynthError> {
-        self.insert(
-            added,
-            semantic_sources,
-            OwnershipLineage::Inherited(sorted_cells(ownership_sources)),
-        )
-    }
-
-    pub(crate) fn record_boundary_cell(
-        &mut self,
-        added: TempCellId,
-        semantic_sources: impl IntoIterator<Item = CellId>,
-        driver_sources: impl IntoIterator<Item = CellId>,
-        sink: CellId,
-    ) -> Result<(), crate::SynthError> {
-        self.insert(
-            added,
-            semantic_sources,
-            OwnershipLineage::Boundary {
-                drivers: sorted_cells(driver_sources),
-                sink,
-            },
-        )
-    }
-
-    fn insert(
-        &mut self,
-        added: TempCellId,
-        semantic_sources: impl IntoIterator<Item = CellId>,
-        ownership: OwnershipLineage,
+        fragment: FragmentFootprint,
     ) -> Result<(), crate::SynthError> {
         let lineage = AddedCellLineage {
             semantic_sources: sorted_cells(semantic_sources),
-            ownership,
+            fragment,
         };
         if self.added_cells.insert(added, lineage).is_some() {
             return Err(crate::SynthError::invariant(format!(
@@ -483,16 +314,7 @@ fn sorted_cells(sources: impl IntoIterator<Item = CellId>) -> Box<[CellId]> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AddedCellLineage {
     semantic_sources: Box<[CellId]>,
-    ownership: OwnershipLineage,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum OwnershipLineage {
-    Inherited(Box<[CellId]>),
-    Boundary {
-        drivers: Box<[CellId]>,
-        sink: CellId,
-    },
+    fragment: FragmentFootprint,
 }
 
 #[derive(Debug)]
@@ -500,19 +322,12 @@ pub(crate) struct PreparedImplementationEdit {
     generation: MappedGenerationId,
     removals: Vec<CellId>,
     additions: Vec<PreparedImplementationAddition>,
-    owner_impact: MappedOwnerImpact,
+    fragment_impact: FragmentImpact,
 }
 
 #[derive(Debug)]
 struct PreparedImplementationAddition {
     cell: CellId,
     operators: Box<[OperatorId]>,
-    ownership: PreparedOwnership,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PreparedOwnership {
-    Global,
-    Region(RegionAnchorId),
-    Boundary(BoundaryEdge),
+    fragment: FragmentFootprint,
 }

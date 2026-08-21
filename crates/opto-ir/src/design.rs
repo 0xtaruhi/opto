@@ -117,6 +117,8 @@ pub enum NetDriver {
         /// Zero-based output ordinal in [`Cell::outputs`].
         output: u32,
     },
+    /// Canonical source-domain constant.
+    Constant(crate::BitVal),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +132,15 @@ pub struct NetBit {
     pub driver: Option<NetDriver>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether a cell propagates input changes combinationally to its outputs.
+pub enum CellClass {
+    /// Every output may depend combinationally on the inputs.
+    Combinational,
+    /// State or memory breaks combinational reachability.
+    StateBoundary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Canonical logical cell with exact input and output net bits.
 pub struct Cell<L> {
@@ -137,6 +148,8 @@ pub struct Cell<L> {
     pub id: CellId,
     /// Logical operation or mapped target-cell payload.
     pub kind: L,
+    /// Combinational-cycle classification independent of the payload type.
+    pub class: CellClass,
     /// Input net bits in semantic operand order.
     pub inputs: Box<[NetBitId]>,
     /// Output net bits in semantic result order.
@@ -529,17 +542,75 @@ where
             if self.net_directory.get(net.id) != Some(encoded) {
                 return Err(DesignError::DirectoryMismatch(EntityId::NetBit(net.id)));
             }
-            if let Some(NetDriver::Cell { cell, output }) = net.driver {
-                let Some(driver) = self.cell(cell) else {
-                    return Err(DesignError::UnknownNetDriver { net: net.id, cell });
-                };
-                if driver.outputs.get(output as usize).copied() != Some(net.id) {
-                    return Err(DesignError::OutputDriverMismatch { cell, net: net.id });
+            match net.driver {
+                Some(NetDriver::Cell { cell, output }) => {
+                    let Some(driver) = self.cell(cell) else {
+                        return Err(DesignError::UnknownNetDriver { net: net.id, cell });
+                    };
+                    if driver.outputs.get(output as usize).copied() != Some(net.id) {
+                        return Err(DesignError::OutputDriverMismatch { cell, net: net.id });
+                    }
                 }
+                Some(NetDriver::Constant(_)) | None => {}
             }
         }
         if counted_cells != self.live_cells || counted_nets != self.live_nets {
             return Err(DesignError::LiveCountMismatch);
+        }
+        self.validate_combinational_acyclic()?;
+        Ok(())
+    }
+
+    fn validate_combinational_acyclic(&self) -> Result<(), DesignError> {
+        let combinational = self
+            .cells()
+            .filter(|cell| cell.class == CellClass::Combinational)
+            .map(|cell| cell.id)
+            .collect::<BTreeSet<_>>();
+        let mut indegree = combinational
+            .iter()
+            .copied()
+            .map(|cell| (cell, 0usize))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut successors = std::collections::BTreeMap::<CellId, BTreeSet<CellId>>::new();
+        for cell in self
+            .cells()
+            .filter(|cell| cell.class == CellClass::Combinational)
+        {
+            for &input in &cell.inputs {
+                let Some(NetDriver::Cell { cell: source, .. }) =
+                    self.net(input).and_then(|net| net.driver)
+                else {
+                    continue;
+                };
+                if combinational.contains(&source)
+                    && successors.entry(source).or_default().insert(cell.id)
+                {
+                    *indegree
+                        .get_mut(&cell.id)
+                        .expect("combinational cell was indexed") += 1;
+                }
+            }
+        }
+        let mut ready = indegree
+            .iter()
+            .filter_map(|(&cell, &degree)| (degree == 0).then_some(cell))
+            .collect::<BTreeSet<_>>();
+        let mut visited = 0usize;
+        while let Some(cell) = ready.pop_first() {
+            visited += 1;
+            for &successor in successors.get(&cell).into_iter().flatten() {
+                let degree = indegree
+                    .get_mut(&successor)
+                    .expect("combinational successor was indexed");
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.insert(successor);
+                }
+            }
+        }
+        if visited != combinational.len() {
+            return Err(DesignError::CombinationalCycle);
         }
         Ok(())
     }
@@ -753,6 +824,9 @@ pub enum DesignError {
     /// Cached live counts disagree with record pages.
     #[error("design revision live counts do not match its record pages")]
     LiveCountMismatch,
+    /// The scalar cell/net graph contains a combinational cycle.
+    #[error("design revision contains a combinational cycle")]
+    CombinationalCycle,
     /// The owning proof engine rejected a transaction certificate.
     #[error("rewrite equivalence certificate was rejected: {0}")]
     ProofRejected(String),
@@ -784,6 +858,7 @@ mod tests {
         Cell {
             id: CellId::from_bytes(digest(id)),
             kind,
+            class: CellClass::Combinational,
             inputs: inputs
                 .iter()
                 .map(|id| NetBitId::from_bytes(digest(*id)))
@@ -868,6 +943,30 @@ mod tests {
         assert_eq!(committed.revision(), base.revision());
         assert_eq!(committed.cell_count(), base.cell_count());
         assert_eq!(committed.net_count(), base.net_count());
+    }
+
+    #[test]
+    fn sealing_rejects_a_bit_level_combinational_cycle() {
+        let mut builder = DesignBuilder::new(DesignRevisionId::from_bytes(digest(90)));
+        builder.add_net(net(10, Some((2, 0))));
+        builder.add_net(net(11, Some((1, 0))));
+        builder.add_cell(cell(1, "left", &[10], &[11]));
+        builder.add_cell(cell(2, "right", &[11], &[10]));
+
+        assert_eq!(builder.seal().unwrap_err(), DesignError::CombinationalCycle);
+    }
+
+    #[test]
+    fn state_boundary_breaks_a_bit_level_cycle() {
+        let mut builder = DesignBuilder::new(DesignRevisionId::from_bytes(digest(90)));
+        builder.add_net(net(10, Some((2, 0))));
+        builder.add_net(net(11, Some((1, 0))));
+        builder.add_cell(cell(1, "logic", &[10], &[11]));
+        let mut state = cell(2, "register", &[11], &[10]);
+        state.class = CellClass::StateBoundary;
+        builder.add_cell(state);
+
+        builder.seal().unwrap();
     }
 
     #[test]

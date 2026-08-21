@@ -10,7 +10,7 @@ impl ImplementationDb {
     /// Translates stable optimization-time cell slots to the one dense
     /// publication generation.
     ///
-    /// The origin and owner arenas are content-addressed and therefore survive
+    /// The origin and fragment arenas are content-addressed and therefore survive
     /// unchanged; only their per-cell rows and the operator-to-cell reverse
     /// index cross the generation boundary.
     pub(crate) fn remap_cells_for_publication(
@@ -23,13 +23,13 @@ impl ImplementationDb {
                 "publication cell translation does not cross mapped generations",
             ));
         }
-        if !self.committed_owner_impact.is_empty() {
+        if !self.committed_fragment_impact.is_empty() {
             return Err(crate::SynthError::invariant(
-                "cannot repack implementation ownership with unconsumed mapped edits",
+                "cannot repack implementation fragments with unconsumed mapped edits",
             ));
         }
         if remap.old_cell_slot_count() != self.cell_origins.len()
-            || self.cell_origins.len() != self.cell_owners.len()
+            || self.cell_origins.len() != self.cell_fragments.len()
         {
             return Err(crate::SynthError::invariant(
                 "publication cell translation does not match implementation slot indexes",
@@ -37,21 +37,24 @@ impl ImplementationDb {
         }
 
         let mut cell_origins = vec![OriginSetId::EMPTY; remap.cell_count()];
-        let mut cell_owners = vec![None; remap.cell_count()];
+        let mut cell_fragments = vec![None; remap.cell_count()];
         let mut occupied = vec![false; remap.cell_count()];
-        for (index, (&origin, &owner)) in
-            self.cell_origins.iter().zip(&self.cell_owners).enumerate()
+        for (index, (&origin, &fragment)) in self
+            .cell_origins
+            .iter()
+            .zip(&self.cell_fragments)
+            .enumerate()
         {
             let old = CellId::from_index(index).map_err(crate::SynthError::Mapped)?;
             let Some(new) = remap.cell(old) else {
-                if owner.is_some() || origin != OriginSetId::EMPTY {
+                if fragment.is_some() || origin != OriginSetId::EMPTY {
                     return Err(crate::SynthError::invariant(
                         "publication translation discarded a live implementation cell",
                     ));
                 }
                 continue;
             };
-            let Some(owner) = owner else {
+            let Some(fragment) = fragment else {
                 return Err(crate::SynthError::invariant(
                     "publication translation retained a removed implementation cell",
                 ));
@@ -67,7 +70,7 @@ impl ImplementationDb {
                 ));
             }
             cell_origins[new.index()] = origin;
-            cell_owners[new.index()] = Some(owner);
+            cell_fragments[new.index()] = Some(fragment);
         }
         if occupied.iter().any(|&used| !used) {
             return Err(crate::SynthError::invariant(
@@ -103,17 +106,17 @@ impl ImplementationDb {
                 Ok(cells)
             })
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
-        let boundary_edge_cells = self
-            .boundary_edge_cells
+        let fragment_cells = self
+            .fragment_cells
             .iter()
             .enumerate()
-            .map(|(edge, cells)| {
+            .map(|(fragment, cells)| {
                 let mut cells = cells
                     .iter()
                     .map(|&cell| {
                         remap.cell(cell).ok_or_else(|| {
                             crate::SynthError::invariant(format!(
-                                "boundary edge {edge} references a removed publication cell"
+                                "fragment {fragment} references a removed publication cell"
                             ))
                         })
                     })
@@ -125,11 +128,11 @@ impl ImplementationDb {
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
 
         self.cell_origins = cell_origins;
-        self.cell_owners = cell_owners;
+        self.cell_fragments = cell_fragments;
         for (region, cells) in self.regions.iter_mut().zip(region_cells) {
             region.mapped_cells = cells;
         }
-        self.boundary_edge_cells = boundary_edge_cells;
+        self.fragment_cells = fragment_cells;
         self.mapped_generation
             .store(remap.target_generation().get().get(), Ordering::Release);
         Ok(())

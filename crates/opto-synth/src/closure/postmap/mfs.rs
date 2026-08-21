@@ -233,7 +233,7 @@ pub(super) fn optimization_boundary_nets(
         let mut first = None;
         for cell in pins.filter_map(|pin| mapped.pin_owner(pin)) {
             if let Some(first) = first
-                && !implementations.cells_share_owner(first, cell)?
+                && !implementations.cells_share_fragment(first, cell)?
             {
                 boundary.insert(net);
                 break;
@@ -462,7 +462,7 @@ fn driver_mffc_reading(
                 continue;
             }
             if !implementations
-                .cells_share_owner(root, driver.0)
+                .cells_share_fragment(root, driver.0)
                 .unwrap_or(false)
             {
                 continue;
@@ -648,7 +648,7 @@ fn replace_driver_candidate(
         .collect::<Vec<_>>();
     if sources.iter().any(|&source| {
         !implementations
-            .cells_share_owner(cell, source)
+            .cells_share_fragment(cell, source)
             .unwrap_or(false)
     }) {
         return Err(crate::SynthError::invariant(
@@ -682,11 +682,8 @@ fn replace_driver_candidate(
             .remove_net(dying_net)
             .map_err(crate::SynthError::from)?;
     }
-    PostmapCandidate::new(delta).record_added_cell(
-        added,
-        sources.iter().copied(),
-        sources.iter().copied(),
-    )
+    let fragment = implementations.common_fragment(&sources)?;
+    PostmapCandidate::new(delta).record_added_cell(added, sources.iter().copied(), fragment)
 }
 
 #[derive(Clone, Copy)]
@@ -716,7 +713,7 @@ fn rewire_candidate(
     let dying = closed_dying_cone(mapped, cell, &protected_nets, dying);
     if dying.iter().any(|&(dying, _, _)| {
         !implementations
-            .cells_share_owner(cell, dying)
+            .cells_share_fragment(cell, dying)
             .unwrap_or(false)
     }) {
         return Err(crate::SynthError::invariant(

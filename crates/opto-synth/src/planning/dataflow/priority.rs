@@ -3,7 +3,6 @@
 
 use hashbrown::HashSet;
 use opto_ir::word;
-use std::ops::Range;
 
 #[derive(Clone)]
 struct PriorityChain {
@@ -32,17 +31,10 @@ struct PriorityNode {
     value: word::ValueId,
 }
 
-pub(super) struct GeneratedOperations {
-    pub(super) range: Range<usize>,
-    pub(super) sources: Box<[word::OpId]>,
-}
-
 pub(super) struct RebalanceResult {
     pub(super) changed: bool,
-    pub(super) generated: Vec<GeneratedOperations>,
 }
 
-#[cfg(test)]
 pub(super) fn rebalance_constant_priority_muxes(
     module: &mut word::WordModule,
 ) -> Result<bool, crate::SynthError> {
@@ -62,10 +54,7 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
         .filter(|chain| classify(&chain.nodes).is_some())
         .collect::<Vec<_>>();
     if chains.is_empty() {
-        return Ok(RebalanceResult {
-            changed: false,
-            generated: Vec::new(),
-        });
+        return Ok(RebalanceResult { changed: false });
     }
     materialize_defaults(module, chains.iter_mut())?;
     let condition_sequences = chains
@@ -105,25 +94,8 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
         }
     }
     let mut replacements = Vec::with_capacity(chains.len());
-    let mut generated = Vec::with_capacity(chains.len());
     for chain in &chains {
-        let start = module.operations().len();
         let replacement = build_chain(module, chain)?;
-        let end = module.operations().len();
-        let sources = chain
-            .nodes
-            .iter()
-            .filter_map(
-                |&value| match module.value(value).map(|value| &value.kind) {
-                    Some(word::ValueKind::Operation(operation)) => Some(*operation),
-                    Some(word::ValueKind::Signal(_) | word::ValueKind::Constant(_)) | None => None,
-                },
-            )
-            .collect();
-        generated.push(GeneratedOperations {
-            range: start..end,
-            sources,
-        });
         replacements.push((chain.connect, replacement));
     }
     replacements.sort_unstable_by_key(|(connect, _)| *connect);
@@ -143,10 +115,7 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
             .connect(connect.target, value, connect.source)
             .map_err(crate::SynthError::from)?;
     }
-    Ok(RebalanceResult {
-        changed: true,
-        generated,
-    })
+    Ok(RebalanceResult { changed: true })
 }
 
 impl PriorityDefault {

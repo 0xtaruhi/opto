@@ -616,7 +616,7 @@ fn net_driver_cells(
             .is_some_and(|pin| pin.direction() == TargetPinDirection::Output)
             && let Some(cell) = mapped.pin_owner(pin)
         {
-            let candidate = implementations.ownership_endpoint(cell)?;
+            let candidate = implementations.fragment_endpoint(cell)?;
             if endpoint.is_some_and(|endpoint| endpoint != candidate) {
                 return Ok(None);
             }
@@ -629,7 +629,7 @@ fn net_driver_cells(
     Ok(Some(drivers.into_boxed_slice()))
 }
 
-pub(super) fn group_sink_pins_by_owner(
+pub(super) fn group_sink_pins_by_fragment(
     mapped: &MappedNetlist,
     implementations: &ImplementationDb,
     sinks: impl IntoIterator<Item = PinId>,
@@ -641,7 +641,7 @@ pub(super) fn group_sink_pins_by_owner(
                 "boundary sink pin {pin:?} has no live mapped owner"
             ))
         })?;
-        let endpoint = implementations.ownership_endpoint(cell)?;
+        let endpoint = implementations.fragment_endpoint(cell)?;
         let group = groups.entry(endpoint).or_insert_with(|| (cell, Vec::new()));
         group.0 = group.0.min(cell);
         group.1.push(pin);
@@ -748,7 +748,7 @@ pub(super) fn fanout_forest_delta(
     let mut delta = RegionDelta::new(snapshot);
     let mut added_cells = Vec::new();
     for (plan, drivers, buffer, descriptor) in prepared {
-        let groups = group_sink_pins_by_owner(
+        let groups = group_sink_pins_by_fragment(
             mapped,
             implementations,
             plan.leaf_groups.iter().flatten().copied(),
@@ -848,7 +848,8 @@ pub(super) fn buffer_branch_forest_delta(
     let mut delta = RegionDelta::new(snapshot);
     let mut added_cells = Vec::with_capacity(prepared.len());
     for (plan, drivers, buffer, descriptor) in prepared {
-        let groups = group_sink_pins_by_owner(mapped, implementations, plan.sinks.iter().copied())?;
+        let groups =
+            group_sink_pins_by_fragment(mapped, implementations, plan.sinks.iter().copied())?;
         let multiple = groups.len() > 1;
         for (segment, (sink, pins)) in groups.into_iter().enumerate() {
             let suffix = if multiple {

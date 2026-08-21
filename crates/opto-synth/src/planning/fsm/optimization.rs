@@ -17,7 +17,6 @@ const MAX_TRANSITION_VALUES: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct DerivedFsm {
-    register_operation: word::OpId,
     register: word::RegisterOp,
     register_result: word::ValueId,
     state_signal: word::SignalId,
@@ -29,6 +28,7 @@ struct DerivedFsm {
     reset_values: Box<[ConstBits]>,
     transition_order: Box<[word::ValueId]>,
     constant_values: Box<[(word::ValueId, ConstBits)]>,
+    observations: Box<[word::ValueId]>,
     exposes_state_encoding: bool,
 }
 
@@ -87,59 +87,19 @@ pub(crate) enum FsmObjective {
     Timing,
 }
 
-pub(crate) fn optimize_derived_fsms_in_regions(
+pub(crate) fn optimize_derived_fsms(
     module: &mut word::WordModule,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
     timing: &opto_timing::TimingContext,
     port_bindings: &opto_timing::PortBindings,
     runtime: &opto_runtime::ExecutionContext,
-) -> Result<usize, crate::SynthError> {
-    if ownership.len() != module.operations().len() {
-        return Err(crate::SynthError::invariant(
-            "regional FSM optimization has incomplete operation ownership",
-        ));
-    }
-    let mut catalog = derive_catalog(module, runtime)?;
-    catalog.machines = catalog
-        .machines
-        .into_vec()
-        .into_iter()
-        .filter(|machine| machine_is_region_private(module, machine, ownership))
-        .collect();
+) -> Result<[u8; 32], crate::SynthError> {
+    let catalog = derive_catalog(module, runtime)?;
     let plans = plan_catalog(catalog, |machine| {
         machine_objective(module, machine, timing, port_bindings)
     })?;
-    for materialized in materialize_plans(module, &plans)? {
-        if materialized.operations.start != ownership.len() {
-            return Err(crate::SynthError::invariant(
-                "FSM ownership does not align with generated operations",
-            ));
-        }
-        ownership.claim_range(
-            module,
-            materialized.operations.start,
-            materialized.operations.end,
-            &[materialized.source],
-        )?;
-    }
-    Ok(plans.len())
-}
-
-fn machine_is_region_private(
-    module: &word::WordModule,
-    machine: &DerivedFsm,
-    ownership: &crate::regional::StructuralOwnershipProvenance,
-) -> bool {
-    let owner = ownership.owner(machine.register_operation);
-    owner.is_some()
-        && machine.transition_order.iter().all(|&value| {
-            let Some(word::ValueKind::Operation(operation)) =
-                module.value(value).map(|value| &value.kind)
-            else {
-                return true;
-            };
-            ownership.owner(*operation) == owner
-        })
+    let proof = prove_plan_relations(module, &plans)?;
+    materialize_plans(module, &plans)?;
+    Ok(proof)
 }
 
 #[cfg(test)]
@@ -149,7 +109,8 @@ fn optimize_with_objective(
 ) -> Result<usize, crate::SynthError> {
     let catalog = derive_catalog(module, crate::test_runtime())?;
     let plans = plan_catalog(catalog, |_| objective)?;
-    let _ = materialize_plans(module, &plans)?;
+    prove_plan_relations(module, &plans)?;
+    materialize_plans(module, &plans)?;
     module.compact_netlist().map_err(crate::SynthError::from)?;
     module.validate().map_err(crate::SynthError::from)?;
     Ok(plans.len())
@@ -284,7 +245,6 @@ fn derive_catalog(
             .collect::<Result<Box<[_]>, crate::SynthError>>()?;
         candidates.push(FsmAnalysisCandidate {
             machine: DerivedFsm {
-                register_operation: operation_id,
                 register: register.clone(),
                 register_result: operation.result,
                 state_signal: connect.target.signal,
@@ -296,6 +256,7 @@ fn derive_catalog(
                 reset_values: reset_values.into_boxed_slice(),
                 transition_order: transition_order.into_boxed_slice(),
                 constant_values: constant_values.into_boxed_slice(),
+                observations: Box::new([]),
                 exposes_state_encoding: false,
             },
             reset_states,
@@ -312,6 +273,7 @@ fn derive_catalog(
             &observation_candidates,
             &dependency_index,
         )?;
+        machine.observations.clone_from(&observation_roots.values);
         machine.exposes_state_encoding =
             state_encoding_is_observable(module, machine.state_signal, &observability)?;
         let mut behavior =
@@ -702,6 +664,89 @@ fn group_signatures<K: Ord>(signatures: impl IntoIterator<Item = K>) -> Vec<usiz
             *classes.entry(signature).or_insert(next_class)
         })
         .collect()
+}
+
+fn prove_plan_relations(
+    module: &word::WordModule,
+    plans: &[FsmPlan],
+) -> Result<[u8; 32], crate::SynthError> {
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"opto.fsm-state-relation.v1\0");
+    digest.update(&(plans.len() as u64).to_le_bytes());
+    for plan in plans {
+        let machine = &plan.machine;
+        match machine.source.identity() {
+            Some(identity) => {
+                digest.update(&[1]);
+                digest.update(&identity.bytes());
+            }
+            None => {
+                digest.update(&[0]);
+            }
+        }
+        digest.update(&machine.state_type.width().to_le_bytes());
+        digest.update(&plan.encoded_type.width().to_le_bytes());
+        digest.update(&(machine.states.len() as u64).to_le_bytes());
+        for (state, &class) in machine.states.iter().zip(&machine.state_classes) {
+            hash_bits(&mut digest, state);
+            digest.update(&(class as u64).to_le_bytes());
+        }
+        for code in &plan.codes {
+            hash_bits(&mut digest, code);
+        }
+        for (state, &class) in machine.state_classes.iter().enumerate() {
+            let representative = machine.representatives[class];
+            if state == representative {
+                continue;
+            }
+            for outcome in [
+                opto_formal::prove_values_equivalent_between_signal_states(
+                    module,
+                    &machine.observations,
+                    machine.state_signal,
+                    &machine.states[representative],
+                    &machine.states[state],
+                ),
+                opto_formal::prove_partitioned_register_successor_equivalence(
+                    module,
+                    &machine.register,
+                    machine.state_signal,
+                    &machine.states[representative],
+                    &machine.states[state],
+                    &machine.states,
+                    &machine.state_classes,
+                ),
+            ] {
+                let report = outcome
+                    .map_err(|error| {
+                        crate::SynthError::invariant(format!(
+                            "FSM state-relation proof could not be built: {error}"
+                        ))
+                    })?
+                    .require_proved()
+                    .map_err(|counterexample| {
+                        crate::SynthError::invariant(format!(
+                            "FSM state-relation proof failed: {counterexample}"
+                        ))
+                    })?;
+                digest.update(&(report.encoded_values as u64).to_le_bytes());
+                digest.update(&(report.clauses as u64).to_le_bytes());
+            }
+        }
+    }
+    Ok(*digest.finalize().as_bytes())
+}
+
+fn hash_bits(digest: &mut blake3::Hasher, bits: &ConstBits) {
+    digest.update(&bits.width().to_le_bytes());
+    for bit in bits.as_slice() {
+        digest.update(&[match bit {
+            BitVal::Zero => 0,
+            BitVal::One => 1,
+            BitVal::X => 2,
+            BitVal::Z => 3,
+        }]);
+    }
 }
 
 fn plan_catalog(

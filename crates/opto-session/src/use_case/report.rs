@@ -212,13 +212,13 @@ impl Session {
                         let source_file = region.source_file().ok_or_else(|| {
                             SessionError::state(format!(
                                 "report_resources: source operation {} has no source file",
-                                region.source_operation().raw()
+                                region.operator().raw()
                             ))
                         })?;
                         let source_line = region.source_line().ok_or_else(|| {
                             SessionError::state(format!(
                                 "report_resources: source operation {} has no source line",
-                                region.source_operation().raw()
+                                region.operator().raw()
                             ))
                         })?;
                         let source_lines = region

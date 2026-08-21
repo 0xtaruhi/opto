@@ -82,8 +82,8 @@ impl<'a> InputOperations<'a> {
 pub(super) struct ConnectivityIndex<'a> {
     module: &'a word::WordModule,
     value_keys: &'a [[u8; 32]],
-    operation_owner: &'a [Option<usize>],
-    memory_signal_owner: &'a BTreeMap<word::SignalId, usize>,
+    operation_region: &'a [Option<usize>],
+    memory_signal_region: &'a BTreeMap<word::SignalId, usize>,
     instance_boundary_signals: BTreeSet<word::SignalId>,
     bit_connectivity: BitConnectivity<'a>,
 }
@@ -92,8 +92,8 @@ impl<'a> ConnectivityIndex<'a> {
     pub(super) fn new(
         module: &'a word::WordModule,
         value_keys: &'a [[u8; 32]],
-        operation_owner: &'a [Option<usize>],
-        memory_signal_owner: &'a BTreeMap<word::SignalId, usize>,
+        operation_region: &'a [Option<usize>],
+        memory_signal_region: &'a BTreeMap<word::SignalId, usize>,
     ) -> Result<Self, crate::SynthError> {
         let mut instance_boundary_signals = BTreeSet::new();
         for connection in module
@@ -110,8 +110,8 @@ impl<'a> ConnectivityIndex<'a> {
         Ok(Self {
             module,
             value_keys,
-            operation_owner,
-            memory_signal_owner,
+            operation_region,
+            memory_signal_region,
             instance_boundary_signals,
             bit_connectivity: BitConnectivity::new(module)?,
         })
@@ -164,7 +164,7 @@ impl<'a> ConnectivityIndex<'a> {
             else {
                 continue;
             };
-            let Some(producer) = self.endpoint_owner(source)? else {
+            let Some(producer) = self.endpoint_region(source)? else {
                 continue;
             };
             if Some(producer) != sink {
@@ -189,42 +189,42 @@ impl<'a> ConnectivityIndex<'a> {
             .ok_or_else(|| crate::SynthError::invariant("region value is unknown"))?
             .ty
             .width();
-        let mut owner = None;
+        let mut region = None;
         for bit in 0..width {
             let BitSource::Value { value, .. } = self.bit_connectivity.source(value, bit)? else {
                 continue;
             };
-            let Some(candidate) = self.endpoint_owner(value)? else {
+            let Some(candidate) = self.endpoint_region(value)? else {
                 continue;
             };
-            if owner
+            if region
                 .replace(candidate)
                 .is_some_and(|current| current != candidate)
             {
                 return Ok(None);
             }
         }
-        Ok(owner)
+        Ok(region)
     }
 
-    fn endpoint_owner(&self, value: word::ValueId) -> Result<Option<usize>, crate::SynthError> {
+    fn endpoint_region(&self, value: word::ValueId) -> Result<Option<usize>, crate::SynthError> {
         let stored = self.module.value(value).ok_or_else(|| {
             crate::SynthError::invariant("bit producer references an unknown value")
         })?;
         match stored.kind {
             word::ValueKind::Operation(operation) => {
-                if let Some(owner) = self
-                    .operation_owner
+                if let Some(region) = self
+                    .operation_region
                     .get(operation.index())
                     .copied()
                     .flatten()
                 {
-                    return Ok(Some(owner));
+                    return Ok(Some(region));
                 }
                 if self.module.operation(operation).is_some_and(|operation| {
                     matches!(operation.kind, word::OpKind::TriState { .. })
                 }) {
-                    // The resolved-net shell owns the physical driver cell;
+                    // The resolved-net shell contains the physical driver cell;
                     // only its data and enable cones receive region placement.
                     Ok(None)
                 } else {
@@ -234,8 +234,8 @@ impl<'a> ConnectivityIndex<'a> {
                 }
             }
             word::ValueKind::Signal(reference) => {
-                if let Some(owner) = self.memory_signal_owner.get(&reference.signal).copied() {
-                    return Ok(Some(owner));
+                if let Some(region) = self.memory_signal_region.get(&reference.signal).copied() {
+                    return Ok(Some(region));
                 }
                 let signal = self.module.signal(reference.signal).ok_or_else(|| {
                     crate::SynthError::invariant("bit producer signal is unknown")

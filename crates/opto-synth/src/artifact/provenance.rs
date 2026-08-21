@@ -4,8 +4,8 @@
 use crate::OperatorId;
 use crate::artifact::MappedCellSource;
 use crate::artifact::implementation::{
-    ImplementationDb, ImplementationRegion, ImplementationRegionMetadata,
-    ImplementationRegionSource, InitialCellOwner, OriginSetId, implementation_origin_hash,
+    FragmentFootprint, ImplementationDb, ImplementationRegion, ImplementationRegionMetadata,
+    ImplementationRegionSource, OriginSetId, implementation_origin_hash,
 };
 use crate::planning::operator::ArchitectureDecisions;
 use opto_ir::mapped::CellId;
@@ -85,8 +85,6 @@ struct PublishedOperator {
     candidate: crate::ImplementationCandidateId,
     owner: Option<crate::RegionAnchorId>,
     source_operations: Box<[word::OpId]>,
-    source_inputs: Box<[word::ValueId]>,
-    source_results: Box<[word::ValueId]>,
     width: u32,
     lines: Box<[Option<u32>]>,
     file: Option<Box<str>>,
@@ -99,59 +97,6 @@ struct PublishedOperator {
 
 pub(crate) struct PrivateArchitecturePublication {
     operators: Box<[PublishedOperator]>,
-}
-
-struct SourceBoundary {
-    inputs: Box<[word::ValueId]>,
-    results: Box<[word::ValueId]>,
-}
-
-fn source_boundary(
-    source: &word::WordModule,
-    uses: &[u32],
-    operations: &[word::OpId],
-    input_candidates: impl IntoIterator<Item = word::ValueId>,
-) -> Result<SourceBoundary, crate::SynthError> {
-    let mut internal_results = std::collections::BTreeSet::new();
-    let mut internal_uses = std::collections::BTreeMap::<_, u32>::new();
-    for &operation in operations {
-        let operation = source.operation(operation).ok_or_else(|| {
-            crate::SynthError::invariant(
-                "published architecture references an unknown source operation",
-            )
-        })?;
-        internal_results.insert(operation.result);
-        for input in crate::word::operation_inputs(&operation.kind) {
-            *internal_uses.entry(input).or_default() += 1;
-        }
-    }
-    let results = internal_results
-        .iter()
-        .filter(|result| {
-            let internal = internal_uses.get(result).copied().unwrap_or(0);
-            internal == 0 || uses[result.index()] > internal
-        })
-        .copied()
-        .collect::<Vec<_>>();
-    if results.is_empty() {
-        return Err(crate::SynthError::invariant(
-            "published semantic operator has no source result",
-        ));
-    }
-    let mut inputs = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for input in input_candidates
-        .into_iter()
-        .chain(internal_uses.into_keys())
-    {
-        if !internal_results.contains(&input) && seen.insert(input) {
-            inputs.push(input);
-        }
-    }
-    Ok(SourceBoundary {
-        inputs: inputs.into_boxed_slice(),
-        results: results.into_boxed_slice(),
-    })
 }
 
 pub(crate) fn resolve_private_operator_sources(
@@ -226,7 +171,6 @@ impl PrivateArchitecturePublication {
         source: &word::WordModule,
         decisions: &ArchitectureDecisions,
         owner: crate::RegionAnchorId,
-        source_to_local: &std::collections::BTreeMap<word::ValueId, word::ValueId>,
         resolved_sources: &[Box<[word::OpId]>],
     ) -> Result<Self, crate::SynthError> {
         if resolved_sources.len() != decisions.operators().len() {
@@ -234,25 +178,8 @@ impl PrivateArchitecturePublication {
                 "private architecture source records do not align with semantic operators",
             ));
         }
-        let mut source_values_by_local =
-            std::collections::BTreeMap::<word::ValueId, Vec<word::ValueId>>::new();
-        for (&source, &local) in source_to_local {
-            source_values_by_local
-                .entry(local)
-                .or_default()
-                .push(source);
-        }
-        let uses = crate::word::uses::value_use_counts(source)?;
         let mut published = Vec::with_capacity(decisions.operators().len());
         for (semantic, source_operations) in decisions.operators().iter().zip(resolved_sources) {
-            let input_candidates = decisions.operator_inputs(*semantic).flat_map(|value| {
-                source_values_by_local
-                    .get(&value)
-                    .into_iter()
-                    .flatten()
-                    .copied()
-            });
-            let boundary = source_boundary(source, &uses, source_operations, input_candidates)?;
             let candidate = decisions.selected_candidate(semantic.id()).ok_or_else(|| {
                 crate::SynthError::invariant("private semantic operator has no selected candidate")
             })?;
@@ -267,8 +194,6 @@ impl PrivateArchitecturePublication {
                 candidate: candidate.id(),
                 owner: Some(owner),
                 source_operations: source_operations.clone(),
-                source_inputs: boundary.inputs,
-                source_results: boundary.results,
                 width: semantic.width(),
                 lines: spans.iter().map(|span| span.line()).collect(),
                 file: first.and_then(word::SourceSpan::file).map(Into::into),
@@ -323,7 +248,6 @@ impl ProvenanceBuilder {
         let empty = OriginSetId::EMPTY;
         let mut origin_ids = HashMap::new();
         origin_ids.insert(implementation_origin_hash(&[]), smallvec![empty]);
-        let uses = crate::word::uses::value_use_counts(module)?;
         let mut operators = Vec::with_capacity(plan.operators().len());
         for operator in plan.operators() {
             if operator.id().raw() as usize != operators.len() {
@@ -338,12 +262,6 @@ impl ProvenanceBuilder {
                 ))
             })?;
             let source_operations = plan.source_operations(operator.id());
-            let boundary = source_boundary(
-                module,
-                &uses,
-                source_operations,
-                plan.operator_inputs(*operator),
-            )?;
             let spans = source_operations
                 .iter()
                 .map(|operation| {
@@ -358,8 +276,6 @@ impl ProvenanceBuilder {
                 candidate: candidate.id(),
                 owner: None,
                 source_operations: source_operations.into(),
-                source_inputs: boundary.inputs,
-                source_results: boundary.results,
                 width: operator.width(),
                 lines: spans
                     .iter()
@@ -534,7 +450,7 @@ impl ProvenanceBuilder {
             .resize(mapped_module.values().len(), OriginSetId::EMPTY);
         let cell_slots = mapped.cell_slot_count();
         let mut cell_origins = vec![OriginSetId::EMPTY; cell_slots];
-        let mut cell_owners = std::iter::repeat_with(|| None)
+        let mut cell_fragments = std::iter::repeat_with(|| None)
             .take(cell_slots)
             .collect::<Vec<_>>();
         let mut seen = vec![false; cell_slots];
@@ -554,8 +470,8 @@ impl ProvenanceBuilder {
                     "mapped cell {cell:?} has multiple provenance sources"
                 )));
             }
-            let (origin, owner) = match cell_source {
-                MappedCellSource::Instance(_) => (OriginSetId::EMPTY, InitialCellOwner::Global),
+            let (origin, fragment) = match cell_source {
+                MappedCellSource::Instance(_) => (OriginSetId::EMPTY, FragmentFootprint::Global),
                 MappedCellSource::StructuralValue(value) => (
                     self.value_origins
                         .get(value.index())
@@ -565,9 +481,9 @@ impl ProvenanceBuilder {
                                 "mapped cell {cell:?} references structural value {value:?} without provenance"
                             ))
                         })?,
-                    InitialCellOwner::Global,
+                    FragmentFootprint::Global,
                 ),
-                MappedCellSource::Value { value, owner } => (
+                MappedCellSource::Value { value, region } => (
                     self.value_origins
                         .get(value.index())
                         .copied()
@@ -576,10 +492,10 @@ impl ProvenanceBuilder {
                                 "mapped cell {cell:?} references value {value:?} without provenance"
                             ))
                         })?,
-                    InitialCellOwner::Region(owner),
+                    FragmentFootprint::Region(region),
                 ),
-                MappedCellSource::Region { origins, owner } => {
-                    (origins, InitialCellOwner::Region(owner))
+                MappedCellSource::Region { origins, region } => {
+                    (origins, FragmentFootprint::Region(region))
                 }
             };
             if origin.0 as usize >= self.origin_sets.len() {
@@ -589,7 +505,7 @@ impl ProvenanceBuilder {
                 )));
             }
             cell_origins[cell.index()] = origin;
-            cell_owners[cell.index()] = Some(owner);
+            cell_fragments[cell.index()] = Some(fragment);
         }
         if let Some(cell) = mapped.cell_ids().find(|cell| !seen[cell.index()]) {
             return Err(crate::SynthError::invariant(format!(
@@ -616,6 +532,19 @@ impl ProvenanceBuilder {
                 Some(owner) => owner,
                 None => operator_region_id(&operator.source_operations, synthesis_regions)?,
             };
+            let source_operations = operator
+                .source_operations
+                .iter()
+                .map(|&operation| {
+                    synthesis_regions
+                        .operation_anchor(operation)
+                        .ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "implementation source operation has no stable anchor",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             regions.push(ImplementationRegion::new(
                 raw_id,
                 crate::artifact::implementation::ImplementationRegionIdentity {
@@ -625,9 +554,7 @@ impl ProvenanceBuilder {
                     width: operator.width,
                 },
                 ImplementationRegionSource {
-                    operations: &operator.source_operations,
-                    inputs: operator.source_inputs.to_vec(),
-                    results: operator.source_results.to_vec(),
+                    operations: &source_operations,
                     lines: operator.lines.to_vec(),
                 },
                 ImplementationRegionMetadata {
@@ -669,7 +596,7 @@ impl ProvenanceBuilder {
             cell_origins,
             origin_offsets,
             origin_operators,
-            cell_owners,
+            cell_fragments,
         )
     }
 
@@ -735,14 +662,14 @@ fn operator_region_id(
         .split_first()
         .ok_or_else(|| crate::SynthError::invariant("semantic operator has no source operation"))?;
     let owner = graph
-        .operation_owner(first)
+        .operation_region(first)
         .map(|region| region.id())
         .ok_or_else(|| {
             crate::SynthError::invariant("semantic operator source has no synthesis region")
         })?;
     if rest
         .iter()
-        .any(|&source| graph.operation_owner(source).map(|region| region.id()) != Some(owner))
+        .any(|&source| graph.operation_region(source).map(|region| region.id()) != Some(owner))
     {
         return Err(crate::SynthError::invariant(
             "resource-affinity operator crosses synthesis regions",
@@ -821,32 +748,13 @@ mod tests {
         assert_eq!(plan.operators().len(), 3);
         for operator in plan.operators() {
             let region = implementations.region_for_operator(operator.id()).unwrap();
-            assert_eq!(region.source_inputs(), operator.inputs());
-            assert_eq!(region.source_operations(), [operator.source_operation()]);
+            assert_eq!(
+                region.source_operations(),
+                [synthesis_regions
+                    .operation_anchor(operator.source_operation())
+                    .unwrap()]
+            );
         }
-    }
-
-    #[test]
-    fn derives_escaping_source_results_and_the_complete_boundary() {
-        let mut source = WordModule::new("boundary");
-        let ty = WordType::bits(8).unwrap();
-        let inputs = ["a", "b", "c"].map(|name| input(&mut source, name, ty));
-        let intermediate = source
-            .binary(BinaryOp::Add, inputs[0], inputs[1], test_span())
-            .unwrap();
-        let result = source
-            .binary(BinaryOp::Mul, intermediate, inputs[2], test_span())
-            .unwrap();
-        let _outside = source
-            .unary(word::UnaryOp::BitNot, intermediate, test_span())
-            .unwrap();
-        let operations = [intermediate, result].map(|value| operation(&source, value));
-        let uses = crate::word::uses::value_use_counts(&source).unwrap();
-
-        let boundary = source_boundary(&source, &uses, &operations, [inputs[0]]).unwrap();
-
-        assert_eq!(boundary.results.as_ref(), &[intermediate, result]);
-        assert_eq!(boundary.inputs.as_ref(), inputs.as_slice());
     }
 
     #[test]
@@ -962,7 +870,13 @@ mod tests {
                 &synthesis_regions,
                 &module,
                 &mapped,
-                &[(cell, MappedCellSource::Region { origins, owner })],
+                &[(
+                    cell,
+                    MappedCellSource::Region {
+                        origins,
+                        region: owner,
+                    },
+                )],
             )
             .unwrap();
         let operators = plan

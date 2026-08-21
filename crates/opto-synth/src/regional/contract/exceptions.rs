@@ -95,7 +95,7 @@ fn exception_anchors(
                     .iter()
                     .any(|point| filter.objects().binary_search(point).is_ok())
             }) {
-                rows.insert(port.owner());
+                rows.insert(port.region());
                 rows.extend(port.peer());
             }
         }
