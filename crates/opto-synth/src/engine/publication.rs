@@ -13,6 +13,7 @@ use crate::{IncrementalSnapshot, SynthesisMetrics, SynthesisResult};
 /// owner is validated against the same compact generation.
 pub(super) fn finalize(
     mut optimized: FinalizableState,
+    execution: opto_runtime::ExecutionMetrics,
 ) -> Result<SynthesisResult, crate::SynthError> {
     #[cfg(test)]
     let synthesized = {
@@ -58,6 +59,7 @@ pub(super) fn finalize(
         .saturating_add(reuse.regional_decision_misses);
     let operator_instances = optimized.operator_manifest.instances().len();
     let metrics = SynthesisMetrics {
+        execution,
         source_change: optimized.ledger.source_change,
         normalized_values: optimized.ledger.normalized_values,
         normalized_operations: optimized.ledger.normalized_operations,

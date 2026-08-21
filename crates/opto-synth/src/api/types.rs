@@ -304,6 +304,8 @@ pub struct SynthesisReport {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 /// Pipeline-size and incremental-reuse measurements recorded at finalization.
 pub struct SynthesisMetrics {
+    /// Scheduler work, utilization-time, ready-depth, and memory-admission counters.
+    pub execution: opto_runtime::ExecutionMetrics,
     /// Change classification against the previous compatible source snapshot.
     pub source_change: SourceChangeMetrics,
     /// Number of values after RTL normalization.
@@ -535,6 +537,23 @@ impl SynthesisMetrics {
         mapped_cells: usize,
         has_timing: bool,
     ) -> Result<(), crate::SynthError> {
+        let execution = self.execution;
+        let composite = [
+            execution.composite_active_nanoseconds,
+            execution.composite_wall_nanoseconds,
+            execution.composite_estimated_work,
+            execution.composite_peak_ready_tasks,
+            execution.composite_peak_admitted_memory,
+        ];
+        if (execution.composite_batches == 0 && composite != [0; 5])
+            || (execution.composite_batches != 0
+                && (execution.composite_peak_ready_tasks == 0
+                    || execution.composite_estimated_work == 0))
+        {
+            return Err(crate::SynthError::invariant(
+                "checkpoint execution metrics are inconsistent",
+            ));
+        }
         let changes = self.source_change;
         if changes.changed_values > changes.values
             || changes.changed_operations > changes.operations

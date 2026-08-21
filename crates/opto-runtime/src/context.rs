@@ -13,6 +13,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::time::Instant;
 
 type CompositeCompletion<O, E> = Result<Result<O, E>, Box<dyn Any + Send>>;
 
@@ -30,6 +31,12 @@ pub(crate) struct ExecutionContextInner {
     pub(crate) cancelled: AtomicBool,
     pub(crate) completed_task_callbacks: AtomicU64,
     pub(crate) completed_batches: AtomicU64,
+    pub(crate) composite_batches: AtomicU64,
+    pub(crate) composite_active_nanoseconds: AtomicU64,
+    pub(crate) composite_wall_nanoseconds: AtomicU64,
+    pub(crate) composite_estimated_work: AtomicU64,
+    pub(crate) composite_peak_ready_tasks: AtomicU64,
+    pub(crate) composite_peak_admitted_memory: AtomicU64,
 }
 
 impl Default for ExecutionContext {
@@ -63,6 +70,12 @@ impl ExecutionContext {
                 cancelled: AtomicBool::new(false),
                 completed_task_callbacks: AtomicU64::new(0),
                 completed_batches: AtomicU64::new(0),
+                composite_batches: AtomicU64::new(0),
+                composite_active_nanoseconds: AtomicU64::new(0),
+                composite_wall_nanoseconds: AtomicU64::new(0),
+                composite_estimated_work: AtomicU64::new(0),
+                composite_peak_ready_tasks: AtomicU64::new(0),
+                composite_peak_admitted_memory: AtomicU64::new(0),
             }),
             parallelism_limit: None,
             memory_limit: None,
@@ -125,6 +138,24 @@ impl ExecutionContext {
         ExecutionMetrics {
             completed_task_callbacks: self.inner.completed_task_callbacks.load(Ordering::Relaxed),
             completed_batches: self.inner.completed_batches.load(Ordering::Relaxed),
+            composite_batches: self.inner.composite_batches.load(Ordering::Relaxed),
+            composite_active_nanoseconds: self
+                .inner
+                .composite_active_nanoseconds
+                .load(Ordering::Relaxed),
+            composite_wall_nanoseconds: self
+                .inner
+                .composite_wall_nanoseconds
+                .load(Ordering::Relaxed),
+            composite_estimated_work: self.inner.composite_estimated_work.load(Ordering::Relaxed),
+            composite_peak_ready_tasks: self
+                .inner
+                .composite_peak_ready_tasks
+                .load(Ordering::Relaxed),
+            composite_peak_admitted_memory: self
+                .inner
+                .composite_peak_admitted_memory
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -171,6 +202,7 @@ impl ExecutionContext {
         if tasks.is_empty() {
             return Ok(Vec::new());
         }
+        let _batch = CompositeBatchTimer::start(&self.inner, &tasks);
         let workers = self.parallelism().max(1);
         let memory_limit = self.memory_limit.map_or(u64::MAX, NonZeroU64::get);
         if let Some(task) = tasks
@@ -187,7 +219,15 @@ impl ExecutionContext {
         if workers == 1 {
             return tasks
                 .into_iter()
-                .map(|task| operation(task.input, self))
+                .map(|task| {
+                    let started = Instant::now();
+                    let result = operation(task.input, self);
+                    record_active_time(&self.inner, started);
+                    self.inner
+                        .completed_task_callbacks
+                        .fetch_add(1, Ordering::Relaxed);
+                    result
+                })
                 .collect();
         }
 
@@ -225,7 +265,9 @@ impl ExecutionContext {
                     let operation = &operation;
                     let inner_runtime = &inner_runtime;
                     let completed = &self.inner.completed_task_callbacks;
+                    let metrics = &self.inner;
                     scope.spawn(move |_| {
+                        let started = Instant::now();
                         let result = catch_unwind(AssertUnwindSafe(|| {
                             if inner_runtime.is_cancelled() {
                                 Err(RuntimeError::Cancelled.into())
@@ -233,6 +275,7 @@ impl ExecutionContext {
                                 operation(task.input, inner_runtime)
                             }
                         }));
+                        record_active_time(metrics, started);
                         completed.fetch_add(1, Ordering::Relaxed);
                         let _ = sender.send((index, result));
                     });
@@ -247,6 +290,9 @@ impl ExecutionContext {
                 {
                     launch(index)?;
                     admitted_memory = admitted_memory.saturating_add(task_memory[index]);
+                    self.inner
+                        .composite_peak_admitted_memory
+                        .fetch_max(admitted_memory, Ordering::Relaxed);
                     active += 1;
                     next += 1;
                 }
@@ -266,6 +312,9 @@ impl ExecutionContext {
                     {
                         launch(index)?;
                         admitted_memory = admitted_memory.saturating_add(task_memory[index]);
+                        self.inner
+                            .composite_peak_admitted_memory
+                            .fetch_max(admitted_memory, Ordering::Relaxed);
                         active += 1;
                         next += 1;
                     }
@@ -384,11 +433,66 @@ impl ExecutionContext {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Point-in-time execution counters for one runtime.
 pub struct ExecutionMetrics {
     /// Task callbacks that returned.
     pub completed_task_callbacks: u64,
     /// Successful indexed analyses, chunk commits, and dependency publications.
     pub completed_batches: u64,
+    /// Completed invocations of the hierarchical composite scheduler.
+    pub composite_batches: u64,
+    /// Sum of wall time spent inside composite task callbacks.
+    pub composite_active_nanoseconds: u64,
+    /// Sum of end-to-end wall time for composite scheduler invocations.
+    pub composite_wall_nanoseconds: u64,
+    /// Sum of declared work admitted to composite scheduler invocations.
+    pub composite_estimated_work: u64,
+    /// Largest ready composite task batch observed by this runtime.
+    pub composite_peak_ready_tasks: u64,
+    /// Largest simultaneous declared private-memory admission.
+    pub composite_peak_admitted_memory: u64,
+}
+
+struct CompositeBatchTimer<'a> {
+    metrics: &'a ExecutionContextInner,
+    started: Instant,
+}
+
+impl<'a> CompositeBatchTimer<'a> {
+    fn start<I>(metrics: &'a ExecutionContextInner, tasks: &[Task<I>]) -> Self {
+        metrics.composite_batches.fetch_add(1, Ordering::Relaxed);
+        metrics.composite_peak_ready_tasks.fetch_max(
+            u64::try_from(tasks.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        metrics.composite_estimated_work.fetch_add(
+            tasks.iter().fold(0_u64, |total, task| {
+                total.saturating_add(task.estimated_work)
+            }),
+            Ordering::Relaxed,
+        );
+        Self {
+            metrics,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for CompositeBatchTimer<'_> {
+    fn drop(&mut self) {
+        self.metrics
+            .composite_wall_nanoseconds
+            .fetch_add(elapsed_nanoseconds(self.started), Ordering::Relaxed);
+    }
+}
+
+fn record_active_time(metrics: &ExecutionContextInner, started: Instant) {
+    metrics
+        .composite_active_nanoseconds
+        .fetch_add(elapsed_nanoseconds(started), Ordering::Relaxed);
+}
+
+fn elapsed_nanoseconds(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }

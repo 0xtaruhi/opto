@@ -348,7 +348,9 @@ impl SynthesisEngine {
         let optimized = execution.run_stage(StageId::POSTMAP_OPTIMIZATION, |execution| {
             optimize_postmap(execution, mapped)
         })?;
-        execution.run_stage(StageId::FINALIZATION, |_| publication::finalize(optimized))
+        execution.run_stage(StageId::FINALIZATION, |execution| {
+            publication::finalize(optimized, execution.runtime.metrics())
+        })
     }
 }
 

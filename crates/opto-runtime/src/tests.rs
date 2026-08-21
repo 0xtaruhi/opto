@@ -125,6 +125,13 @@ fn composite_scheduler_admits_tasks_within_the_memory_limit() {
 
     assert_eq!(outputs, (0_u64..4).collect::<Vec<_>>());
     assert_eq!(peak.load(Ordering::SeqCst), 10);
+    let metrics = runtime.metrics();
+    assert_eq!(metrics.composite_batches, 1);
+    assert_eq!(metrics.composite_estimated_work, 4);
+    assert_eq!(metrics.composite_peak_ready_tasks, 4);
+    assert_eq!(metrics.composite_peak_admitted_memory, 10);
+    assert!(metrics.composite_active_nanoseconds > 0);
+    assert!(metrics.composite_wall_nanoseconds > 0);
 }
 
 #[test]
