@@ -5,7 +5,7 @@
 
 use opto_ir::design::{
     Cell, CellClass, CellId, DesignBuilder, DesignRevision, DesignRevisionId, EntityId, EntitySet,
-    NetBit, NetBitId, NetDriver,
+    NetBit, NetBitId, NetDriver, RevisionFootprint,
 };
 use opto_ir::word;
 use opto_runtime::{Task, TaskKey};
@@ -178,10 +178,8 @@ pub(crate) struct WorkProduct<T> {
 pub(crate) struct WorkResult<T> {
     item: WorkItemId,
     shard: CompilationShardId,
-    base: DesignRevisionId,
     context: WorkContextKey,
-    reads: EntitySet,
-    replaces: EntitySet,
+    footprint: RevisionFootprint,
     proof: opto_ir::design::EquivalenceCertificate,
     output: T,
 }
@@ -487,11 +485,11 @@ impl WorkGraph {
                 .ok_or_else(|| {
                     crate::SynthError::invariant("work result item has no compilation shard")
                 })?;
-            if result.base != self.design.0.revision()
+            if result.footprint.base != self.design.0.revision()
                 || result.shard != shard
                 || result.context != item.context
-                || result.reads != reads
-                || result.replaces != item.core
+                || result.footprint.reads != reads
+                || result.footprint.replaces != item.core
             {
                 return Err(crate::SynthError::invariant(
                     "work result does not match its immutable revision, context, or footprint",
@@ -646,10 +644,12 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                     Ok(WorkResult {
                         item: item.id,
                         shard: packet.shard,
-                        base: packet.design,
                         context: item.context.key,
-                        reads: entity_union(&item.core, &item.halo)?,
-                        replaces: item.core.clone(),
+                        footprint: RevisionFootprint {
+                            base: packet.design,
+                            reads: entity_union(&item.core, &item.halo)?,
+                            replaces: item.core.clone(),
+                        },
                         proof: product.proof,
                         output: product.output,
                     })
@@ -1700,7 +1700,7 @@ mod tests {
             })
         })
         .unwrap();
-        invalid[0].replaces = EntitySet::new(vec![]).unwrap();
+        invalid[0].footprint.replaces = EntitySet::new(vec![]).unwrap();
         assert!(work.accept_results(invalid).is_err());
         let serial =
             opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 })

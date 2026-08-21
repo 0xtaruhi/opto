@@ -120,6 +120,17 @@ impl EntitySet {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Immutable revision and exact entity closure read and replaced by one task.
+pub struct RevisionFootprint {
+    /// Immutable revision read by the worker.
+    pub base: DesignRevisionId,
+    /// Every entity whose structure influenced the result.
+    pub reads: EntitySet,
+    /// Complete mutation footprint.
+    pub replaces: EntitySet,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Exact driver endpoint of one canonical net bit.
 pub enum NetDriver {
@@ -219,12 +230,8 @@ pub struct SemanticBinding {
 pub struct RewriteDelta<L> {
     /// Stable transaction identity covering the recipe and complete fragment.
     pub id: RewriteDeltaId,
-    /// Immutable revision read by the worker.
-    pub base: DesignRevisionId,
-    /// Every entity whose structure influenced the result.
-    pub reads: EntitySet,
-    /// Complete mutation footprint.
-    pub replaces: EntitySet,
+    /// Immutable base generation and exact read/replacement closure.
+    pub footprint: RevisionFootprint,
     /// New or replacement cells.
     pub cells: Box<[Cell<L>]>,
     /// New or replacement net bits.
@@ -405,7 +412,7 @@ where
         for delta in &deltas {
             self.validate_delta(delta)?;
             validate_proof(delta)?;
-            for &entity in delta.replaces.as_slice() {
+            for &entity in delta.footprint.replaces.as_slice() {
                 if !claimed.insert(entity) {
                     return Err(DesignError::OverlappingReplacement(entity));
                 }
@@ -416,7 +423,7 @@ where
                 .map(|cell| EntityId::Cell(cell.id))
                 .chain(delta.nets.iter().map(|net| EntityId::NetBit(net.id)))
             {
-                if !delta.replaces.contains(entity) && !claimed.insert(entity) {
+                if !delta.footprint.replaces.contains(entity) && !claimed.insert(entity) {
                     return Err(DesignError::OverlappingFragmentEntity(entity));
                 }
             }
@@ -432,29 +439,31 @@ where
     }
 
     fn validate_delta(&self, delta: &RewriteDelta<L>) -> Result<(), DesignError> {
-        if delta.base != self.revision {
+        if delta.footprint.base != self.revision {
             return Err(DesignError::StaleBase {
                 expected: self.revision,
-                received: delta.base,
+                received: delta.footprint.base,
             });
         }
-        for &entity in delta.reads.as_slice() {
+        for &entity in delta.footprint.reads.as_slice() {
             if !self.contains(entity) {
                 return Err(DesignError::UnknownRead(entity));
             }
         }
-        for &entity in delta.replaces.as_slice() {
+        for &entity in delta.footprint.replaces.as_slice() {
             if !self.contains(entity) {
                 return Err(DesignError::UnknownReplacement(entity));
             }
-            if !delta.reads.contains(entity) {
+            if !delta.footprint.reads.contains(entity) {
                 return Err(DesignError::IncompleteReadFootprint(entity));
             }
         }
         validate_unique_cells(&delta.cells)?;
         validate_unique_nets(&delta.nets)?;
         for cell in &delta.cells {
-            if self.cell(cell.id).is_some() && !delta.replaces.contains(EntityId::Cell(cell.id)) {
+            if self.cell(cell.id).is_some()
+                && !delta.footprint.replaces.contains(EntityId::Cell(cell.id))
+            {
                 return Err(DesignError::UnclaimedMutation(EntityId::Cell(cell.id)));
             }
             if self.cell(cell.id).is_none() && self.cell_directory.get(cell.id).is_some() {
@@ -462,7 +471,9 @@ where
             }
         }
         for net in &delta.nets {
-            if self.net(net.id).is_some() && !delta.replaces.contains(EntityId::NetBit(net.id)) {
+            if self.net(net.id).is_some()
+                && !delta.footprint.replaces.contains(EntityId::NetBit(net.id))
+            {
                 return Err(DesignError::UnclaimedMutation(EntityId::NetBit(net.id)));
             }
             if self.net(net.id).is_none() && self.net_directory.get(net.id).is_some() {
@@ -473,14 +484,14 @@ where
             if self.net(input).is_none() {
                 return Err(DesignError::UnknownBoundaryNet(input));
             }
-            if !delta.reads.contains(EntityId::NetBit(input)) {
+            if !delta.footprint.reads.contains(EntityId::NetBit(input)) {
                 return Err(DesignError::IncompleteReadFootprint(EntityId::NetBit(
                     input,
                 )));
             }
         }
         for &output in &delta.semantic.outputs {
-            if !delta.replaces.contains(EntityId::NetBit(output)) {
+            if !delta.footprint.replaces.contains(EntityId::NetBit(output)) {
                 return Err(DesignError::UnclaimedBoundaryOutput(output));
             }
             let previous = self
@@ -497,8 +508,8 @@ where
             for &input in &cell.inputs {
                 let entity = EntityId::NetBit(input);
                 if self.net(input).is_some()
-                    && !delta.replaces.contains(entity)
-                    && !delta.reads.contains(entity)
+                    && !delta.footprint.replaces.contains(entity)
+                    && !delta.footprint.reads.contains(entity)
                 {
                     return Err(DesignError::IncompleteReadFootprint(entity));
                 }
@@ -515,7 +526,7 @@ where
             .iter()
             .flat_map(|cell| cell.inputs.iter().copied())
             .filter(|&net| {
-                self.net(net).is_some() && !delta.replaces.contains(EntityId::NetBit(net))
+                self.net(net).is_some() && !delta.footprint.replaces.contains(EntityId::NetBit(net))
             })
             .collect::<BTreeSet<_>>();
         if let Some(net) = required_inputs.difference(&semantic_inputs).next().copied() {
@@ -529,9 +540,9 @@ where
             .collect::<BTreeSet<_>>();
         let required_outputs = self
             .cells()
-            .filter(|cell| !delta.replaces.contains(EntityId::Cell(cell.id)))
+            .filter(|cell| !delta.footprint.replaces.contains(EntityId::Cell(cell.id)))
             .flat_map(|cell| cell.inputs.iter().copied())
-            .filter(|&net| delta.replaces.contains(EntityId::NetBit(net)))
+            .filter(|&net| delta.footprint.replaces.contains(EntityId::NetBit(net)))
             .collect::<BTreeSet<_>>();
         if let Some(net) = required_outputs
             .difference(&semantic_outputs)
@@ -544,7 +555,7 @@ where
     }
 
     fn apply_delta(&mut self, delta: &RewriteDelta<L>) -> Result<(), DesignError> {
-        for &entity in delta.replaces.as_slice() {
+        for &entity in delta.footprint.replaces.as_slice() {
             match entity {
                 EntityId::Cell(id) if !delta.cells.iter().any(|cell| cell.id == id) => {
                     self.remove_cell(id)?;
@@ -810,8 +821,8 @@ fn derive_revision_id<L: DesignPayload>(
     digest.update(&base.bytes());
     for delta in deltas {
         digest.update(&delta.id.bytes());
-        hash_entities(&mut digest, delta.reads.as_slice());
-        hash_entities(&mut digest, delta.replaces.as_slice());
+        hash_entities(&mut digest, delta.footprint.reads.as_slice());
+        hash_entities(&mut digest, delta.footprint.replaces.as_slice());
         let mut cells = delta.cells.iter().collect::<Vec<_>>();
         cells.sort_unstable_by_key(|cell| cell.id);
         digest.update(&(cells.len() as u64).to_le_bytes());
@@ -1037,19 +1048,33 @@ mod tests {
         EntitySet::new(entities).unwrap()
     }
 
+    fn footprint(
+        base: DesignRevisionId,
+        reads: Vec<EntityId>,
+        replaces: Vec<EntityId>,
+    ) -> RevisionFootprint {
+        RevisionFootprint {
+            base,
+            reads: set(reads),
+            replaces: set(replaces),
+        }
+    }
+
     fn delta(id: u8, base: DesignRevisionId, kind: &'static str) -> RewriteDelta<&'static str> {
         RewriteDelta {
             id: RewriteDeltaId::from_bytes(digest(id)),
-            base,
-            reads: set(vec![
-                EntityId::Cell(CellId::from_bytes(digest(1))),
-                EntityId::NetBit(NetBitId::from_bytes(digest(10))),
-                EntityId::NetBit(NetBitId::from_bytes(digest(11))),
-            ]),
-            replaces: set(vec![
-                EntityId::Cell(CellId::from_bytes(digest(1))),
-                EntityId::NetBit(NetBitId::from_bytes(digest(11))),
-            ]),
+            footprint: footprint(
+                base,
+                vec![
+                    EntityId::Cell(CellId::from_bytes(digest(1))),
+                    EntityId::NetBit(NetBitId::from_bytes(digest(10))),
+                    EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                ],
+                vec![
+                    EntityId::Cell(CellId::from_bytes(digest(1))),
+                    EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                ],
+            ),
             cells: vec![cell(2, kind, &[10], &[11])].into_boxed_slice(),
             nets: vec![net(11, Some((2, 0)))].into_boxed_slice(),
             semantic: SemanticBinding {
@@ -1130,15 +1155,17 @@ mod tests {
             .commit(
                 vec![RewriteDelta {
                     id: RewriteDeltaId::from_bytes(digest(20)),
-                    base: base.revision(),
-                    reads: set(vec![
-                        EntityId::Cell(CellId::from_bytes(digest(1))),
-                        EntityId::NetBit(NetBitId::from_bytes(digest(11))),
-                    ]),
-                    replaces: set(vec![
-                        EntityId::Cell(CellId::from_bytes(digest(1))),
-                        EntityId::NetBit(NetBitId::from_bytes(digest(11))),
-                    ]),
+                    footprint: footprint(
+                        base.revision(),
+                        vec![
+                            EntityId::Cell(CellId::from_bytes(digest(1))),
+                            EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                        ],
+                        vec![
+                            EntityId::Cell(CellId::from_bytes(digest(1))),
+                            EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                        ],
+                    ),
                     cells: Box::new([]),
                     nets: Box::new([]),
                     semantic: SemanticBinding {
@@ -1185,7 +1212,7 @@ mod tests {
     fn commit_rejects_an_incomplete_read_footprint() {
         let base = base_design();
         let mut replacement = delta(20, base.revision(), "missing-read");
-        replacement.reads = set(vec![
+        replacement.footprint.reads = set(vec![
             EntityId::NetBit(NetBitId::from_bytes(digest(10))),
             EntityId::NetBit(NetBitId::from_bytes(digest(11))),
         ]);
@@ -1257,9 +1284,11 @@ mod tests {
         let base = base_design();
         let added = |id, kind| RewriteDelta {
             id: RewriteDeltaId::from_bytes(digest(id)),
-            base: base.revision(),
-            reads: set(vec![EntityId::NetBit(NetBitId::from_bytes(digest(10)))]),
-            replaces: set(vec![]),
+            footprint: footprint(
+                base.revision(),
+                vec![EntityId::NetBit(NetBitId::from_bytes(digest(10)))],
+                vec![],
+            ),
             cells: vec![cell(2, kind, &[10], &[12])].into_boxed_slice(),
             nets: vec![net(12, Some((2, 0)))].into_boxed_slice(),
             semantic: SemanticBinding {
@@ -1298,15 +1327,17 @@ mod tests {
             .commit(
                 vec![RewriteDelta {
                     id: RewriteDeltaId::from_bytes(digest(20)),
-                    base: base.revision(),
-                    reads: set(vec![
-                        EntityId::Cell(CellId::from_bytes(digest(1))),
-                        EntityId::NetBit(NetBitId::from_bytes(digest(11))),
-                    ]),
-                    replaces: set(vec![
-                        EntityId::Cell(CellId::from_bytes(digest(1))),
-                        EntityId::NetBit(NetBitId::from_bytes(digest(11))),
-                    ]),
+                    footprint: footprint(
+                        base.revision(),
+                        vec![
+                            EntityId::Cell(CellId::from_bytes(digest(1))),
+                            EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                        ],
+                        vec![
+                            EntityId::Cell(CellId::from_bytes(digest(1))),
+                            EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                        ],
+                    ),
                     cells: Box::new([]),
                     nets: Box::new([]),
                     semantic: SemanticBinding {
@@ -1325,9 +1356,11 @@ mod tests {
             .commit(
                 vec![RewriteDelta {
                     id: RewriteDeltaId::from_bytes(digest(30)),
-                    base: removed.revision(),
-                    reads: set(vec![EntityId::NetBit(NetBitId::from_bytes(digest(10)))]),
-                    replaces: set(vec![]),
+                    footprint: footprint(
+                        removed.revision(),
+                        vec![EntityId::NetBit(NetBitId::from_bytes(digest(10)))],
+                        vec![],
+                    ),
                     cells: vec![cell(1, "reused", &[10], &[11])].into_boxed_slice(),
                     nets: vec![net(11, Some((1, 0)))].into_boxed_slice(),
                     semantic: SemanticBinding {
@@ -1362,16 +1395,18 @@ mod tests {
         let first = delta(20, base.revision(), "replace-a");
         let second = RewriteDelta {
             id: RewriteDeltaId::from_bytes(digest(30)),
-            base: base.revision(),
-            reads: set(vec![
-                EntityId::Cell(CellId::from_bytes(digest(3))),
-                EntityId::NetBit(NetBitId::from_bytes(digest(12))),
-                EntityId::NetBit(NetBitId::from_bytes(digest(13))),
-            ]),
-            replaces: set(vec![
-                EntityId::Cell(CellId::from_bytes(digest(3))),
-                EntityId::NetBit(NetBitId::from_bytes(digest(13))),
-            ]),
+            footprint: footprint(
+                base.revision(),
+                vec![
+                    EntityId::Cell(CellId::from_bytes(digest(3))),
+                    EntityId::NetBit(NetBitId::from_bytes(digest(12))),
+                    EntityId::NetBit(NetBitId::from_bytes(digest(13))),
+                ],
+                vec![
+                    EntityId::Cell(CellId::from_bytes(digest(3))),
+                    EntityId::NetBit(NetBitId::from_bytes(digest(13))),
+                ],
+            ),
             cells: vec![cell(4, "replace-b", &[12], &[13])].into_boxed_slice(),
             nets: vec![net(13, Some((4, 0)))].into_boxed_slice(),
             semantic: SemanticBinding {
