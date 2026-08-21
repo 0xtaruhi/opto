@@ -5,8 +5,7 @@
 
 use opto_ir::design::{
     Cell, CellClass, CellId, DesignBuilder, DesignRevision, DesignRevisionId, EntityId, EntitySet,
-    EquivalenceCertificate, EquivalenceRegime, NetBit, NetBitId, NetDriver, RewriteDelta,
-    RewriteDeltaId, SemanticBinding,
+    NetBit, NetBitId, NetDriver,
 };
 use opto_ir::word;
 use opto_runtime::{Task, TaskKey};
@@ -45,14 +44,6 @@ digest_id!(
 impl WorkContextKey {
     const fn bytes(self) -> [u8; 32] {
         self.0
-    }
-
-    fn structural(design: DesignRevisionId, local: [u8; 32]) -> Self {
-        let mut digest = blake3::Hasher::new();
-        digest.update(b"opto.structural-work-context.v1\0");
-        digest.update(&design.bytes());
-        digest.update(&local);
-        Self::from_bytes(*digest.finalize().as_bytes())
     }
 }
 
@@ -125,15 +116,8 @@ pub(crate) struct WorkItem {
     core: EntitySet,
     halo: EntitySet,
     context: WorkContextKey,
-    kind: WorkItemKind,
     estimated_work: u64,
     estimated_memory: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkItemKind {
-    Local,
-    Reduce,
 }
 
 #[derive(Debug)]
@@ -231,7 +215,6 @@ impl WorkGraph {
                 core,
                 halo,
                 context: contexts[region.row().index()],
-                kind: WorkItemKind::Local,
                 estimated_work: region.estimated_work().max(1),
                 estimated_memory,
             };
@@ -268,61 +251,6 @@ impl WorkGraph {
         graph.rebatch(1)?;
         graph.validate()?;
         Ok((graph, binding))
-    }
-
-    pub(crate) fn build_structural(
-        module: &word::WordModule,
-        regions: &crate::SynthesisRegionGraph,
-        design: &WorkDesign,
-    ) -> Result<Self, crate::SynthError> {
-        let contexts = regions
-            .regions()
-            .iter()
-            .map(|region| {
-                WorkContextKey::structural(design.0.revision(), region.revision().bytes())
-            })
-            .collect::<Vec<_>>();
-        let (mut graph, _) = Self::build(module, regions, design, &contexts)?;
-        let core = EntitySet::new(
-            graph
-                .design
-                .cells()
-                .map(|cell| EntityId::Cell(cell.id))
-                .chain(graph.design.nets().map(|net| EntityId::NetBit(net.id)))
-                .collect(),
-        )
-        .map_err(|error| design_error(&error))?;
-        if core.is_empty() {
-            return Ok(graph);
-        }
-        let mut digest = blake3::Hasher::new();
-        digest.update(b"opto.structural-reduce-item.v1\0");
-        digest.update(&graph.design.revision().bytes());
-        let id = WorkItemId::from_bytes(*digest.finalize().as_bytes());
-        let estimated_work = graph.items.iter().fold(0u64, |total, item| {
-            total.saturating_add(item.estimated_work)
-        });
-        let estimated_memory = u64::try_from(core.as_slice().len())
-            .unwrap_or(u64::MAX)
-            .max(1);
-        graph.items = Box::new([WorkItem {
-            id,
-            core,
-            halo: EntitySet::new(Vec::new()).map_err(|error| design_error(&error))?,
-            context: WorkContextKey::structural(
-                graph.design.revision(),
-                regions.revision().bytes(),
-            ),
-            kind: WorkItemKind::Reduce,
-            estimated_work,
-            estimated_memory,
-        }]);
-        graph.predecessors = opto_core::PackedRows::try_from_rows(vec![Vec::new()])
-            .map_err(|_| crate::SynthError::capacity("structural reduce predecessors"))?;
-        graph.successors = opto_core::PackedRows::try_from_rows(vec![Vec::new()])
-            .map_err(|_| crate::SynthError::capacity("structural reduce successors"))?;
-        graph.rebatch(1)?;
-        Ok(graph)
     }
 
     /// Deterministically changes only scheduler batching, never semantic items.
@@ -395,7 +323,6 @@ impl WorkGraph {
         }
         if let Some((row, _)) = self.items.iter().enumerate().find(|(_, item)| {
             item.core.is_empty()
-                || (item.kind == WorkItemKind::Reduce && !item.halo.is_empty())
                 || item.estimated_memory
                     < u64::try_from(item.core.as_slice().len() + item.halo.as_slice().len())
                         .unwrap_or(u64::MAX)
@@ -452,64 +379,6 @@ impl WorkDesign {
         regions: &crate::SynthesisRegionGraph,
     ) -> Result<Self, crate::SynthError> {
         seal_logical_design(module, regions).map(Self)
-    }
-
-    pub(crate) fn rewrite_all(
-        &self,
-        module: &word::WordModule,
-        regions: &crate::SynthesisRegionGraph,
-        proof: [u8; 32],
-    ) -> Result<Self, crate::SynthError> {
-        let expected = seal_logical_design(module, regions)?;
-        let reads = EntitySet::new(
-            self.0
-                .cells()
-                .map(|cell| EntityId::Cell(cell.id))
-                .chain(self.0.nets().map(|net| EntityId::NetBit(net.id)))
-                .collect(),
-        )
-        .map_err(|error| design_error(&error))?;
-        let mut digest = blake3::Hasher::new();
-        digest.update(b"opto.structural-rewrite-delta.v1\0");
-        digest.update(&self.0.revision().bytes());
-        digest.update(&expected.revision().bytes());
-        digest.update(&proof);
-        let delta = RewriteDelta {
-            id: RewriteDeltaId::from_bytes(*digest.finalize().as_bytes()),
-            base: self.0.revision(),
-            replaces: reads.clone(),
-            reads,
-            cells: expected.cells().cloned().collect(),
-            nets: expected.nets().cloned().collect(),
-            semantic: SemanticBinding {
-                inputs: Box::new([]),
-                outputs: Box::new([]),
-            },
-            proof: EquivalenceCertificate {
-                regime: EquivalenceRegime::Sequential,
-                digest: proof,
-            },
-        };
-        let committed = self
-            .0
-            .commit(vec![delta], |delta| {
-                if delta.proof.regime == EquivalenceRegime::Sequential
-                    && delta.proof.digest == proof
-                {
-                    Ok(())
-                } else {
-                    Err(opto_ir::design::DesignError::ProofRejected(
-                        "structural task returned another proof certificate".to_string(),
-                    ))
-                }
-            })
-            .map_err(|error| design_error(&error))?;
-        if !same_design(&committed, &expected) {
-            return Err(crate::SynthError::invariant(
-                "structural rewrite transaction differs from its sealed result",
-            ));
-        }
-        Ok(Self(committed))
     }
 }
 
@@ -1480,10 +1349,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         let design = WorkDesign::seal(&module, &regions).unwrap();
-        let reduce = WorkGraph::build_structural(&module, &regions, &design).unwrap();
-        assert_eq!(reduce.items.len(), 1);
-        assert_eq!(reduce.items[0].kind, WorkItemKind::Reduce);
-        assert_eq!(reduce.tasks().len(), 1);
         let (mut work, binding) = WorkGraph::build(&module, &regions, &design, &contexts).unwrap();
 
         assert!(work.design.cell_count() >= regions.regions().len());
