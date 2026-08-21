@@ -1411,12 +1411,14 @@ inventory keeps only canonical `NameId`/u32 order vectors and derives pin full
 names through one reused scratch string. Registry planning marks retained
 objects only within participating designs and represents removals as sorted
 u32 live slots. The fallible preflight interns names, verifies an exact source
-digest, freezes only compact `ObjectKey` additions, and validates every UID and
-arena bound. Timing, power, and collections prepare sparse edits by scanning
-the smaller of the removal set and their reverse index. Once those tokens and
-the registry token exist, commit performs no source callback or recoverable
-operation: dependent owners consume their sparse edits first and the registry
-publishes the prevalidated removals/additions last.
+digest and addition count, freezes only compact `ObjectKey` additions, and
+validates every UID and arena bound. It reserves the final arena, UID, active-
+locator, and per-design index capacities once; the consuming commit therefore
+does not grow or rehash an owner index. Timing, power, and collections prepare
+sparse edits by scanning the smaller of the removal set and their reverse
+index. Once those tokens and the registry token exist, commit performs no source
+callback or recoverable operation: dependent owners consume their sparse edits
+first and the registry publishes the prevalidated removals/additions last.
 
 ## Cache And Incremental Reuse
 

@@ -54,11 +54,14 @@ struct PlannedDesign {
     mode: ObjectReconcileMode,
 }
 
+type PreparedDesignIndexes = Box<[(NameId, Vec<LiveSlot>)]>;
+
 /// Compact, immutable removal plan produced before any session owner changes.
 ///
 /// Removed objects are represented by 32-bit live-slot IDs. The plan remains
 /// valid only while the originating registry retains the same owner, UID
-/// high-water mark, and live length.
+/// high-water mark, and live length. The same replay freezes exact source and
+/// addition cardinalities so preparation needs no growth heuristic.
 #[derive(Debug)]
 pub struct ObjectRegistryReconcilePlan {
     owner: OwnerToken<ObjectRegistryOwner>,
@@ -67,6 +70,7 @@ pub struct ObjectRegistryReconcilePlan {
     designs: Box<[PlannedDesign]>,
     removed: Box<[LiveSlot]>,
     source_count: usize,
+    addition_count: usize,
     source_digest: [u8; 32],
 }
 
@@ -137,9 +141,9 @@ impl ObjectRegistryReconcilePlan {
 
 /// Fully preflighted registry edit.
 ///
-/// Name interning and every capacity check have completed. Dropping this
-/// token rolls back newly interned names; [`Self::commit`] performs only
-/// deterministic, prevalidated ownership moves.
+/// Name interning, every capacity check, and all owner-index allocation have
+/// completed. Dropping this token rolls back newly interned names; [`Self::commit`]
+/// performs only deterministic, prevalidated ownership moves.
 #[must_use = "a prepared registry reconciliation has no effect unless committed"]
 #[derive(Debug)]
 pub struct PreparedObjectReconcile<'registry> {
@@ -147,6 +151,7 @@ pub struct PreparedObjectReconcile<'registry> {
     plan: ObjectRegistryReconcilePlan,
     names_checkpoint: NameCheckpoint,
     additions: Box<[ObjectKey]>,
+    new_designs: PreparedDesignIndexes,
     committed: bool,
 }
 
@@ -160,6 +165,12 @@ impl PreparedObjectReconcile<'_> {
     pub fn commit(mut self) {
         for &slot in &self.plan.removed {
             self.registry.remove_slot(slot);
+        }
+        for (design, slots) in std::mem::take(&mut self.new_designs).into_vec() {
+            assert!(
+                self.registry.by_design.insert(design, slots).is_none(),
+                "prepared design index remained live after its removals"
+            );
         }
 
         for &key in &self.additions {
@@ -226,6 +237,7 @@ impl ObjectRegistry {
             .collect::<Vec<_>>();
         let mut source_error = None;
         let mut source_count = 0usize;
+        let mut addition_count = 0usize;
         let mut source_digest = reconcile_digest();
         source.visit(&mut |object| {
             if source_error.is_some() {
@@ -255,12 +267,15 @@ impl ObjectRegistry {
                 return;
             };
             if designs[index].mode != ObjectReconcileMode::Update {
+                increment_addition_count(&mut addition_count, &mut source_error);
                 return;
             }
             let Some(key) = ObjectKey::lookup_resolved(object, &self.names) else {
+                increment_addition_count(&mut addition_count, &mut source_error);
                 return;
             };
             let Some(id) = self.active.get(&key) else {
+                increment_addition_count(&mut addition_count, &mut source_error);
                 return;
             };
             let slot = self.slots_by_uid[&id.uid()];
@@ -306,6 +321,7 @@ impl ObjectRegistry {
             designs,
             removed: removed.into_boxed_slice(),
             source_count,
+            addition_count,
             source_digest: *source_digest.finalize().as_bytes(),
         })
     }
@@ -338,7 +354,7 @@ impl ObjectRegistry {
         let names_checkpoint = self.names.checkpoint();
         let prepared = (|| {
             let mut previous: Option<ObjectKey> = None;
-            let mut additions = Vec::new();
+            let mut additions = Vec::with_capacity(plan.addition_count);
             let mut source_count = 0usize;
             let mut source_digest = reconcile_digest();
             let mut changes = HashMap::<NameId, (usize, usize)>::new();
@@ -420,15 +436,21 @@ impl ObjectRegistry {
                     "object reconciliation source changed after removal planning".to_string(),
                 ));
             }
+            if additions.len() != plan.addition_count {
+                return Err(RegistryError::InvalidEdit(
+                    "object reconciliation addition count changed after planning".to_string(),
+                ));
+            }
             let added = u64::try_from(additions.len()).map_err(|_| RegistryError::UidExhausted)?;
             self.next_uid
                 .checked_add(added)
                 .ok_or(RegistryError::UidExhausted)?;
-            self.validate_reconcile_capacity(plan.removed.len(), additions.len(), changes)?;
-            Ok(additions.into_boxed_slice())
+            let new_designs =
+                self.prepare_reconcile_capacity(plan.removed.len(), additions.len(), changes)?;
+            Ok((additions.into_boxed_slice(), new_designs))
         })();
 
-        let additions = match prepared {
+        let (additions, new_designs) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.names
@@ -443,16 +465,17 @@ impl ObjectRegistry {
             plan,
             names_checkpoint,
             additions,
+            new_designs,
             committed: false,
         })
     }
 
-    fn validate_reconcile_capacity(
-        &self,
+    fn prepare_reconcile_capacity(
+        &mut self,
         removed: usize,
         additions: usize,
         changes: HashMap<NameId, (usize, usize)>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<PreparedDesignIndexes, RegistryError> {
         let free_after_removals = self
             .slots
             .len()
@@ -472,6 +495,8 @@ impl ObjectRegistry {
                     })?;
             LiveSlot::from_index(last)?;
         }
+        let mut existing_growth = Vec::new();
+        let mut new_designs = Vec::new();
         for (design, (removed, added)) in changes {
             let current = self.by_design.get(&design).map_or(0, Vec::len);
             let future = current
@@ -483,9 +508,46 @@ impl ObjectRegistry {
             if future > 0 {
                 DesignPosition::from_index(future - 1)?;
             }
+            let growth = added.saturating_sub(removed);
+            if current > 0 && removed == current && added > 0 {
+                new_designs.push((design, added));
+            } else if self.by_design.contains_key(&design) {
+                existing_growth.push((design, growth));
+            } else if added > 0 {
+                new_designs.push((design, added));
+            }
         }
-        Ok(())
+
+        // Capacity changes are not semantic registry state. New per-design
+        // vectors stay token-owned until the consuming commit publishes them.
+        self.slots.reserve(new_slots);
+        let live_growth = additions.saturating_sub(removed);
+        self.slots_by_uid.reserve(live_growth);
+        self.active.reserve(live_growth);
+        self.by_design.reserve(new_designs.len());
+        for (design, growth) in existing_growth {
+            self.by_design
+                .get_mut(&design)
+                .expect("existing design growth was classified from this index")
+                .reserve(growth);
+        }
+        new_designs.sort_unstable_by_key(|(design, _)| *design);
+        Ok(new_designs
+            .into_iter()
+            .map(|(design, capacity)| (design, Vec::with_capacity(capacity)))
+            .collect())
     }
+}
+
+fn increment_addition_count(count: &mut usize, error: &mut Option<RegistryError>) {
+    *count = if let Some(count) = count.checked_add(1) {
+        count
+    } else {
+        *error = Some(RegistryError::Capacity {
+            resource: "replayed object additions",
+        });
+        return;
+    };
 }
 
 fn reconcile_digest() -> blake3::Hasher {
@@ -576,4 +638,138 @@ fn validate_designs(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct PortSource {
+        count: usize,
+        mode: ObjectReconcileMode,
+    }
+
+    impl ObjectReconcileSource for PortSource {
+        fn design_count(&self) -> usize {
+            1
+        }
+
+        fn design(&self, index: usize) -> ObjectReconcileDesign<'_> {
+            assert_eq!(index, 0);
+            ObjectReconcileDesign {
+                name: "top",
+                mode: self.mode,
+            }
+        }
+
+        fn visit(&self, visitor: &mut dyn FnMut(ResolvedObject<'_>)) {
+            visitor(ResolvedObject::Design { name: "top" });
+            for index in 0..self.count {
+                let name = format!("p{index:05}");
+                visitor(ResolvedObject::Port {
+                    design: "top",
+                    name: &name,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn reconcile_prepares_exact_index_capacity_before_commit() {
+        let mut registry = ObjectRegistry::default();
+        let initial = PortSource {
+            count: 2_048,
+            mode: ObjectReconcileMode::Update,
+        };
+        let plan = registry.plan_reconcile(&initial).unwrap();
+        assert_eq!(plan.addition_count, initial.count + 1);
+        let prepared = registry.prepare_reconcile(plan, &initial).unwrap();
+        let prepared_capacities = (
+            prepared.registry.slots.capacity(),
+            prepared.registry.slots_by_uid.capacity(),
+            prepared.registry.active.capacity(),
+        );
+        prepared.commit();
+        assert_eq!(
+            (
+                registry.slots.capacity(),
+                registry.slots_by_uid.capacity(),
+                registry.active.capacity(),
+            ),
+            prepared_capacities
+        );
+
+        let expanded = PortSource {
+            count: 4_096,
+            mode: ObjectReconcileMode::Update,
+        };
+        let plan = registry.plan_reconcile(&expanded).unwrap();
+        assert_eq!(plan.addition_count, expanded.count - initial.count);
+        let design = registry.names.get("top").unwrap();
+        let prepared = registry.prepare_reconcile(plan, &expanded).unwrap();
+        let prepared_capacities = (
+            prepared.registry.slots.capacity(),
+            prepared.registry.slots_by_uid.capacity(),
+            prepared.registry.active.capacity(),
+            prepared.registry.by_design[&design].capacity(),
+        );
+        prepared.commit();
+        assert_eq!(
+            (
+                registry.slots.capacity(),
+                registry.slots_by_uid.capacity(),
+                registry.active.capacity(),
+                registry.by_design[&design].capacity(),
+            ),
+            prepared_capacities
+        );
+        assert_eq!(registry.len, expanded.count + 1);
+    }
+
+    #[test]
+    fn replacement_prepares_a_design_index_removed_to_empty() {
+        let mut registry = ObjectRegistry::default();
+        let initial = PortSource {
+            count: 64,
+            mode: ObjectReconcileMode::Update,
+        };
+        let plan = registry.plan_reconcile(&initial).unwrap();
+        registry.prepare_reconcile(plan, &initial).unwrap().commit();
+
+        let replacement = PortSource {
+            count: 64,
+            mode: ObjectReconcileMode::Replace,
+        };
+        let plan = registry.plan_reconcile(&replacement).unwrap();
+        let design = registry.names.get("top").unwrap();
+        let prepared = registry.prepare_reconcile(plan, &replacement).unwrap();
+        let prepared_capacity = prepared
+            .new_designs
+            .iter()
+            .find(|(prepared_design, _)| *prepared_design == design)
+            .unwrap()
+            .1
+            .capacity();
+        assert!(prepared_capacity > replacement.count);
+        prepared.commit();
+
+        assert_eq!(registry.by_design[&design].capacity(), prepared_capacity);
+        assert_eq!(registry.by_design[&design].len(), replacement.count + 1);
+    }
+
+    #[test]
+    fn dropping_prepared_capacity_keeps_the_registry_semantically_empty() {
+        let mut registry = ObjectRegistry::default();
+        let names = registry.names.entry_count();
+        let source = PortSource {
+            count: 64,
+            mode: ObjectReconcileMode::Update,
+        };
+        let plan = registry.plan_reconcile(&source).unwrap();
+        drop(registry.prepare_reconcile(plan, &source).unwrap());
+
+        assert_eq!(registry.len, 0);
+        assert!(registry.by_design.is_empty());
+        assert_eq!(registry.names.entry_count(), names);
+    }
 }
