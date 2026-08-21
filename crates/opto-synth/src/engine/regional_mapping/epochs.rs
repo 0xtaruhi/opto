@@ -68,7 +68,12 @@ impl RegionalMapper<'_> {
                     .iter()
                     .cloned()
                     .zip(rows.iter().map(|row| row.binding.clone()))
-                    .map(|(plan, binding)| super::RegionalPlanRow { plan, binding })
+                    .zip(rows.iter().map(|row| row.sequential.clone()))
+                    .map(|((plan, binding), sequential)| super::RegionalPlanRow {
+                        plan,
+                        binding,
+                        sequential,
+                    })
                     .collect();
                 best = Some(BestMapping {
                     objective,
@@ -194,12 +199,20 @@ impl RegionalMapper<'_> {
         );
         observed_values.sort_unstable();
         observed_values.dedup();
+        let mut sequential_pins = state
+            .rows
+            .iter()
+            .flat_map(|row| row.binding.sequential_pins())
+            .collect::<Vec<_>>();
+        sequential_pins.sort_unstable();
+        sequential_pins.dedup();
         let (
             materialize::MappedOutput {
                 netlist,
                 cell_sources: substrate_sources,
             },
             observed_nets,
+            sequential_pins,
         ) = materialize::build_mapped_substrate(materialize::MappedSubstrateRequest {
             module: state.module,
             options: self.config.options,
@@ -208,6 +221,7 @@ impl RegionalMapper<'_> {
             source_instances: self.config.source_instances,
             base_revision: self.config.base_revision,
             observed_values: &observed_values,
+            sequential_pins: &sequential_pins,
         })?;
         let signals =
             WordMappedSignals::from_observations(state.module, &observed_values, &observed_nets)?;
@@ -240,6 +254,7 @@ impl RegionalMapper<'_> {
             cell_sources,
             implementation_census: None,
             signals,
+            sequential_pins,
             boundary_nets: boundary_nets.into_boxed_slice(),
             footprints: std::iter::repeat_with(|| None)
                 .take(state.rows.len())
@@ -250,6 +265,8 @@ impl RegionalMapper<'_> {
             state.module,
             &mapped.signals,
             state.sequential_operations,
+            state.rows.iter().flat_map(|row| row.sequential.iter()),
+            &mapped.sequential_pins,
             &self.config,
         )?;
         let rows = (0..state.rows.len()).collect::<Vec<_>>();
@@ -372,6 +389,7 @@ impl RegionalMapper<'_> {
                     &state_row.binding,
                     region_binding,
                     &mapped.signals,
+                    &mapped.sequential_pins,
                     self.combinational_catalog(),
                     &self.config.options.target_cells,
                 )?;

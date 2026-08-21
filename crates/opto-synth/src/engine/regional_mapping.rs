@@ -70,6 +70,7 @@ struct RegionalMappingState<'a> {
 pub(super) struct RegionalPlanRow {
     pub(super) plan: crate::RegionCoverPlan,
     pub(super) binding: RegionPlanBinding,
+    pub(super) sequential: Box<[materialize::RegionalSequentialCellPlan]>,
 }
 
 impl RegionalMappingState<'_> {
@@ -116,6 +117,7 @@ struct RegionalMappedState {
     cell_sources: Vec<Option<MappedCellSource>>,
     implementation_census: Option<ImplementationCensus>,
     signals: WordMappedSignals,
+    sequential_pins: materialize::SequentialMappedPins,
     boundary_nets: Box<[crate::closure::BoundaryNetObservation]>,
     footprints: Vec<Option<MappedRegionFootprint>>,
     timing: Option<crate::closure::mmmc::MmmcTiming>,

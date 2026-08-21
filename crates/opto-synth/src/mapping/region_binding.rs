@@ -21,21 +21,24 @@ pub(crate) enum RegionPlanValueBinding {
         ordinal: u32,
         bit: u32,
     },
-    SequentialInputBit {
-        operation: word::OpId,
-        role: SequentialInputRole,
-        bit: u32,
-    },
+    SequentialPinBit(SequentialPinKey),
     Lowered(word::ValueId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SequentialInputRole {
+pub(crate) enum SequentialPinRole {
     Data,
     Clock,
     Enable,
     ResetControl(u32),
     ResetValue(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SequentialPinKey {
+    pub(crate) state: opto_ir::design::CellId,
+    pub(crate) role: SequentialPinRole,
+    pub(crate) bit: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,9 +67,16 @@ impl RegionPlanBinding {
                 RegionPlanValueBinding::SourceBit { value, .. } => Some(value),
                 RegionPlanValueBinding::MemoryLogicBit { .. }
                 | RegionPlanValueBinding::MemoryStateBit { .. }
-                | RegionPlanValueBinding::SequentialInputBit { .. }
+                | RegionPlanValueBinding::SequentialPinBit(_)
                 | RegionPlanValueBinding::Lowered(_) => None,
             })
+    }
+
+    pub(crate) fn sequential_pins(&self) -> impl Iterator<Item = SequentialPinKey> + '_ {
+        self.outputs.iter().filter_map(|binding| match *binding {
+            RegionPlanValueBinding::SequentialPinBit(pin) => Some(pin),
+            _ => None,
+        })
     }
 
     fn for_each_binding_mut(
@@ -122,53 +132,11 @@ impl RegionPlanBinding {
                     bit,
                 ),
                 RegionPlanValueBinding::SourceBit { .. }
-                | RegionPlanValueBinding::SequentialInputBit { .. }
+                | RegionPlanValueBinding::SequentialPinBit(_)
                 | RegionPlanValueBinding::Lowered(_) => {
                     return Ok(());
                 }
             };
-            *binding = RegionPlanValueBinding::SourceBit { value, bit };
-            Ok(())
-        };
-        self.for_each_binding_mut(resolve)
-    }
-
-    pub(crate) fn resolve_sequential_sources(
-        &mut self,
-        module: &word::WordModule,
-    ) -> Result<(), crate::SynthError> {
-        let resolve = |binding: &mut RegionPlanValueBinding| -> Result<(), crate::SynthError> {
-            let RegionPlanValueBinding::SequentialInputBit {
-                operation,
-                role,
-                bit,
-            } = *binding
-            else {
-                return Ok(());
-            };
-            let operation = module.operation(operation).ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "regional sequential binding references an unknown source operation",
-                )
-            })?;
-            let value = sequential_input(&operation.kind, role).ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "regional sequential binding no longer matches its source endpoint",
-                )
-            })?;
-            let width = module
-                .value(value)
-                .map(|value| value.ty.width())
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "regional sequential binding references an unknown source value",
-                    )
-                })?;
-            if bit >= width {
-                return Err(crate::SynthError::invariant(
-                    "regional sequential binding bit exceeds its source endpoint",
-                ));
-            }
             *binding = RegionPlanValueBinding::SourceBit { value, bit };
             Ok(())
         };
@@ -233,7 +201,8 @@ impl RegionPlanBinding {
                     })?,
                     bit,
                 ),
-                RegionPlanValueBinding::SequentialInputBit { .. } => {
+                RegionPlanValueBinding::SequentialPinBit(_) if preserve_endpoint => return Ok(()),
+                RegionPlanValueBinding::SequentialPinBit(_) => {
                     return Err(crate::SynthError::invariant(
                         "regional sequential binding was not resolved before scalar lowering",
                     ));
@@ -304,7 +273,7 @@ impl RegionPlanBinding {
                 RegionPlanValueBinding::SourceBit { .. }
                 | RegionPlanValueBinding::MemoryLogicBit { .. }
                 | RegionPlanValueBinding::MemoryStateBit { .. }
-                | RegionPlanValueBinding::SequentialInputBit { .. } => None,
+                | RegionPlanValueBinding::SequentialPinBit(_) => None,
             })
     }
 
@@ -326,7 +295,10 @@ impl RegionPlanBinding {
         self.outputs
             .iter()
             .copied()
-            .map(|binding| resolve_plan_value(binding, region_binding))
+            .filter_map(|binding| match binding {
+                RegionPlanValueBinding::SequentialPinBit(_) => None,
+                _ => Some(resolve_plan_value(binding, region_binding)),
+            })
             .collect()
     }
 }
@@ -350,6 +322,7 @@ pub(crate) struct CandidateBindingDomain<'a> {
     pub(crate) owned_memory_logic: &'a [RegionalMemoryLogicBinding],
     pub(crate) memory_states: &'a [RegionalMemoryStateBinding],
     pub(crate) operation_sources: &'a crate::planning::regional::LocalOperationProvenance,
+    pub(crate) source_cells: &'a std::collections::BTreeMap<word::OpId, opto_ir::design::CellId>,
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
     pub(crate) region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
 }
@@ -432,6 +405,7 @@ pub(crate) fn build_candidate_binding<'a>(
         owned_memory_logic,
         memory_states,
         operation_sources,
+        source_cells,
         root_bindings,
         region_binding,
     } = domain;
@@ -508,21 +482,40 @@ pub(crate) fn build_candidate_binding<'a>(
         let Some([source_operation]) = operation_sources.sources(local_operation) else {
             continue;
         };
+        let state = source_cells.get(source_operation).copied().ok_or_else(|| {
+            crate::SynthError::invariant(
+                "regional state provenance has no stable logical cell binding",
+            )
+        })?;
+        let source_kind = &source_module
+            .operation(*source_operation)
+            .ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "regional state provenance references an unknown source operation",
+                )
+            })?
+            .kind;
         for (role, value) in sequential_inputs(&operation.kind)? {
             let Some(bits) = region_binding.lowered_bits(value) else {
                 continue;
             };
+            let source = sequential_input(source_kind, role);
+            let source_bits = source
+                .and_then(|source| source_to_local.get(&source))
+                .and_then(|local| region_binding.lowered_bits(*local));
             for (bit, &lowered) in bits.iter().enumerate() {
                 let bit = u32::try_from(bit)
                     .map_err(|_| crate::SynthError::capacity("regional sequential bit index"))?;
-                let binding = RegionPlanValueBinding::SequentialInputBit {
-                    operation: *source_operation,
-                    role,
-                    bit,
-                };
-                local_to_sources
-                    .entry(lowered)
-                    .or_insert_with(|| vec![binding]);
+                if source_bits.and_then(|bits| bits.get(bit as usize)).copied() == Some(lowered) {
+                    local_to_sources.entry(lowered).or_insert_with(|| {
+                        vec![RegionPlanValueBinding::SourceBit {
+                            value: source.expect("matching source bits require a source value"),
+                            bit,
+                        }]
+                    });
+                }
+                let binding =
+                    RegionPlanValueBinding::SequentialPinBit(SequentialPinKey { state, role, bit });
                 local_to_outputs
                     .entry(lowered)
                     .or_insert_with(|| vec![binding]);
@@ -548,32 +541,7 @@ pub(crate) fn build_candidate_binding<'a>(
         .values_mut()
         .chain(local_to_outputs.values_mut())
     {
-        bindings.sort_unstable_by_key(|binding| match *binding {
-            RegionPlanValueBinding::MemoryLogicBit {
-                memory,
-                ordinal,
-                bit,
-            } => (0, memory.raw(), ordinal, bit),
-            RegionPlanValueBinding::MemoryStateBit {
-                memory,
-                ordinal,
-                bit,
-            } => (1, memory.raw(), ordinal, bit),
-            RegionPlanValueBinding::SequentialInputBit {
-                operation,
-                role,
-                bit,
-            } => (2, operation.raw(), sequential_role_key(role), bit),
-            RegionPlanValueBinding::SourceBit { value, bit } => {
-                let kind = match source_module.value(value).map(|value| &value.kind) {
-                    Some(word::ValueKind::Signal(_)) => 3,
-                    Some(word::ValueKind::Constant(_)) => 4,
-                    Some(word::ValueKind::Operation(_)) | None => 5,
-                };
-                (kind + 3, value.raw(), bit, 0)
-            }
-            RegionPlanValueBinding::Lowered(value) => (9, value.raw(), 0, 0),
-        });
+        bindings.sort_unstable();
         bindings.dedup();
     }
     complete_binding_aliases(
@@ -775,20 +743,20 @@ fn resolve_immutable_binding_alias(
 
 fn sequential_inputs(
     operation: &word::OpKind,
-) -> Result<Vec<(SequentialInputRole, word::ValueId)>, crate::SynthError> {
+) -> Result<Vec<(SequentialPinRole, word::ValueId)>, crate::SynthError> {
     let mut inputs = Vec::new();
     let resets = match operation {
         word::OpKind::Register(register) => {
-            inputs.push((SequentialInputRole::Data, register.d));
-            inputs.push((SequentialInputRole::Clock, register.clock));
+            inputs.push((SequentialPinRole::Data, register.d));
+            inputs.push((SequentialPinRole::Clock, register.clock));
             if let Some(enable) = register.enable {
-                inputs.push((SequentialInputRole::Enable, enable.value));
+                inputs.push((SequentialPinRole::Enable, enable.value));
             }
             &register.resets
         }
         word::OpKind::Latch(latch) => {
-            inputs.push((SequentialInputRole::Data, latch.d));
-            inputs.push((SequentialInputRole::Enable, latch.enable.value));
+            inputs.push((SequentialPinRole::Data, latch.d));
+            inputs.push((SequentialPinRole::Enable, latch.enable.value));
             &latch.resets
         }
         _ => return Ok(inputs),
@@ -796,36 +764,39 @@ fn sequential_inputs(
     for (index, reset) in resets.iter().enumerate() {
         let index = u32::try_from(index)
             .map_err(|_| crate::SynthError::capacity("regional sequential reset index"))?;
-        inputs.push((SequentialInputRole::ResetControl(index), reset.value));
-        inputs.push((SequentialInputRole::ResetValue(index), reset.reset_value));
+        inputs.push((SequentialPinRole::ResetControl(index), reset.value));
+        inputs.push((SequentialPinRole::ResetValue(index), reset.reset_value));
     }
     Ok(inputs)
 }
 
-fn sequential_input(operation: &word::OpKind, role: SequentialInputRole) -> Option<word::ValueId> {
+pub(crate) fn sequential_input(
+    operation: &word::OpKind,
+    role: SequentialPinRole,
+) -> Option<word::ValueId> {
     match (operation, role) {
-        (word::OpKind::Register(register), SequentialInputRole::Data) => Some(register.d),
-        (word::OpKind::Register(register), SequentialInputRole::Clock) => Some(register.clock),
-        (word::OpKind::Register(register), SequentialInputRole::Enable) => {
+        (word::OpKind::Register(register), SequentialPinRole::Data) => Some(register.d),
+        (word::OpKind::Register(register), SequentialPinRole::Clock) => Some(register.clock),
+        (word::OpKind::Register(register), SequentialPinRole::Enable) => {
             register.enable.map(|enable| enable.value)
         }
-        (word::OpKind::Latch(latch), SequentialInputRole::Data) => Some(latch.d),
-        (word::OpKind::Latch(latch), SequentialInputRole::Enable) => Some(latch.enable.value),
-        (word::OpKind::Register(register), SequentialInputRole::ResetControl(index)) => {
+        (word::OpKind::Latch(latch), SequentialPinRole::Data) => Some(latch.d),
+        (word::OpKind::Latch(latch), SequentialPinRole::Enable) => Some(latch.enable.value),
+        (word::OpKind::Register(register), SequentialPinRole::ResetControl(index)) => {
             register.resets.get(index as usize).map(|reset| reset.value)
         }
-        (word::OpKind::Register(register), SequentialInputRole::ResetValue(index)) => register
+        (word::OpKind::Register(register), SequentialPinRole::ResetValue(index)) => register
             .resets
             .get(index as usize)
             .map(|reset| reset.reset_value),
-        (word::OpKind::Latch(latch), SequentialInputRole::ResetControl(index)) => {
+        (word::OpKind::Latch(latch), SequentialPinRole::ResetControl(index)) => {
             latch.resets.get(index as usize).map(|reset| reset.value)
         }
-        (word::OpKind::Latch(latch), SequentialInputRole::ResetValue(index)) => latch
+        (word::OpKind::Latch(latch), SequentialPinRole::ResetValue(index)) => latch
             .resets
             .get(index as usize)
             .map(|reset| reset.reset_value),
-        (word::OpKind::Latch(_), SequentialInputRole::Clock)
+        (word::OpKind::Latch(_), SequentialPinRole::Clock)
         | (
             word::OpKind::Unary { .. }
             | word::OpKind::Binary { .. }
@@ -841,16 +812,6 @@ fn sequential_input(operation: &word::OpKind, role: SequentialInputRole) -> Opti
     }
 }
 
-fn sequential_role_key(role: SequentialInputRole) -> u32 {
-    match role {
-        SequentialInputRole::Data => 0,
-        SequentialInputRole::Clock => 1,
-        SequentialInputRole::Enable => 2,
-        SequentialInputRole::ResetControl(index) => index.saturating_mul(2).saturating_add(3),
-        SequentialInputRole::ResetValue(index) => index.saturating_mul(2).saturating_add(4),
-    }
-}
-
 fn resolve_plan_value(
     binding: RegionPlanValueBinding,
     _region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
@@ -860,7 +821,7 @@ fn resolve_plan_value(
         RegionPlanValueBinding::SourceBit { .. }
         | RegionPlanValueBinding::MemoryLogicBit { .. }
         | RegionPlanValueBinding::MemoryStateBit { .. }
-        | RegionPlanValueBinding::SequentialInputBit { .. } => Err(crate::SynthError::invariant(
+        | RegionPlanValueBinding::SequentialPinBit(_) => Err(crate::SynthError::invariant(
             "regional plan binding was not materialized against the selected global lowering",
         )),
     }

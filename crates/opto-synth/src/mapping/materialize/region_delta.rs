@@ -106,6 +106,7 @@ impl MappedRegionArtifact {
         plan_binding: &RegionPlanBinding,
         region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
         mapped_values: &WordMappedSignals,
+        sequential_pins: &super::SequentialMappedPins,
         catalog: &CombinationalCellCatalog,
         target_cells: &opto_library::TargetCellSet,
     ) -> Result<Self, crate::SynthError> {
@@ -158,10 +159,23 @@ impl MappedRegionArtifact {
                     .map(|signal| nets.signal(signal))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let output_values = plan_binding.resolve_outputs(region_binding)?;
         let mut output_targets = vec![[None::<ArtifactSignal>; 2]; cover.cells().len()];
-        for (&value, source) in output_values.iter().zip(cover.outputs()) {
-            let target = nets.signal(mapped_values.require(value)?);
+        for (&binding, source) in plan_binding.outputs.iter().zip(cover.outputs()) {
+            let target = match binding {
+                crate::mapping::RegionPlanValueBinding::Lowered(value) => {
+                    nets.signal(mapped_values.require(value)?)
+                }
+                crate::mapping::RegionPlanValueBinding::SequentialPinBit(pin) => {
+                    nets.signal(MappedValueSignal::Net(sequential_pins.require(pin)?))
+                }
+                crate::mapping::RegionPlanValueBinding::SourceBit { .. }
+                | crate::mapping::RegionPlanValueBinding::MemoryLogicBit { .. }
+                | crate::mapping::RegionPlanValueBinding::MemoryStateBit { .. } => {
+                    return Err(crate::SynthError::invariant(
+                        "regional output binding was not materialized against global lowering",
+                    ));
+                }
+            };
             match *source {
                 LibraryCoverSource::Cell(index) => {
                     assign_output_target(&mut output_targets, index, 0, target)?;

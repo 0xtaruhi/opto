@@ -25,8 +25,9 @@ const TRI_STATE_CELL_PREFIX: &str = "_tri_state_";
 use crate::artifact::MappedCellSource;
 pub(crate) use region_delta::REGION_CELL_PREFIX;
 pub(crate) use sequential_delta::{
-    MappedSequentialArtifact, SequentialRegionBinding, lowered_sequential_binding_values,
-    lowered_sequential_operations, sequential_binding_values, sequential_region_bindings,
+    MappedSequentialArtifact, RegionalSequentialCellPlan, SequentialRegionBinding,
+    lowered_sequential_binding_values, lowered_sequential_operations,
+    plan_regional_sequential_cells, sequential_binding_values, sequential_region_bindings,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -339,7 +340,30 @@ pub(crate) struct MappedOutput {
     pub(crate) cell_sources: Box<[(CellId, MappedCellSource)]>,
 }
 
-pub(crate) type MappedSubstrate = (MappedOutput, Box<[Option<NetId>]>);
+pub(crate) type MappedSubstrate = (MappedOutput, Box<[Option<NetId>]>, SequentialMappedPins);
+
+#[derive(Debug)]
+pub(crate) struct SequentialMappedPins(Box<[(crate::mapping::SequentialPinKey, NetId)]>);
+
+impl SequentialMappedPins {
+    pub(crate) fn get(&self, pin: crate::mapping::SequentialPinKey) -> Option<NetId> {
+        self.0
+            .binary_search_by_key(&pin, |&(candidate, _)| candidate)
+            .ok()
+            .map(|index| self.0[index].1)
+    }
+
+    pub(crate) fn require(
+        &self,
+        pin: crate::mapping::SequentialPinKey,
+    ) -> Result<NetId, crate::SynthError> {
+        self.get(pin).ok_or_else(|| {
+            crate::SynthError::invariant(
+                "regional sequential pin has no stable mapped substrate net",
+            )
+        })
+    }
+}
 
 #[derive(Debug)]
 struct ObservableOutput {
@@ -788,6 +812,7 @@ pub(crate) struct MappedSubstrateRequest<'a> {
     pub(crate) source_instances: &'a SourceInstanceProvenance,
     pub(crate) base_revision: opto_ir::RevisionId,
     pub(crate) observed_values: &'a [word::ValueId],
+    pub(crate) sequential_pins: &'a [crate::mapping::SequentialPinKey],
 }
 
 fn target_pin_id(
@@ -816,7 +841,7 @@ pub(crate) fn build_test_substrate(
     source_instances: &SourceInstanceProvenance,
     base_revision: opto_ir::RevisionId,
 ) -> Result<MappedOutput, crate::SynthError> {
-    let (output, _) = build_mapped_substrate(MappedSubstrateRequest {
+    let (output, _, _) = build_mapped_substrate(MappedSubstrateRequest {
         module,
         options,
         design_references,
@@ -824,6 +849,7 @@ pub(crate) fn build_test_substrate(
         source_instances,
         base_revision,
         observed_values: &[],
+        sequential_pins: &[],
     })?;
     Ok(output)
 }
@@ -844,6 +870,7 @@ pub(crate) fn build_mapped_substrate(
         source_instances,
         base_revision,
         observed_values,
+        sequential_pins,
     } = request;
     let offsets = signal_offsets(module)?;
     let signal_bit_count = module.signals().iter().try_fold(0usize, |count, signal| {
@@ -902,6 +929,18 @@ pub(crate) fn build_mapped_substrate(
             );
         }
     }
+    let mut sequential_pins = sequential_pins.to_vec();
+    sequential_pins.sort_unstable();
+    sequential_pins.dedup();
+    let sequential_pins = sequential_pins
+        .into_iter()
+        .map(|pin| {
+            builder
+                .add_net(None)
+                .map(|net| (pin, net))
+                .map_err(crate::SynthError::from)
+        })
+        .collect::<Result<Box<[_]>, _>>()?;
     if required_roots
         .iter()
         .any(|&root| root_nets.get(root).is_none_or(Option::is_none))
@@ -1086,6 +1125,7 @@ pub(crate) fn build_mapped_substrate(
             cell_sources: cell_sources.into_boxed_slice(),
         },
         observed_nets.into_boxed_slice(),
+        SequentialMappedPins(sequential_pins),
     ))
 }
 

@@ -29,6 +29,7 @@ struct RegionArchitectureMaterializer<'request, 'data> {
     request: &'request RegionalArchitectureRequest<'data>,
     semantics: &'request super::roots::FullDomainRootSemantics<'data>,
     roots: &'request [MappingRoot],
+    source_cells: &'request BTreeMap<word::OpId, opto_ir::design::CellId>,
 }
 
 pub(crate) struct RegionalArchitectureRequest<'a> {
@@ -208,6 +209,16 @@ pub(crate) fn prepare_regional_architectures(
         ));
     }
     let semantics = super::roots::FullDomainRootSemantics::new(request.source)?;
+    let source_cells = request
+        .regions
+        .regions()
+        .iter()
+        .flat_map(|&region| request.regions.operations(region).iter().copied())
+        .map(|operation| {
+            crate::regional::logical_operation_cell_id(request.regions, operation)
+                .map(|cell| (operation, cell))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let mut roots = mapping_roots(request.source, request.timing, request.port_bindings, None)?;
     for root in &mut roots {
         root.requires_combinational_cover = semantics.requires_artifact(root.value)?;
@@ -216,6 +227,7 @@ pub(crate) fn prepare_regional_architectures(
         request,
         semantics: &semantics,
         roots: &roots,
+        source_cells: &source_cells,
     };
     let contexts = request
         .decisions
@@ -482,6 +494,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                         owned_memory_logic: &owned_memory_logic,
                         memory_states: &memory_states,
                         operation_sources: &operation_sources,
+                        source_cells: self.source_cells,
                         root_bindings: &root_bindings,
                         region_binding: &lowered_binding,
                     },
