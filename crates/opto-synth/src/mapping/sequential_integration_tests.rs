@@ -333,6 +333,96 @@ fn synthesize_maps_semantic_clock_enable_to_an_enable_dff_pin() {
 }
 
 #[test]
+fn synthesize_selects_enabled_dffs_for_uniform_vector_resets() {
+    let mut module = WordModule::new("top");
+    let vector = WordType::bits(4).unwrap();
+    let clock = module
+        .add_port("clk", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let reset = module
+        .add_port("reset", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let enable = module
+        .add_port("enable", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let data = module
+        .add_port("d", PortDirection::Input, vector, test_span())
+        .unwrap();
+    let output = module
+        .add_port("q", PortDirection::Output, vector, test_span())
+        .unwrap();
+    let [clock, reset, enable, data] =
+        [clock, reset, enable, data].map(|port| read_port(&mut module, port));
+    let zero = module
+        .constant(
+            ConstBits::from_bits(vec![opto_ir::BitVal::Zero; 4]).unwrap(),
+            vector,
+            test_span(),
+        )
+        .unwrap();
+    let result = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: data,
+                clock,
+                edge: Edge::Pos,
+                enable: Some(word::Enable {
+                    value: enable,
+                    active_high: true,
+                }),
+                resets: vec![word::Reset {
+                    kind: word::ResetKind::Async,
+                    value: reset,
+                    active_high: true,
+                    reset_value: zero,
+                }],
+            },
+            test_span(),
+        )
+        .unwrap();
+    connect_port(&mut module, output, result);
+
+    let mut enabled = enable_dff_target_cell();
+    enabled.name = "EDFD1R".to_string();
+    enabled.pins.push(TargetPin {
+        name: "R".to_string(),
+        direction: TargetPinDirection::Input,
+        function: None,
+        three_state: None,
+        capacitance: None,
+        rise_capacitance: None,
+        fall_capacitance: None,
+        receiver_capacitance: None,
+        fanout_load: None,
+        next_state_type: Some(TargetNextStateType::Clear),
+        timing_arcs: Vec::new(),
+        clock_gate_role: None,
+    });
+    enabled.sequential[0].clear = Some(BooleanFunction::parse("R").unwrap());
+    let options = SynthesisOptions {
+        target_cells: vec![enabled].into(),
+    };
+    crate::mapping::TargetMappingContext::new(&options, crate::SynthesisConfig::default())
+        .prepare_private_structure(
+            &mut module,
+            &std::collections::BTreeMap::default(),
+            None,
+            true,
+        )
+        .unwrap();
+
+    let word::ValueKind::Operation(operation) = module.value(result).unwrap().kind else {
+        panic!("vector register result lost its operation");
+    };
+    let word::OpKind::Register(register) = &module.operation(operation).unwrap().kind else {
+        panic!("vector register changed operation kind");
+    };
+    assert!(register.enable.is_some());
+    assert_eq!(module.value(register.d).unwrap().ty.width(), 4);
+}
+
+#[test]
 fn synthesize_covers_enable_polarity_in_the_boolean_network() {
     let mut module = module_with_enable_flop_process();
     let mut enabled = enable_dff_target_cell();

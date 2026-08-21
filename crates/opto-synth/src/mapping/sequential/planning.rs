@@ -24,7 +24,7 @@ pub(crate) fn expand_unsupported_enables(
             continue;
         };
         let result = model.result;
-        let has_enable_cell = uniform_async_reset_requests(module, &register.resets)?
+        let has_enable_cell = super::uniform_async_reset_requests(module, &register.resets)?
             .is_some_and(|requests| sequential_catalog.has_enable_cell(register.edge, &requests));
         if has_enable_cell {
             continue;
@@ -75,8 +75,14 @@ pub(crate) fn normalize_enable_polarities(
                 let Some(enable) = register.enable else {
                     continue;
                 };
-                let super::SelectedRegisterCell::Enabled(cell) =
-                    sequential_catalog.select_register(module, register, combinational_catalog)?
+                let resets = super::uniform_async_reset_requests(module, &register.resets)?
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "retained enabled register has non-uniform reset values",
+                        )
+                    })?;
+                let super::SelectedRegisterCell::Enabled(cell) = sequential_catalog
+                    .select_register_for_resets(module, register, &resets, combinational_catalog)?
                 else {
                     return Err(crate::SynthError::invariant(
                         "retained register enable selected a simple DFF",
@@ -378,89 +384,6 @@ fn active_high_control(
     }
 }
 
-fn async_reset_requests(
-    module: &word::WordModule,
-    resets: &[word::Reset],
-) -> Result<super::AsyncResetRequests, crate::SynthError> {
-    resets
-        .iter()
-        .copied()
-        .map(|reset| async_reset_request_for(module, reset))
-        .collect()
-}
-
-fn async_reset_request_for(
-    module: &word::WordModule,
-    reset: word::Reset,
-) -> Result<super::AsyncResetRequest, crate::SynthError> {
-    let value = module.value(reset.reset_value).ok_or_else(|| {
-        crate::SynthError::invariant(format!(
-            "unknown asynchronous reset value {:?}",
-            reset.reset_value
-        ))
-    })?;
-    let word::ValueKind::Constant(bits) = &value.kind else {
-        return Err(crate::SynthError::invariant(
-            "asynchronous register reset value must be constant",
-        ));
-    };
-    let reset_value = crate::boolean::logic::logic_constant(bits).ok_or_else(|| {
-        crate::SynthError::invariant(format!(
-            "asynchronous register reset value must be a two-state scalar constant, got width {} and bits {bits:?}",
-            value.ty.width()
-        ))
-    })?;
-    Ok(super::AsyncResetRequest {
-        active_high: reset.active_high,
-        reset_value,
-    })
-}
-
-fn uniform_async_reset_requests(
-    module: &word::WordModule,
-    resets: &[word::Reset],
-) -> Result<Option<super::AsyncResetRequests>, crate::SynthError> {
-    resets
-        .iter()
-        .copied()
-        .map(|reset| uniform_async_reset_request_for(module, reset))
-        .collect()
-}
-
-fn uniform_async_reset_request_for(
-    module: &word::WordModule,
-    reset: word::Reset,
-) -> Result<Option<super::AsyncResetRequest>, crate::SynthError> {
-    let value = module.value(reset.reset_value).ok_or_else(|| {
-        crate::SynthError::invariant(format!(
-            "unknown asynchronous reset value {:?}",
-            reset.reset_value
-        ))
-    })?;
-    let word::ValueKind::Constant(bits) = &value.kind else {
-        return Err(crate::SynthError::invariant(
-            "asynchronous register reset value must be constant",
-        ));
-    };
-    let Some(first) = bits.as_slice().first().copied() else {
-        return Err(crate::SynthError::invariant(
-            "asynchronous register reset value is empty",
-        ));
-    };
-    let reset_value = match first {
-        opto_ir::BitVal::Zero => false,
-        opto_ir::BitVal::One => true,
-        opto_ir::BitVal::X | opto_ir::BitVal::Z => return Ok(None),
-    };
-    if !bits.as_slice().iter().all(|&bit| bit == first) {
-        return Ok(None);
-    }
-    Ok(Some(super::AsyncResetRequest {
-        active_high: reset.active_high,
-        reset_value,
-    }))
-}
-
 fn normalize_async_resets(
     module: &mut word::WordModule,
     resets: &[word::Reset],
@@ -475,7 +398,7 @@ fn normalize_async_resets(
         return Ok(asynchronous);
     }
 
-    let requests = async_reset_requests(module, &asynchronous)?;
+    let requests = super::async_reset_requests(module, &asynchronous)?;
     if requests
         .iter()
         .all(|request| request.reset_value == requests[0].reset_value)
@@ -657,17 +580,18 @@ mod tests {
             )
             .unwrap();
         let reset = input(&mut module, "reset");
-        let request = uniform_async_reset_request_for(
+        let request = super::super::uniform_async_reset_requests(
             &module,
-            word::Reset {
+            &[word::Reset {
                 kind: word::ResetKind::Async,
                 value: reset,
                 active_high: true,
                 reset_value,
-            },
+            }],
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .remove(0);
 
         assert_eq!(
             request,
@@ -692,14 +616,14 @@ mod tests {
         let reset = input(&mut module, "reset");
 
         assert_eq!(
-            uniform_async_reset_request_for(
+            super::super::uniform_async_reset_requests(
                 &module,
-                word::Reset {
+                &[word::Reset {
                     kind: word::ResetKind::Async,
                     value: reset,
                     active_high: false,
                     reset_value,
-                },
+                }],
             )
             .unwrap(),
             None
