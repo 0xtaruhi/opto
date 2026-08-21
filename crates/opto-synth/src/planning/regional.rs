@@ -16,7 +16,7 @@ pub(crate) use lowering::{
 };
 pub(crate) use operation_provenance::LocalOperationProvenance;
 pub(crate) use private::seal_work_design;
-pub(crate) use search::{RegionalSearchRequest, select_architectures};
+pub(crate) use search::{RegionalSearchRequest, context_keys, select_architectures};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryImplementationCandidate {

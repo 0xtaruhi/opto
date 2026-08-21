@@ -12,13 +12,10 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy)]
 pub(crate) struct RegionalSearchRequest<'a> {
     pub(crate) module: &'a word::WordModule,
-    pub(crate) regions: &'a SynthesisRegionGraph,
-    pub(crate) scenarios: &'a ScenarioSet,
+    pub(crate) work: &'a crate::regional::WorkGraph,
+    pub(crate) contexts: &'a [RegionContextKey],
     pub(crate) target_cells: &'a opto_library::TargetCellSet,
     pub(crate) target_model: &'a crate::planning::regional::StructuralTargetModel,
-    pub(crate) contracts: &'a crate::regional::RegionContractSet,
-    pub(crate) effort: SynthesisEffort,
-    pub(crate) target_fingerprint: [u8; 32],
     pub(crate) previous: &'a [RegionalCacheRecord],
     pub(crate) metrics: &'a crate::incremental::IncrementalRunMetrics,
 }
@@ -37,20 +34,79 @@ pub(crate) fn select_architectures(
 ) -> Result<Box<[RegionalCacheRecord]>, crate::SynthError> {
     let RegionalSearchRequest {
         module,
-        regions,
-        scenarios,
+        work,
+        contexts,
         target_cells,
         target_model,
-        contracts,
-        effort,
-        target_fingerprint,
         previous,
         metrics,
     } = request;
-    let contexts = regions
+    let regions = work.regions();
+    if contexts.len() != regions.regions().len() {
+        return Err(crate::SynthError::invariant(
+            "architecture contexts do not cover the work graph",
+        ));
+    }
+    let cached = contexts
+        .iter()
+        .map(|context| {
+            previous
+                .binary_search_by_key(context, RegionalCacheRecord::context)
+                .ok()
+                .map(|index| &previous[index])
+        })
+        .collect::<Vec<_>>();
+    let results =
+        crate::regional::SynthesisExecutor::execute(runtime, work.packet_tasks(), |item, _| {
+            let region_row = work.item_region(item.id()).ok_or_else(|| {
+                crate::SynthError::invariant("architecture work item has no region binding")
+            })?;
+            let row = region_row.index();
+            let region = regions.regions()[row];
+            let record = if let Some(cached) = cached[row] {
+                validate_cached_region(module, regions.memories(region), target_cells, cached)?;
+                cached.clone()
+            } else {
+                let implementations =
+                    search_region(module, regions.memories(region), target_cells, target_model)?;
+                let encoded = implementations
+                    .iter()
+                    .flat_map(|implementation| implementation.raw().to_le_bytes())
+                    .collect::<Vec<_>>();
+                RegionalCacheRecord::new(contexts[row], &encoded)
+            };
+            Ok(crate::regional::WorkProduct {
+                proof: decision_proof(&record),
+                output: record,
+            })
+        })?;
+    let records = work
+        .accept_results(results)?
+        .into_vec()
+        .into_iter()
+        .map(|result| result.output)
+        .collect::<Vec<_>>();
+    for cached in cached {
+        if cached.is_some() {
+            metrics.regional_decision_hit();
+        } else {
+            metrics.regional_decision_miss();
+        }
+    }
+    Ok(records.into_boxed_slice())
+}
+
+pub(crate) fn context_keys(
+    regions: &SynthesisRegionGraph,
+    contracts: &crate::regional::RegionContractSet,
+    scenarios: &ScenarioSet,
+    target_fingerprint: [u8; 32],
+    effort: SynthesisEffort,
+) -> Result<Box<[RegionContextKey]>, crate::SynthError> {
+    regions
         .regions()
         .iter()
-        .map(|region| -> Result<RegionContextKey, crate::SynthError> {
+        .map(|region| {
             let predecessor_summaries = regions
                 .predecessors(*region)
                 .iter()
@@ -72,38 +128,18 @@ pub(crate) fn select_architectures(
                 &predecessor_summaries,
             ))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let cached = contexts
-        .iter()
-        .map(|context| {
-            previous
-                .binary_search_by_key(context, RegionalCacheRecord::context)
-                .ok()
-                .map(|index| &previous[index])
-        })
-        .collect::<Vec<_>>();
-    let records = runtime.analyze_indexed(regions.regions().len(), |row| {
-        let region = regions.regions()[row];
-        if let Some(cached) = cached[row] {
-            validate_cached_region(module, regions.memories(region), target_cells, cached)?;
-            return Ok::<_, crate::SynthError>(cached.clone());
-        }
-        let implementations =
-            search_region(module, regions.memories(region), target_cells, target_model)?;
-        let encoded = implementations
-            .iter()
-            .flat_map(|implementation| implementation.raw().to_le_bytes())
-            .collect::<Vec<_>>();
-        Ok::<_, crate::SynthError>(RegionalCacheRecord::new(contexts[row], &encoded))
-    })?;
-    for cached in cached {
-        if cached.is_some() {
-            metrics.regional_decision_hit();
-        } else {
-            metrics.regional_decision_miss();
-        }
+        .collect()
+}
+
+fn decision_proof(record: &RegionalCacheRecord) -> opto_ir::design::EquivalenceCertificate {
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"opto/regional-decision/v1\0");
+    digest.update(&record.context().bytes());
+    digest.update(record.memory_implementations());
+    opto_ir::design::EquivalenceCertificate {
+        regime: opto_ir::design::EquivalenceRegime::ByConstruction,
+        digest: *digest.finalize().as_bytes(),
     }
-    Ok(records.into_boxed_slice())
 }
 
 fn search_region(

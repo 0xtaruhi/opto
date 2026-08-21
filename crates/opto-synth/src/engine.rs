@@ -665,29 +665,6 @@ fn plan_regions(
         &normalized.environment.object_bindings,
         0,
     )?;
-    normalized.ledger.regional_cache_records = crate::planning::regional::select_architectures(
-        crate::planning::regional::RegionalSearchRequest {
-            module: &normalized.synthesized,
-            regions: &regions,
-            scenarios: &normalized.environment.scenarios,
-            target_cells: &normalized.environment.options.target_cells,
-            target_model: &target_model,
-            contracts: &contracts,
-            effort: normalized.environment.effort,
-            target_fingerprint: normalized
-                .environment
-                .options
-                .target_cells
-                .content_fingerprint()
-                .bytes(),
-            previous: &normalized.previous_regional_cache_records,
-            metrics: &normalized.environment.incremental_metrics,
-        },
-        execution.runtime,
-    )?;
-    normalized.previous_regional_cache_records = Arc::from([]);
-    let regions = Arc::new(regions);
-    let design = Arc::new(design);
     let scenarios = normalized.environment.scenarios.generation();
     let target = normalized
         .environment
@@ -695,14 +672,21 @@ fn plan_regions(
         .target_cells
         .content_fingerprint()
         .bytes();
-    let contexts = normalized
-        .ledger
-        .regional_cache_records
+    let context_keys = crate::planning::regional::context_keys(
+        &regions,
+        &contracts,
+        &normalized.environment.scenarios,
+        target,
+        normalized.environment.effort,
+    )?;
+    let regions = Arc::new(regions);
+    let design = Arc::new(design);
+    let contexts = context_keys
         .iter()
         .zip(regions.regions())
-        .map(|(record, region)| {
+        .map(|(&context, region)| {
             crate::regional::WorkContext::logical(
-                record.context().into(),
+                context.into(),
                 design.revision(),
                 scenarios,
                 target,
@@ -719,6 +703,19 @@ fn plan_regions(
         execution.runtime,
     )?;
     work.rebatch_for_workers(execution.runtime.parallelism())?;
+    normalized.ledger.regional_cache_records = crate::planning::regional::select_architectures(
+        crate::planning::regional::RegionalSearchRequest {
+            module: &normalized.synthesized,
+            work: &work,
+            contexts: &context_keys,
+            target_cells: &normalized.environment.options.target_cells,
+            target_model: &target_model,
+            previous: &normalized.previous_regional_cache_records,
+            metrics: &normalized.environment.incremental_metrics,
+        },
+        execution.runtime,
+    )?;
+    normalized.previous_regional_cache_records = Arc::from([]);
     Ok(PlannedState {
         normalized,
         mapping_context,
