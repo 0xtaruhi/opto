@@ -158,6 +158,15 @@ pub struct Cell<L> {
     pub source: SourceSpan,
 }
 
+/// Canonical semantic identity contributed by a design cell payload.
+///
+/// Implementations must return the same digest for semantically equal payloads
+/// and different digests whenever the payload changes design behavior.
+pub trait DesignPayload {
+    /// Returns the payload's canonical semantic fingerprint.
+    fn semantic_fingerprint(&self) -> [u8; 32];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Proof regime carried by one rewrite transaction.
 pub enum EquivalenceRegime {
@@ -246,7 +255,7 @@ impl<L> DesignBuilder<L> {
 
 impl<L> DesignBuilder<L>
 where
-    L: Clone + Eq,
+    L: Clone + Eq + DesignPayload,
 {
     /// Sorts stable entities, constructs persistent directories, and validates
     /// complete connectivity.
@@ -347,7 +356,7 @@ impl<L> DesignRevision<L> {
 
 impl<L> DesignRevision<L>
 where
-    L: Clone + Eq,
+    L: Clone + Eq + DesignPayload,
 {
     /// Validates and atomically commits one deterministic wave of disjoint
     /// rewrite deltas.
@@ -379,13 +388,23 @@ where
         {
             return Err(DesignError::DuplicateDelta(id));
         }
-        let mut written = BTreeSet::new();
+        let mut claimed = BTreeSet::new();
         for delta in &deltas {
             self.validate_delta(delta)?;
             validate_proof(delta)?;
             for &entity in delta.replaces.as_slice() {
-                if !written.insert(entity) {
+                if !claimed.insert(entity) {
                     return Err(DesignError::OverlappingReplacement(entity));
+                }
+            }
+            for entity in delta
+                .cells
+                .iter()
+                .map(|cell| EntityId::Cell(cell.id))
+                .chain(delta.nets.iter().map(|net| EntityId::NetBit(net.id)))
+            {
+                if !delta.replaces.contains(entity) && !claimed.insert(entity) {
+                    return Err(DesignError::OverlappingFragmentEntity(entity));
                 }
             }
         }
@@ -471,6 +490,42 @@ where
                     return Err(DesignError::IncompleteReadFootprint(entity));
                 }
             }
+        }
+        let semantic_inputs = delta
+            .semantic
+            .inputs
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let required_inputs = delta
+            .cells
+            .iter()
+            .flat_map(|cell| cell.inputs.iter().copied())
+            .filter(|&net| {
+                self.net(net).is_some() && !delta.replaces.contains(EntityId::NetBit(net))
+            })
+            .collect::<BTreeSet<_>>();
+        if let Some(net) = required_inputs.difference(&semantic_inputs).next().copied() {
+            return Err(DesignError::IncompleteSemanticInput(net));
+        }
+        let semantic_outputs = delta
+            .semantic
+            .outputs
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let required_outputs = self
+            .cells()
+            .filter(|cell| !delta.replaces.contains(EntityId::Cell(cell.id)))
+            .flat_map(|cell| cell.inputs.iter().copied())
+            .filter(|&net| delta.replaces.contains(EntityId::NetBit(net)))
+            .collect::<BTreeSet<_>>();
+        if let Some(net) = required_outputs
+            .difference(&semantic_outputs)
+            .next()
+            .copied()
+        {
+            return Err(DesignError::IncompleteSemanticOutput(net));
         }
         Ok(())
     }
@@ -733,15 +788,86 @@ fn validate_unique_nets(nets: &[NetBit]) -> Result<(), DesignError> {
     Ok(())
 }
 
-fn derive_revision_id<L>(base: DesignRevisionId, deltas: &[RewriteDelta<L>]) -> DesignRevisionId {
+fn derive_revision_id<L: DesignPayload>(
+    base: DesignRevisionId,
+    deltas: &[RewriteDelta<L>],
+) -> DesignRevisionId {
     let mut digest = blake3::Hasher::new();
-    digest.update(b"opto.design-revision.v1\0");
+    digest.update(b"opto.design-revision.v2\0");
     digest.update(&base.bytes());
     for delta in deltas {
         digest.update(&delta.id.bytes());
+        hash_entities(&mut digest, delta.reads.as_slice());
+        hash_entities(&mut digest, delta.replaces.as_slice());
+        let mut cells = delta.cells.iter().collect::<Vec<_>>();
+        cells.sort_unstable_by_key(|cell| cell.id);
+        digest.update(&(cells.len() as u64).to_le_bytes());
+        for cell in cells {
+            digest.update(&cell.id.bytes());
+            digest.update(&cell.kind.semantic_fingerprint());
+            digest.update(&[match cell.class {
+                CellClass::Combinational => 0,
+                CellClass::StateBoundary => 1,
+            }]);
+            hash_net_ids(&mut digest, &cell.inputs);
+            hash_net_ids(&mut digest, &cell.outputs);
+        }
+        let mut nets = delta.nets.iter().collect::<Vec<_>>();
+        nets.sort_unstable_by_key(|net| net.id);
+        digest.update(&(nets.len() as u64).to_le_bytes());
+        for net in nets {
+            digest.update(&net.id.bytes());
+            digest.update(&[match net.state {
+                LogicStateKind::TwoState => 0,
+                LogicStateKind::FourState => 1,
+            }]);
+            match net.driver {
+                None => {
+                    digest.update(&[0]);
+                }
+                Some(NetDriver::Cell { cell, output }) => {
+                    digest.update(&[1]);
+                    digest.update(&cell.bytes());
+                    digest.update(&output.to_le_bytes());
+                }
+                Some(NetDriver::Constant(value)) => {
+                    digest.update(&[2, value as u8]);
+                }
+            }
+        }
+        hash_net_ids(&mut digest, &delta.semantic.inputs);
+        hash_net_ids(&mut digest, &delta.semantic.outputs);
+        digest.update(&[match delta.proof.regime {
+            EquivalenceRegime::Combinational => 0,
+            EquivalenceRegime::Sequential => 1,
+            EquivalenceRegime::ByConstruction => 2,
+        }]);
         digest.update(&delta.proof.digest);
     }
     DesignRevisionId::from_bytes(*digest.finalize().as_bytes())
+}
+
+fn hash_entities(digest: &mut blake3::Hasher, entities: &[EntityId]) {
+    digest.update(&(entities.len() as u64).to_le_bytes());
+    for entity in entities {
+        match entity {
+            EntityId::Cell(id) => {
+                digest.update(&[0]);
+                digest.update(&id.bytes());
+            }
+            EntityId::NetBit(id) => {
+                digest.update(&[1]);
+                digest.update(&id.bytes());
+            }
+        }
+    }
+}
+
+fn hash_net_ids(digest: &mut blake3::Hasher, nets: &[NetBitId]) {
+    digest.update(&(nets.len() as u64).to_le_bytes());
+    for net in nets {
+        digest.update(&net.bytes());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -779,12 +905,21 @@ pub enum DesignError {
     /// Two transactions in one ordinary wave replace the same entity.
     #[error("rewrite deltas overlap at replacement entity {0:?}")]
     OverlappingReplacement(EntityId),
+    /// Two transactions introduce the same stable fragment identity.
+    #[error("rewrite deltas introduce the same fragment entity {0:?}")]
+    OverlappingFragmentEntity(EntityId),
     /// A fragment changes an existing entity outside its write footprint.
     #[error("rewrite fragment mutates unclaimed entity {0:?}")]
     UnclaimedMutation(EntityId),
     /// A semantic boundary refers to a missing net.
     #[error("rewrite boundary refers to unknown net {0:?}")]
     UnknownBoundaryNet(NetBitId),
+    /// A fragment consumes an external net omitted from its semantic inputs.
+    #[error("rewrite semantic inputs omit external net {0:?}")]
+    IncompleteSemanticInput(NetBitId),
+    /// A changed net drives an unchanged consumer but is absent from outputs.
+    #[error("rewrite semantic outputs omit externally consumed net {0:?}")]
+    IncompleteSemanticOutput(NetBitId),
     /// A driven boundary output was not declared writable.
     #[error("rewrite boundary output {0:?} is outside the replacement footprint")]
     UnclaimedBoundaryOutput(NetBitId),
@@ -838,6 +973,12 @@ pub enum DesignError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl DesignPayload for &'_ str {
+        fn semantic_fingerprint(&self) -> [u8; 32] {
+            *blake3::hash(self.as_bytes()).as_bytes()
+        }
+    }
 
     fn digest(value: u8) -> [u8; 32] {
         [value; 32]
@@ -1043,6 +1184,36 @@ mod tests {
     }
 
     #[test]
+    fn commit_rejects_an_incomplete_semantic_input() {
+        let base = base_design();
+        let mut replacement = delta(20, base.revision(), "missing-input");
+        replacement.semantic.inputs = Box::new([]);
+
+        assert_eq!(
+            base.commit(vec![replacement], |_| Ok(())).unwrap_err(),
+            DesignError::IncompleteSemanticInput(NetBitId::from_bytes(digest(10)))
+        );
+    }
+
+    #[test]
+    fn commit_rejects_an_omitted_externally_consumed_output() {
+        let mut builder = DesignBuilder::new(DesignRevisionId::from_bytes(digest(90)));
+        builder.add_net(net(10, None));
+        builder.add_net(net(11, Some((1, 0))));
+        builder.add_net(net(12, Some((3, 0))));
+        builder.add_cell(cell(1, "not", &[10], &[11]));
+        builder.add_cell(cell(3, "consumer", &[11], &[12]));
+        let base = builder.seal().unwrap();
+        let mut replacement = delta(20, base.revision(), "replacement");
+        replacement.semantic.outputs = Box::new([]);
+
+        assert_eq!(
+            base.commit(vec![replacement], |_| Ok(())).unwrap_err(),
+            DesignError::IncompleteSemanticOutput(NetBitId::from_bytes(digest(11)))
+        );
+    }
+
+    #[test]
     fn stable_boundary_cannot_change_state_domain() {
         let base = base_design();
         let mut replacement = delta(20, base.revision(), "four-state");
@@ -1066,6 +1237,45 @@ mod tests {
             base.cell(CellId::from_bytes(digest(1))).unwrap().kind,
             "not"
         );
+    }
+
+    #[test]
+    fn ordinary_wave_rejects_duplicate_new_fragment_identity() {
+        let base = base_design();
+        let added = |id, kind| RewriteDelta {
+            id: RewriteDeltaId::from_bytes(digest(id)),
+            base: base.revision(),
+            reads: set(vec![EntityId::NetBit(NetBitId::from_bytes(digest(10)))]),
+            replaces: set(vec![]),
+            cells: vec![cell(2, kind, &[10], &[12])].into_boxed_slice(),
+            nets: vec![net(12, Some((2, 0)))].into_boxed_slice(),
+            semantic: SemanticBinding {
+                inputs: vec![NetBitId::from_bytes(digest(10))].into_boxed_slice(),
+                outputs: Box::new([]),
+            },
+            proof: EquivalenceCertificate {
+                regime: EquivalenceRegime::ByConstruction,
+                digest: digest(id + 1),
+            },
+        };
+
+        assert!(matches!(
+            base.commit(vec![added(20, "first"), added(30, "second")], |_| Ok(())),
+            Err(DesignError::OverlappingFragmentEntity(_))
+        ));
+    }
+
+    #[test]
+    fn committed_revision_hashes_fragment_payload_content() {
+        let base = base_design();
+        let first = base
+            .commit(vec![delta(20, base.revision(), "first")], |_| Ok(()))
+            .unwrap();
+        let second = base
+            .commit(vec![delta(20, base.revision(), "second")], |_| Ok(()))
+            .unwrap();
+
+        assert_ne!(first.revision(), second.revision());
     }
 
     #[test]

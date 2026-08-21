@@ -107,6 +107,15 @@ pub(crate) enum LogicalCell {
     },
 }
 
+impl opto_ir::design::DesignPayload for LogicalCell {
+    fn semantic_fingerprint(&self) -> [u8; 32] {
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"opto/logical-cell/v1\0");
+        hash_logical_cell(&mut digest, self);
+        *digest.finalize().as_bytes()
+    }
+}
+
 #[derive(Debug, Clone)]
 /// Canonical immutable macro design consumed by every regional work epoch.
 pub(crate) struct WorkDesign(DesignRevision<LogicalCell>);
