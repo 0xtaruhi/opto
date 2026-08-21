@@ -121,6 +121,33 @@ pub(crate) struct WorkItem {
     estimated_memory: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct WorkContext {
+    key: WorkContextKey,
+    design: DesignRevisionId,
+    scenarios: opto_timing::ScenarioGeneration,
+    target: [u8; 32],
+    contracts: Box<[crate::BoundaryContract]>,
+}
+
+impl WorkContext {
+    pub(crate) fn logical(
+        key: WorkContextKey,
+        design: DesignRevisionId,
+        scenarios: opto_timing::ScenarioGeneration,
+        target: [u8; 32],
+        contracts: &[crate::BoundaryContract],
+    ) -> Self {
+        Self {
+            key,
+            design,
+            scenarios,
+            target,
+            contracts: contracts.into(),
+        }
+    }
+}
+
 impl WorkItem {
     pub(crate) const fn context(&self) -> WorkContextKey {
         self.context
@@ -140,6 +167,7 @@ pub(crate) struct WorkGraph {
     design: Arc<WorkDesign>,
     regions: Arc<crate::SynthesisRegionGraph>,
     item_regions: Box<[crate::RegionRowId]>,
+    contexts: Box<[WorkContext]>,
     items: Box<[WorkItem]>,
     shards: Box<[CompilationShard]>,
     coarse_groups: opto_core::PackedRows<CompilationShardId>,
@@ -152,7 +180,7 @@ impl WorkGraph {
         module: &word::WordModule,
         regions: Arc<crate::SynthesisRegionGraph>,
         design: Arc<WorkDesign>,
-        contexts: &[WorkContextKey],
+        contexts: Box<[WorkContext]>,
         runtime: &opto_runtime::ExecutionContext,
     ) -> Result<Self, crate::SynthError> {
         if contexts.len() != regions.regions().len() {
@@ -214,7 +242,7 @@ impl WorkGraph {
                 id,
                 core,
                 halo,
-                context: contexts[region.row().index()],
+                context: contexts[region.row().index()].key,
                 estimated_work: region.estimated_work().max(1),
                 estimated_memory,
             };
@@ -241,6 +269,7 @@ impl WorkGraph {
             design,
             regions,
             item_regions,
+            contexts,
             items: items.into_boxed_slice(),
             shards: Box::new([]),
             coarse_groups: opto_core::PackedRows::try_from_rows(Vec::<Vec<_>>::new())
@@ -323,10 +352,32 @@ impl WorkGraph {
         if self.predecessors.row_count() != self.items.len()
             || self.successors.row_count() != self.items.len()
             || self.item_regions.len() != self.items.len()
+            || self.contexts.len() != self.items.len()
             || self.coarse_groups.value_count() != self.shards.len()
         {
             return Err(crate::SynthError::invariant(
                 "work shards do not match their stable semantic items",
+            ));
+        }
+        let revision = self.design.0.revision();
+        if self
+            .contexts
+            .iter()
+            .zip(&self.items)
+            .any(|(context, item)| {
+                context.key != item.context
+                    || context.design != revision
+                    || context
+                        .contracts
+                        .iter()
+                        .any(|contract| contract.scenario_generation() != context.scenarios)
+            })
+            || self.contexts.windows(2).any(|pair| {
+                pair[0].scenarios != pair[1].scenarios || pair[0].target != pair[1].target
+            })
+        {
+            return Err(crate::SynthError::invariant(
+                "work context does not match its design or scenario generation",
             ));
         }
         if let Some((row, _)) = self.items.iter().enumerate().find(|(_, item)| {
@@ -387,6 +438,10 @@ impl WorkDesign {
         regions: &crate::SynthesisRegionGraph,
     ) -> Result<Self, crate::SynthError> {
         seal_logical_design(module, regions).map(Self)
+    }
+
+    pub(crate) const fn revision(&self) -> DesignRevisionId {
+        self.0.revision()
     }
 }
 
@@ -1320,16 +1375,28 @@ mod tests {
             super::super::region_graph::RegionPartitionPolicy::with_target_work(1),
         )
         .unwrap();
+        let design = Arc::new(WorkDesign::seal(&module, &regions).unwrap());
+        let regions = Arc::new(regions);
+        let scenarios = opto_timing::ScenarioSet::single(
+            Arc::new(opto_timing::TimingContext::default()),
+            Arc::new(opto_timing::TimingLibrary::default()),
+            opto_timing::Parasitics::default(),
+        )
+        .generation();
         let contexts = (0..regions.regions().len())
             .map(|index| {
                 let mut bytes = [0; 32];
                 bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
-                WorkContextKey::from(crate::RegionContextKey::from_bytes_for_test(bytes))
+                WorkContext::logical(
+                    WorkContextKey::from(crate::RegionContextKey::from_bytes_for_test(bytes)),
+                    design.revision(),
+                    scenarios,
+                    [0; 32],
+                    &[],
+                )
             })
-            .collect::<Vec<_>>();
-
-        let design = Arc::new(WorkDesign::seal(&module, &regions).unwrap());
-        let regions = Arc::new(regions);
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let runtime =
             opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 4 })
                 .unwrap();
@@ -1337,7 +1404,7 @@ mod tests {
             &module,
             Arc::clone(&regions),
             Arc::clone(&design),
-            &contexts,
+            contexts.clone(),
             &runtime,
         )
         .unwrap();
@@ -1366,7 +1433,7 @@ mod tests {
             &module,
             Arc::clone(&regions),
             Arc::clone(&design),
-            &contexts,
+            contexts,
             &serial,
         )
         .unwrap();

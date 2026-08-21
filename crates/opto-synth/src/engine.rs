@@ -687,17 +687,36 @@ fn plan_regions(
         execution.runtime,
     )?;
     normalized.previous_regional_cache_records = Arc::from([]);
+    let regions = Arc::new(regions);
+    let design = Arc::new(design);
+    let scenarios = normalized.environment.scenarios.generation();
+    let target = normalized
+        .environment
+        .options
+        .target_cells
+        .content_fingerprint()
+        .bytes();
     let contexts = normalized
         .ledger
         .regional_cache_records
         .iter()
-        .map(|record| record.context().into())
-        .collect::<Vec<_>>();
+        .zip(regions.regions())
+        .map(|(record, region)| {
+            crate::regional::WorkContext::logical(
+                record.context().into(),
+                design.revision(),
+                scenarios,
+                target,
+                contracts.contracts(region.row()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     let mut work = crate::regional::WorkGraph::build(
         &normalized.synthesized,
-        Arc::new(regions),
-        Arc::new(design),
-        &contexts,
+        regions,
+        design,
+        contexts,
         execution.runtime,
     )?;
     work.rebatch_for_workers(execution.runtime.parallelism())?;
