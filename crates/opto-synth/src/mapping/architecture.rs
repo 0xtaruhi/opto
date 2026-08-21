@@ -22,8 +22,10 @@ use crate::{
     SynthesisOptions, SynthesisRegion,
 };
 use opto_ir::word;
-use opto_runtime::ExecutionContext;
+use opto_runtime::{ExecutionContext, Task, TaskKey};
 use std::collections::BTreeMap;
+
+const REGIONAL_MATERIALIZATION_TASK_DOMAIN: u32 = 0x4d41_544c;
 
 struct RegionArchitectureMaterializer<'request, 'data> {
     request: &'request RegionalArchitectureRequest<'data>,
@@ -87,6 +89,18 @@ struct OptimizedPrivateRegion {
     root_pairs: Vec<(MappingRoot, word::ValueId)>,
     state_relations: BTreeMap<word::OpId, [u8; 32]>,
     substrate_instances: Box<[Box<str>]>,
+}
+
+struct CharacterizedPrivateRegion {
+    optimized: OptimizedPrivateRegion,
+    decisions: ArchitectureDecisions,
+}
+
+struct RegionalCharacterization {
+    memory_implementations: Box<[MemoryImplementationCandidate]>,
+    restored_plan: Option<RegionCoverPlan>,
+    context: RegionContextKey,
+    private: CharacterizedPrivateRegion,
 }
 
 #[derive(Clone, Copy)]
@@ -310,17 +324,63 @@ pub(crate) fn prepare_regional_architectures(
             )?;
             let restored_plan =
                 decision.restore_plan(region, request.contracts.contracts(region.row()))?;
-            let mapped = materializer.materialize(
+            let private = materializer.characterize_private_region(
                 &memory_implementations,
-                restored_plan,
                 region,
-                decision.context(),
+                regional_runtime,
+            )?;
+            Ok(crate::regional::WorkProduct {
+                proof: characterization_proof(region, &private.decisions),
+                output: RegionalCharacterization {
+                    memory_implementations,
+                    restored_plan,
+                    context: decision.context(),
+                    private,
+                },
+            })
+        },
+    )?;
+    let mut characterized = work
+        .accept_results(results)?
+        .into_vec()
+        .into_iter()
+        .map(|result| result.output)
+        .collect::<Vec<_>>();
+    for (row, candidate) in characterized.iter_mut().enumerate() {
+        candidate.private.decisions.select_for_budget(
+            request.target_model,
+            request.contracts.delay_budget(regions.regions()[row].row()),
+        )?;
+    }
+    let tasks = characterized
+        .into_iter()
+        .enumerate()
+        .map(|(row, candidate)| {
+            let region = regions.regions()[row];
+            Task::new(
+                TaskKey::new(REGIONAL_MATERIALIZATION_TASK_DOMAIN, row as u64),
+                (region, candidate),
+            )
+            .with_estimated_work(region.estimated_work().max(1))
+            .with_estimated_memory(region.estimated_work().max(1))
+        })
+        .collect();
+    let mapped_regions = runtime.map_ordered_composite(
+        tasks,
+        |(region, candidate), regional_runtime| {
+            let mapped = materializer.materialize(
+                &candidate.memory_implementations,
+                candidate.restored_plan,
+                region,
+                candidate.context,
+                candidate.private,
                 regional_runtime,
             )?;
             crate::api::diagnostics::trace!(
                 crate::api::diagnostics::SynthTrace::new(self::diagnostics_enabled(&materializer)),
                 "regional.architecture",
-                "row={region_index} lowering_work={} nested_lanes={} area={:.4} cells={} violation={:.6} slack={:.4}",
+                "row={} lowering_work={} nested_lanes={} area={:.4} cells={} violation={:.6} slack={:.4}",
+                region.row().raw(),
                 region.estimated_work().max(1),
                 regional_runtime.parallelism(),
                 mapped.plan.cost().area.get(),
@@ -328,22 +388,12 @@ pub(crate) fn prepare_regional_architectures(
                 mapped.plan.cost().worst_normalized_violation.get(),
                 mapped.plan.cost().minimum_slack.get(),
             );
-            Ok(crate::regional::WorkProduct {
-                proof: mapped.proof,
-                output: (memory_implementations, mapped),
-            })
+            Ok::<_, SynthError>((candidate.memory_implementations, mapped))
         },
     )?;
-    let mapped_regions = work.accept_results(results)?;
     let mut prepared_regions = Vec::with_capacity(mapped_regions.len());
     let mut selected_memories = vec![None; request.source.memories().len()];
-    for (row, result) in mapped_regions.into_vec().into_iter().enumerate() {
-        let (memory_implementations, mapped) = result.output;
-        if result.proof != mapped.proof {
-            return Err(SynthError::invariant(
-                "regional result proof differs from its compiled artifact",
-            ));
-        }
+    for (row, (memory_implementations, mapped)) in mapped_regions.into_iter().enumerate() {
         let region = regions.regions()[row];
         if mapped.plan.region() != region.id() {
             return Err(SynthError::invariant(
@@ -372,6 +422,20 @@ pub(crate) fn prepare_regional_architectures(
         prepared_regions.into_boxed_slice(),
         selected_memories.into_boxed_slice(),
     ))
+}
+
+fn characterization_proof(
+    region: SynthesisRegion,
+    decisions: &ArchitectureDecisions,
+) -> opto_ir::design::EquivalenceCertificate {
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"opto/regional-characterization/v1\0");
+    digest.update(&region.id().bytes());
+    digest.update(&(decisions.operators().len() as u64).to_le_bytes());
+    opto_ir::design::EquivalenceCertificate {
+        regime: opto_ir::design::EquivalenceRegime::ByConstruction,
+        digest: *digest.finalize().as_bytes(),
+    }
 }
 
 fn diagnostics_enabled(materializer: &RegionArchitectureMaterializer<'_, '_>) -> bool {
@@ -448,6 +512,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         restored_plan: Option<RegionCoverPlan>,
         region: SynthesisRegion,
         context: RegionContextKey,
+        private: CharacterizedPrivateRegion,
         runtime: &ExecutionContext,
     ) -> Result<RegionalArchitectureMapping, SynthError> {
         let profiling = self.request.mapping_context.config.diagnostics.timing;
@@ -456,7 +521,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("logic_lowering.region[{row}].private_lowering")
             });
-            self.lower_private_region(memory_implementations, region, runtime)?
+            self.lower_characterized_region(private, region)?
         };
         let PreparedRegionCover {
             slice,
@@ -587,12 +652,15 @@ impl RegionArchitectureMaterializer<'_, '_> {
         })
     }
 
-    fn lower_private_region(
+    fn lower_characterized_region(
         &self,
-        memory_implementations: &[MemoryImplementationCandidate],
+        private: CharacterizedPrivateRegion,
         region: SynthesisRegion,
-        runtime: &ExecutionContext,
     ) -> Result<(LoweredPrivateRegion, Vec<(MappingRoot, word::ValueId)>), SynthError> {
+        let CharacterizedPrivateRegion {
+            optimized,
+            decisions: local_decisions,
+        } = private;
         let OptimizedPrivateRegion {
             mut module,
             source_to_local,
@@ -604,7 +672,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             root_pairs,
             state_relations,
             substrate_instances,
-        } = self.optimize_private_region(memory_implementations, region, runtime)?;
+        } = optimized;
         let boundary_inputs = frozen_boundary_inputs(&boundary_bindings);
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
         let local_root_values = root_pairs
@@ -634,25 +702,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
         tracked_values.dedup();
         let profiling = self.request.mapping_context.config.diagnostics.timing;
         let row = region.row().raw();
-        let mut local_decisions = {
-            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-                format!("logic_lowering.region[{row}].architecture_candidates")
-            });
-            ArchitectureDecisions::for_private_region(
-                &module,
-                &tracked_values,
-                implementation_providers().into(),
-            )?
-        };
-        {
-            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-                format!("logic_lowering.region[{row}].architecture_selection")
-            });
-            local_decisions.select_for_budget(
-                self.request.target_model,
-                self.request.contracts.delay_budget(region.row()),
-            )?;
-        }
         let (architecture, operators) = {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("logic_lowering.region[{row}].operator_provenance")
@@ -749,6 +798,43 @@ impl RegionArchitectureMaterializer<'_, '_> {
             },
             root_pairs,
         ))
+    }
+
+    fn characterize_private_region(
+        &self,
+        memory_implementations: &[MemoryImplementationCandidate],
+        region: SynthesisRegion,
+        runtime: &ExecutionContext,
+    ) -> Result<CharacterizedPrivateRegion, SynthError> {
+        let optimized = self.optimize_private_region(memory_implementations, region, runtime)?;
+        let mut tracked_values = frozen_boundary_inputs(&optimized.boundary_bindings)
+            .into_iter()
+            .chain(optimized.root_pairs.iter().map(|(_, local)| *local))
+            .chain(optimized.boundary_bindings.iter().map(|(_, local)| *local))
+            .chain(
+                optimized
+                    .owned_memory_logic
+                    .iter()
+                    .map(|binding| binding.local),
+            )
+            .chain(optimized.memory_states.iter().map(|binding| binding.local))
+            .collect::<Vec<_>>();
+        tracked_values.sort_unstable();
+        tracked_values.dedup();
+        let row = region.row().raw();
+        let _profile = crate::api::diagnostics::ProfileSpan::new(
+            self.request.mapping_context.config.diagnostics.timing,
+            || format!("logic_lowering.region[{row}].architecture_candidates"),
+        );
+        let decisions = ArchitectureDecisions::for_private_region(
+            &optimized.module,
+            &tracked_values,
+            implementation_providers().into(),
+        )?;
+        Ok(CharacterizedPrivateRegion {
+            optimized,
+            decisions,
+        })
     }
 
     fn optimize_private_region(
