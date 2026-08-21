@@ -588,7 +588,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             root_pairs,
             state_relations,
         } = self.optimize_private_region(memory_implementations, region, runtime)?;
-        let boundary_inputs = collect_local_boundary_inputs(&module)?;
+        let boundary_inputs = frozen_boundary_inputs(&boundary_bindings);
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
         let local_root_values = root_pairs
             .iter()
@@ -749,7 +749,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 memory_states,
                 root_bindings,
             },
-            _,
             mut root_pairs,
         ) = self.prepare_private_word(memory_implementations, region)?;
         let mut owned_memory_logic = owned_memory_logic.into_vec();
@@ -1015,22 +1014,11 @@ impl RegionArchitectureMaterializer<'_, '_> {
         })
     }
 
-    #[expect(
-        clippy::type_complexity,
-        reason = "the private tuple is consumed immediately; a stage carrier would add no owner or invariant"
-    )]
     fn prepare_private_word(
         &self,
         memory_implementations: &[MemoryImplementationCandidate],
         region: SynthesisRegion,
-    ) -> Result<
-        (
-            RegionalWordCone,
-            Vec<word::ValueId>,
-            Vec<(MappingRoot, word::ValueId)>,
-        ),
-        SynthError,
-    > {
+    ) -> Result<(RegionalWordCone, Vec<(MappingRoot, word::ValueId)>), SynthError> {
         let memories = self.request.work.regions().memories(region);
         if memory_implementations.len() != memories.len() {
             return Err(SynthError::invariant(
@@ -1169,7 +1157,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 )
             })
         };
-        let local_boundary_inputs = collect_local_boundary_inputs(&module)?;
         let root_pairs = regional_roots
             .iter()
             .map(|root| map_source(&root.value).map(|local| (*root, local)))
@@ -1184,7 +1171,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 memory_states,
                 root_bindings,
             },
-            local_boundary_inputs,
             root_pairs,
         ))
     }
@@ -1221,31 +1207,11 @@ pub(crate) fn regional_proof(
     }
 }
 
-fn collect_local_boundary_inputs(
-    module: &word::WordModule,
-) -> Result<Vec<word::ValueId>, SynthError> {
-    let mut inputs = Vec::new();
-    for (index, stored) in module.values().iter().enumerate() {
-        let word::ValueKind::Signal(reference) = stored.kind else {
-            continue;
-        };
-        let signal = module.signal(reference.signal).ok_or_else(|| {
-            SynthError::invariant("regional boundary value references an unknown signal")
-        })?;
-        let word::SignalKind::Port(port) = signal.kind else {
-            continue;
-        };
-        let port = module.port(port).ok_or_else(|| {
-            SynthError::invariant("regional boundary signal references an unknown port")
-        })?;
-        if matches!(
-            port.direction,
-            word::PortDirection::Input | word::PortDirection::Inout
-        ) {
-            inputs.push(word::ValueId::from_index(index).map_err(SynthError::from)?);
-        }
-    }
-    Ok(inputs)
+fn frozen_boundary_inputs(bindings: &[(word::ValueId, word::ValueId)]) -> Vec<word::ValueId> {
+    let mut inputs = bindings.iter().map(|&(_, local)| local).collect::<Vec<_>>();
+    inputs.sort_unstable();
+    inputs.dedup();
+    inputs
 }
 
 fn canonical_root_producers(
@@ -1611,7 +1577,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_boundary_cast_is_not_a_hard_input() {
+    fn frozen_boundary_value_is_the_only_hard_input() {
         let mut module = word::WordModule::new("boundary_cast");
         let unsigned = word::WordType::bits(2).unwrap();
         let signed = word::WordType::new(2, true, word::LogicStateKind::FourState).unwrap();
@@ -1638,12 +1604,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(collect_local_boundary_inputs(&module).unwrap(), [signal]);
-        assert!(
-            !collect_local_boundary_inputs(&module)
-                .unwrap()
-                .contains(&cast)
-        );
+        let source = word::ValueId::from_index(99).unwrap();
+        assert_eq!(frozen_boundary_inputs(&[(source, cast)]), [cast]);
+        assert!(!frozen_boundary_inputs(&[(source, cast)]).contains(&signal));
     }
 
     #[test]
