@@ -107,6 +107,24 @@ impl RegionalWordCone {
                 .0
                 .push(root);
         }
+        for index in 0..source.operations().len() {
+            let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+            let owned = operation_regions.get(index).copied().flatten() == Some(region);
+            let state = source.operation(operation).is_some_and(|operation| {
+                matches!(
+                    operation.kind,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                )
+            });
+            if owned && state {
+                let result = source
+                    .operation(operation)
+                    .expect("validated state remains live")
+                    .result;
+                importer.import(result)?;
+                importer.import_operation(operation)?;
+            }
+        }
         let mut root_bindings = Vec::new();
         for (index, (local, (roots, ty, source))) in observable_roots.into_iter().enumerate() {
             let port = importer
@@ -377,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn represents_state_as_one_private_boundary() {
+    fn imports_state_operation_over_one_private_feedback_boundary() {
         let mut source = word::WordModule::new("feedback");
         let bit = word::WordType::bits(1).unwrap();
         let clock = source
@@ -446,7 +464,11 @@ mod tests {
             ..
         } = cone;
 
-        assert_eq!(module.operations().len(), 1);
+        assert_eq!(module.operations().len(), 2);
+        assert!(matches!(
+            module.operations()[1].kind,
+            word::OpKind::Register(_)
+        ));
         assert_eq!(
             operations
                 .sources(word::OpId::from_index(0).unwrap())
@@ -459,7 +481,7 @@ mod tests {
                 .iter()
                 .filter(|port| port.direction == word::PortDirection::Input)
                 .count(),
-            1
+            2
         );
     }
 

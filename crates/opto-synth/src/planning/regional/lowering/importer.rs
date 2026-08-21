@@ -975,7 +975,10 @@ impl RegionalWordImporter<'_> {
         Ok(local)
     }
 
-    fn import_operation(&mut self, source: word::OpId) -> Result<word::ValueId, crate::SynthError> {
+    pub(super) fn import_operation(
+        &mut self,
+        source: word::OpId,
+    ) -> Result<word::ValueId, crate::SynthError> {
         let operation = self.source.operation(source).cloned().ok_or_else(|| {
             crate::SynthError::invariant("region-local Word import reached an unknown operation")
         })?;

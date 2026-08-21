@@ -120,6 +120,55 @@ pub(crate) fn sequential_region_bindings(
     Ok(operations.into_boxed_slice())
 }
 
+pub(crate) fn local_sequential_bindings(
+    module: &word::WordModule,
+    region: crate::RegionAnchorId,
+    provenance: &crate::planning::regional::LocalOperationProvenance,
+    source_cells: &std::collections::BTreeMap<word::OpId, opto_ir::design::CellId>,
+) -> Result<Box<[SourceSequentialBinding]>, crate::SynthError> {
+    module
+        .operations()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            matches!(
+                operation.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            )
+            .then_some(index)
+        })
+        .map(|index| {
+            let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+            let mut cells = provenance
+                .sources(operation)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("private state has no source provenance")
+                })?
+                .iter()
+                .map(|source| {
+                    source_cells.get(source).copied().ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "private state has no stable logical cell binding",
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            cells.sort_unstable();
+            cells.dedup();
+            if cells.is_empty() {
+                return Err(crate::SynthError::invariant(
+                    "private state has no stable source relation",
+                ));
+            }
+            Ok(SourceSequentialBinding {
+                operation,
+                cells: cells.into_boxed_slice(),
+                region,
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn plan_regional_sequential_cells(
     module: &word::WordModule,
     operations: &[SequentialRegionBinding],
@@ -310,9 +359,10 @@ pub(crate) fn lowered_sequential_operations(
                 stored.kind,
                 word::OpKind::Register(_) | word::OpKind::Latch(_)
             ) {
-                return Err(crate::SynthError::invariant(
-                    "lowered sequential state is produced by combinational logic",
-                ));
+                return Err(crate::SynthError::invariant(format!(
+                    "lowered sequential state {value:?} is produced by combinational operation {operation:?}: {:?}",
+                    stored.kind
+                )));
             }
             let row = lowered
                 .entry(operation)

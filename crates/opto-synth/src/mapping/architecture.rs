@@ -40,6 +40,7 @@ pub(crate) struct RegionalArchitectureRequest<'a> {
     pub(crate) design: &'a crate::regional::WorkDesign,
     pub(crate) contracts: &'a RegionContractSet,
     pub(crate) options: &'a SynthesisOptions,
+    pub(crate) clock_gating: Option<crate::ClockGatingStyle>,
     pub(crate) timing: &'a opto_timing::TimingContext,
     pub(crate) scenarios: &'a opto_timing::ScenarioSet,
     pub(crate) target_model: &'a crate::planning::regional::StructuralTargetModel,
@@ -55,19 +56,21 @@ pub(crate) struct RegionalArchitectureMapping {
     pub(crate) architecture: PrivateArchitecturePublication,
     pub(crate) operators: DurableOperatorArena,
     pub(crate) publication: Box<[crate::boolean::bitblast::RegionalPublicationBit]>,
+    pub(crate) sequential: Box<[super::materialize::RegionalSequentialCellPlan]>,
 }
 
 struct LoweredPrivateRegion {
     module: word::WordModule,
     source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
-    operation_sources: crate::planning::regional::LocalOperationProvenance,
     owned_memory_logic: Vec<RegionalMemoryLogicBinding>,
     memory_states: Vec<RegionalMemoryStateBinding>,
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
     architecture: PrivateArchitecturePublication,
     operators: DurableOperatorArena,
     lowering: LocalRegionBooleanLowering,
+    state_operations: Box<[super::materialize::SequentialRegionBinding]>,
+    sequential: Box<[super::materialize::RegionalSequentialCellPlan]>,
 }
 
 #[derive(Clone, Copy)]
@@ -436,13 +439,14 @@ impl RegionArchitectureMaterializer<'_, '_> {
             module,
             source_to_local,
             boundary_bindings,
-            operation_sources,
             owned_memory_logic,
             memory_states,
             root_bindings,
             architecture,
             operators,
             lowering,
+            state_operations,
+            sequential,
         } = private;
         let empty_port_bindings = opto_timing::PortBindings::new([]);
         let LocalRegionBooleanLowering {
@@ -493,8 +497,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
                         boundary_bindings: &boundary_bindings,
                         owned_memory_logic: &owned_memory_logic,
                         memory_states: &memory_states,
-                        operation_sources: &operation_sources,
                         source_cells: self.source_cells,
+                        sequential_operations: &state_operations,
                         root_bindings: &root_bindings,
                         region_binding: &lowered_binding,
                     },
@@ -530,6 +534,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             architecture,
             operators,
             publication,
+            sequential,
         })
     }
 
@@ -543,7 +548,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 mut module,
                 source_to_local,
                 boundary_bindings,
-                operation_sources,
+                mut operation_sources,
                 owned_memory_logic,
                 memory_states,
                 root_bindings,
@@ -553,10 +558,69 @@ impl RegionArchitectureMaterializer<'_, '_> {
         ) = self.prepare_private_word(memory_implementations, region)?;
         let owned_memory_logic = owned_memory_logic.into_vec();
         let memory_states = memory_states.into_vec();
+        let state_feedback = module
+            .operations()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, operation)| {
+                matches!(
+                    operation.kind,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                )
+                .then_some((index, operation))
+            })
+            .map(|(index, _)| {
+                let local = word::OpId::from_index(index).map_err(SynthError::from)?;
+                let mut feedback = operation_sources
+                    .sources(local)
+                    .ok_or_else(|| SynthError::invariant("private state has no source relation"))?
+                    .iter()
+                    .map(|&source| {
+                        let result = self
+                            .request
+                            .source
+                            .operation(source)
+                            .ok_or_else(|| {
+                                SynthError::invariant("private state source is not live")
+                            })?
+                            .result;
+                        source_to_local.get(&result).copied().ok_or_else(|| {
+                            SynthError::invariant("private state has no feedback boundary")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                feedback.sort_unstable();
+                feedback.dedup();
+                let [feedback] = feedback.as_slice() else {
+                    return Err(SynthError::invariant(
+                        "merged private state has conflicting feedback boundaries",
+                    ));
+                };
+                Ok((local, *feedback))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        self.request.mapping_context.prepare_private_structure(
+            &mut module,
+            &state_feedback,
+            self.request.clock_gating,
+            true,
+        )?;
+        operation_sources.inherit_appended(&module)?;
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
         let local_root_values = root_pairs
             .iter()
             .map(|(_, local)| *local)
+            .collect::<Vec<_>>();
+        let state_values = module
+            .operations()
+            .iter()
+            .filter_map(|operation| {
+                matches!(
+                    operation.kind,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                )
+                .then_some(operation.result)
+            })
             .collect::<Vec<_>>();
         let mut tracked_values = boundary_inputs
             .iter()
@@ -595,6 +659,32 @@ impl RegionArchitectureMaterializer<'_, '_> {
             });
             self.prepare_operators(region, &module, &local_decisions, &operation_sources)?
         };
+        let source_sequential = super::materialize::local_sequential_bindings(
+            &module,
+            region.id(),
+            &operation_sources,
+            self.source_cells,
+        )?;
+        let state_binding = crate::boolean::bitblast::lower_private_word_values(
+            &mut module,
+            &local_decisions,
+            &mut provenance,
+            region.row(),
+            &state_values,
+        )?;
+        let lowered_sequential = super::materialize::lowered_sequential_operations(
+            &module,
+            &state_binding,
+            &source_sequential,
+        )?;
+        for state in &lowered_sequential {
+            let operation = module.operation(state.operation).ok_or_else(|| {
+                SynthError::invariant("private scalar state disappeared before Boolean lowering")
+            })?;
+            tracked_values.extend(crate::word::operation_inputs(&operation.kind));
+        }
+        tracked_values.sort_unstable();
+        tracked_values.dedup();
         let lowering = {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("logic_lowering.region[{row}].bitblast")
@@ -612,18 +702,24 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 },
             )
         }?;
+        let sequential = super::materialize::plan_regional_sequential_cells(
+            &module,
+            &lowered_sequential,
+            self.request.mapping_context,
+        )?;
         Ok((
             LoweredPrivateRegion {
                 module,
                 source_to_local,
                 boundary_bindings,
-                operation_sources,
                 owned_memory_logic,
                 memory_states,
                 root_bindings,
                 architecture,
                 operators,
                 lowering,
+                state_operations: lowered_sequential,
+                sequential,
             },
             root_pairs,
         ))
@@ -677,12 +773,20 @@ impl RegionArchitectureMaterializer<'_, '_> {
             &self.request.mapping_context.combinational_catalog,
         )?;
         let empty_port_bindings = opto_timing::PortBindings::new([]);
-        let roots = mapping_roots(
+        let mut roots = mapping_roots(
             &private.module,
             self.request.timing,
             &empty_port_bindings,
             Some(&sequential_timing),
         )?;
+        roots.extend(super::roots::state_mapping_roots(
+            &private.module,
+            private.state_operations.iter().map(|state| state.operation),
+            self.request.timing,
+            &empty_port_bindings,
+            Some(&sequential_timing),
+        )?);
+        let roots = merge_by_value(roots);
         append_local_mapping_roots(
             &private.module,
             &local_semantics,

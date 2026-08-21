@@ -345,6 +345,36 @@ pub(crate) fn mapping_roots(
     Ok(merge_by_value(roots))
 }
 
+pub(crate) fn state_mapping_roots(
+    module: &word::WordModule,
+    operations: impl IntoIterator<Item = word::OpId>,
+    timing: &opto_timing::TimingContext,
+    port_bindings: &opto_timing::PortBindings,
+    sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
+) -> Result<Vec<MappingRoot>, crate::SynthError> {
+    let global_required = timing.minimum_synthesis_delay();
+    let mut roots = Vec::new();
+    for operation in operations {
+        let operation = module.operation(operation).ok_or_else(|| {
+            crate::SynthError::invariant("explicit state mapping root is not live")
+        })?;
+        if !publish_state_roots(
+            &mut roots,
+            module,
+            operation,
+            timing,
+            port_bindings,
+            sequential_timing,
+            global_required,
+        ) {
+            return Err(crate::SynthError::invariant(
+                "explicit state mapping root is combinational",
+            ));
+        }
+    }
+    Ok(merge_by_value(roots))
+}
+
 fn publish_state_roots(
     roots: &mut Vec<MappingRoot>,
     module: &word::WordModule,

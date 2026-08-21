@@ -238,6 +238,38 @@ pub(crate) struct LocalRegionBooleanRequest<'a> {
     pub(crate) tracked_values: &'a [word::ValueId],
 }
 
+pub(crate) fn lower_private_word_values(
+    module: &mut word::WordModule,
+    plan: &ArchitectureDecisions,
+    provenance: &mut ProvenanceBuilder,
+    region: crate::RegionRowId,
+    values: &[word::ValueId],
+) -> Result<LoweredRegionBinding, crate::SynthError> {
+    let operation_regions = vec![Some(region); module.operations().len()];
+    let mut blaster = BitBlaster::<WordBackend>::new(
+        module,
+        BitBlasterRequest {
+            plan,
+            provenance,
+            operation_regions: &operation_regions,
+            boundary_inputs: &[],
+            source_operations: None,
+            source_values: None,
+            global_scope: GlobalBitblastScope::Complete,
+            publication_contract: FrozenPublicationContract::default(),
+        },
+    )?;
+    for &value in values {
+        blaster.value(value)?;
+    }
+    blaster.lowered_regions.capture_lowered_values(
+        &blaster.cache,
+        &blaster.arena,
+        &blaster.backend,
+    )?;
+    Ok(blaster.lowered_regions)
+}
+
 pub(crate) fn lower_local_region_boolean(
     module: &mut word::WordModule,
     request: LocalRegionBooleanRequest<'_>,

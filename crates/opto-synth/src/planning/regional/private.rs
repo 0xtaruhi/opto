@@ -7,9 +7,6 @@ use opto_ir::word;
 
 pub(crate) fn optimize_private_structure(
     module: &mut word::WordModule,
-    mapping: &crate::mapping::TargetMappingContext,
-    clock_gating: Option<crate::ClockGatingStyle>,
-    target_mapping: bool,
     timing: &opto_timing::TimingContext,
     port_bindings: &opto_timing::PortBindings,
     runtime: &opto_runtime::ExecutionContext,
@@ -24,7 +21,6 @@ pub(crate) fn optimize_private_structure(
         runtime,
         |value| canonical.representatives()[value.index()],
     )?;
-    mapping.prepare_private_structure(&mut private, clock_gating, target_mapping)?;
     crate::planning::dataflow::optimize_combinational_dataflow(&mut private)?;
     private.compact_netlist().map_err(crate::SynthError::Word)?;
     private.validate().map_err(crate::SynthError::Word)?;

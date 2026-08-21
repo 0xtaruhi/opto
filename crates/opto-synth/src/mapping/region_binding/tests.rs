@@ -68,7 +68,6 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
     let source_to_local =
         std::collections::BTreeMap::from([(source_input, local_input), (source_root, local_input)]);
     let region_binding = crate::boolean::bitblast::LoweredRegionBinding::new(local.values().len());
-    let operation_sources = crate::planning::regional::LocalOperationProvenance::default();
 
     let candidate = build_candidate_binding(
         CandidateBindingDomain {
@@ -78,8 +77,8 @@ fn collapsed_root_keeps_input_and_output_identities_separate() {
             boundary_bindings: &[(source_input, local_input)],
             owned_memory_logic: &[],
             memory_states: &[],
-            operation_sources: &operation_sources,
             source_cells: &std::collections::BTreeMap::new(),
+            sequential_operations: &[],
             root_bindings: &[(source_root, root_signal)],
             region_binding: &region_binding,
         },
@@ -159,7 +158,6 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
         (source_root, local_input),
     ]);
     let region_binding = crate::boolean::bitblast::LoweredRegionBinding::new(local.values().len());
-    let operation_sources = crate::planning::regional::LocalOperationProvenance::default();
 
     let candidate = build_candidate_binding(
         CandidateBindingDomain {
@@ -169,8 +167,8 @@ fn only_frozen_boundary_identity_becomes_a_cover_input() {
             boundary_bindings: &[(port_value, local_input)],
             owned_memory_logic: &[],
             memory_states: &[],
-            operation_sources: &operation_sources,
             source_cells: &std::collections::BTreeMap::new(),
+            sequential_operations: &[],
             root_bindings: &[(source_root, root_signal)],
             region_binding: &region_binding,
         },

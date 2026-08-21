@@ -7,6 +7,7 @@ use opto_ir::word;
 pub(crate) fn expand_unsupported_enables(
     module: &mut word::WordModule,
     sequential_catalog: &super::SequentialCellCatalog,
+    state_feedback: &std::collections::BTreeMap<word::OpId, word::ValueId>,
 ) -> Result<(), crate::SynthError> {
     let mut candidates = Vec::new();
     for index in 0..module.operations().len() {
@@ -36,15 +37,12 @@ pub(crate) fn expand_unsupported_enables(
             model.source.clone(),
         ));
     }
-    let mut generated_names = crate::mapping::word_util::GeneratedNames::new(module)?;
     for (operation, mut register, enable, result, source) in candidates {
-        // The held value must denote the register output, not its assigned target.
-        let held = crate::mapping::word_util::add_generated_boundary_value(
-            &mut generated_names,
-            module,
-            result,
-            &source,
-        )?;
+        let held = state_feedback.get(&operation).copied().ok_or_else(|| {
+            crate::SynthError::invariant(format!(
+                "private enabled state {result:?} has no exact feedback boundary"
+            ))
+        })?;
         let (then_value, else_value) = if enable.active_high {
             (register.d, held)
         } else {

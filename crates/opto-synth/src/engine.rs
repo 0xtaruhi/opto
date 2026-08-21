@@ -629,9 +629,6 @@ fn plan_regions(
         .mapping_context(&normalized.environment.options);
     let (regions, design) = crate::planning::regional::optimize_private_structure(
         &mut normalized.synthesized,
-        &mapping_context,
-        normalized.environment.clock_gating,
-        true,
         normalized.environment.primary_scenario().constraints(),
         &normalized.environment.port_bindings,
         execution.runtime,

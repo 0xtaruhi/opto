@@ -39,6 +39,7 @@ pub(super) fn lower_logic(
                 design: &design,
                 contracts: &contracts,
                 options: &environment.options,
+                clock_gating: environment.clock_gating,
                 timing: environment.primary_scenario().constraints(),
                 scenarios: &environment.scenarios,
                 target_model: &target_model,
@@ -129,12 +130,13 @@ pub(super) fn lower_logic(
                 architecture,
                 operators: _,
                 publication: _,
+                sequential,
             } = prepared;
             provenance.import_private_architecture(architecture, &source)?;
             regional_plans.push(super::regional_mapping::RegionalPlanRow {
                 plan,
                 binding,
-                sequential: Box::new([]),
+                sequential,
             });
         }
         let binding = crate::boolean::bitblast::bitblast_module_with_regions(
@@ -153,24 +155,6 @@ pub(super) fn lower_logic(
         &region_binding,
         &source_sequential_operations,
     )?;
-    let sequential_plans = execution
-        .runtime
-        .analyze_indexed(regions.regions().len(), |row| {
-            let region = regions.regions()[row].id();
-            let operations = sequential_operations
-                .iter()
-                .filter(|operation| operation.region == region)
-                .cloned()
-                .collect::<Vec<_>>();
-            crate::mapping::materialize::plan_regional_sequential_cells(
-                &source,
-                &operations,
-                &mapping_context,
-            )
-        })?;
-    for (row, plans) in regional_plans.iter_mut().zip(sequential_plans) {
-        row.sequential = plans;
-    }
     {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.binding_materialization".to_string()

@@ -76,6 +76,7 @@ impl TargetMappingContext {
     pub(crate) fn prepare_private_structure(
         &self,
         module: &mut word::WordModule,
+        state_feedback: &std::collections::BTreeMap<word::OpId, word::ValueId>,
         clock_gating: Option<ClockGatingStyle>,
         target_mapping: bool,
     ) -> Result<(), crate::SynthError> {
@@ -105,7 +106,11 @@ impl TargetMappingContext {
             // enable. Everything before it either keeps the enable exact or
             // turns it into a gated clock; whatever the target cannot realize as
             // an enabled cell becomes a next-state mux here.
-            sequential::expand_unsupported_enables(module, &self.sequential_catalog)?;
+            sequential::expand_unsupported_enables(
+                module,
+                &self.sequential_catalog,
+                state_feedback,
+            )?;
             finish_stage("expand enables");
             sequential::normalize_enable_polarities(
                 module,

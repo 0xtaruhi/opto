@@ -321,8 +321,8 @@ pub(crate) struct CandidateBindingDomain<'a> {
     pub(crate) boundary_bindings: &'a [(word::ValueId, word::ValueId)],
     pub(crate) owned_memory_logic: &'a [RegionalMemoryLogicBinding],
     pub(crate) memory_states: &'a [RegionalMemoryStateBinding],
-    pub(crate) operation_sources: &'a crate::planning::regional::LocalOperationProvenance,
     pub(crate) source_cells: &'a std::collections::BTreeMap<word::OpId, opto_ir::design::CellId>,
+    pub(crate) sequential_operations: &'a [crate::mapping::materialize::SequentialRegionBinding],
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
     pub(crate) region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
 }
@@ -404,12 +404,21 @@ pub(crate) fn build_candidate_binding<'a>(
         boundary_bindings,
         owned_memory_logic,
         memory_states,
-        operation_sources,
         source_cells,
+        sequential_operations,
         root_bindings,
         region_binding,
     } = domain;
     let output_values = output_values.into_iter().collect::<Vec<_>>();
+    let source_operations = source_cells
+        .iter()
+        .map(|(&operation, &cell)| (cell, operation))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if source_operations.len() != source_cells.len() {
+        return Err(crate::SynthError::invariant(
+            "stable logical cell identifies multiple source operations",
+        ));
+    }
     let mut local_to_sources = BindingMap::new();
     // Input identities come only from the region graph's frozen boundary
     // contract. The complete source-to-local provenance map also contains
@@ -477,47 +486,51 @@ pub(crate) fn build_candidate_binding<'a>(
         region_binding,
         &mut local_to_outputs,
     )?;
-    for (index, operation) in local_module.operations().iter().enumerate() {
-        let local_operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
-        let Some([source_operation]) = operation_sources.sources(local_operation) else {
-            continue;
-        };
-        let state = source_cells.get(source_operation).copied().ok_or_else(|| {
-            crate::SynthError::invariant(
-                "regional state provenance has no stable logical cell binding",
-            )
-        })?;
-        let source_kind = &source_module
-            .operation(*source_operation)
-            .ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "regional state provenance references an unknown source operation",
-                )
-            })?
-            .kind;
+    for state_binding in sequential_operations {
+        let operation = local_module
+            .operation(state_binding.operation)
+            .ok_or_else(|| crate::SynthError::invariant("regional state plan is not live"))?;
         for (role, value) in sequential_inputs(&operation.kind)? {
             let Some(bits) = region_binding.lowered_bits(value) else {
                 continue;
             };
-            let source = sequential_input(source_kind, role);
-            let source_bits = source
-                .and_then(|source| source_to_local.get(&source))
-                .and_then(|local| region_binding.lowered_bits(*local));
-            for (bit, &lowered) in bits.iter().enumerate() {
-                let bit = u32::try_from(bit)
-                    .map_err(|_| crate::SynthError::capacity("regional sequential bit index"))?;
-                if source_bits.and_then(|bits| bits.get(bit as usize)).copied() == Some(lowered) {
-                    local_to_sources.entry(lowered).or_insert_with(|| {
+            let [lowered] = bits else {
+                return Err(crate::SynthError::invariant(
+                    "regional scalar state pin did not lower to one bit",
+                ));
+            };
+            for source_bit in &state_binding.sources {
+                let source_operation = source_operations
+                    .get(&source_bit.cell)
+                    .copied()
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "regional state relation has no source operation",
+                        )
+                    })?;
+                let source = source_module
+                    .operation(source_operation)
+                    .and_then(|operation| sequential_input(&operation.kind, role));
+                let source_lowered = source
+                    .and_then(|source| source_to_local.get(&source).copied())
+                    .and_then(|local| region_binding.lowered_bits(local))
+                    .and_then(|bits| bits.get(source_bit.bit as usize))
+                    .copied();
+                if source_lowered == Some(*lowered) {
+                    local_to_sources.entry(*lowered).or_insert_with(|| {
                         vec![RegionPlanValueBinding::SourceBit {
-                            value: source.expect("matching source bits require a source value"),
-                            bit,
+                            value: source.expect("matching source state pin has a source value"),
+                            bit: source_bit.bit,
                         }]
                     });
                 }
-                let binding =
-                    RegionPlanValueBinding::SequentialPinBit(SequentialPinKey { state, role, bit });
+                let binding = RegionPlanValueBinding::SequentialPinBit(SequentialPinKey {
+                    state: source_bit.cell,
+                    role,
+                    bit: source_bit.bit,
+                });
                 local_to_outputs
-                    .entry(lowered)
+                    .entry(*lowered)
                     .or_insert_with(|| vec![binding]);
             }
         }

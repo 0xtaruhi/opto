@@ -336,12 +336,12 @@ fn synthesize_composes_sync_reset_with_a_retained_enable_pin() {
 
     assert_eq!(report.report.cells, 3, "{text}");
     assert!(
-        text.contains("OR2 U2(.A(en), .B(reset), .Z(n2));")
-            || text.contains("OR2 U2(.A(reset), .B(en), .Z(n2));"),
+        text.contains("OR2 U1(.A(en), .B(reset), .Z(n2));")
+            || text.contains("OR2 U1(.A(reset), .B(en), .Z(n2));"),
         "{text}"
     );
     assert!(
-        text.contains("ANR2 U1(.D(d), .R(reset), .Z(n1));"),
+        text.contains("ANR2 U2(.D(d), .R(reset), .Z(n1));"),
         "{text}"
     );
     assert!(
