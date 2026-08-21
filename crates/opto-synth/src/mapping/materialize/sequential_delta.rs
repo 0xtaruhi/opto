@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Direct materialization of live state elements into the mapped substrate.
+//! Direct materialization of fixed regional cells into the mapped substrate.
 //!
 //! Sequential cells are immutable state-region substrate objects: regional
 //! epochs replace only combinational covers. This module therefore prepares one
@@ -19,11 +19,11 @@ use opto_ir::word;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-/// Immutable topology for every live register and latch in one lowered design.
+/// Immutable topology for state cells and generated target cells in one lowered design.
 ///
 /// Existing nets are explicit and sorted.
 #[derive(Debug, Clone)]
-pub(crate) struct MappedSequentialArtifact {
+pub(crate) struct MappedFixedSubstrateArtifact {
     nets: ArtifactNetTable,
     cells: Box<[ArtifactCell<MappedCellSource>]>,
     referenced_nets: Box<[NetId]>,
@@ -31,7 +31,7 @@ pub(crate) struct MappedSequentialArtifact {
 
 /// Delta-local sequential identities retained until mapped/timing commit.
 #[derive(Debug)]
-pub(crate) struct PendingMappedSequential {
+pub(crate) struct PendingMappedFixedSubstrate {
     cells: Box<[(TempCellId, MappedCellSource)]>,
 }
 
@@ -68,8 +68,24 @@ pub(crate) struct RegionalSequentialCellPlan {
     pub(crate) region: crate::RegionAnchorId,
     pub(crate) instance_name: Box<str>,
     pub(crate) cell_name: Box<str>,
-    pub(crate) inputs: Box<[(Box<str>, crate::mapping::SequentialEndpoint)]>,
-    pub(crate) output: (Box<str>, crate::mapping::SequentialEndpoint),
+    pub(crate) inputs: Box<[(Box<str>, crate::mapping::RegionalEndpoint)]>,
+    pub(crate) output: (Box<str>, crate::mapping::RegionalEndpoint),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegionalSubstrateConnection {
+    pub(crate) pin: Box<str>,
+    pub(crate) output: bool,
+    pub(crate) endpoint: crate::mapping::RegionalEndpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegionalSubstrateCellPlan {
+    pub(crate) source: word::ValueId,
+    pub(crate) region: crate::RegionAnchorId,
+    pub(crate) instance_name: Box<str>,
+    pub(crate) cell_name: Box<str>,
+    pub(crate) connections: Box<[RegionalSubstrateConnection]>,
 }
 
 pub(crate) struct SequentialPublicationPlan {
@@ -82,7 +98,7 @@ impl SequentialPublicationPlan {
     }
 }
 
-impl PendingMappedSequential {
+impl PendingMappedFixedSubstrate {
     pub(crate) fn resolve(
         self,
         applied: &AppliedRegionDelta,
@@ -217,8 +233,8 @@ pub(crate) fn plan_regional_sequential_cells(
     operations: &[SequentialRegionBinding],
     mapping: &crate::mapping::TargetMappingContext,
     endpoints: &std::collections::BTreeMap<
-        crate::mapping::SequentialPinKey,
-        crate::mapping::SequentialEndpoint,
+        crate::mapping::RegionalPinKey,
+        crate::mapping::RegionalEndpoint,
     >,
 ) -> Result<Box<[RegionalSequentialCellPlan]>, crate::SynthError> {
     operations
@@ -347,11 +363,13 @@ pub(crate) fn plan_regional_sequential_cells(
             })?;
             let endpoint = |role| {
                 endpoints
-                    .get(&crate::mapping::SequentialPinKey {
-                        state: source.cell,
-                        role,
-                        bit: source.bit,
-                    })
+                    .get(&crate::mapping::RegionalPinKey::Sequential(
+                        crate::mapping::SequentialPinKey {
+                            state: source.cell,
+                            role,
+                            bit: source.bit,
+                        },
+                    ))
                     .copied()
                     .ok_or_else(|| {
                         crate::SynthError::invariant(
@@ -565,7 +583,7 @@ pub(crate) fn sequential_plan_values<'a>(
             .map(|(_, endpoint)| endpoint)
             .chain(std::iter::once(&plan.output.1))
     }) {
-        let crate::mapping::SequentialEndpoint::SourceBit { value, bit } = *endpoint else {
+        let crate::mapping::RegionalEndpoint::SourceBit { value, bit } = *endpoint else {
             continue;
         };
         let stored = module
@@ -599,7 +617,7 @@ fn collect_sequential_binding_values(
     Ok(values.into_iter().collect())
 }
 
-impl MappedSequentialArtifact {
+impl MappedFixedSubstrateArtifact {
     #[allow(
         clippy::redundant_closure_for_method_calls,
         reason = "the method's defining module is private, so its method-item path is not nameable here"
@@ -609,7 +627,8 @@ impl MappedSequentialArtifact {
         region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
         mapped_values: &WordMappedSignals,
         plans: impl IntoIterator<Item = &'a RegionalSequentialCellPlan>,
-        sequential_pins: &super::SequentialMappedPins,
+        substrate: impl IntoIterator<Item = &'a RegionalSubstrateCellPlan>,
+        regional_pins: &super::RegionalMappedPins,
         config: &crate::mapping::MappingConfig<'_>,
     ) -> Result<Self, crate::SynthError> {
         let mut artifact = ArtifactBuilder::new();
@@ -624,13 +643,23 @@ impl MappedSequentialArtifact {
                 module,
                 region_binding,
                 mapped_values,
-                sequential_pins,
+                regional_pins,
+                &config.options.target_cells,
+                plan,
+            )?;
+        }
+        for plan in substrate {
+            artifact.push_substrate_cell(
+                module,
+                region_binding,
+                mapped_values,
+                regional_pins,
                 &config.options.target_cells,
                 plan,
             )?;
         }
         validate_artifact_nets(
-            "sequential artifact",
+            "fixed regional substrate",
             &artifact.nets,
             &artifact.cells,
             &config.options.target_cells,
@@ -645,24 +674,24 @@ impl MappedSequentialArtifact {
     pub(crate) fn append_to_delta(
         &self,
         delta: &mut RegionDelta,
-    ) -> Result<PendingMappedSequential, crate::SynthError> {
+    ) -> Result<PendingMappedFixedSubstrate, crate::SynthError> {
         if self
             .referenced_nets
             .iter()
             .any(|&net| !delta.snapshot().contains_net(net))
         {
             return Err(crate::SynthError::invariant(
-                "sequential substrate net is absent from its transaction snapshot",
+                "fixed regional substrate net is absent from its transaction snapshot",
             ));
         }
         let (_, cells) = super::append_artifact_cells(
             delta,
             &self.nets,
             &self.cells,
-            "sequential artifact references an unknown internal net",
+            "fixed regional substrate references an unknown internal net",
             |cell, &source| (cell, source),
         )?;
-        Ok(PendingMappedSequential { cells })
+        Ok(PendingMappedFixedSubstrate { cells })
     }
 }
 
@@ -679,33 +708,59 @@ impl ArtifactBuilder {
         }
     }
 
+    fn target_cell<'a>(
+        target_cells: &'a opto_library::TargetCellSet,
+        name: &str,
+    ) -> Result<(u32, opto_library::TargetCellRef<'a>), crate::SynthError> {
+        let (index, cell) = target_cells
+            .iter()
+            .enumerate()
+            .find(|(_, cell)| cell.name() == name)
+            .ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "fixed regional cell '{name}' disappeared from the target library"
+                ))
+            })?;
+        let index = u32::try_from(index)
+            .map_err(|_| crate::SynthError::capacity("target cell index exceeds 32 bits"))?;
+        Ok((index, cell))
+    }
+
+    fn push_cell(
+        &mut self,
+        instance_name: &str,
+        cell_name: &str,
+        library_cell: u32,
+        connections: Box<[(String, Option<u16>, super::ArtifactSignal)]>,
+        value: word::ValueId,
+        region: crate::RegionAnchorId,
+    ) {
+        self.cells.push(ArtifactCell {
+            name: instance_name.to_owned(),
+            cell_type: cell_name.to_owned(),
+            library_cell: Some(library_cell),
+            connections,
+            metadata: MappedCellSource::Value { value, region },
+        });
+    }
+
     fn push_planned_cell(
         &mut self,
         module: &word::WordModule,
         region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
         mapped_values: &WordMappedSignals,
-        sequential_pins: &super::SequentialMappedPins,
+        regional_pins: &super::RegionalMappedPins,
         target_cells: &opto_library::TargetCellSet,
         plan: &RegionalSequentialCellPlan,
     ) -> Result<(), crate::SynthError> {
-        let (library_cell, target) = target_cells
-            .synthesis_cells()
-            .find(|(_, cell)| cell.name() == plan.cell_name.as_ref())
-            .ok_or_else(|| {
-                crate::SynthError::invariant(format!(
-                    "selected sequential cell '{}' disappeared from the target library",
-                    plan.cell_name
-                ))
-            })?;
-        let library_cell = u32::try_from(library_cell)
-            .map_err(|_| crate::SynthError::capacity("target cell index exceeds 32 bits"))?;
+        let (library_cell, target) = Self::target_cell(target_cells, &plan.cell_name)?;
         let mut connections = Vec::with_capacity(plan.inputs.len().saturating_add(1));
         for (pin, endpoint) in &plan.inputs {
             let signal = resolve_endpoint(
                 module,
                 region_binding,
                 mapped_values,
-                sequential_pins,
+                regional_pins,
                 *endpoint,
             )?;
             connections.push((
@@ -718,7 +773,7 @@ impl ArtifactBuilder {
             module,
             region_binding,
             mapped_values,
-            sequential_pins,
+            regional_pins,
             plan.output.1,
         )?;
         let output = self.nets.signal(output);
@@ -731,16 +786,59 @@ impl ArtifactBuilder {
         let source = plan.sources.first().ok_or_else(|| {
             crate::SynthError::invariant("regional state-cell plan has no semantic source")
         })?;
-        self.cells.push(ArtifactCell {
-            name: plan.instance_name.to_string(),
-            cell_type: plan.cell_name.to_string(),
-            library_cell: Some(library_cell),
-            connections: connections.into_boxed_slice(),
-            metadata: MappedCellSource::Value {
-                value: source.value,
-                region: plan.region,
-            },
-        });
+        self.push_cell(
+            &plan.instance_name,
+            &plan.cell_name,
+            library_cell,
+            connections.into_boxed_slice(),
+            source.value,
+            plan.region,
+        );
+        Ok(())
+    }
+
+    fn push_substrate_cell(
+        &mut self,
+        module: &word::WordModule,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
+        mapped_values: &WordMappedSignals,
+        regional_pins: &super::RegionalMappedPins,
+        target_cells: &opto_library::TargetCellSet,
+        plan: &RegionalSubstrateCellPlan,
+    ) -> Result<(), crate::SynthError> {
+        let (library_cell, target) = Self::target_cell(target_cells, &plan.cell_name)?;
+        let connections = plan
+            .connections
+            .iter()
+            .map(|connection| {
+                let signal = resolve_endpoint(
+                    module,
+                    region_binding,
+                    mapped_values,
+                    regional_pins,
+                    connection.endpoint,
+                )?;
+                let signal = self.nets.signal(signal);
+                let signal = if connection.output {
+                    self.nets.claim_output(Some(signal))?
+                } else {
+                    signal
+                };
+                Ok((
+                    connection.pin.to_string(),
+                    Some(target_pin_id(target, &connection.pin)?),
+                    signal,
+                ))
+            })
+            .collect::<Result<Box<[_]>, crate::SynthError>>()?;
+        self.push_cell(
+            &plan.instance_name,
+            &plan.cell_name,
+            library_cell,
+            connections,
+            plan.source,
+            plan.region,
+        );
         Ok(())
     }
 
@@ -805,9 +903,9 @@ impl ArtifactBuilder {
         Ok(unique_instance_name(module, base))
     }
 
-    fn finish(self) -> MappedSequentialArtifact {
+    fn finish(self) -> MappedFixedSubstrateArtifact {
         let referenced_nets = self.nets.external_nets().collect::<Vec<_>>();
-        MappedSequentialArtifact {
+        MappedFixedSubstrateArtifact {
             nets: self.nets,
             cells: self.cells.into_boxed_slice(),
             referenced_nets: referenced_nets.into_boxed_slice(),
@@ -819,17 +917,15 @@ fn resolve_endpoint(
     module: &word::WordModule,
     region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
     mapped_values: &WordMappedSignals,
-    sequential_pins: &super::SequentialMappedPins,
-    endpoint: crate::mapping::SequentialEndpoint,
+    regional_pins: &super::RegionalMappedPins,
+    endpoint: crate::mapping::RegionalEndpoint,
 ) -> Result<MappedValueSignal, crate::SynthError> {
     match endpoint {
-        crate::mapping::SequentialEndpoint::Pin(pin) => {
-            sequential_pins.require(pin).map(MappedValueSignal::Net)
+        crate::mapping::RegionalEndpoint::Pin(pin) => {
+            regional_pins.require(pin).map(MappedValueSignal::Net)
         }
-        crate::mapping::SequentialEndpoint::Constant(value) => {
-            Ok(MappedValueSignal::Constant(value))
-        }
-        crate::mapping::SequentialEndpoint::SourceBit { value, bit } => {
+        crate::mapping::RegionalEndpoint::Constant(value) => Ok(MappedValueSignal::Constant(value)),
+        crate::mapping::RegionalEndpoint::SourceBit { value, bit } => {
             let stored = module
                 .value(value)
                 .ok_or_else(|| crate::SynthError::invariant("state endpoint source is not live"))?;

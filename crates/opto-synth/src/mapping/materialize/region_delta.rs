@@ -106,7 +106,7 @@ impl MappedRegionArtifact {
         plan_binding: &RegionPlanBinding,
         region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
         mapped_values: &WordMappedSignals,
-        sequential_pins: &super::SequentialMappedPins,
+        regional_pins: &super::RegionalMappedPins,
         catalog: &CombinationalCellCatalog,
         target_cells: &opto_library::TargetCellSet,
     ) -> Result<Self, crate::SynthError> {
@@ -156,8 +156,8 @@ impl MappedRegionArtifact {
             .zip(plan_binding.inputs.iter().copied())
             .map(|(value, binding)| {
                 let signal = match binding {
-                    crate::mapping::RegionPlanValueBinding::SequentialPinBit { pin, .. } => {
-                        MappedValueSignal::Net(sequential_pins.require(pin)?)
+                    crate::mapping::RegionPlanValueBinding::ArtifactPinBit { pin, .. } => {
+                        MappedValueSignal::Net(regional_pins.require(pin)?)
                     }
                     _ => mapped_values.require(value)?,
                 };
@@ -170,8 +170,8 @@ impl MappedRegionArtifact {
                 crate::mapping::RegionPlanValueBinding::Lowered(value) => {
                     nets.signal(mapped_values.require(value)?)
                 }
-                crate::mapping::RegionPlanValueBinding::SequentialPinBit { pin, .. } => {
-                    nets.signal(MappedValueSignal::Net(sequential_pins.require(pin)?))
+                crate::mapping::RegionPlanValueBinding::ArtifactPinBit { pin, .. } => {
+                    nets.signal(MappedValueSignal::Net(regional_pins.require(pin)?))
                 }
                 crate::mapping::RegionPlanValueBinding::SourceBit { .. }
                 | crate::mapping::RegionPlanValueBinding::MemoryLogicBit { .. }

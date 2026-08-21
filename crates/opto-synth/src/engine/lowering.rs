@@ -130,6 +130,7 @@ pub(super) fn lower_logic(
                 operators: _,
                 publication: _,
                 sequential,
+                substrate,
                 proof,
             } = prepared;
             provenance.import_private_architecture(architecture, &source)?;
@@ -137,6 +138,7 @@ pub(super) fn lower_logic(
                 plan,
                 binding,
                 sequential,
+                substrate,
                 proof,
             });
         }

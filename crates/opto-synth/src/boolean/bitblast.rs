@@ -107,6 +107,11 @@ impl LoweredRegionBinding {
             .and_then(Option::as_deref)
     }
 
+    #[cfg(test)]
+    pub(crate) fn bind_identity_for_test(&mut self, value: word::ValueId) {
+        self.lowered_values[value.index()] = Some(Box::new([value]));
+    }
+
     fn capture_lowered_values(
         &mut self,
         cache: &[Option<BitSpan>],

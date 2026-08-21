@@ -21,8 +21,8 @@ pub(crate) enum RegionPlanValueBinding {
         ordinal: u32,
         bit: u32,
     },
-    SequentialPinBit {
-        pin: SequentialPinKey,
+    ArtifactPinBit {
+        pin: RegionalPinKey,
         value: word::ValueId,
     },
     Lowered(word::ValueId),
@@ -45,6 +45,25 @@ pub(crate) struct SequentialPinKey {
     pub(crate) bit: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SubstratePinKey {
+    pub(crate) region: crate::RegionAnchorId,
+    pub(crate) instance: u32,
+    pub(crate) connection: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RegionalPinKey {
+    Sequential(SequentialPinKey),
+    Substrate(SubstratePinKey),
+}
+
+impl From<SequentialPinKey> for RegionalPinKey {
+    fn from(pin: SequentialPinKey) -> Self {
+        Self::Sequential(pin)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegionPlanBinding {
     pub(crate) inputs: Arc<[RegionPlanValueBinding]>,
@@ -64,17 +83,17 @@ impl RegionPlanBinding {
                 RegionPlanValueBinding::SourceBit { value, .. } => Some(value),
                 RegionPlanValueBinding::MemoryLogicBit { .. }
                 | RegionPlanValueBinding::MemoryStateBit { .. }
-                | RegionPlanValueBinding::SequentialPinBit { .. }
+                | RegionPlanValueBinding::ArtifactPinBit { .. }
                 | RegionPlanValueBinding::Lowered(_) => None,
             })
     }
 
-    pub(crate) fn sequential_pins(&self) -> impl Iterator<Item = SequentialPinKey> + '_ {
+    pub(crate) fn artifact_pins(&self) -> impl Iterator<Item = RegionalPinKey> + '_ {
         self.inputs
             .iter()
             .chain(self.outputs.iter())
             .filter_map(|binding| match *binding {
-                RegionPlanValueBinding::SequentialPinBit { pin, .. } => Some(pin),
+                RegionPlanValueBinding::ArtifactPinBit { pin, .. } => Some(pin),
                 _ => None,
             })
     }
@@ -132,7 +151,7 @@ impl RegionPlanBinding {
                     bit,
                 ),
                 RegionPlanValueBinding::SourceBit { .. }
-                | RegionPlanValueBinding::SequentialPinBit { .. }
+                | RegionPlanValueBinding::ArtifactPinBit { .. }
                 | RegionPlanValueBinding::Lowered(_) => {
                     return Ok(());
                 }
@@ -201,7 +220,7 @@ impl RegionPlanBinding {
                     })?,
                     bit,
                 ),
-                RegionPlanValueBinding::SequentialPinBit { .. }
+                RegionPlanValueBinding::ArtifactPinBit { .. }
                 | RegionPlanValueBinding::Lowered(_) => return Ok(()),
             };
             let stored = module.value(value).ok_or_else(|| {
@@ -268,7 +287,7 @@ impl RegionPlanBinding {
                 RegionPlanValueBinding::SourceBit { .. }
                 | RegionPlanValueBinding::MemoryLogicBit { .. }
                 | RegionPlanValueBinding::MemoryStateBit { .. }
-                | RegionPlanValueBinding::SequentialPinBit { .. } => None,
+                | RegionPlanValueBinding::ArtifactPinBit { .. } => None,
             })
     }
 
@@ -279,7 +298,10 @@ impl RegionPlanBinding {
         self.inputs
             .iter()
             .copied()
-            .map(|binding| resolve_plan_value(binding, region_binding))
+            .filter_map(|binding| match binding {
+                RegionPlanValueBinding::ArtifactPinBit { .. } => None,
+                _ => Some(resolve_plan_value(binding, region_binding)),
+            })
             .collect()
     }
 
@@ -291,7 +313,7 @@ impl RegionPlanBinding {
             .iter()
             .copied()
             .filter_map(|binding| match binding {
-                RegionPlanValueBinding::SequentialPinBit { .. } => None,
+                RegionPlanValueBinding::ArtifactPinBit { .. } => None,
                 _ => Some(resolve_plan_value(binding, region_binding)),
             })
             .collect()
@@ -301,13 +323,14 @@ impl RegionPlanBinding {
 pub(crate) struct CandidateBinding {
     pub(crate) binding: RegionPlanBinding,
     pub(crate) output_widths: Box<[usize]>,
-    pub(crate) state_endpoints: std::collections::BTreeMap<SequentialPinKey, SequentialEndpoint>,
+    pub(crate) endpoints: std::collections::BTreeMap<RegionalPinKey, RegionalEndpoint>,
+    pub(crate) substrate: Box<[crate::mapping::materialize::RegionalSubstrateCellPlan]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SequentialEndpoint {
+pub(crate) enum RegionalEndpoint {
     SourceBit { value: word::ValueId, bit: u32 },
-    Pin(SequentialPinKey),
+    Pin(RegionalPinKey),
     Constant(bool),
 }
 
@@ -328,18 +351,204 @@ pub(crate) struct CandidateBindingDomain<'a> {
     pub(crate) sequential_operations: &'a [crate::mapping::materialize::SequentialRegionBinding],
     pub(crate) root_bindings: &'a [(word::ValueId, word::SignalId)],
     pub(crate) region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
+    pub(crate) region: crate::RegionAnchorId,
+    pub(crate) target_cells: &'a opto_library::TargetCellSet,
+    pub(crate) substrate_instances: &'a [Box<str>],
 }
 
 type BindingMap = std::collections::BTreeMap<word::ValueId, Vec<RegionPlanValueBinding>>;
 
-fn bind_owned_memory_logic_bit(
+fn binding_endpoint(binding: RegionPlanValueBinding) -> Option<RegionalEndpoint> {
+    match binding {
+        RegionPlanValueBinding::SourceBit { value, bit } => {
+            Some(RegionalEndpoint::SourceBit { value, bit })
+        }
+        RegionPlanValueBinding::ArtifactPinBit { pin, .. } => Some(RegionalEndpoint::Pin(pin)),
+        RegionPlanValueBinding::MemoryLogicBit { .. }
+        | RegionPlanValueBinding::MemoryStateBit { .. }
+        | RegionPlanValueBinding::Lowered(_) => None,
+    }
+}
+
+fn bound_endpoint(bindings: &BindingMap, value: word::ValueId) -> Option<RegionalEndpoint> {
+    bindings
+        .get(&value)?
+        .iter()
+        .copied()
+        .find_map(binding_endpoint)
+}
+
+fn publication_endpoint(
+    bindings: &[RegionPlanValueBinding],
+    value: word::ValueId,
+) -> Option<RegionalEndpoint> {
+    bindings.iter().find_map(|binding| match *binding {
+        RegionPlanValueBinding::ArtifactPinBit { pin, value: output } if output == value => {
+            Some(RegionalEndpoint::Pin(pin))
+        }
+        _ => None,
+    })
+}
+
+fn constant_endpoint(
+    module: &word::WordModule,
+    value: word::ValueId,
+) -> Result<Option<RegionalEndpoint>, crate::SynthError> {
+    let stored = module
+        .value(value)
+        .ok_or_else(|| crate::SynthError::invariant("regional endpoint is not live"))?;
+    let word::ValueKind::Constant(bits) = &stored.kind else {
+        return Ok(None);
+    };
+    let [bit] = bits.as_slice() else {
+        return Err(crate::SynthError::invariant(
+            "regional endpoint constant is not scalar",
+        ));
+    };
+    crate::boolean::resolve_publication_bit(*bit, module.name(), &stored.source)
+        .map(|bit| Some(RegionalEndpoint::Constant(bit == opto_ir::BitVal::One)))
+}
+
+struct PendingSubstrateCell {
+    source: word::ValueId,
+    region: crate::RegionAnchorId,
+    instance_name: Box<str>,
+    cell_name: Box<str>,
+    connections: Vec<(Box<str>, bool, word::ValueId, RegionalPinKey)>,
+}
+
+fn bind_substrate_cells(
+    domain: CandidateBindingDomain<'_>,
+    inputs: &mut BindingMap,
+    outputs: &mut BindingMap,
+) -> Result<Vec<PendingSubstrateCell>, crate::SynthError> {
+    let selected = domain
+        .substrate_instances
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect::<std::collections::BTreeSet<_>>();
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let semantics = super::roots::FullDomainRootSemantics::new(domain.local_module)?;
+    let fallback_source = domain
+        .sequential_operations
+        .iter()
+        .flat_map(|state| state.sources.iter())
+        .map(|source| source.value)
+        .next()
+        .or_else(|| domain.boundary_bindings.first().map(|&(source, _)| source))
+        .or_else(|| domain.root_bindings.first().map(|&(source, _)| source))
+        .ok_or_else(|| {
+            crate::SynthError::invariant("regional substrate cell has no provenance source")
+        })?;
+    let mut plans = Vec::new();
+    for (instance_index, instance) in domain.local_module.instances().iter().enumerate() {
+        let instance_name = domain.local_module.name_str(instance.name);
+        if !selected.contains(instance_name) {
+            continue;
+        }
+        let cell_name = domain.local_module.name_str(instance.module);
+        let target = domain
+            .target_cells
+            .iter()
+            .find(|cell| cell.name() == cell_name)
+            .ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "generated regional instance '{instance_name}' is not a target cell"
+                ))
+            })?;
+        let instance_index = u32::try_from(instance_index)
+            .map_err(|_| crate::SynthError::capacity("regional substrate instance index"))?;
+        let mut connections = Vec::with_capacity(instance.connections.len());
+        for (connection_index, connection) in instance.connections.iter().enumerate() {
+            let pin_name = domain.local_module.name_str(connection.port);
+            let pin = target
+                .pins()
+                .find(|pin| pin.name() == pin_name)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(format!(
+                        "regional substrate cell '{cell_name}' has no pin '{pin_name}'"
+                    ))
+                })?;
+            let values = super::roots::scalar_value_parts(domain.local_module, connection.value)?;
+            let [value] = values.as_slice() else {
+                return Err(crate::SynthError::invariant(format!(
+                    "regional substrate pin '{cell_name}.{pin_name}' is not scalar"
+                )));
+            };
+            let [lowered] = domain.region_binding.lowered_bits(*value).ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "regional substrate pin '{cell_name}.{pin_name}' has no lowered identity"
+                ))
+            })?
+            else {
+                return Err(crate::SynthError::invariant(format!(
+                    "regional substrate pin '{cell_name}.{pin_name}' did not lower to one bit"
+                )));
+            };
+            let value = semantics.canonical_root(*lowered)?;
+            let connection = u32::try_from(connection_index)
+                .map_err(|_| crate::SynthError::capacity("regional substrate connection index"))?;
+            let key = RegionalPinKey::Substrate(SubstratePinKey {
+                region: domain.region,
+                instance: instance_index,
+                connection,
+            });
+            let output = matches!(
+                pin.direction(),
+                opto_library::TargetPinDirection::Output | opto_library::TargetPinDirection::Inout
+            );
+            let binding = RegionPlanValueBinding::ArtifactPinBit { pin: key, value };
+            if output {
+                inputs.entry(value).or_default().push(binding);
+            } else {
+                outputs.entry(value).or_default().push(binding);
+            }
+            connections.push((pin_name.into(), output, value, key));
+        }
+        plans.push(PendingSubstrateCell {
+            source: fallback_source,
+            region: domain.region,
+            instance_name: instance_name.into(),
+            cell_name: cell_name.into(),
+            connections,
+        });
+    }
+    if plans.len() != selected.len() {
+        return Err(crate::SynthError::invariant(
+            "generated regional substrate instance disappeared before publication",
+        ));
+    }
+    Ok(plans)
+}
+
+fn bind_artifact_output(
     outputs: &mut BindingMap,
     lowered: word::ValueId,
     binding: RegionPlanValueBinding,
 ) {
-    // State results have a distinct MemoryStateBit identity and never enter
-    // this collection. Every memory-logic row is therefore a cover output.
     outputs.entry(lowered).or_default().push(binding);
+}
+
+fn compact_publication_bindings(
+    mut bindings: Vec<RegionPlanValueBinding>,
+) -> Vec<RegionPlanValueBinding> {
+    let has_source = bindings
+        .iter()
+        .any(|binding| matches!(binding, RegionPlanValueBinding::SourceBit { .. }));
+    let mut kept_artifact = false;
+    bindings.retain(|binding| match binding {
+        RegionPlanValueBinding::ArtifactPinBit { .. } if has_source => false,
+        RegionPlanValueBinding::ArtifactPinBit { .. } => {
+            !std::mem::replace(&mut kept_artifact, true)
+        }
+        RegionPlanValueBinding::SourceBit { .. }
+        | RegionPlanValueBinding::MemoryLogicBit { .. }
+        | RegionPlanValueBinding::MemoryStateBit { .. }
+        | RegionPlanValueBinding::Lowered(_) => true,
+    });
+    bindings
 }
 
 fn bind_root_outputs(
@@ -411,6 +620,9 @@ pub(crate) fn build_candidate_binding<'a>(
         sequential_operations,
         root_bindings,
         region_binding,
+        region: _,
+        target_cells: _,
+        substrate_instances: _,
     } = domain;
     let output_values = output_values.into_iter().collect::<Vec<_>>();
     let source_operations = source_cells
@@ -476,9 +688,11 @@ pub(crate) fn build_candidate_binding<'a>(
                 ordinal: memory_logic.ordinal,
                 bit,
             };
-            bind_owned_memory_logic_bit(&mut local_to_outputs, lowered, binding);
+            bind_artifact_output(&mut local_to_outputs, lowered, binding);
         }
     }
+    let pending_substrate =
+        bind_substrate_cells(domain, &mut local_to_sources, &mut local_to_outputs)?;
     canonicalize_bindings(local_module, &mut local_to_sources)?;
     canonicalize_bindings(local_module, &mut local_to_outputs)?;
     bind_root_outputs(
@@ -530,15 +744,8 @@ pub(crate) fn build_candidate_binding<'a>(
             .and_then(|bindings| bindings.first())
             .copied()
             .ok_or_else(|| {
-                let operation = local_module.value(value).and_then(|stored| match stored.kind {
-                    word::ValueKind::Operation(operation) => {
-                        local_module.operation(operation).map(|operation| &operation.kind)
-                    }
-                    word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
-                });
                 crate::SynthError::invariant(format!(
-                    "region-local cover input value {value:?} ({:?}, operation {operation:?}) has no immutable source-bit binding",
-                    local_module.value(value).map(|stored| &stored.kind),
+                    "region-local cover input value {value:?} has no immutable endpoint binding"
                 ))
             })
     };
@@ -546,6 +753,7 @@ pub(crate) fn build_candidate_binding<'a>(
         local_to_outputs
             .get(&value)
             .cloned()
+            .map(compact_publication_bindings)
             .map(Vec::into_boxed_slice)
             .ok_or_else(|| {
                 let operation = local_module.value(value).and_then(|stored| match stored.kind {
@@ -589,16 +797,26 @@ pub(crate) fn build_candidate_binding<'a>(
         .flatten()
         .collect::<Vec<_>>()
         .into();
-    let state_endpoints = build_state_endpoints(
+    let mut endpoints = build_state_endpoints(
         local_module,
+        region_binding,
         sequential_operations,
         &local_to_sources,
         &outputs,
     )?;
+    let substrate = build_substrate_plans(
+        local_module,
+        pending_substrate,
+        &local_to_sources,
+        &local_to_outputs,
+        &outputs,
+        &mut endpoints,
+    )?;
     Ok(CandidateBinding {
         binding: RegionPlanBinding { inputs, outputs },
         output_widths: output_widths.into_boxed_slice(),
-        state_endpoints,
+        endpoints,
+        substrate,
     })
 }
 
@@ -643,12 +861,26 @@ fn bind_sequential_values(
                     value: source_result,
                     bit: source_bit.bit,
                 },
-                |pin| RegionPlanValueBinding::SequentialPinBit { pin, value },
+                |pin| RegionPlanValueBinding::ArtifactPinBit {
+                    pin: pin.into(),
+                    value,
+                },
             )
         };
         inputs
             .entry(*output)
             .or_insert_with(|| vec![state_binding(*output)]);
+        if let Some(feedback) = domain.source_to_local.get(&source_result).copied()
+            && let Some(lowered) = domain
+                .region_binding
+                .lowered_bits(feedback)
+                .and_then(|bits| bits.get(source_bit.bit as usize))
+                .copied()
+        {
+            inputs
+                .entry(lowered)
+                .or_insert_with(|| vec![state_binding(lowered)]);
+        }
         for &lowering_source in &state.lowering_sources {
             let source = domain
                 .local_module
@@ -694,58 +926,106 @@ fn bind_sequential_values(
                     }]
                 });
             }
-            outputs.entry(*lowered).or_insert_with(|| {
-                vec![RegionPlanValueBinding::SequentialPinBit {
+            bind_artifact_output(
+                outputs,
+                *lowered,
+                RegionPlanValueBinding::ArtifactPinBit {
                     pin: SequentialPinKey {
                         state: source_bit.cell,
                         role,
                         bit: source_bit.bit,
-                    },
+                    }
+                    .into(),
                     value: *lowered,
-                }]
-            });
+                },
+            );
         }
     }
     Ok(())
 }
 
+fn build_substrate_plans(
+    module: &word::WordModule,
+    plans: Vec<PendingSubstrateCell>,
+    sources: &BindingMap,
+    declared_outputs: &BindingMap,
+    outputs: &[RegionPlanValueBinding],
+    endpoints: &mut std::collections::BTreeMap<RegionalPinKey, RegionalEndpoint>,
+) -> Result<Box<[crate::mapping::materialize::RegionalSubstrateCellPlan]>, crate::SynthError> {
+    let stable_endpoint = |value| {
+        bound_endpoint(sources, value)
+            .or_else(|| {
+                declared_outputs.get(&value).and_then(|bindings| {
+                    bindings.iter().find_map(|binding| match *binding {
+                        RegionPlanValueBinding::SourceBit { value, bit } => {
+                            Some(RegionalEndpoint::SourceBit { value, bit })
+                        }
+                        _ => None,
+                    })
+                })
+            })
+            .or_else(|| publication_endpoint(outputs, value))
+    };
+    plans
+        .into_iter()
+        .map(|plan| {
+            let connections = plan
+                .connections
+                .into_iter()
+                .map(|(pin, output, value, key)| {
+                    let endpoint = if output {
+                        RegionalEndpoint::Pin(key)
+                    } else {
+                        stable_endpoint(value)
+                            .or(constant_endpoint(module, value)?)
+                            .or_else(|| {
+                                outputs
+                                    .iter()
+                                    .any(|binding| {
+                                        matches!(
+                                            binding,
+                                            RegionPlanValueBinding::ArtifactPinBit { pin, .. }
+                                                if pin == &key
+                                        )
+                                    })
+                                    .then_some(RegionalEndpoint::Pin(key))
+                            })
+                            .ok_or_else(|| {
+                                crate::SynthError::invariant(format!(
+                                    "regional substrate input '{0}.{pin}' has no stable endpoint",
+                                    plan.cell_name
+                                ))
+                            })?
+                    };
+                    insert_endpoint(endpoints, key, endpoint, "substrate pin")?;
+                    Ok(crate::mapping::materialize::RegionalSubstrateConnection {
+                        pin,
+                        output,
+                        endpoint,
+                    })
+                })
+                .collect::<Result<_, crate::SynthError>>()?;
+            Ok(crate::mapping::materialize::RegionalSubstrateCellPlan {
+                source: plan.source,
+                region: plan.region,
+                instance_name: plan.instance_name,
+                cell_name: plan.cell_name,
+                connections,
+            })
+        })
+        .collect()
+}
+
 fn build_state_endpoints(
     module: &word::WordModule,
+    binding: &crate::boolean::bitblast::LoweredRegionBinding,
     states: &[crate::mapping::materialize::SequentialRegionBinding],
     sources: &BindingMap,
     outputs: &[RegionPlanValueBinding],
-) -> Result<std::collections::BTreeMap<SequentialPinKey, SequentialEndpoint>, crate::SynthError> {
+) -> Result<std::collections::BTreeMap<RegionalPinKey, RegionalEndpoint>, crate::SynthError> {
     let mut endpoints = std::collections::BTreeMap::new();
     let mut state_outputs = std::collections::BTreeMap::new();
     let semantics = super::roots::FullDomainRootSemantics::new(module)?;
-    let source_endpoint = |value| {
-        sources.get(&value).and_then(|bindings| {
-            bindings.iter().find_map(|binding| match *binding {
-                RegionPlanValueBinding::SourceBit { value, bit } => {
-                    Some(SequentialEndpoint::SourceBit { value, bit })
-                }
-                RegionPlanValueBinding::SequentialPinBit { pin, .. } => {
-                    Some(SequentialEndpoint::Pin(pin))
-                }
-                _ => None,
-            })
-        })
-    };
-    let constant_endpoint = |value| -> Result<Option<SequentialEndpoint>, crate::SynthError> {
-        let stored = module
-            .value(value)
-            .ok_or_else(|| crate::SynthError::invariant("regional state endpoint is not live"))?;
-        let word::ValueKind::Constant(bits) = &stored.kind else {
-            return Ok(None);
-        };
-        let [bit] = bits.as_slice() else {
-            return Err(crate::SynthError::invariant(
-                "regional state endpoint constant is not scalar",
-            ));
-        };
-        crate::boolean::resolve_publication_bit(*bit, module.name(), &stored.source)
-            .map(|bit| Some(SequentialEndpoint::Constant(bit == opto_ir::BitVal::One)))
-    };
     for state in states {
         let operation = module
             .operation(state.operation)
@@ -758,15 +1038,24 @@ fn build_state_endpoints(
             role: SequentialPinRole::StateOutput,
             bit: source.bit,
         };
-        let canonical = semantics.canonical_root(operation.result)?;
-        let endpoint = source_endpoint(canonical).unwrap_or(SequentialEndpoint::Pin(key));
+        let [lowered] = binding.lowered_bits(operation.result).ok_or_else(|| {
+            crate::SynthError::invariant("regional state output has no lowered identity")
+        })?
+        else {
+            return Err(crate::SynthError::invariant(
+                "regional state output did not lower to one bit",
+            ));
+        };
+        let canonical = semantics.canonical_root(*lowered)?;
+        let endpoint =
+            bound_endpoint(sources, canonical).unwrap_or(RegionalEndpoint::Pin(key.into()));
         insert_endpoint(
             &mut state_outputs,
             canonical,
             endpoint,
             "state output value",
         )?;
-        insert_endpoint(&mut endpoints, key, endpoint, "state output")?;
+        insert_endpoint(&mut endpoints, key.into(), endpoint, "state output")?;
     }
     for state in states {
         let operation = module
@@ -781,38 +1070,36 @@ fn build_state_endpoints(
                 role,
                 bit: source.bit,
             };
-            let canonical = semantics.canonical_root(value)?;
+            let [lowered] = binding.lowered_bits(value).ok_or_else(|| {
+                crate::SynthError::invariant("regional state pin has no lowered identity")
+            })?
+            else {
+                return Err(crate::SynthError::invariant(
+                    "regional state pin did not lower to one bit",
+                ));
+            };
+            let canonical = semantics.canonical_root(*lowered)?;
             let endpoint = state_outputs
                 .get(&canonical)
                 .copied()
-                .or_else(|| source_endpoint(canonical))
-                .or(constant_endpoint(canonical)?)
-                .or_else(|| {
-                    outputs
-                        .iter()
-                        .any(|binding| {
-                            matches!(
-                                binding,
-                                RegionPlanValueBinding::SequentialPinBit { pin, .. } if pin == &key
-                            )
-                        })
-                        .then_some(SequentialEndpoint::Pin(key))
-                })
+                .or_else(|| bound_endpoint(sources, canonical))
+                .or(constant_endpoint(module, canonical)?)
+                .or_else(|| publication_endpoint(outputs, canonical))
                 .ok_or_else(|| {
                     crate::SynthError::invariant(format!(
                         "regional state pin {key:?} value {value:?} has neither a stable source nor a cover output"
                     ))
                 })?;
-            insert_endpoint(&mut endpoints, key, endpoint, "state pin")?;
+            insert_endpoint(&mut endpoints, key.into(), endpoint, "state pin")?;
         }
     }
     Ok(endpoints)
 }
 
 fn insert_endpoint<K: Ord + Copy>(
-    endpoints: &mut std::collections::BTreeMap<K, SequentialEndpoint>,
+    endpoints: &mut std::collections::BTreeMap<K, RegionalEndpoint>,
     key: K,
-    endpoint: SequentialEndpoint,
+    endpoint: RegionalEndpoint,
     description: &str,
 ) -> Result<(), crate::SynthError> {
     if endpoints
@@ -1023,7 +1310,7 @@ fn resolve_plan_value(
 ) -> Result<word::ValueId, crate::SynthError> {
     match binding {
         RegionPlanValueBinding::Lowered(value)
-        | RegionPlanValueBinding::SequentialPinBit { value, .. } => Ok(value),
+        | RegionPlanValueBinding::ArtifactPinBit { value, .. } => Ok(value),
         RegionPlanValueBinding::SourceBit { .. }
         | RegionPlanValueBinding::MemoryLogicBit { .. }
         | RegionPlanValueBinding::MemoryStateBit { .. } => Err(crate::SynthError::invariant(

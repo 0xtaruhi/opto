@@ -69,6 +69,7 @@ pub(super) struct RegionalPlanRow {
     pub(super) plan: crate::RegionCoverPlan,
     pub(super) binding: RegionPlanBinding,
     pub(super) sequential: Box<[materialize::RegionalSequentialCellPlan]>,
+    pub(super) substrate: Box<[materialize::RegionalSubstrateCellPlan]>,
     pub(super) proof: opto_ir::design::EquivalenceCertificate,
 }
 
@@ -116,7 +117,7 @@ struct RegionalMappedState {
     cell_sources: Vec<Option<MappedCellSource>>,
     implementation_census: Option<ImplementationCensus>,
     signals: WordMappedSignals,
-    sequential_pins: materialize::SequentialMappedPins,
+    regional_pins: materialize::RegionalMappedPins,
     boundary_nets: Box<[crate::closure::BoundaryNetObservation]>,
     footprints: Vec<Option<MappedRegionFootprint>>,
     timing: Option<crate::closure::mmmc::MmmcTiming>,

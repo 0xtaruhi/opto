@@ -25,8 +25,9 @@ const TRI_STATE_CELL_PREFIX: &str = "_tri_state_";
 use crate::artifact::MappedCellSource;
 pub(crate) use region_delta::REGION_CELL_PREFIX;
 pub(crate) use sequential_delta::{
-    MappedSequentialArtifact, RegionalSequentialCellPlan, SequentialRegionBinding,
-    local_sequential_bindings, lowered_sequential_operations, plan_regional_sequential_cells,
+    MappedFixedSubstrateArtifact, RegionalSequentialCellPlan, RegionalSubstrateCellPlan,
+    RegionalSubstrateConnection, SequentialRegionBinding, local_sequential_bindings,
+    lowered_sequential_operations, plan_regional_sequential_cells,
     reconcile_sequential_publication, sequential_binding_values, sequential_plan_values,
     sequential_region_bindings,
 };
@@ -341,13 +342,13 @@ pub(crate) struct MappedOutput {
     pub(crate) cell_sources: Box<[(CellId, MappedCellSource)]>,
 }
 
-pub(crate) type MappedSubstrate = (MappedOutput, Box<[Option<NetId>]>, SequentialMappedPins);
+pub(crate) type MappedSubstrate = (MappedOutput, Box<[Option<NetId>]>, RegionalMappedPins);
 
 #[derive(Debug)]
-pub(crate) struct SequentialMappedPins(Box<[(crate::mapping::SequentialPinKey, NetId)]>);
+pub(crate) struct RegionalMappedPins(Box<[(crate::mapping::RegionalPinKey, NetId)]>);
 
-impl SequentialMappedPins {
-    pub(crate) fn get(&self, pin: crate::mapping::SequentialPinKey) -> Option<NetId> {
+impl RegionalMappedPins {
+    pub(crate) fn get(&self, pin: crate::mapping::RegionalPinKey) -> Option<NetId> {
         self.0
             .binary_search_by_key(&pin, |&(candidate, _)| candidate)
             .ok()
@@ -356,12 +357,10 @@ impl SequentialMappedPins {
 
     pub(crate) fn require(
         &self,
-        pin: crate::mapping::SequentialPinKey,
+        pin: crate::mapping::RegionalPinKey,
     ) -> Result<NetId, crate::SynthError> {
         self.get(pin).ok_or_else(|| {
-            crate::SynthError::invariant(
-                "regional sequential pin has no stable mapped substrate net",
-            )
+            crate::SynthError::invariant("regional artifact pin has no stable mapped substrate net")
         })
     }
 }
@@ -814,7 +813,7 @@ pub(crate) struct MappedSubstrateRequest<'a> {
     pub(crate) base_revision: opto_ir::RevisionId,
     pub(crate) observed_values: &'a [word::ValueId],
     pub(crate) value_aliases: &'a [(word::ValueId, word::ValueId)],
-    pub(crate) sequential_pins: &'a [crate::mapping::SequentialPinKey],
+    pub(crate) regional_pins: &'a [crate::mapping::RegionalPinKey],
 }
 
 fn target_pin_id(
@@ -852,7 +851,7 @@ pub(crate) fn build_test_substrate(
         base_revision,
         observed_values: &[],
         value_aliases: &[],
-        sequential_pins: &[],
+        regional_pins: &[],
     })?;
     Ok(output)
 }
@@ -874,7 +873,7 @@ pub(crate) fn build_mapped_substrate(
         base_revision,
         observed_values,
         value_aliases,
-        sequential_pins,
+        regional_pins,
     } = request;
     let offsets = signal_offsets(module)?;
     let signal_bit_count = module.signals().iter().try_fold(0usize, |count, signal| {
@@ -944,10 +943,10 @@ pub(crate) fn build_mapped_substrate(
             );
         }
     }
-    let mut sequential_pins = sequential_pins.to_vec();
-    sequential_pins.sort_unstable();
-    sequential_pins.dedup();
-    let sequential_pins = sequential_pins
+    let mut regional_pins = regional_pins.to_vec();
+    regional_pins.sort_unstable();
+    regional_pins.dedup();
+    let regional_pins = regional_pins
         .into_iter()
         .map(|pin| {
             builder
@@ -1047,7 +1046,7 @@ pub(crate) fn build_mapped_substrate(
             cell_sources: cell_sources.into_boxed_slice(),
         },
         observed_nets.into_boxed_slice(),
-        SequentialMappedPins(sequential_pins),
+        RegionalMappedPins(regional_pins),
     ))
 }
 

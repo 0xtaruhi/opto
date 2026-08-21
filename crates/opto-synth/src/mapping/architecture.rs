@@ -56,6 +56,7 @@ pub(crate) struct RegionalArchitectureMapping {
     pub(crate) operators: DurableOperatorArena,
     pub(crate) publication: Box<[crate::boolean::bitblast::RegionalPublicationBit]>,
     pub(crate) sequential: Box<[super::materialize::RegionalSequentialCellPlan]>,
+    pub(crate) substrate: Box<[super::materialize::RegionalSubstrateCellPlan]>,
     pub(crate) proof: opto_ir::design::EquivalenceCertificate,
 }
 
@@ -72,6 +73,7 @@ struct LoweredPrivateRegion {
     state_operations: Box<[super::materialize::SequentialRegionBinding]>,
     mapping_roots: Box<[MappingRoot]>,
     sequential_timing: super::sequential::SequentialTimingProjection,
+    substrate_instances: Box<[Box<str>]>,
 }
 
 struct OptimizedPrivateRegion {
@@ -84,6 +86,7 @@ struct OptimizedPrivateRegion {
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
     root_pairs: Vec<(MappingRoot, word::ValueId)>,
     state_relations: BTreeMap<word::OpId, [u8; 32]>,
+    substrate_instances: Box<[Box<str>]>,
 }
 
 #[derive(Clone, Copy)]
@@ -470,6 +473,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             state_operations,
             mapping_roots: _,
             sequential_timing: _,
+            substrate_instances,
         } = private;
         let empty_port_bindings = opto_timing::PortBindings::new([]);
         let LocalRegionBooleanLowering {
@@ -517,6 +521,9 @@ impl RegionArchitectureMaterializer<'_, '_> {
             sequential_operations: &state_operations,
             root_bindings: &root_bindings,
             region_binding: &lowered_binding,
+            region: region.id(),
+            target_cells: &self.request.options.target_cells,
+            substrate_instances: &substrate_instances,
         };
         let (rematerialized, candidate) = match analysis {
             super::cover::RegionCoverAnalysis::NoCombinationalLogic => (
@@ -557,7 +564,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             self.request.source,
             &state_operations,
             self.request.mapping_context,
-            &candidate.state_endpoints,
+            &candidate.endpoints,
         )?;
         let proof = regional_proof(&plan, &sequential);
         Ok(RegionalArchitectureMapping {
@@ -567,6 +574,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             operators,
             publication,
             sequential,
+            substrate: candidate.substrate,
             proof,
         })
     }
@@ -587,6 +595,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             root_bindings,
             root_pairs,
             state_relations,
+            substrate_instances,
         } = self.optimize_private_region(memory_implementations, region, runtime)?;
         let boundary_inputs = frozen_boundary_inputs(&boundary_bindings);
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
@@ -728,6 +737,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 state_operations: lowered_sequential,
                 mapping_roots: mapping_roots.into_boxed_slice(),
                 sequential_timing,
+                substrate_instances,
             },
             root_pairs,
         ))
@@ -915,12 +925,17 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 Ok::<_, SynthError>((local, feedback))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let first_generated_instance = module.instances().len();
         self.request.mapping_context.prepare_private_structure(
             &mut module,
             &state_feedback,
             self.request.clock_gating,
             true,
         )?;
+        let substrate_instances = module.instances()[first_generated_instance..]
+            .iter()
+            .map(|instance| module.name_str(instance.name).into())
+            .collect();
         operation_sources.inherit_appended(&module)?;
         Ok(OptimizedPrivateRegion {
             module,
@@ -932,6 +947,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             root_bindings,
             root_pairs,
             state_relations,
+            substrate_instances,
         })
     }
 

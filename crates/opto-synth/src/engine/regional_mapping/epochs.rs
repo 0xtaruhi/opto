@@ -69,15 +69,17 @@ impl RegionalMapper<'_> {
                     .cloned()
                     .zip(rows.iter().map(|row| row.binding.clone()))
                     .zip(rows.iter().map(|row| row.sequential.clone()))
+                    .zip(rows.iter().map(|row| row.substrate.clone()))
                     .zip(rows.iter().map(|row| row.proof))
-                    .map(
-                        |(((plan, binding), sequential), proof)| super::RegionalPlanRow {
+                    .map(|((((plan, binding), sequential), substrate), proof)| {
+                        super::RegionalPlanRow {
                             plan,
                             binding,
                             sequential,
+                            substrate,
                             proof,
-                        },
-                    )
+                        }
+                    })
                     .collect();
                 best = Some(BestMapping {
                     objective,
@@ -220,11 +222,11 @@ impl RegionalMapper<'_> {
         );
         observed_values.sort_unstable();
         observed_values.dedup();
-        let mut sequential_pins = state
+        let mut regional_pins = state
             .rows
             .iter()
             .flat_map(|row| {
-                row.binding.sequential_pins().chain(
+                row.binding.artifact_pins().chain(
                     row.sequential
                         .iter()
                         .flat_map(|plan| {
@@ -234,22 +236,33 @@ impl RegionalMapper<'_> {
                                 .chain(std::iter::once(&plan.output.1))
                         })
                         .filter_map(|endpoint| match *endpoint {
-                            crate::mapping::SequentialEndpoint::Pin(pin) => Some(pin),
-                            crate::mapping::SequentialEndpoint::SourceBit { .. }
-                            | crate::mapping::SequentialEndpoint::Constant(_) => None,
+                            crate::mapping::RegionalEndpoint::Pin(pin) => Some(pin),
+                            crate::mapping::RegionalEndpoint::SourceBit { .. }
+                            | crate::mapping::RegionalEndpoint::Constant(_) => None,
                         }),
                 )
             })
             .collect::<Vec<_>>();
-        sequential_pins.sort_unstable();
-        sequential_pins.dedup();
+        regional_pins.extend(state.rows.iter().flat_map(|row| {
+            row.substrate.iter().flat_map(|plan| {
+                plan.connections
+                    .iter()
+                    .filter_map(|connection| match connection.endpoint {
+                        crate::mapping::RegionalEndpoint::Pin(pin) => Some(pin),
+                        crate::mapping::RegionalEndpoint::SourceBit { .. }
+                        | crate::mapping::RegionalEndpoint::Constant(_) => None,
+                    })
+            })
+        }));
+        regional_pins.sort_unstable();
+        regional_pins.dedup();
         let (
             materialize::MappedOutput {
                 netlist,
                 cell_sources: substrate_sources,
             },
             observed_nets,
-            sequential_pins,
+            regional_pins,
         ) = materialize::build_mapped_substrate(materialize::MappedSubstrateRequest {
             module: state.module,
             options: self.config.options,
@@ -259,7 +272,7 @@ impl RegionalMapper<'_> {
             base_revision: self.config.base_revision,
             observed_values: &observed_values,
             value_aliases: sequential_publication.aliases(),
-            sequential_pins: &sequential_pins,
+            regional_pins: &regional_pins,
         })?;
         let signals =
             WordMappedSignals::from_observations(state.module, &observed_values, &observed_nets)?;
@@ -292,24 +305,25 @@ impl RegionalMapper<'_> {
             cell_sources,
             implementation_census: None,
             signals,
-            sequential_pins,
+            regional_pins,
             boundary_nets: boundary_nets.into_boxed_slice(),
             footprints: std::iter::repeat_with(|| None)
                 .take(state.rows.len())
                 .collect(),
             timing: None,
         };
-        let sequential = materialize::MappedSequentialArtifact::from_module(
+        let fixed_substrate = materialize::MappedFixedSubstrateArtifact::from_module(
             state.module,
             state.region_binding,
             &mapped.signals,
             state.rows.iter().flat_map(|row| row.sequential.iter()),
-            &mapped.sequential_pins,
+            state.rows.iter().flat_map(|row| row.substrate.iter()),
+            &mapped.regional_pins,
             &self.config,
         )?;
         let rows = (0..state.rows.len()).collect::<Vec<_>>();
         let regions = self.prepare_regions(state, &mapped, &rows)?;
-        self.apply_regions(&mut mapped, &regions, Some(&sequential))?;
+        self.apply_regions(&mut mapped, &regions, Some(&fixed_substrate))?;
         let census = self.full_implementation_census(state, &mapped)?;
         mapped.implementation_census = Some(census);
         mapped.timing = crate::closure::mmmc::MmmcTiming::new(
@@ -427,7 +441,7 @@ impl RegionalMapper<'_> {
                     &state_row.binding,
                     region_binding,
                     &mapped.signals,
-                    &mapped.sequential_pins,
+                    &mapped.regional_pins,
                     self.combinational_catalog(),
                     &self.config.options.target_cells,
                 )?;
@@ -459,17 +473,17 @@ impl RegionalMapper<'_> {
         &self,
         mapped: &mut RegionalMappedState,
         regions: &[PreparedRegion],
-        sequential: Option<&materialize::MappedSequentialArtifact>,
+        fixed_substrate: Option<&materialize::MappedFixedSubstrateArtifact>,
     ) -> Result<(), crate::SynthError> {
-        let application_kind = if sequential.is_some() {
+        let application_kind = if fixed_substrate.is_some() {
             "initial"
         } else {
             "replacement"
         };
         let mut cells = BTreeSet::new();
         let mut nets = BTreeSet::new();
-        if let Some(sequential) = sequential {
-            nets.extend(sequential.required_nets().iter().copied());
+        if let Some(fixed_substrate) = fixed_substrate {
+            nets.extend(fixed_substrate.required_nets().iter().copied());
         }
         for region in regions {
             let previous = mapped
@@ -511,8 +525,8 @@ impl RegionalMapper<'_> {
             .snapshot_region(cells, nets.iter().copied())
             .map_err(crate::SynthError::from)?;
         let mut delta = RegionDelta::new(snapshot);
-        let pending_sequential = sequential
-            .map(|sequential| sequential.append_to_delta(&mut delta))
+        let pending_fixed_substrate = fixed_substrate
+            .map(|artifact| artifact.append_to_delta(&mut delta))
             .transpose()?;
         let pending_regions = regions
             .iter()
@@ -551,11 +565,11 @@ impl RegionalMapper<'_> {
                 .ok_or_else(|| {
                     crate::SynthError::invariant("fresh regional mapped snapshot became stale")
                 })?;
-        let sequential_sources = match pending_sequential {
+        let fixed_sources = match pending_fixed_substrate {
             Some(pending) => match pending.resolve(transaction.mapped_edit()) {
                 Ok(sources) => sources,
                 Err(error) => {
-                    return transaction.abort(error, "initial sequential materialization");
+                    return transaction.abort(error, "initial fixed-substrate materialization");
                 }
             },
             None => Box::new([]),
@@ -580,7 +594,7 @@ impl RegionalMapper<'_> {
             publications.push((row, owner, origins, footprint));
         }
 
-        let mut new_sources = sequential_sources.into_vec();
+        let mut new_sources = fixed_sources.into_vec();
         for (_, owner, origins, footprint) in &publications {
             new_sources.extend(footprint.cells().iter().copied().map(|cell| {
                 (
