@@ -158,12 +158,44 @@ fn commit_operation_rewrites(
     for binding in memory_states.iter_mut() {
         binding.local = resolve(binding.local)?;
     }
+    let state_roots = module
+        .operations()
+        .iter()
+        .filter_map(|operation| {
+            matches!(
+                operation.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            )
+            .then_some(operation.result)
+        })
+        .collect::<Vec<_>>();
+    compact_private_module(
+        module,
+        operation_sources,
+        source_to_local,
+        boundary_bindings,
+        owned_memory_logic,
+        memory_states,
+        &state_roots,
+    )
+}
+
+fn compact_private_module(
+    module: &mut word::WordModule,
+    operation_sources: &mut crate::planning::regional::LocalOperationProvenance,
+    source_to_local: &mut BTreeMap<word::ValueId, word::ValueId>,
+    boundary_bindings: &mut [(word::ValueId, word::ValueId)],
+    owned_memory_logic: &mut [RegionalMemoryLogicBinding],
+    memory_states: &mut [RegionalMemoryStateBinding],
+    extra_roots: &[word::ValueId],
+) -> Result<(), SynthError> {
     let roots = source_to_local
         .values()
         .copied()
         .chain(boundary_bindings.iter().map(|&(_, local)| local))
         .chain(owned_memory_logic.iter().map(|binding| binding.local))
         .chain(memory_states.iter().map(|binding| binding.local))
+        .chain(extra_roots.iter().copied())
         .collect::<Vec<_>>();
     let remap = module
         .compact_netlist_with_roots(&roots)
@@ -423,7 +455,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("logic_lowering.region[{row}].private_lowering")
             });
-            self.lower_private_region(memory_implementations, region)?
+            self.lower_private_region(memory_implementations, region, runtime)?
         };
         let PreparedRegionCover {
             slice,
@@ -542,22 +574,139 @@ impl RegionArchitectureMaterializer<'_, '_> {
         &self,
         memory_implementations: &[MemoryImplementationCandidate],
         region: SynthesisRegion,
+        runtime: &ExecutionContext,
     ) -> Result<(LoweredPrivateRegion, Vec<(MappingRoot, word::ValueId)>), SynthError> {
         let (
             RegionalWordCone {
                 mut module,
-                source_to_local,
-                boundary_bindings,
+                mut source_to_local,
+                mut boundary_bindings,
                 mut operation_sources,
                 owned_memory_logic,
                 memory_states,
                 root_bindings,
             },
-            boundary_inputs,
-            root_pairs,
+            _,
+            mut root_pairs,
         ) = self.prepare_private_word(memory_implementations, region)?;
-        let owned_memory_logic = owned_memory_logic.into_vec();
-        let memory_states = memory_states.into_vec();
+        let mut owned_memory_logic = owned_memory_logic.into_vec();
+        let mut memory_states = memory_states.into_vec();
+        let fsm = crate::planning::fsm::optimize_derived_fsms(
+            &mut module,
+            self.request.timing,
+            &opto_timing::PortBindings::new([]),
+            runtime,
+        )?;
+        operation_sources.inherit_appended(&module)?;
+        for &(replaced, replacement) in fsm.rewrites() {
+            let sources = operation_sources
+                .sources(replaced)
+                .ok_or_else(|| SynthError::invariant("replaced FSM has no source relation"))?
+                .to_vec();
+            operation_sources.set(replacement, sources)?;
+        }
+        let _fsm_proof = fsm.proof();
+        let canonical = crate::planning::dataflow::optimize_combinational_dataflow(&mut module)?;
+        remap_private_values(
+            &canonical,
+            &mut source_to_local,
+            &mut boundary_bindings,
+            &mut owned_memory_logic,
+            &mut memory_states,
+        );
+        operation_sources.inherit_appended(&module)?;
+        let shareable =
+            crate::planning::dataflow::shareable_sequential_operations(self.request.source)?
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+        let state_candidates = module
+            .operations()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, operation)| {
+                matches!(
+                    operation.kind,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                )
+                .then_some(index)
+            })
+            .map(|index| word::OpId::from_index(index).map_err(SynthError::from))
+            .filter_map(|operation| match operation {
+                Ok(operation)
+                    if operation_sources.sources(operation).is_some_and(|sources| {
+                        !sources.is_empty()
+                            && sources.iter().all(|source| shareable.contains(source))
+                    }) =>
+                {
+                    Some(Ok(operation))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let sharing = crate::planning::dataflow::share_equivalent_sequential_values_by(
+            &mut module,
+            &state_candidates,
+            runtime,
+            |value| canonical.representatives()[value.index()],
+        )?;
+        for &operation in &state_candidates {
+            let result = module
+                .operation(operation)
+                .ok_or_else(|| SynthError::invariant("private state candidate disappeared"))?
+                .result;
+            let representative = sharing.representatives()[result.index()];
+            if representative == result {
+                continue;
+            }
+            let representative = module
+                .value(representative)
+                .and_then(|value| match value.kind {
+                    word::ValueKind::Operation(operation) => Some(operation),
+                    word::ValueKind::Constant(_) | word::ValueKind::Signal(_) => None,
+                })
+                .ok_or_else(|| SynthError::invariant("shared state has no representative"))?;
+            let sources = operation_sources
+                .sources(operation)
+                .ok_or_else(|| SynthError::invariant("shared state has no source relation"))?
+                .to_vec();
+            operation_sources.merge(representative, sources)?;
+        }
+        remap_private_values(
+            &sharing,
+            &mut source_to_local,
+            &mut boundary_bindings,
+            &mut owned_memory_logic,
+            &mut memory_states,
+        );
+        let state_roots = module
+            .operations()
+            .iter()
+            .filter_map(|operation| {
+                matches!(
+                    operation.kind,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                )
+                .then_some(sharing.representatives()[operation.result.index()])
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        compact_private_module(
+            &mut module,
+            &mut operation_sources,
+            &mut source_to_local,
+            &mut boundary_bindings,
+            &mut owned_memory_logic,
+            &mut memory_states,
+            &state_roots,
+        )?;
+        let boundary_inputs = collect_local_boundary_inputs(&module)?;
+        for (root, local) in &mut root_pairs {
+            *local = source_to_local.get(&root.value).copied().ok_or_else(|| {
+                SynthError::invariant("private root disappeared after local optimization")
+            })?;
+        }
         let state_feedback = module
             .operations()
             .iter()
@@ -571,32 +720,22 @@ impl RegionArchitectureMaterializer<'_, '_> {
             })
             .map(|(index, _)| {
                 let local = word::OpId::from_index(index).map_err(SynthError::from)?;
-                let mut feedback = operation_sources
+                let source = operation_sources
                     .sources(local)
                     .ok_or_else(|| SynthError::invariant("private state has no source relation"))?
-                    .iter()
-                    .map(|&source| {
-                        let result = self
-                            .request
-                            .source
-                            .operation(source)
-                            .ok_or_else(|| {
-                                SynthError::invariant("private state source is not live")
-                            })?
-                            .result;
-                        source_to_local.get(&result).copied().ok_or_else(|| {
-                            SynthError::invariant("private state has no feedback boundary")
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                feedback.sort_unstable();
-                feedback.dedup();
-                let [feedback] = feedback.as_slice() else {
-                    return Err(SynthError::invariant(
-                        "merged private state has conflicting feedback boundaries",
-                    ));
-                };
-                Ok((local, *feedback))
+                    .first()
+                    .copied()
+                    .ok_or_else(|| SynthError::invariant("private state has no source relation"))?;
+                let result = self
+                    .request
+                    .source
+                    .operation(source)
+                    .ok_or_else(|| SynthError::invariant("private state source is not live"))?
+                    .result;
+                let feedback = source_to_local.get(&result).copied().ok_or_else(|| {
+                    SynthError::invariant("private state has no feedback boundary")
+                })?;
+                Ok::<_, SynthError>((local, feedback))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         self.request.mapping_context.prepare_private_structure(
@@ -681,7 +820,13 @@ impl RegionArchitectureMaterializer<'_, '_> {
             let operation = module.operation(state.operation).ok_or_else(|| {
                 SynthError::invariant("private scalar state disappeared before Boolean lowering")
             })?;
+            tracked_values.push(operation.result);
             tracked_values.extend(crate::word::operation_inputs(&operation.kind));
+            tracked_values.extend(
+                state.lowering_sources.iter().filter_map(|&source| {
+                    module.operation(source).map(|operation| operation.result)
+                }),
+            );
         }
         tracked_values.sort_unstable();
         tracked_values.dedup();

@@ -627,12 +627,8 @@ fn plan_regions(
     let mapping_context = execution
         .engine
         .mapping_context(&normalized.environment.options);
-    let (regions, design) = crate::planning::regional::optimize_private_structure(
-        &mut normalized.synthesized,
-        normalized.environment.primary_scenario().constraints(),
-        &normalized.environment.port_bindings,
-        execution.runtime,
-    )?;
+    let (regions, design) =
+        crate::planning::regional::seal_work_design(&mut normalized.synthesized)?;
     normalized.ledger.normalized_values = normalized.synthesized.values().len();
     normalized.ledger.normalized_operations = normalized.synthesized.operations().len();
     let trace = crate::api::diagnostics::SynthTrace::timing(execution.engine.config.diagnostics);

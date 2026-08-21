@@ -25,6 +25,7 @@ enum SequentialKey {
 
 pub(crate) fn share_equivalent_sequential_values_by(
     module: &mut word::WordModule,
+    operations: &[word::OpId],
     runtime: &ExecutionContext,
     canonical_value: impl Fn(word::ValueId) -> word::ValueId,
 ) -> Result<DataflowChanges, crate::SynthError> {
@@ -44,28 +45,12 @@ pub(crate) fn share_equivalent_sequential_values_by(
             Some(word::ValueKind::Operation(_) | word::ValueKind::Constant(_)) | None => value,
         }
     };
-    let mut sequential_targets = HashMap::<word::ValueId, word::LValue>::new();
-    let mut multiple_targets = BTreeSet::new();
-    for connect in module.connects() {
-        if sequential_targets
-            .insert(connect.value, connect.target.clone())
-            .is_some()
-        {
-            multiple_targets.insert(connect.value);
-        }
-    }
-    for value in multiple_targets {
-        sequential_targets.remove(&value);
-    }
     let mut representatives = HashMap::<SequentialKey, word::ValueId>::new();
     let mut aliases = Vec::new();
-    for operation in module.operations() {
-        let Some(target) = sequential_targets.get(&operation.result) else {
-            continue;
-        };
-        if module.signal_is_preserved(target.signal) {
-            continue;
-        }
+    for &operation_id in operations {
+        let operation = module.operation(operation_id).ok_or_else(|| {
+            crate::SynthError::invariant("explicit sequential sharing candidate is not live")
+        })?;
         let key = match &operation.kind {
             word::OpKind::Register(register) => SequentialKey::Register {
                 d: canonical_value(register.d),
@@ -190,6 +175,40 @@ pub(crate) fn share_equivalent_sequential_values_by(
     DataflowChanges::from_aliases(module.values().len(), &aliases)
 }
 
+pub(crate) fn shareable_sequential_operations(
+    module: &word::WordModule,
+) -> Result<Box<[word::OpId]>, crate::SynthError> {
+    let mut targets = HashMap::<word::ValueId, word::SignalId>::new();
+    let mut ambiguous = BTreeSet::new();
+    for connect in module.connects() {
+        if targets
+            .insert(connect.value, connect.target.signal)
+            .is_some()
+        {
+            ambiguous.insert(connect.value);
+        }
+    }
+    module
+        .operations()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            matches!(
+                operation.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            )
+            .then_some((index, operation))
+        })
+        .filter(|(_, operation)| {
+            !ambiguous.contains(&operation.result)
+                && targets
+                    .get(&operation.result)
+                    .is_some_and(|&signal| !module.signal_is_preserved(signal))
+        })
+        .map(|(index, _)| word::OpId::from_index(index).map_err(crate::SynthError::from))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,11 +260,14 @@ mod tests {
             .connect(word::LValue::signal(q1_signal), q1, source)
             .unwrap();
 
-        let changes =
-            share_equivalent_sequential_values_by(&mut module, crate::test_runtime(), |value| {
-                value
-            })
-            .unwrap();
+        let candidates = shareable_sequential_operations(&module).unwrap();
+        let changes = share_equivalent_sequential_values_by(
+            &mut module,
+            &candidates,
+            crate::test_runtime(),
+            |value| value,
+        )
+        .unwrap();
 
         assert!(changes.has_equivalences());
         assert_eq!(changes.representatives()[q1.index()], q0);
@@ -303,11 +325,14 @@ mod tests {
             }
         }
 
-        let changes =
-            share_equivalent_sequential_values_by(&mut module, crate::test_runtime(), |value| {
-                value
-            })
-            .unwrap();
+        let candidates = shareable_sequential_operations(&module).unwrap();
+        let changes = share_equivalent_sequential_values_by(
+            &mut module,
+            &candidates,
+            crate::test_runtime(),
+            |value| value,
+        )
+        .unwrap();
 
         assert!(!changes.has_equivalences());
         assert_eq!(
@@ -349,11 +374,16 @@ mod tests {
                 .unwrap();
         }
 
-        let changes =
-            share_equivalent_sequential_values_by(&mut module, crate::test_runtime(), |value| {
-                value
-            })
-            .unwrap();
+        let candidates = (0..module.operations().len())
+            .map(|index| word::OpId::from_index(index).unwrap())
+            .collect::<Vec<_>>();
+        let changes = share_equivalent_sequential_values_by(
+            &mut module,
+            &candidates,
+            crate::test_runtime(),
+            |value| value,
+        )
+        .unwrap();
         assert!(!changes.has_equivalences());
     }
 
@@ -397,11 +427,14 @@ mod tests {
         }
 
         let canonical = super::super::canonicalize_combinational_dataflow(&mut module).unwrap();
-        let changes =
-            share_equivalent_sequential_values_by(&mut module, crate::test_runtime(), |value| {
-                canonical.representatives()[value.index()]
-            })
-            .unwrap();
+        let candidates = shareable_sequential_operations(&module).unwrap();
+        let changes = share_equivalent_sequential_values_by(
+            &mut module,
+            &candidates,
+            crate::test_runtime(),
+            |value| canonical.representatives()[value.index()],
+        )
+        .unwrap();
 
         assert!(changes.has_equivalences());
         assert_eq!(

@@ -490,6 +490,49 @@ pub(crate) fn build_candidate_binding<'a>(
         let operation = local_module
             .operation(state_binding.operation)
             .ok_or_else(|| crate::SynthError::invariant("regional state plan is not live"))?;
+        let source_bit = state_binding.sources.first().ok_or_else(|| {
+            crate::SynthError::invariant("regional state relation has no source state bit")
+        })?;
+        let source_operation = source_operations
+            .get(&source_bit.cell)
+            .copied()
+            .ok_or_else(|| {
+                crate::SynthError::invariant("regional state relation has no source operation")
+            })?;
+        let source_result = source_module
+            .operation(source_operation)
+            .ok_or_else(|| crate::SynthError::invariant("source state operation is not live"))?
+            .result;
+        let Some([output]) = region_binding.lowered_bits(operation.result) else {
+            return Err(crate::SynthError::invariant(
+                "regional scalar state output did not lower to one bit",
+            ));
+        };
+        local_to_sources.entry(*output).or_insert_with(|| {
+            vec![RegionPlanValueBinding::SourceBit {
+                value: source_result,
+                bit: source_bit.bit,
+            }]
+        });
+        for &lowering_source in &state_binding.lowering_sources {
+            let source = local_module
+                .operation(lowering_source)
+                .ok_or_else(|| crate::SynthError::invariant("state lowering source is not live"))?
+                .result;
+            let Some(lowered) = region_binding
+                .lowered_bits(source)
+                .and_then(|bits| bits.get(source_bit.bit as usize))
+                .copied()
+            else {
+                continue;
+            };
+            local_to_sources.entry(lowered).or_insert_with(|| {
+                vec![RegionPlanValueBinding::SourceBit {
+                    value: source_result,
+                    bit: source_bit.bit,
+                }]
+            });
+        }
         for (role, value) in sequential_inputs(&operation.kind)? {
             let Some(bits) = region_binding.lowered_bits(value) else {
                 continue;
@@ -499,40 +542,30 @@ pub(crate) fn build_candidate_binding<'a>(
                     "regional scalar state pin did not lower to one bit",
                 ));
             };
-            for source_bit in &state_binding.sources {
-                let source_operation = source_operations
-                    .get(&source_bit.cell)
-                    .copied()
-                    .ok_or_else(|| {
-                        crate::SynthError::invariant(
-                            "regional state relation has no source operation",
-                        )
-                    })?;
-                let source = source_module
-                    .operation(source_operation)
-                    .and_then(|operation| sequential_input(&operation.kind, role));
-                let source_lowered = source
-                    .and_then(|source| source_to_local.get(&source).copied())
-                    .and_then(|local| region_binding.lowered_bits(local))
-                    .and_then(|bits| bits.get(source_bit.bit as usize))
-                    .copied();
-                if source_lowered == Some(*lowered) {
-                    local_to_sources.entry(*lowered).or_insert_with(|| {
-                        vec![RegionPlanValueBinding::SourceBit {
-                            value: source.expect("matching source state pin has a source value"),
-                            bit: source_bit.bit,
-                        }]
-                    });
-                }
-                let binding = RegionPlanValueBinding::SequentialPinBit(SequentialPinKey {
-                    state: source_bit.cell,
-                    role,
-                    bit: source_bit.bit,
+            let source = source_module
+                .operation(source_operation)
+                .and_then(|operation| sequential_input(&operation.kind, role));
+            let source_lowered = source
+                .and_then(|source| source_to_local.get(&source).copied())
+                .and_then(|local| region_binding.lowered_bits(local))
+                .and_then(|bits| bits.get(source_bit.bit as usize))
+                .copied();
+            if source_lowered == Some(*lowered) {
+                local_to_sources.entry(*lowered).or_insert_with(|| {
+                    vec![RegionPlanValueBinding::SourceBit {
+                        value: source.expect("matching source state pin has a source value"),
+                        bit: source_bit.bit,
+                    }]
                 });
-                local_to_outputs
-                    .entry(*lowered)
-                    .or_insert_with(|| vec![binding]);
             }
+            let binding = RegionPlanValueBinding::SequentialPinBit(SequentialPinKey {
+                state: source_bit.cell,
+                role,
+                bit: source_bit.bit,
+            });
+            local_to_outputs
+                .entry(*lowered)
+                .or_insert_with(|| vec![binding]);
         }
     }
     for operation in local_module.operations() {

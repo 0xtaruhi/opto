@@ -8,21 +8,22 @@ use opto_ir::word;
 pub(super) fn materialize_plans(
     module: &mut word::WordModule,
     plans: &[FsmPlan],
-) -> Result<(), crate::SynthError> {
+) -> Result<Box<[(word::OpId, word::OpId)]>, crate::SynthError> {
     if plans.is_empty() {
-        return Ok(());
+        return Ok(Box::new([]));
     }
-    for plan in plans {
-        rewrite_candidate(module, plan)?;
-    }
+    let rewrites = plans
+        .iter()
+        .map(|plan| rewrite_candidate(module, plan))
+        .collect::<Result<_, _>>()?;
     module.validate().map_err(crate::SynthError::from)?;
-    Ok(())
+    Ok(rewrites)
 }
 
 fn rewrite_candidate(
     module: &mut word::WordModule,
     plan: &FsmPlan,
-) -> Result<(), crate::SynthError> {
+) -> Result<(word::OpId, word::OpId), crate::SynthError> {
     let candidate = &plan.machine;
     let encoded_signal = module
         .add_generated_wire(plan.encoded_type, candidate.source.clone())
@@ -111,7 +112,19 @@ fn rewrite_candidate(
             candidate.source.clone(),
         )
         .map_err(crate::SynthError::from)?;
-    Ok(())
+    let operation = |value| {
+        module
+            .value(value)
+            .and_then(|value| match value.kind {
+                word::ValueKind::Operation(operation) => Some(operation),
+                word::ValueKind::Constant(_) | word::ValueKind::Signal(_) => None,
+            })
+            .ok_or_else(|| crate::SynthError::invariant("FSM state has no operation identity"))
+    };
+    Ok((
+        operation(candidate.register_result)?,
+        operation(encoded_register)?,
+    ))
 }
 
 fn decode_state(

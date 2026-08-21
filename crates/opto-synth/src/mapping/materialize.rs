@@ -27,7 +27,8 @@ pub(crate) use region_delta::REGION_CELL_PREFIX;
 pub(crate) use sequential_delta::{
     MappedSequentialArtifact, RegionalSequentialCellPlan, SequentialRegionBinding,
     local_sequential_bindings, lowered_sequential_binding_values, lowered_sequential_operations,
-    plan_regional_sequential_cells, sequential_binding_values, sequential_region_bindings,
+    plan_regional_sequential_cells, reconcile_sequential_publication, sequential_binding_values,
+    sequential_region_bindings,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -812,6 +813,7 @@ pub(crate) struct MappedSubstrateRequest<'a> {
     pub(crate) source_instances: &'a SourceInstanceProvenance,
     pub(crate) base_revision: opto_ir::RevisionId,
     pub(crate) observed_values: &'a [word::ValueId],
+    pub(crate) value_aliases: &'a [(word::ValueId, word::ValueId)],
     pub(crate) sequential_pins: &'a [crate::mapping::SequentialPinKey],
 }
 
@@ -849,6 +851,7 @@ pub(crate) fn build_test_substrate(
         source_instances,
         base_revision,
         observed_values: &[],
+        value_aliases: &[],
         sequential_pins: &[],
     })?;
     Ok(output)
@@ -870,6 +873,7 @@ pub(crate) fn build_mapped_substrate(
         source_instances,
         base_revision,
         observed_values,
+        value_aliases,
         sequential_pins,
     } = request;
     let offsets = signal_offsets(module)?;
@@ -883,6 +887,17 @@ pub(crate) fn build_mapped_substrate(
         .ok_or_else(|| crate::SynthError::invariant("mapped operation count overflow"))?;
     let (mut aliases, constants) =
         build_alias_classes(module, &offsets, signal_bit_count, bit_count)?;
+    for &(value, representative) in value_aliases {
+        let (ScalarSignal::Bit(value), ScalarSignal::Bit(representative)) = (
+            scalar_signal(module, &offsets, signal_bit_count, value)?,
+            scalar_signal(module, &offsets, signal_bit_count, representative)?,
+        ) else {
+            return Err(crate::SynthError::invariant(
+                "mapped value alias does not identify two scalar net bits",
+            ));
+        };
+        aliases.union(value, representative);
+    }
 
     // The mapped substrate represents only externally observed equivalence
     // classes; regional artifacts remain the owner of internal Word topology.

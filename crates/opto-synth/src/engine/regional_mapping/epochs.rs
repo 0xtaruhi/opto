@@ -184,13 +184,18 @@ impl RegionalMapper<'_> {
         state: &mut RegionalMappingState<'_>,
     ) -> Result<RegionalMappedState, crate::SynthError> {
         let boundary_values = boundary_observation_values(self.regions, state.region_binding)?;
+        let sequential_publication = materialize::reconcile_sequential_publication(
+            state.module,
+            state.sequential_operations,
+            state.rows.iter().flat_map(|row| row.sequential.iter()),
+        )?;
         let mut observed_values = materialize::region_delta::regional_binding_values(
             state.rows.iter().map(|row| &row.binding),
         )
         .into_vec();
         observed_values.extend(materialize::lowered_sequential_binding_values(
             state.module,
-            state.sequential_operations,
+            sequential_publication.operations(),
         )?);
         observed_values.extend(
             boundary_values
@@ -221,6 +226,7 @@ impl RegionalMapper<'_> {
             source_instances: self.config.source_instances,
             base_revision: self.config.base_revision,
             observed_values: &observed_values,
+            value_aliases: sequential_publication.aliases(),
             sequential_pins: &sequential_pins,
         })?;
         let signals =
@@ -264,7 +270,7 @@ impl RegionalMapper<'_> {
         let sequential = materialize::MappedSequentialArtifact::from_module(
             state.module,
             &mapped.signals,
-            state.sequential_operations,
+            sequential_publication.operations(),
             state.rows.iter().flat_map(|row| row.sequential.iter()),
             &mapped.sequential_pins,
             &self.config,

@@ -197,7 +197,7 @@ impl RegionalWordImporter<'_> {
                     == Some(self.region) =>
             {
                 if self.operation_is_state(operation) {
-                    self.import_boundary(source, value.ty, &value.source)?
+                    self.import_state_feedback(source, value.ty, &value.source)?
                 } else {
                     self.import_operation(operation)?
                 }
@@ -958,6 +958,24 @@ impl RegionalWordImporter<'_> {
             .read_signal(signal, span.clone())
             .map_err(crate::SynthError::from)?;
         self.boundary_bindings.push((source, local));
+        Ok(local)
+    }
+
+    fn import_state_feedback(
+        &mut self,
+        source: word::ValueId,
+        ty: word::WordType,
+        span: &word::SourceSpan,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let signal = self
+            .module
+            .add_generated_wire(ty, span.clone())
+            .map_err(crate::SynthError::from)?;
+        let local = self
+            .module
+            .read_signal(signal, span.clone())
+            .map_err(crate::SynthError::from)?;
+        self.state_feedback_signals.insert(source, signal);
         Ok(local)
     }
 

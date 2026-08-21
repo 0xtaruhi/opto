@@ -57,6 +57,7 @@ pub(crate) struct SequentialRegionBinding {
     pub(crate) operation: word::OpId,
     pub(crate) region: crate::RegionAnchorId,
     pub(crate) sources: Box<[SequentialSourceBit]>,
+    pub(crate) lowering_sources: Box<[word::OpId]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +67,21 @@ pub(crate) struct RegionalSequentialCellPlan {
     pub(crate) cell_name: Box<str>,
     pub(crate) inputs: Box<[(Box<str>, crate::mapping::SequentialPinRole)]>,
     pub(crate) output: Box<str>,
+}
+
+pub(crate) struct SequentialPublicationPlan {
+    operations: Box<[SequentialRegionBinding]>,
+    aliases: Box<[(word::ValueId, word::ValueId)]>,
+}
+
+impl SequentialPublicationPlan {
+    pub(crate) fn operations(&self) -> &[SequentialRegionBinding] {
+        &self.operations
+    }
+
+    pub(crate) fn aliases(&self) -> &[(word::ValueId, word::ValueId)] {
+        &self.aliases
+    }
 }
 
 impl PendingMappedSequential {
@@ -326,7 +342,11 @@ pub(crate) fn lowered_sequential_operations(
 ) -> Result<Box<[SequentialRegionBinding]>, crate::SynthError> {
     let mut lowered = std::collections::BTreeMap::<
         word::OpId,
-        (crate::RegionAnchorId, Vec<SequentialSourceBit>),
+        (
+            crate::RegionAnchorId,
+            Vec<SequentialSourceBit>,
+            Vec<word::OpId>,
+        ),
     >::new();
     for source_binding in source_operations {
         let source = module.operation(source_binding.operation).ok_or_else(|| {
@@ -366,7 +386,7 @@ pub(crate) fn lowered_sequential_operations(
             }
             let row = lowered
                 .entry(operation)
-                .or_insert_with(|| (source_binding.region, Vec::new()));
+                .or_insert_with(|| (source_binding.region, Vec::new(), Vec::new()));
             if row.0 != source_binding.region {
                 return Err(crate::SynthError::invariant(
                     "one lowered sequential operation has conflicting region bindings",
@@ -379,20 +399,99 @@ pub(crate) fn lowered_sequential_operations(
                     .copied()
                     .map(|cell| SequentialSourceBit { cell, bit }),
             );
+            row.2.push(source_binding.operation);
         }
     }
     Ok(lowered
         .into_iter()
-        .map(|(operation, (region, mut sources))| {
+        .map(|(operation, (region, mut sources, mut lowering_sources))| {
             sources.sort_unstable();
             sources.dedup();
+            lowering_sources.sort_unstable();
+            lowering_sources.dedup();
             SequentialRegionBinding {
                 operation,
                 region,
                 sources: sources.into_boxed_slice(),
+                lowering_sources: lowering_sources.into_boxed_slice(),
             }
         })
         .collect())
+}
+
+pub(crate) fn reconcile_sequential_publication<'a>(
+    module: &word::WordModule,
+    operations: &[SequentialRegionBinding],
+    plans: impl IntoIterator<Item = &'a RegionalSequentialCellPlan>,
+) -> Result<SequentialPublicationPlan, crate::SynthError> {
+    let mut sources = operations
+        .iter()
+        .flat_map(|binding| {
+            binding
+                .sources
+                .iter()
+                .copied()
+                .map(move |source| (source, (binding.operation, binding.region)))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if sources.len() != operations.iter().map(|binding| binding.sources.len()).sum() {
+        return Err(crate::SynthError::invariant(
+            "source state bit has multiple lowered operations",
+        ));
+    }
+    let mut aliases = Vec::new();
+    let mut grouped = Vec::new();
+    for plan in plans {
+        let mut members = plan
+            .sources
+            .iter()
+            .map(|source| {
+                sources.remove(source).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "regional state-cell plan references an unknown source state bit",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        members.sort_unstable();
+        members.dedup();
+        let &(representative, region) = members.first().ok_or_else(|| {
+            crate::SynthError::invariant("regional state-cell plan has no source state")
+        })?;
+        if region != plan.region || members.iter().any(|&(_, member)| member != region) {
+            return Err(crate::SynthError::invariant(
+                "regional state-cell plan crosses its semantic region",
+            ));
+        }
+        let representative_result = module
+            .operation(representative)
+            .ok_or_else(|| crate::SynthError::invariant("published state is not live"))?
+            .result;
+        for &(operation, _) in &members[1..] {
+            let result = module
+                .operation(operation)
+                .ok_or_else(|| crate::SynthError::invariant("aliased state is not live"))?
+                .result;
+            aliases.push((result, representative_result));
+        }
+        grouped.push(SequentialRegionBinding {
+            operation: representative,
+            region,
+            sources: plan.sources.clone(),
+            lowering_sources: members.iter().map(|&(operation, _)| operation).collect(),
+        });
+    }
+    if !sources.is_empty() {
+        return Err(crate::SynthError::invariant(
+            "live source state has no regional publication plan",
+        ));
+    }
+    aliases.sort_unstable();
+    grouped.sort_unstable_by_key(|binding| binding.operation);
+    Ok(SequentialPublicationPlan {
+        operations: grouped.into_boxed_slice(),
+        aliases: aliases.into_boxed_slice(),
+    })
 }
 
 /// Returns every value needed to materialize a frozen sequential operation set.

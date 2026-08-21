@@ -87,19 +87,34 @@ pub(crate) enum FsmObjective {
     Timing,
 }
 
+pub(crate) struct FsmOptimization {
+    proof: [u8; 32],
+    rewrites: Box<[(word::OpId, word::OpId)]>,
+}
+
+impl FsmOptimization {
+    pub(crate) const fn proof(&self) -> [u8; 32] {
+        self.proof
+    }
+
+    pub(crate) fn rewrites(&self) -> &[(word::OpId, word::OpId)] {
+        &self.rewrites
+    }
+}
+
 pub(crate) fn optimize_derived_fsms(
     module: &mut word::WordModule,
     timing: &opto_timing::TimingContext,
     port_bindings: &opto_timing::PortBindings,
     runtime: &opto_runtime::ExecutionContext,
-) -> Result<[u8; 32], crate::SynthError> {
+) -> Result<FsmOptimization, crate::SynthError> {
     let catalog = derive_catalog(module, runtime)?;
     let plans = plan_catalog(catalog, |machine| {
         machine_objective(module, machine, timing, port_bindings)
     })?;
     let proof = prove_plan_relations(module, &plans)?;
-    materialize_plans(module, &plans)?;
-    Ok(proof)
+    let rewrites = materialize_plans(module, &plans)?;
+    Ok(FsmOptimization { proof, rewrites })
 }
 
 #[cfg(test)]

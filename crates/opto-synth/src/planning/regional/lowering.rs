@@ -86,6 +86,7 @@ impl RegionalWordCone {
             dynamic_high_bits: BTreeMap::new(),
             boundary_signals: BTreeMap::new(),
             boundary_port_signals: BTreeMap::new(),
+            state_feedback_signals: BTreeMap::new(),
             known_bits: word::KnownBitsAnalysis::new(source),
         };
         importer.import_memories(memories)?;
@@ -122,7 +123,26 @@ impl RegionalWordCone {
                     .expect("validated state remains live")
                     .result;
                 importer.import(result)?;
-                importer.import_operation(operation)?;
+                let local = importer.import_operation(operation)?;
+                let signal = importer
+                    .state_feedback_signals
+                    .get(&result)
+                    .copied()
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant("owned state has no private feedback signal")
+                    })?;
+                importer
+                    .module
+                    .connect(
+                        word::LValue::signal(signal),
+                        local,
+                        source
+                            .operation(operation)
+                            .expect("validated state remains live")
+                            .source
+                            .clone(),
+                    )
+                    .map_err(crate::SynthError::from)?;
             }
         }
         let mut root_bindings = Vec::new();
@@ -232,6 +252,7 @@ struct RegionalWordImporter<'a> {
     dynamic_high_bits: BTreeMap<word::OpId, word::ValueId>,
     boundary_signals: BTreeMap<word::SignalRef, (word::WordType, word::ValueId)>,
     boundary_port_signals: BTreeMap<word::SignalId, word::SignalId>,
+    state_feedback_signals: BTreeMap<word::ValueId, word::SignalId>,
     known_bits: word::KnownBitsAnalysis,
 }
 
@@ -395,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn imports_state_operation_over_one_private_feedback_boundary() {
+    fn imports_state_operation_with_private_feedback() {
         let mut source = word::WordModule::new("feedback");
         let bit = word::WordType::bits(1).unwrap();
         let clock = source
@@ -469,6 +490,13 @@ mod tests {
             module.operations()[1].kind,
             word::OpKind::Register(_)
         ));
+        let state = module.operations()[1].result;
+        assert!(module.connects().iter().any(|connect| {
+            connect.value == state
+                && module
+                    .signal(connect.target.signal)
+                    .is_some_and(|signal| signal.kind == word::SignalKind::Wire)
+        }));
         assert_eq!(
             operations
                 .sources(word::OpId::from_index(0).unwrap())
@@ -481,7 +509,7 @@ mod tests {
                 .iter()
                 .filter(|port| port.direction == word::PortDirection::Input)
                 .count(),
-            2
+            1
         );
     }
 
