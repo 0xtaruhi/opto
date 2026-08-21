@@ -107,6 +107,7 @@ struct LogicalReset {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LogicalCell {
     Operation(LogicalOperation),
+    Connection,
     Memory {
         element: word::WordType,
         depth: u32,
@@ -649,6 +650,30 @@ fn seal_logical_design(
             value_nets(module, regions, &connectivity, flow.value(), &mut nets)?;
         }
     }
+    for (index, signal) in module.signals().iter().enumerate() {
+        let signal_id = word::SignalId::from_index(index).map_err(crate::SynthError::from)?;
+        let anchor = signal_anchor(module, signal_id)?;
+        for bit in 0..signal.ty.width() {
+            let Some(source) = connectivity.signal_source(signal_id, bit)? else {
+                continue;
+            };
+            let input = source_net(module, regions, source, signal.ty.state(), &mut nets)?;
+            let output = signal_net_id(anchor, bit);
+            if input == output {
+                continue;
+            }
+            let cell = connection_cell_id(anchor, bit);
+            install_driver(&mut nets, output, NetDriver::Cell { cell, output: 0 })?;
+            cells.push(Cell {
+                id: cell,
+                kind: LogicalCell::Connection,
+                class: CellClass::Combinational,
+                inputs: Box::new([input]),
+                outputs: Box::new([output]),
+                source: signal.source.clone(),
+            });
+        }
+    }
     let revision = logical_revision_id(&cells, &nets);
     let mut builder = DesignBuilder::new(revision);
     for net in nets.into_values() {
@@ -939,41 +964,61 @@ fn value_nets(
         .ok_or_else(|| crate::SynthError::invariant("logical net references an unknown value"))?;
     (0..stored.ty.width())
         .map(|bit| {
-            let (id, state, driver) = match connectivity.source(value, bit)? {
-                crate::word::bit_connectivity::BitSource::Constant(constant) => (
-                    constant_net_id(constant, stored.ty.state()),
-                    stored.ty.state(),
-                    Some(NetDriver::Constant(constant)),
-                ),
-                crate::word::bit_connectivity::BitSource::Value { value, bit } => {
-                    let source = module.value(value).ok_or_else(|| {
-                        crate::SynthError::invariant("logical bit source is unknown")
-                    })?;
-                    match source.kind {
-                        word::ValueKind::Operation(operation) => (
-                            operation_net_id(regions, operation, bit)?,
-                            source.ty.state(),
-                            None,
-                        ),
-                        word::ValueKind::Signal(reference) => {
-                            let anchor = signal_anchor(module, reference.signal)?;
-                            let physical = reference.lsb.checked_add(bit).ok_or_else(|| {
-                                crate::SynthError::capacity("logical signal bit offset")
-                            })?;
-                            (signal_net_id(anchor, physical), source.ty.state(), None)
-                        }
-                        word::ValueKind::Constant(_) => {
-                            return Err(crate::SynthError::invariant(
-                                "constant bit source lost its constant classification",
-                            ));
-                        }
-                    }
-                }
-            };
-            install_net(nets, id, state, driver)?;
-            Ok(id)
+            source_net(
+                module,
+                regions,
+                connectivity.source(value, bit)?,
+                stored.ty.state(),
+                nets,
+            )
         })
         .collect()
+}
+
+fn source_net(
+    module: &word::WordModule,
+    regions: &crate::SynthesisRegionGraph,
+    source: crate::word::bit_connectivity::BitSource,
+    state: word::LogicStateKind,
+    nets: &mut BTreeMap<NetBitId, NetBit>,
+) -> Result<NetBitId, crate::SynthError> {
+    let (id, state, driver) = match source {
+        crate::word::bit_connectivity::BitSource::Constant(constant) => (
+            constant_net_id(constant, state),
+            state,
+            Some(NetDriver::Constant(constant)),
+        ),
+        crate::word::bit_connectivity::BitSource::Value { value, bit } => {
+            let source = module
+                .value(value)
+                .ok_or_else(|| crate::SynthError::invariant("logical bit source is unknown"))?;
+            match source.kind {
+                word::ValueKind::Operation(operation) => (
+                    operation_net_id(regions, operation, bit)?,
+                    source.ty.state(),
+                    None,
+                ),
+                word::ValueKind::Signal(reference) => {
+                    let physical = reference
+                        .lsb
+                        .checked_add(bit)
+                        .ok_or_else(|| crate::SynthError::capacity("logical signal bit offset"))?;
+                    (
+                        signal_net_id(signal_anchor(module, reference.signal)?, physical),
+                        source.ty.state(),
+                        None,
+                    )
+                }
+                word::ValueKind::Constant(_) => {
+                    return Err(crate::SynthError::invariant(
+                        "constant bit source lost its constant classification",
+                    ));
+                }
+            }
+        }
+    };
+    install_net(nets, id, state, driver)?;
+    Ok(id)
 }
 
 fn install_net(
@@ -1136,6 +1181,9 @@ fn hash_logical_cell(digest: &mut blake3::Hasher, cell: &LogicalCell) {
             digest.update(&depth.to_le_bytes());
             digest.update(interface);
         }
+        LogicalCell::Connection => {
+            digest.update(&[2]);
+        }
     }
 }
 
@@ -1210,6 +1258,14 @@ fn memory_cell_id(
         b"opto/logical-memory-cell/v1\0",
         [identity.bytes()],
     )))
+}
+
+fn connection_cell_id(signal: [u8; 32], bit: u32) -> CellId {
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"opto/logical-connection-cell/v1\0");
+    digest.update(&signal);
+    digest.update(&bit.to_le_bytes());
+    CellId::from_bytes(*digest.finalize().as_bytes())
 }
 
 fn memory_interface_id(
@@ -1430,7 +1486,7 @@ mod tests {
         assert_eq!(reduce.tasks().len(), 1);
         let (mut work, binding) = WorkGraph::build(&module, &regions, &design, &contexts).unwrap();
 
-        assert_eq!(work.design.cell_count(), regions.regions().len());
+        assert!(work.design.cell_count() >= regions.regions().len());
         assert_eq!(work.items.len(), regions.regions().len());
         assert_eq!(work.tasks().len(), regions.regions().len());
         for (index, &region) in regions.regions().iter().enumerate() {
@@ -1490,7 +1546,10 @@ mod tests {
             .unwrap();
             let design = WorkDesign::seal(&module, &regions).unwrap();
             let net = signal_net_id(signal_anchor(&module, output_signal).unwrap(), 0);
-            assert!(design.0.net(net).is_some());
+            assert!(matches!(
+                design.0.net(net).and_then(|net| net.driver),
+                Some(NetDriver::Cell { .. })
+            ));
             (net, design.0.revision())
         };
 
