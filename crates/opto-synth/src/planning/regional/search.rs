@@ -42,6 +42,11 @@ pub(crate) fn select_architectures(
         metrics,
     } = request;
     let regions = work.regions();
+    let region_rows = regions
+        .regions()
+        .iter()
+        .map(|region| (region.id(), region.row()))
+        .collect::<std::collections::BTreeMap<_, _>>();
     if contexts.len() != regions.regions().len() {
         return Err(crate::SynthError::invariant(
             "architecture contexts do not cover the work graph",
@@ -58,9 +63,12 @@ pub(crate) fn select_architectures(
         .collect::<Vec<_>>();
     let results =
         crate::regional::SynthesisExecutor::execute(runtime, work.packet_tasks(), |item, _, _| {
-            let region_row = work.item_region(item.id()).ok_or_else(|| {
-                crate::SynthError::invariant("architecture work item has no region binding")
-            })?;
+            let region_row = region_rows
+                .get(&item.fixed_logic())
+                .copied()
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("architecture work item has no fixed-logic scope")
+                })?;
             let row = region_row.index();
             let region = regions.regions()[row];
             let record = if let Some(cached) = cached[row] {

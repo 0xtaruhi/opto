@@ -126,11 +126,17 @@ pub(crate) struct WorkDesign(DesignRevision<LogicalCell>);
 #[derive(Debug)]
 pub(crate) struct WorkItem {
     id: WorkItemId,
+    kind: WorkItemKind,
     core: EntitySet,
     halo: EntitySet,
     context: WorkContextKey,
     estimated_work: u64,
     estimated_memory: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum WorkItemKind {
+    FixedLogic(crate::RegionAnchorId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +160,7 @@ struct WorkBoundaryContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkPacketItem {
     id: WorkItemId,
+    kind: WorkItemKind,
     core: EntitySet,
     halo: EntitySet,
     context: WorkContext,
@@ -316,8 +323,10 @@ impl WorkContext {
 }
 
 impl WorkPacketItem {
-    pub(crate) const fn id(&self) -> WorkItemId {
-        self.id
+    pub(crate) const fn fixed_logic(&self) -> crate::RegionAnchorId {
+        match self.kind {
+            WorkItemKind::FixedLogic(region) => region,
+        }
     }
 }
 
@@ -333,7 +342,6 @@ pub(crate) struct CompilationShard {
 pub(crate) struct WorkGraph {
     design: Arc<WorkDesign>,
     regions: Arc<crate::SynthesisRegionGraph>,
-    item_regions: Box<[crate::RegionRowId]>,
     contexts: Box<[WorkContext]>,
     items: Box<[WorkItem]>,
     item_rows: BTreeMap<WorkItemId, usize>,
@@ -408,16 +416,16 @@ impl WorkGraph {
                 .max(1);
             let item = WorkItem {
                 id,
+                kind: WorkItemKind::FixedLogic(region.id()),
                 core,
                 halo,
                 context: contexts[region.row().index()].key,
                 estimated_work: region.estimated_work().max(1),
                 estimated_memory,
             };
-            Ok::<_, crate::SynthError>((id, region.row(), item))
+            Ok::<_, crate::SynthError>((id, item))
         })?;
-        let item_regions = rows.iter().map(|row| row.1).collect();
-        let items = rows.into_iter().map(|row| row.2).collect::<Vec<_>>();
+        let items = rows.into_iter().map(|row| row.1).collect::<Vec<_>>();
         let item_rows = items
             .iter()
             .enumerate()
@@ -441,7 +449,6 @@ impl WorkGraph {
         let mut graph = Self {
             design,
             regions,
-            item_regions,
             contexts,
             items: items.into_boxed_slice(),
             item_rows,
@@ -503,6 +510,7 @@ impl WorkGraph {
                     .iter()
                     .map(|&row| WorkPacketItem {
                         id: self.items[row].id,
+                        kind: self.items[row].kind,
                         core: self.items[row].core.clone(),
                         halo: self.items[row].halo.clone(),
                         context: self.contexts[row].clone(),
@@ -596,13 +604,6 @@ impl WorkGraph {
             .map(|cell| cell.id)
     }
 
-    pub(crate) fn item_region(&self, item: WorkItemId) -> Option<crate::RegionRowId> {
-        self.item_rows
-            .get(&item)
-            .and_then(|&row| self.item_regions.get(row))
-            .copied()
-    }
-
     pub(crate) fn accept_results<T>(
         &self,
         results: Vec<WorkResult<T>>,
@@ -662,7 +663,6 @@ impl WorkGraph {
     fn validate(&self) -> Result<(), crate::SynthError> {
         if self.predecessors.row_count() != self.items.len()
             || self.successors.row_count() != self.items.len()
-            || self.item_regions.len() != self.items.len()
             || self.contexts.len() != self.items.len()
             || self.item_rows.len() != self.items.len()
             || self.coarse_groups.value_count() != self.shards.len()
@@ -1810,7 +1810,10 @@ mod tests {
         assert_eq!(work.items.len(), regions.regions().len());
         assert_eq!(work.packet_tasks().len(), regions.regions().len());
         for (index, &region) in regions.regions().iter().enumerate() {
-            assert_eq!(work.item_regions[index], region.row());
+            assert_eq!(
+                work.items[index].kind,
+                WorkItemKind::FixedLogic(region.id())
+            );
             for &operation in regions.operations(region) {
                 let _ = logical_operation(&module, operation).unwrap();
                 assert!(
@@ -1869,7 +1872,6 @@ mod tests {
             &serial,
         )
         .unwrap();
-        assert_eq!(serial_work.item_regions, work.item_regions);
         assert!(
             serial_work
                 .items
@@ -1877,6 +1879,7 @@ mod tests {
                 .zip(&work.items)
                 .all(|(left, right)| {
                     left.id == right.id
+                        && left.kind == right.kind
                         && left.core == right.core
                         && left.halo == right.halo
                         && left.context == right.context
@@ -1898,7 +1901,10 @@ mod tests {
         );
         assert_eq!(execute(&work), semantic_items);
         for (index, &region) in regions.regions().iter().enumerate() {
-            assert_eq!(work.item_regions[index], region.row());
+            assert_eq!(
+                work.items[index].kind,
+                WorkItemKind::FixedLogic(region.id())
+            );
         }
     }
 

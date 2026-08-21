@@ -283,14 +283,22 @@ pub(crate) fn prepare_regional_architectures(
         source_cells: &source_cells,
     };
     let work = request.work;
+    let region_rows = regions
+        .regions()
+        .iter()
+        .map(|region| (region.id(), region.row()))
+        .collect::<BTreeMap<_, _>>();
     let profiling = request.mapping_context.config.diagnostics.timing;
     let results = crate::regional::SynthesisExecutor::execute(
         runtime,
         work.packet_tasks(),
         |item, _, regional_runtime| {
-            let region_row = work.item_region(item.id()).ok_or_else(|| {
-                SynthError::invariant("regional work item has no local import binding")
-            })?;
+            let region_row = region_rows
+                .get(&item.fixed_logic())
+                .copied()
+                .ok_or_else(|| {
+                    SynthError::invariant("regional work item has no fixed-logic scope")
+                })?;
             let region_index = region_row.index();
             let _region_profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("logic_lowering.region[{region_index}]")
