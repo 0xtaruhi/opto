@@ -159,7 +159,7 @@ fn incrementally_recomputes_cell_replacements_and_rollbacks() {
 }
 
 #[test]
-fn one_pin_edit_does_not_seed_an_unchanged_high_fanout_input() {
+fn local_edits_do_not_propagate_through_an_unchanged_high_fanout_input() {
     const BRANCHES: usize = 128;
     let library = TimingLibrary {
         cells: test_cells(vec![TimingCell {
@@ -236,6 +236,15 @@ fn one_pin_edit_does_not_seed_an_unchanged_high_fanout_input() {
         assert_eq!(edit.recomputed_nets(), 3);
         incremental.rollback(edit).unwrap();
         assert_eq!(incremental.quality_summary().unwrap(), before);
+
+        let mut delta = TimingRegionDelta::new();
+        delta
+            .remove_instance(TimingInstanceId::from_raw(0))
+            .unwrap();
+        let edit = incremental.apply_optimization_region_delta(delta).unwrap();
+        assert_eq!(edit.recomputed_nets(), 3);
+        incremental.rollback(edit).unwrap();
+        assert_eq!(incremental.quality_summary().unwrap(), before);
     }
 }
 
@@ -295,6 +304,48 @@ fn multi_seed_closures_match_full_recomputation_in_every_execution_mode() {
                 reference.quality_summary().unwrap()
             );
         }
+    }
+}
+
+#[test]
+fn wide_incremental_frontiers_match_full_recomputation_and_rollback() {
+    let branch_count = crate::analysis::SPARSE_ARRIVAL_FRONTIER_LIMIT + 64;
+    let base = wide_fanout_model(branch_count);
+    let mut rebuilt = base.design().to_owned();
+    rebuilt.instances[0].cell = "FAST_BUF".to_string();
+    let reference = IncrementalTiming::new(
+        TimingContext::new(),
+        TimingModel::new(rebuilt, base.library().clone()).unwrap(),
+        ReportTimingOptions::default(),
+    )
+    .unwrap();
+
+    for max_threads in [1, 4] {
+        let mut incremental = IncrementalTiming::new_for_optimization(
+            TimingContext::new(),
+            wide_fanout_model(branch_count),
+            ReportTimingOptions::default(),
+            opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads })
+                .unwrap(),
+        )
+        .unwrap();
+        let before_states = incremental.net_states();
+        let before_quality = incremental.quality_summary().unwrap();
+        let mut delta = TimingRegionDelta::new();
+        delta
+            .set_instance(buf_instance(0, "U0", "FAST_BUF", "a", "shared"))
+            .unwrap();
+
+        let edit = incremental.apply_optimization_region_delta(delta).unwrap();
+        assert!(edit.recomputed_nets() > crate::analysis::SPARSE_ARRIVAL_FRONTIER_LIMIT);
+        assert_eq!(incremental.net_states(), reference.net_states());
+        assert_eq!(
+            incremental.quality_summary().unwrap(),
+            reference.quality_summary().unwrap()
+        );
+        incremental.rollback(edit).unwrap();
+        assert_eq!(incremental.net_states(), before_states);
+        assert_eq!(incremental.quality_summary().unwrap(), before_quality);
     }
 }
 
@@ -2276,6 +2327,35 @@ fn long_chain_model() -> TimingModel {
         .into_iter()
         .map(|(id, name, input, output)| buf_instance(id, name, "BUF", input, output))
         .collect(),
+    };
+    TimingModel::new(design, base.library).unwrap()
+}
+
+fn wide_fanout_model(branch_count: usize) -> TimingModel {
+    assert!(branch_count > 0);
+    let base = chain_model();
+    let mut instances = vec![buf_instance(0, "U0", "BUF", "a", "shared")];
+    instances.extend((0..branch_count).map(|index| {
+        buf_instance(
+            u32::try_from(index + 1).unwrap(),
+            &format!("U{}", index + 1),
+            "BUF",
+            "shared",
+            &format!("y{index}"),
+        )
+    }));
+    let mut ports = vec![test_port("a", TimingPortDirection::Input)];
+    ports.extend((0..branch_count).map(|index| TimingPort {
+        id: test_port_id(&format!("y{index}")),
+        name: format!("y{index}"),
+        net: crate::TimingNet::named(format!("y{index}")),
+        direction: TimingPortDirection::Output,
+    }));
+    let design = TimingDesign {
+        id: test_design_id(),
+        name: "top".to_string(),
+        ports,
+        instances,
     };
     TimingModel::new(design, base.library).unwrap()
 }

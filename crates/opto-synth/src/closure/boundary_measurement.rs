@@ -54,9 +54,12 @@ pub(crate) fn measure_global_boundaries(
             dynamic_powers.push(None);
             continue;
         };
-        let power_states = power_view.electrical_snapshot()?;
         let dynamic_power = power_evaluator
-            .dynamic_power_watts(runtime, scenario, power_view.model(), &power_states)
+            .dynamic_power_watts(runtime, scenario, power_view.model(), &|| {
+                power_view
+                    .electrical_snapshot()
+                    .map_err(|error| error.to_string())
+            })
             .map_err(crate::SynthError::Power)?;
         dynamic_powers.push(validated_dynamic_power(
             dynamic_power,

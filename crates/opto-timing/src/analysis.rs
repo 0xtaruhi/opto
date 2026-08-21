@@ -13,11 +13,16 @@ use crate::{
     TimingLibraryMetadata, TimingModel, TimingPort, TimingPortDirection, TimingRequirement,
 };
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 type ArrivalJournalEntry = (usize, ArrivalRow);
 type RequiredJournalEntry = (usize, RequiredRow);
 type RequiredWorklistUpdate = (usize, Vec<RequiredJournalEntry>);
+
+// Keep common local edits cheaper than constructing a dependency closure, but
+// bound serial work before handing a genuinely wide frontier to the runtime.
+pub(crate) const SPARSE_ARRIVAL_FRONTIER_LIMIT: usize = 256;
 
 mod arrival;
 mod checks;
@@ -30,8 +35,8 @@ mod support;
 mod topology;
 
 use arrival::{
-    ArrivalTask, arrival_slots_match, propagate_summary_slots, recompute_net,
-    recompute_net_changed, seed_net, seed_summary_slots,
+    ArrivalTask, arrival_slots_match, propagate_into_net, propagate_summary_slots, recompute_net,
+    seed_net, seed_net_journaled, seed_summary_slots_journaled,
 };
 pub(super) use checks::check_timing;
 use checks::{
@@ -337,6 +342,83 @@ pub(super) fn update_propagation(
     Ok(dirty_count)
 }
 
+fn update_wide_arrival_frontier(
+    inputs: &PropagationInputs<'_, '_>,
+    propagation: &mut PropagationState,
+    seeds: &[usize],
+    runtime: &opto_runtime::ExecutionContext,
+    origin_journal: &mut OriginJournal<'_>,
+) -> Result<(usize, Vec<usize>, Vec<ArrivalJournalEntry>), crate::TimingError> {
+    let dependency_items = inputs.graph.propagation_closure(
+        opto_runtime::DependencyDirection::Forward,
+        seeds.iter().copied(),
+    )?;
+    let worklist = inputs.graph.propagation_worklist(
+        opto_runtime::DependencyDirection::Forward,
+        dependency_items.iter().copied(),
+    )?;
+    // Seed rows may intern launch identities, so prepare them transactionally
+    // before read-only worker tasks begin. Keep the overlay closure-sized.
+    let mut seeded = Vec::with_capacity(dependency_items.len());
+    for &net in &dependency_items {
+        seeded.push((
+            net,
+            seed_summary_slots_journaled(
+                inputs,
+                net,
+                &mut propagation.origins,
+                &mut propagation.tags,
+                origin_journal,
+            )?,
+        ));
+    }
+    seeded.sort_unstable_by_key(|(net, _)| *net);
+
+    let publication = opto_runtime::DependencyPublicationPlan::identity(inputs.graph.net_count());
+    let mut effects = opto_runtime::DependencyEffects::new();
+    let origins = &propagation.origins;
+    let tags = &propagation.tags;
+    let execution = runtime.publish_dependency_rows(
+        worklist,
+        &mut propagation.arrivals,
+        opto_runtime::DependencyRun::new(
+            &publication,
+            opto_runtime::DependencyActivation::on_change(
+                inputs.graph.net_count(),
+                seeds.iter().copied(),
+            )?,
+        )
+        .record_effects(&mut effects),
+        |arrivals, net| {
+            ArrivalTask::prepare_with_slots(
+                inputs,
+                arrivals,
+                origins,
+                net,
+                seeded
+                    .binary_search_by_key(&net, |(seeded_net, _)| *seeded_net)
+                    .ok()
+                    .map(|position| seeded[position].1.clone())
+                    .expect("scheduled timing net owns precomputed seed slots"),
+            )
+        },
+        |task| {
+            let net = task.net();
+            task.analyze(inputs, tags)
+                .map(|slots| opto_runtime::DependencyPublication::row(net, slots))
+        },
+    )?;
+    let journals = effects
+        .into_entries()
+        .map(|(_, net, previous)| (net, previous))
+        .collect();
+    Ok((
+        execution.published_items().len(),
+        execution.changed_items().to_vec(),
+        journals,
+    ))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "incremental propagation is one atomic row-journal transaction; splitting it would \
@@ -377,145 +459,84 @@ pub(super) fn update_propagation_from_nets(
         options,
         graph,
     };
-    let dependency_items = graph.propagation_closure(
-        opto_runtime::DependencyDirection::Forward,
-        seeds.iter().copied(),
-    )?;
-    let dependency_set = dependency_items.iter().copied().collect::<BTreeSet<_>>();
-    edit.origins.extend(
-        propagation
-            .origins
-            .ids
-            .iter()
-            .filter(|(key, _)| match key {
-                OriginKey::PrimaryInput { port, .. } => graph
-                    .port_net(*port)
-                    .is_some_and(|net| dependency_set.contains(&net.index())),
-                OriginKey::Sequential { net, .. } => dependency_set.contains(net),
-            })
-            .map(|(_, &id)| (id, propagation.origins.values[id.raw() as usize].clone())),
-    );
-    let mut worklist = graph.propagation_worklist(
-        opto_runtime::DependencyDirection::Forward,
-        dependency_items.iter().copied(),
-    )?;
-    let active = ActiveClosure::seeded(graph.net_count(), seeds);
     let mut changed = BTreeSet::new();
     let mut dirty_count = 0usize;
     let result = (|| {
-        if !propagation.tracks_paths()
-            && let Some(runtime) = runtime
-        {
-            let mut seeded = vec![None; graph.net_count()];
-            for &net in &dependency_items {
-                seeded[net] = Some(seed_summary_slots(
-                    &inputs,
-                    net,
-                    &mut propagation.origins,
-                    &mut propagation.tags,
-                )?);
+        let mut active = ActiveClosure::empty(graph.net_count());
+        let mut pending = BinaryHeap::new();
+        for &net in seeds {
+            if active.activate(net) {
+                pending.push(Reverse((graph.topological_position(net), net)));
             }
-            let publication = opto_runtime::DependencyPublicationPlan::identity(graph.net_count());
-            let mut effects = opto_runtime::DependencyEffects::new();
-            let tags = &propagation.tags;
-            let execution = runtime.publish_dependency_rows(
-                worklist,
-                &mut propagation.arrivals,
-                opto_runtime::DependencyRun::new(
-                    &publication,
-                    opto_runtime::DependencyActivation::on_change(
-                        graph.net_count(),
-                        seeds.iter().copied(),
-                    )?,
-                )
-                .record_effects(&mut effects),
-                |arrivals, net| {
-                    ArrivalTask::prepare_with_slots(
-                        &inputs,
-                        arrivals,
-                        &propagation.origins,
-                        net,
-                        seeded[net]
-                            .clone()
-                            .expect("scheduled timing net owns precomputed seed slots"),
-                    )
-                },
-                |task| {
-                    let net = task.net();
-                    task.analyze(&inputs, tags)
-                        .map(|slots| opto_runtime::DependencyPublication::row(net, slots))
-                },
-            )?;
-            dirty_count += execution.published_items().len();
-            changed.extend(execution.changed_items().iter().copied());
-            edit.arrivals.extend(
-                effects
-                    .into_entries()
-                    .map(|(_, net, previous)| (net, previous)),
-            );
-        } else {
-            let mut active = active;
-            while let Some(nets) = worklist.claim_ready()? {
-                if propagation.tracks_paths() {
-                    for net in nets {
-                        if !active.contains(net) {
-                            worklist.finish(net)?;
-                            continue;
-                        }
-                        dirty_count += 1;
-                        edit.arrivals.push((
-                            net,
-                            propagation.arrivals.row(net).ok_or(
-                                crate::TimingAnalysisError::DirtyNetOutOfRange { index: net },
-                            )?,
-                        ));
-                        if recompute_net_changed(&inputs, net, propagation)? {
-                            changed.insert(net);
-                            for &arc in &graph.outgoing[net] {
-                                active.activate(graph.arc(arc).to.index());
-                            }
-                        }
-                        worklist.finish(net)?;
+        }
+        // Canonical positions keep reconvergent predecessors ahead of their
+        // sink even when that sink was activated by a different predecessor.
+        let mut origin_journal = OriginJournal::new(edit.origins_len, &mut edit.origins);
+        while let Some(Reverse((_, net))) = pending.pop() {
+            if dirty_count >= SPARSE_ARRIVAL_FRONTIER_LIMIT
+                && !propagation.tracks_paths()
+                && let Some(runtime) = runtime
+            {
+                let mut remaining_seeds = vec![net];
+                remaining_seeds.extend(pending.drain().map(|Reverse((_, net))| net));
+                remaining_seeds.sort_unstable();
+                remaining_seeds.dedup();
+                let (recomputed, parallel_changed, journals) = update_wide_arrival_frontier(
+                    &inputs,
+                    propagation,
+                    &remaining_seeds,
+                    runtime,
+                    &mut origin_journal,
+                )?;
+                dirty_count += recomputed;
+                changed.extend(parallel_changed);
+                edit.arrivals.extend(journals);
+                break;
+            }
+            dirty_count += 1;
+            edit.arrivals.push((
+                net,
+                propagation
+                    .arrivals
+                    .row(net)
+                    .ok_or(crate::TimingAnalysisError::DirtyNetOutOfRange { index: net })?,
+            ));
+            seed_net_journaled(&inputs, net, propagation, &mut origin_journal)?;
+            if propagation.tracks_paths() {
+                propagate_into_net(&inputs, net, propagation)?;
+            } else {
+                let seeded = propagation
+                    .arrivals
+                    .row(net)
+                    .ok_or(crate::TimingAnalysisError::DirtyNetOutOfRange { index: net })?;
+                let slots = propagate_summary_slots(&inputs, net, propagation, seeded)?;
+                propagation
+                    .arrivals
+                    .replace_row(net, slots)
+                    .expect("topological timing propagation only visits live net rows");
+            }
+            let current = propagation
+                .arrivals
+                .row(net)
+                .ok_or(crate::TimingAnalysisError::DirtyNetOutOfRange { index: net })?;
+            if !arrival_slots_match(
+                &edit
+                    .arrivals
+                    .last()
+                    .expect("the active net was journaled before propagation")
+                    .1,
+                &current,
+            ) {
+                changed.insert(net);
+                for &arc in &graph.outgoing[net] {
+                    let successor = graph.arc(arc).to.index();
+                    if active.activate(successor) {
+                        pending.push(Reverse((graph.topological_position(successor), successor)));
                     }
-                    continue;
-                }
-                let active_nets = nets
-                    .iter()
-                    .copied()
-                    .filter(|&net| active.contains(net))
-                    .collect::<Vec<_>>();
-                dirty_count += active_nets.len();
-                let edit_offset = edit.arrivals.len();
-                for &net in &active_nets {
-                    edit.arrivals.push((
-                        net,
-                        propagation
-                            .arrivals
-                            .row(net)
-                            .ok_or(crate::TimingAnalysisError::DirtyNetOutOfRange { index: net })?,
-                    ));
-                    seed_net(&inputs, net, propagation)?;
-                }
-                let computed = analyze_arrivals(&inputs, propagation, &active_nets)?;
-                for (position, (net, slots)) in computed.into_iter().enumerate() {
-                    let did_change =
-                        !arrival_slots_match(&edit.arrivals[edit_offset + position].1, &slots);
-                    propagation
-                        .arrivals
-                        .replace_row(net, slots)
-                        .expect("timing worklists only publish live net rows");
-                    if did_change {
-                        changed.insert(net);
-                        for &arc in &graph.outgoing[net] {
-                            active.activate(graph.arc(arc).to.index());
-                        }
-                    }
-                }
-                for net in nets {
-                    worklist.finish(net)?;
                 }
             }
         }
+        drop(origin_journal);
         edit.arrivals.sort_unstable_by_key(|(net, _)| *net);
         if defer_required {
             let mut required_dirty = seeds.iter().copied().collect::<BTreeSet<_>>();
@@ -705,20 +726,26 @@ fn update_required_worklist(
 struct ActiveClosure(Box<[bool]>);
 
 impl ActiveClosure {
+    fn empty(len: usize) -> Self {
+        Self(vec![false; len].into_boxed_slice())
+    }
+
     fn seeded(len: usize, seeds: &[usize]) -> Self {
-        let mut active = vec![false; len].into_boxed_slice();
+        let mut active = Self::empty(len);
         for &seed in seeds {
-            active[seed] = true;
+            active.activate(seed);
         }
-        Self(active)
+        active
     }
 
     fn contains(&self, item: usize) -> bool {
         self.0[item]
     }
 
-    fn activate(&mut self, item: usize) {
+    fn activate(&mut self, item: usize) -> bool {
+        let was_active = self.0[item];
         self.0[item] = true;
+        !was_active
     }
 }
 
