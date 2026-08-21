@@ -6,8 +6,7 @@ use opto_ir::word;
 
 #[derive(Clone)]
 struct PriorityChain {
-    connect: usize,
-    nodes: Vec<word::ValueId>,
+    original: word::ValueId,
     default: PriorityDefault,
     entries: Vec<PriorityEntry>,
     source: word::SourceSpan,
@@ -31,30 +30,17 @@ struct PriorityNode {
     value: word::ValueId,
 }
 
-pub(super) struct RebalanceResult {
-    pub(super) changed: bool,
-}
-
 pub(super) fn rebalance_constant_priority_muxes(
     module: &mut word::WordModule,
-) -> Result<bool, crate::SynthError> {
-    Ok(rebalance_constant_priority_muxes_by(module, |_| Some(()))?.changed)
-}
-
-pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
-    module: &mut word::WordModule,
-    mut classify: impl FnMut(&[word::ValueId]) -> Option<Scope>,
-) -> Result<RebalanceResult, crate::SynthError> {
+) -> Result<super::DataflowChanges, crate::SynthError> {
     let mut chains = module
         .connects()
         .iter()
-        .enumerate()
-        .filter_map(|(connect, sink)| trace_chain(module, connect, sink))
+        .filter_map(|sink| trace_chain(module, sink))
         .filter(|chain| chain.entries.len() >= 4)
-        .filter(|chain| classify(&chain.nodes).is_some())
         .collect::<Vec<_>>();
     if chains.is_empty() {
-        return Ok(RebalanceResult { changed: false });
+        return super::DataflowChanges::identity(module.values().len());
     }
     materialize_defaults(module, chains.iter_mut())?;
     let condition_sequences = chains
@@ -93,29 +79,21 @@ pub(super) fn rebalance_constant_priority_muxes_by<Scope: Copy>(
             chain.entries = aligned;
         }
     }
-    let mut replacements = Vec::with_capacity(chains.len());
+    let mut replacements = std::collections::BTreeMap::new();
     for chain in &chains {
-        let replacement = build_chain(module, chain)?;
-        replacements.push((chain.connect, replacement));
+        if replacements.contains_key(&chain.original) {
+            continue;
+        }
+        replacements.insert(chain.original, build_chain(module, chain)?);
     }
-    replacements.sort_unstable_by_key(|(connect, _)| *connect);
-
-    let connects = module.take_connects();
-    let mut replacement = replacements.into_iter().peekable();
-    for (index, connect) in connects.into_iter().enumerate() {
-        let value = if replacement
-            .peek()
-            .is_some_and(|(connect, _)| *connect == index)
-        {
-            replacement.next().expect("peeked replacement exists").1
-        } else {
-            connect.value
-        };
-        module
-            .connect(connect.target, value, connect.source)
-            .map_err(crate::SynthError::from)?;
-    }
-    Ok(RebalanceResult { changed: true })
+    let changes = super::DataflowChanges::from_aliases(
+        module.values().len(),
+        &replacements.into_iter().collect::<Vec<_>>(),
+    )?;
+    module
+        .rewrite_value_uses(changes.representatives())
+        .map_err(crate::SynthError::from)?;
+    Ok(changes)
 }
 
 impl PriorityDefault {
@@ -174,21 +152,15 @@ fn false_constant(
         .map_err(crate::SynthError::from)
 }
 
-fn trace_chain(
-    module: &word::WordModule,
-    connect: usize,
-    sink: &word::Connect,
-) -> Option<PriorityChain> {
+fn trace_chain(module: &word::WordModule, sink: &word::Connect) -> Option<PriorityChain> {
     let mut current = sink.value;
     let mut entries = Vec::new();
-    let mut nodes = Vec::new();
     loop {
         let stored = module.value(current)?;
         match stored.kind {
             word::ValueKind::Constant(_) => {
                 return finish_chain(
-                    connect,
-                    nodes,
+                    sink.value,
                     PriorityDefault::Value(current),
                     entries,
                     sink.source.clone(),
@@ -203,14 +175,12 @@ fn trace_chain(
                 else {
                     return finish_implicit_boolean_chain(
                         module,
-                        connect,
-                        nodes,
+                        sink.value,
                         current,
                         entries,
                         sink.source.clone(),
                     );
                 };
-                nodes.push(current);
                 let (condition, previous, update) =
                     if let Some(condition) = inverted_condition(module, cond) {
                         (condition, then_value, else_value)
@@ -229,8 +199,7 @@ fn trace_chain(
             word::ValueKind::Signal(_) => {
                 return finish_implicit_boolean_chain(
                     module,
-                    connect,
-                    nodes,
+                    sink.value,
                     current,
                     entries,
                     sink.source.clone(),
@@ -241,8 +210,7 @@ fn trace_chain(
 }
 
 fn finish_chain(
-    connect: usize,
-    nodes: Vec<word::ValueId>,
+    original: word::ValueId,
     default: PriorityDefault,
     mut entries: Vec<PriorityEntry>,
     source: word::SourceSpan,
@@ -253,8 +221,7 @@ fn finish_chain(
         .iter()
         .all(|entry| conditions.insert(entry.condition));
     conditions_are_distinct.then_some(PriorityChain {
-        connect,
-        nodes,
+        original,
         default,
         entries,
         source,
@@ -263,8 +230,7 @@ fn finish_chain(
 
 fn finish_implicit_boolean_chain(
     module: &word::WordModule,
-    connect: usize,
-    nodes: Vec<word::ValueId>,
+    original: word::ValueId,
     implicit: word::ValueId,
     mut entries: Vec<PriorityEntry>,
     source: word::SourceSpan,
@@ -283,13 +249,7 @@ fn finish_implicit_boolean_chain(
         condition: implicit,
         value: true_value,
     });
-    finish_chain(
-        connect,
-        nodes,
-        PriorityDefault::BooleanFalse(ty),
-        entries,
-        source,
-    )
+    finish_chain(original, PriorityDefault::BooleanFalse(ty), entries, source)
 }
 
 fn constant_boolean(module: &word::WordModule, value: word::ValueId) -> Option<bool> {

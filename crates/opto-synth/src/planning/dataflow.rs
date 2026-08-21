@@ -235,6 +235,30 @@ impl DataflowChanges {
         &self.representatives
     }
 
+    /// Composes two committed rewrites into one entry-to-final remap.
+    fn then(self, next: &Self) -> Result<Self, crate::SynthError> {
+        let advance = |value: word::ValueId| {
+            next.representatives
+                .get(value.index())
+                .copied()
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "composed dataflow representative is outside the next value arena",
+                    )
+                })
+        };
+        let representatives = self
+            .representatives
+            .iter()
+            .copied()
+            .map(advance)
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            representatives,
+            changed: self.changed || next.changed,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) const fn has_equivalences(&self) -> bool {
         self.changed
@@ -245,8 +269,11 @@ pub(crate) fn optimize_combinational_dataflow(
     module: &mut word::WordModule,
 ) -> Result<DataflowChanges, crate::SynthError> {
     let changes = canonicalize_combinational_dataflow(module)?;
-    if priority::rebalance_constant_priority_muxes(module)? {
-        canonicalize_combinational_dataflow(module)
+    let priority = priority::rebalance_constant_priority_muxes(module)?;
+    if priority.changed {
+        let changes = changes.then(&priority)?;
+        let rebalanced = canonicalize_combinational_dataflow(module)?;
+        changes.then(&rebalanced)
     } else {
         Ok(changes)
     }

@@ -824,6 +824,12 @@ fn priority_rebalancing_is_self_contained_in_private_word() {
                 .unwrap()
         })
         .collect::<Vec<_>>();
+    let feedback = module.add_wire("feedback", bit, source.clone()).unwrap();
+    module
+        .connect(word::LValue::signal(feedback), inputs[0], source.clone())
+        .unwrap();
+    let feedback_read = module.read_signal(feedback, source.clone()).unwrap();
+    let feedback_driver = inputs[0];
     let zero = module
         .constant(ConstBits::from_bin_str("0").unwrap(), bit, source.clone())
         .unwrap();
@@ -847,18 +853,35 @@ fn priority_rebalancing_is_self_contained_in_private_word() {
     let output = module
         .add_port("selected", word::PortDirection::Output, bit, source.clone())
         .unwrap();
+    let output_signal = module.port(output).unwrap().signal;
     module
         .connect(
-            word::LValue::signal(module.port(output).unwrap().signal),
+            word::LValue::signal(output_signal),
             selected,
-            source,
+            source.clone(),
         )
         .unwrap();
+    let output_read = module.read_signal(output_signal, source).unwrap();
 
     let original_operations = module.operations().len();
-    optimize_combinational_dataflow(&mut module).unwrap();
+    let changes = optimize_combinational_dataflow(&mut module).unwrap();
     module.validate().unwrap();
     assert_ne!(module.operations().len(), original_operations);
+    assert_eq!(
+        changes.representatives()[feedback_read.index()],
+        feedback_driver
+    );
+    let rebalanced_driver = module
+        .connects()
+        .iter()
+        .find(|connect| connect.target.signal == output_signal)
+        .unwrap()
+        .value;
+    assert_ne!(rebalanced_driver, selected);
+    assert_eq!(
+        changes.representatives()[output_read.index()],
+        rebalanced_driver
+    );
 }
 
 #[test]
