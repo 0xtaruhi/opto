@@ -57,17 +57,16 @@ pub(crate) struct CoverTiming<'a> {
 #[cfg(test)]
 pub(crate) fn cover_logic_network(
     network: &LogicGraph,
-    cuts: &CutDatabase,
+    _cuts: &CutDatabase,
     outputs: &[LogicNodeId],
     catalog: &CombinationalCellCatalog,
     timing_constraints: CoverTiming<'_>,
     runtime: &ExecutionContext,
 ) -> Result<Option<LibraryCover>, crate::SynthError> {
-    let truths = CutTruthDatabase::build_parallel(network, cuts, runtime)?;
-    cover_logic_network_with_truths(
+    let mapping = CompiledMapping::for_network(network, outputs, catalog, runtime)?;
+    cover_compiled(
         network,
-        cuts,
-        &truths,
+        &mapping,
         outputs,
         catalog,
         timing_constraints,
@@ -75,10 +74,9 @@ pub(crate) fn cover_logic_network(
     )
 }
 
-pub(crate) fn cover_logic_network_with_truths(
+fn cover_compiled(
     network: &LogicGraph,
-    cuts: &CutDatabase,
-    truths: &CutTruthDatabase,
+    mapping: &CompiledMapping,
     outputs: &[LogicNodeId],
     catalog: &CombinationalCellCatalog,
     timing_constraints: CoverTiming<'_>,
@@ -86,8 +84,7 @@ pub(crate) fn cover_logic_network_with_truths(
 ) -> Result<Option<LibraryCover>, crate::SynthError> {
     cover_logic_network_with_recovery(CoverProblem {
         network,
-        cuts,
-        truths,
+        mapping,
         outputs,
         catalog,
         timing: timing_constraints,
@@ -95,11 +92,28 @@ pub(crate) fn cover_logic_network_with_truths(
     })
 }
 
+pub(crate) fn cover_choice_graph(
+    choices: &crate::boolean::logic::ChoiceGraph,
+    outputs: &[LogicNodeId],
+    catalog: &CombinationalCellCatalog,
+    timing_constraints: CoverTiming<'_>,
+    runtime: &ExecutionContext,
+) -> Result<Option<LibraryCover>, crate::SynthError> {
+    let mapping = CompiledMapping::for_choices(choices, outputs, catalog, runtime)?;
+    cover_compiled(
+        choices.network(),
+        &mapping,
+        outputs,
+        catalog,
+        timing_constraints,
+        runtime,
+    )
+}
+
 #[derive(Clone, Copy)]
 struct CoverProblem<'a> {
     network: &'a LogicGraph,
-    cuts: &'a CutDatabase,
-    truths: &'a CutTruthDatabase,
+    mapping: &'a CompiledMapping,
     outputs: &'a [LogicNodeId],
     catalog: &'a CombinationalCellCatalog,
     timing: CoverTiming<'a>,
@@ -111,8 +125,7 @@ fn cover_logic_network_with_recovery(
 ) -> Result<Option<LibraryCover>, crate::SynthError> {
     let CoverProblem {
         network,
-        cuts,
-        truths,
+        mapping,
         outputs,
         catalog,
         timing: timing_constraints,
@@ -142,14 +155,12 @@ fn cover_logic_network_with_recovery(
     }
     let mut planner = CoverPlanner::new(
         network,
-        cuts,
-        truths,
+        mapping,
         catalog,
         planner::CoverEndpoints {
             outputs,
             timing: timing_constraints,
         },
-        runtime,
     )?;
     let trace = crate::api::diagnostics::SynthTrace::new(timing);
     crate::api::diagnostics::trace!(
@@ -299,6 +310,17 @@ struct CandidateIndex {
     ranges: Box<[CandidateRange]>,
 }
 
+/// Immutable target compilation for one choice graph and root set.
+struct CompiledMapping {
+    cuts: CutDatabase,
+    truths: CutTruthDatabase,
+    live_nodes: Box<[bool]>,
+    candidates: CandidateIndex,
+    joints: Box<[Joint]>,
+    slot_joints: opto_core::PackedRows<u32>,
+    joints_by_node: opto_core::PackedRows<u32>,
+}
+
 #[derive(Clone, Copy)]
 struct CandidateRange {
     arena: u32,
@@ -403,6 +425,7 @@ impl Joint {
     }
 }
 
+mod compiled;
 mod planner;
 use planner::CoverPlanner;
 

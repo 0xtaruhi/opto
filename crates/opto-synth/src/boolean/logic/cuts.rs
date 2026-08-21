@@ -224,6 +224,9 @@ impl CutSet {
 /// Packed cut rows indexed by frozen logic-node ID.
 pub(crate) struct CutDatabase {
     rows: opto_core::PackedRows<KCut>,
+    /// Choice literal whose function each row entry represents. Ordinary cut
+    /// databases use the row node itself and need no duplicate column.
+    origins: Option<opto_core::PackedRows<LogicNodeId>>,
 }
 
 #[derive(Debug)]
@@ -232,6 +235,10 @@ pub(crate) struct CutTruthDatabase {
 }
 
 impl CutTruthDatabase {
+    pub(crate) fn node_count(&self) -> usize {
+        self.rows.row_count()
+    }
+
     pub(crate) fn build_parallel(
         network: &LogicGraph,
         cuts: &CutDatabase,
@@ -243,14 +250,26 @@ impl CutTruthDatabase {
                 cuts.cuts(node)
                     .iter()
                     .copied()
-                    .map(|cut| {
-                        if cut.contains(node) {
+                    .enumerate()
+                    .map(|(cut_index, cut)| {
+                        let origin = cuts.origin(node, cut_index);
+                        if cut.contains(origin) {
                             TruthTable {
                                 input_count: cut.len(),
                                 bits: 0,
                             }
                         } else {
-                            network.truth_table_for_cut(node, cut)
+                            let mut truth = network.truth_table_for_cut(origin.positive(), cut);
+                            if origin.is_inverted() {
+                                let assignments = 1usize << truth.input_count;
+                                let mask = if assignments == u64::BITS as usize {
+                                    u64::MAX
+                                } else {
+                                    (1u64 << assignments) - 1
+                                };
+                                truth.bits ^= mask;
+                            }
+                            truth
                         }
                     })
                     .collect::<Vec<_>>(),
@@ -289,6 +308,53 @@ impl CutDatabase {
         runtime: &ExecutionContext,
     ) -> Result<Self, crate::SynthError> {
         network.parallel_cut_database(max_leaves, MAX_CUTS_PER_NODE, runtime)
+    }
+
+    /// Enumerates one bounded cut set across every proved alternative in a
+    /// choice class. The retained origin is the evidence needed to compute the
+    /// representative's truth without inventing cross-arena connectivity.
+    pub(crate) fn build_choices_parallel(
+        choices: &super::ChoiceGraph,
+        max_leaves: usize,
+        runtime: &ExecutionContext,
+    ) -> Result<Self, crate::SynthError> {
+        let network = choices.network();
+        let base = Self::build_parallel(network, max_leaves, runtime)?;
+        let mut rows = Vec::with_capacity(network.node_count());
+        let mut origins = Vec::with_capacity(network.node_count());
+        for index in 0..network.node_count() {
+            let node = LogicNodeId::from_index(index);
+            let mut entries = base
+                .cuts(node)
+                .iter()
+                .copied()
+                .map(|cut| (cut, node))
+                .collect::<Vec<_>>();
+            for &alternative in choices.alternatives(node) {
+                entries.extend(
+                    base.cuts(alternative.positive())
+                        .iter()
+                        .copied()
+                        .filter(|cut| !cut.contains(alternative))
+                        .map(|cut| (cut, alternative)),
+                );
+            }
+            entries.sort_unstable_by_key(|&(cut, origin)| (cut.rank(), origin));
+            entries.dedup_by_key(|entry| entry.0);
+            entries.truncate(MAX_CUTS_PER_NODE);
+            let (node_cuts, node_origins): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+            rows.push(node_cuts);
+            origins.push(node_origins);
+        }
+        Ok(Self {
+            rows: opto_core::PackedRows::try_from_rows(rows)
+                .map_err(|_| crate::SynthError::capacity("choice cuts exceed capacity"))?,
+            origins: Some(
+                opto_core::PackedRows::try_from_rows(origins).map_err(|_| {
+                    crate::SynthError::capacity("choice cut origins exceed capacity")
+                })?,
+            ),
+        })
     }
 
     pub(crate) fn build_with_cut_cap_parallel(
@@ -496,11 +562,20 @@ impl CutDatabase {
             ranges.iter().map(|range| range.get(arena).iter().copied()),
         )
         .map_err(|_| crate::SynthError::capacity("logic cut database exceeds capacity"))?;
-        Ok(Self { rows })
+        Ok(Self {
+            rows,
+            origins: None,
+        })
     }
 
     pub(crate) fn cuts(&self, node: LogicNodeId) -> &[KCut] {
         self.rows.row(node.index())
+    }
+
+    pub(crate) fn origin(&self, node: LogicNodeId, cut: usize) -> LogicNodeId {
+        self.origins
+            .as_ref()
+            .map_or(node.positive(), |origins| origins[node.index()][cut])
     }
 
     #[cfg(test)]

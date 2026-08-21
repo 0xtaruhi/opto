@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    Candidate, CandidateContext, CandidateIndex, CandidateRange, CellBinding, CellCost,
-    CombinationalCellCatalog, CoverDemand, CoverPlanner, CoverTiming, CutDatabase,
-    CutTruthDatabase, ExecutionContext, FlowChoice, HashMap, InverterCell, LogicGraph, LogicNode,
-    LogicNodeId, MappingCost, SlotChoice, SmallVec, TruthTable, analyze_node_cares,
-    enumerate_joints, inverter_truth, node_candidates, opposite, slot,
+    Candidate, CellBinding, CellCost, CombinationalCellCatalog, CompiledMapping, CoverDemand,
+    CoverPlanner, CoverTiming, ExecutionContext, FlowChoice, InverterCell, LogicGraph, LogicNode,
+    LogicNodeId, MappingCost, SlotChoice, TruthTable, inverter_truth, opposite, slot,
 };
 use super::{ReferenceScratch, TrialScratch};
 use crate::planning::mapping_policy::{
@@ -26,11 +24,9 @@ impl<'a> CoverPlanner<'a> {
 
     pub(in crate::mapping::cover::search) fn new(
         network: &'a LogicGraph,
-        cuts: &'a CutDatabase,
-        truths: &CutTruthDatabase,
+        mapping: &'a CompiledMapping,
         catalog: &'a CombinationalCellCatalog,
         endpoints: CoverEndpoints<'_>,
-        runtime: &ExecutionContext,
     ) -> Result<Self, crate::SynthError> {
         let CoverEndpoints { outputs, timing } = endpoints;
         let CoverTiming {
@@ -39,21 +35,22 @@ impl<'a> CoverPlanner<'a> {
             input_arrivals,
             ..
         } = timing;
+        let CompiledMapping {
+            cuts,
+            truths,
+            live_nodes,
+            candidates,
+            joints,
+            slot_joints,
+            joints_by_node,
+        } = mapping;
         let node_count = network.node_count();
-        let timing_diagnostics = catalog.diagnostics().timing;
-        let init_started = std::time::Instant::now();
-        let slots = node_count * 2;
-        let mut live_nodes = vec![false; node_count];
-        let mut pending = outputs
-            .iter()
-            .map(|output| output.positive())
-            .collect::<Vec<_>>();
-        while let Some(node) = pending.pop() {
-            if std::mem::replace(&mut live_nodes[node.index()], true) {
-                continue;
-            }
-            pending.extend(network.node(node).fanins().map(LogicNodeId::positive));
+        if truths.node_count() != node_count {
+            return Err(crate::SynthError::invariant(
+                "compiled truth rows do not align with the choice graph",
+            ));
         }
+        let slots = node_count * 2;
         let inverter = catalog
             .best_binding_for_truth(inverter_truth())
             .map(|binding| InverterCell {
@@ -61,62 +58,6 @@ impl<'a> CoverPlanner<'a> {
                 cost: catalog.cost_for_binding(binding),
             });
         let mut reference_estimates = vec![0.0f64; slots];
-        let mut consumer_entries = Vec::new();
-        for (index, &is_live) in live_nodes.iter().enumerate() {
-            if !is_live {
-                continue;
-            }
-            let consumer = u32::try_from(index).map_err(|_| {
-                crate::SynthError::capacity("logic node ID exceeds 32-bit capacity")
-            })?;
-            let mut unique_fanins = SmallVec::<[usize; 3]>::new();
-            for fanin in network.node(LogicNodeId::from_index(index)).fanins() {
-                if !unique_fanins.contains(&fanin.index()) {
-                    unique_fanins.push(fanin.index());
-                    consumer_entries.push((fanin.index(), consumer));
-                }
-            }
-        }
-        let consumers = opto_core::PackedRows::try_from_entries(node_count, consumer_entries)
-            .map_err(|_| crate::SynthError::capacity("logic consumer adjacency"))?;
-        let mut output_nodes = vec![false; node_count];
-        for &output in outputs {
-            output_nodes[output.index()] = true;
-        }
-        let mut node_cares: Vec<Option<Box<[u64]>>> = vec![None; node_count];
-        let mut exact_only = vec![true; node_count];
-        let mut levels = vec![Vec::new(); network.max_level() + 1];
-        for (index, &is_live) in live_nodes.iter().enumerate() {
-            if is_live {
-                levels[network.level(LogicNodeId::from_index(index)) as usize].push(index);
-            }
-        }
-        for nodes in levels.into_iter().rev() {
-            let analyzed = runtime.analyze_indexed(nodes.len(), |position| {
-                let index = nodes[position];
-                let (cares, exact) = analyze_node_cares(
-                    network,
-                    cuts,
-                    index,
-                    consumers.row(index),
-                    output_nodes[index],
-                    &exact_only,
-                );
-                Ok::<_, crate::SynthError>((index, cares, exact))
-            })?;
-            for (index, cares, exact) in analyzed {
-                node_cares[index] = cares;
-                exact_only[index] = exact;
-            }
-        }
-        let trace = crate::api::diagnostics::SynthTrace::new(timing_diagnostics);
-        crate::api::diagnostics::trace!(
-            trace,
-            "cover.cares",
-            "nodes={node_count} wall={:?}",
-            init_started.elapsed()
-        );
-        let candidates_started = std::time::Instant::now();
         for (index, &is_live) in live_nodes.iter().enumerate() {
             if !is_live {
                 continue;
@@ -128,113 +69,8 @@ impl<'a> CoverPlanner<'a> {
                 reference_estimates[slot(fanin) ^ 1] += 1.0;
             }
         }
-        let candidate_shards = runtime.fold_indexed(
-            node_count,
-            || (Vec::new(), Vec::new(), HashMap::new()),
-            |(candidates, lengths, exact_cache), index| {
-                let phase_lengths = if live_nodes[index] {
-                    node_candidates(
-                        CandidateContext {
-                            network,
-                            cuts,
-                            truths,
-                            catalog,
-                        },
-                        index,
-                        node_cares[index].as_deref(),
-                        candidates,
-                        exact_cache,
-                    )?
-                } else {
-                    [0, 0]
-                };
-                lengths.push(phase_lengths);
-                Ok::<_, crate::SynthError>(())
-            },
-        )?;
-        let candidate_count: usize = candidate_shards
-            .iter()
-            .map(|(candidates, _, _)| candidates.len())
-            .sum();
-        let mut candidate_arenas = Vec::with_capacity(candidate_shards.len());
-        let mut candidate_ranges = Vec::with_capacity(slots);
-        for (arena_index, (candidates, lengths, _)) in candidate_shards.into_iter().enumerate() {
-            let arena = u32::try_from(arena_index).map_err(|_| {
-                crate::SynthError::capacity("cover candidate shard count exceeds 32-bit capacity")
-            })?;
-            let mut start = 0usize;
-            for phase_lengths in lengths {
-                for len in phase_lengths {
-                    candidate_ranges.push(CandidateRange {
-                        arena,
-                        start: start.try_into().map_err(|_| {
-                            crate::SynthError::capacity(
-                                "cover candidate shard exceeds 32-bit capacity",
-                            )
-                        })?,
-                        len: len.try_into().map_err(|_| {
-                            crate::SynthError::capacity(
-                                "cover candidate range exceeds 32-bit capacity",
-                            )
-                        })?,
-                    });
-                    start += len;
-                }
-            }
-            if start != candidates.len() {
-                return Err(crate::SynthError::invariant(
-                    "cover candidate ranges do not span their shard",
-                ));
-            }
-            candidate_arenas.push(candidates);
-        }
-        if candidate_ranges.len() != slots {
-            return Err(crate::SynthError::invariant(
-                "cover candidate ranges do not align with logic phases",
-            ));
-        }
-        let candidates = CandidateIndex {
-            arenas: candidate_arenas.into_boxed_slice(),
-            ranges: candidate_ranges.into_boxed_slice(),
-        };
-        crate::api::diagnostics::trace!(
-            trace,
-            "cover.candidates",
-            "candidates={candidate_count} bytes={} wall={:?}",
-            candidate_count * std::mem::size_of::<Candidate>(),
-            candidates_started.elapsed()
-        );
-        let joints_started = std::time::Instant::now();
-        let joints = enumerate_joints(network, cuts, truths, catalog, &live_nodes);
-        crate::api::diagnostics::trace!(
-            trace,
-            "cover.joint_enumeration",
-            "joints={} wall={:?}",
-            joints.len(),
-            joints_started.elapsed()
-        );
         let total = slots + joints.len();
         reference_estimates.resize(total, 1.0);
-        let slot_joint_capacity = joints
-            .len()
-            .checked_mul(2)
-            .ok_or_else(|| crate::SynthError::capacity("cover slot-joint adjacency"))?;
-        let mut slot_joint_entries = Vec::with_capacity(slot_joint_capacity);
-        let mut node_joint_entries = Vec::with_capacity(joints.len());
-        for (index, joint) in joints.iter().enumerate() {
-            let joint_id = u32::try_from(index).map_err(|_| {
-                crate::SynthError::capacity("cover joint ID exceeds 32-bit capacity")
-            })?;
-            for &slot in &joint.slots {
-                slot_joint_entries.push((slot, joint_id));
-            }
-            node_joint_entries.push((joint.slots[0].min(joint.slots[1]) / 2, joint_id));
-        }
-        let slot_joints = opto_core::PackedRows::try_from_entries(slots, slot_joint_entries)
-            .map_err(|_| crate::SynthError::capacity("cover slot-joint adjacency"))?;
-        let joints_by_node =
-            opto_core::PackedRows::try_from_entries(node_count, node_joint_entries)
-                .map_err(|_| crate::SynthError::capacity("cover node-joint adjacency"))?;
         if input_arrivals.len() != input_transitions.len() {
             return Err(crate::SynthError::invariant(
                 "regional input arrivals and transitions do not align",
@@ -270,7 +106,7 @@ impl<'a> CoverPlanner<'a> {
             loads_ready: false,
             reference_estimates,
             demand: CoverDemand::empty(total),
-            live_nodes: live_nodes.into_boxed_slice(),
+            live_nodes: live_nodes.clone(),
             reference_scratch: ReferenceScratch::default(),
             trial_scratch: TrialScratch::default(),
         })

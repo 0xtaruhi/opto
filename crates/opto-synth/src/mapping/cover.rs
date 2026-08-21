@@ -5,9 +5,8 @@ use self::search::{CoverTiming, LibraryCover};
 pub(crate) use self::search::{LibraryCoverBinding, LibraryCoverSource};
 use super::roots::MappingRoot;
 use super::{CombinationalCellCatalog, word};
-use crate::boolean::logic::cuts::{CutDatabase, CutTruthDatabase};
+use crate::boolean::logic::ChoiceGraph;
 use crate::boolean::logic::network::LogicNodeId;
-use crate::boolean::logic::{MAX_MATCH_INPUTS, RegionLogicGraph};
 
 mod portable;
 mod response;
@@ -268,31 +267,14 @@ pub(crate) fn analyze_region_cover(
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "cover.subject_optimization".to_string()
         });
-        RegionLogicGraph::from_canonical(
-            canonical,
-            &root_values,
-            &root_requirements,
-            request.options,
-        )?
+        ChoiceGraph::from_canonical(canonical, &root_values, &root_requirements, request.options)?
     };
     let inputs = subject.inputs().to_vec().into_boxed_slice();
-    let cuts = {
-        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-            "cover.cut_enumeration".to_string()
-        });
-        CutDatabase::build_parallel(subject.network(), MAX_MATCH_INPUTS, request.options.runtime)?
-    };
-    let truths = {
-        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-            "cover.truth_evaluation".to_string()
-        });
-        CutTruthDatabase::build_parallel(subject.network(), &cuts, request.options.runtime)?
-    };
     let Some((outputs, cover)) = ({
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "cover.library_selection".to_string()
         });
-        select_subject_cover(&subject, &cuts, &truths, &inputs, module, &request)?
+        select_subject_cover(&subject, &inputs, module, &request)?
     }) else {
         return Ok(RegionCoverAnalysis::NoCombinationalLogic);
     };
@@ -306,17 +288,13 @@ pub(crate) fn analyze_region_cover(
 }
 
 fn select_subject_cover(
-    subject: &RegionLogicGraph,
-    cuts: &CutDatabase,
-    truths: &CutTruthDatabase,
+    subject: &ChoiceGraph,
     inputs: &[word::ValueId],
     module: &word::WordModule,
     request: &RegionCoverRequest<'_>,
 ) -> Result<Option<SelectedSubjectCover>, crate::SynthError> {
     let selector = CoverSelector {
         subject,
-        cuts,
-        truths,
         inputs,
         module,
         request,
@@ -338,7 +316,7 @@ fn select_subject_cover(
 
 fn analyzed_outputs(
     roots: &[MappingRoot],
-    subject: &RegionLogicGraph,
+    subject: &ChoiceGraph,
 ) -> Result<Option<Box<[AnalyzedRegionOutput]>>, crate::SynthError> {
     let mut outputs = Vec::new();
     for &root in roots {
@@ -370,9 +348,7 @@ fn analyzed_outputs(
 }
 
 struct CoverSelector<'a, 'request> {
-    subject: &'a RegionLogicGraph,
-    cuts: &'a CutDatabase,
-    truths: &'a CutTruthDatabase,
+    subject: &'a ChoiceGraph,
     inputs: &'a [word::ValueId],
     module: &'a word::WordModule,
     request: &'a RegionCoverRequest<'request>,
@@ -386,8 +362,6 @@ impl CoverSelector<'_, '_> {
     ) -> Result<Option<LibraryCover>, crate::SynthError> {
         let Self {
             subject,
-            cuts,
-            truths,
             inputs,
             module,
             request,
@@ -461,15 +435,8 @@ impl CoverSelector<'_, '_> {
             input_transitions: &input_transitions,
             input_arrivals: &input_arrivals,
         };
-        let mut cover = search::cover_logic_network_with_truths(
-            subject.network(),
-            cuts,
-            truths,
-            &nodes,
-            request.catalog,
-            timing,
-            runtime,
-        )?;
+        let mut cover =
+            search::cover_choice_graph(subject, &nodes, request.catalog, timing, runtime)?;
         if let Some(cover) = &mut cover {
             cover.isolate_outputs(request.catalog).map_err(|error| {
                 crate::SynthError::mapping(format!(
