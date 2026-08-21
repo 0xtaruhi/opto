@@ -291,6 +291,7 @@ where
             revision: self.revision,
             cells: PagedCowVec::new(None),
             nets: PagedCowVec::new(None),
+            consumers: PagedCowVec::new(Box::new([])),
             cell_directory: PersistentDirectory::default(),
             net_directory: PersistentDirectory::default(),
             live_cells: 0,
@@ -316,6 +317,7 @@ pub struct DesignRevision<L> {
     revision: DesignRevisionId,
     cells: PagedCowVec<Option<Cell<L>>>,
     nets: PagedCowVec<Option<NetBit>>,
+    consumers: PagedCowVec<Box<[CellId]>>,
     cell_directory: PersistentDirectory<CellId, u32>,
     net_directory: PersistentDirectory<NetBitId, u32>,
     live_cells: usize,
@@ -538,11 +540,23 @@ where
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        let required_outputs = self
-            .cells()
-            .filter(|cell| !delta.footprint.replaces.contains(EntityId::Cell(cell.id)))
-            .flat_map(|cell| cell.inputs.iter().copied())
-            .filter(|&net| delta.footprint.replaces.contains(EntityId::NetBit(net)))
+        let required_outputs = delta
+            .footprint
+            .replaces
+            .as_slice()
+            .iter()
+            .filter_map(|entity| match *entity {
+                EntityId::NetBit(net)
+                    if self.net_consumers(net).is_some_and(|consumers| {
+                        consumers
+                            .iter()
+                            .any(|&cell| !delta.footprint.replaces.contains(EntityId::Cell(cell)))
+                    }) =>
+                {
+                    Some(net)
+                }
+                EntityId::Cell(_) | EntityId::NetBit(_) => None,
+            })
             .collect::<BTreeSet<_>>();
         if let Some(net) = required_outputs
             .difference(&semantic_outputs)
@@ -598,6 +612,15 @@ where
                         net: input,
                     });
                 }
+                if self
+                    .net_consumers(input)
+                    .is_none_or(|consumers| consumers.binary_search(&cell.id).is_err())
+                {
+                    return Err(DesignError::ConsumerIndexMismatch {
+                        cell: cell.id,
+                        net: input,
+                    });
+                }
             }
             for (output, &net) in cell.outputs.iter().enumerate() {
                 let expected = NetDriver::Cell {
@@ -631,6 +654,17 @@ where
                     }
                 }
                 Some(NetDriver::Constant(_)) | None => {}
+            }
+            for &consumer in self.net_consumers(net.id).unwrap_or_default() {
+                if self
+                    .cell(consumer)
+                    .is_none_or(|cell| !cell.inputs.contains(&net.id))
+                {
+                    return Err(DesignError::ConsumerIndexMismatch {
+                        cell: consumer,
+                        net: net.id,
+                    });
+                }
             }
         }
         if counted_cells != self.live_cells || counted_nets != self.live_nets {
@@ -709,6 +743,7 @@ where
         let slot = self.cells.len();
         let encoded =
             u32::try_from(slot).map_err(|_| DesignError::Capacity(opto_core::CapacityError))?;
+        self.attach_inputs(cell.id, &cell.inputs)?;
         self.cells.try_set(slot, Some(cell))?;
         let (directory, previous) = self.cell_directory.insert(id, encoded);
         debug_assert!(previous.is_none());
@@ -726,6 +761,7 @@ where
         let encoded =
             u32::try_from(slot).map_err(|_| DesignError::Capacity(opto_core::CapacityError))?;
         self.nets.try_set(slot, Some(net))?;
+        self.consumers.try_set(slot, Box::new([]))?;
         let (directory, previous) = self.net_directory.insert(id, encoded);
         debug_assert!(previous.is_none());
         self.net_directory = directory;
@@ -735,7 +771,13 @@ where
 
     fn upsert_cell(&mut self, cell: Cell<L>) -> Result<(), DesignError> {
         if let Some(slot) = self.cell_directory.get(cell.id) {
-            let was_live = self.cells.get(slot as usize).is_some_and(Option::is_some);
+            let previous = self.cells.get(slot as usize).and_then(Option::as_ref);
+            let was_live = previous.is_some();
+            if let Some(previous) = previous {
+                let inputs = previous.inputs.clone();
+                self.detach_inputs(cell.id, &inputs)?;
+            }
+            self.attach_inputs(cell.id, &cell.inputs)?;
             self.cells.try_set(slot as usize, Some(cell))?;
             self.live_cells += usize::from(!was_live);
             Ok(())
@@ -760,11 +802,8 @@ where
             self.cell_directory
                 .get(id)
                 .ok_or(DesignError::UnknownReplacement(EntityId::Cell(id)))? as usize;
-        if self
-            .cells
-            .try_set(slot, None)?
-            .is_some_and(|cell| cell.is_some())
-        {
+        if let Some(cell) = self.cells.try_set(slot, None)?.flatten() {
+            self.detach_inputs(id, &cell.inputs)?;
             self.live_cells -= 1;
         }
         Ok(())
@@ -780,7 +819,56 @@ where
             .try_set(slot, None)?
             .is_some_and(|net| net.is_some())
         {
+            self.consumers.try_set(slot, Box::new([]))?;
             self.live_nets -= 1;
+        }
+        Ok(())
+    }
+
+    fn net_consumers(&self, id: NetBitId) -> Option<&[CellId]> {
+        let slot = self.net_directory.get(id)? as usize;
+        self.consumers.get(slot).map(AsRef::as_ref)
+    }
+
+    fn attach_inputs(&mut self, cell: CellId, inputs: &[NetBitId]) -> Result<(), DesignError> {
+        for &net in inputs {
+            let slot = self
+                .net_directory
+                .get(net)
+                .ok_or(DesignError::UnknownCellNet { cell, net })? as usize;
+            let mut consumers = self
+                .consumers
+                .get(slot)
+                .cloned()
+                .unwrap_or_default()
+                .into_vec();
+            match consumers.binary_search(&cell) {
+                Ok(_) => {}
+                Err(index) => {
+                    consumers.insert(index, cell);
+                    self.consumers.try_set(slot, consumers.into_boxed_slice())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn detach_inputs(&mut self, cell: CellId, inputs: &[NetBitId]) -> Result<(), DesignError> {
+        for &net in inputs {
+            let slot = self
+                .net_directory
+                .get(net)
+                .ok_or(DesignError::UnknownCellNet { cell, net })? as usize;
+            let mut consumers = self
+                .consumers
+                .get(slot)
+                .cloned()
+                .unwrap_or_default()
+                .into_vec();
+            if let Ok(index) = consumers.binary_search(&cell) {
+                consumers.remove(index);
+                self.consumers.try_set(slot, consumers.into_boxed_slice())?;
+            }
         }
         Ok(())
     }
@@ -975,6 +1063,14 @@ pub enum DesignError {
         /// Cell side of the binding.
         cell: CellId,
         /// Net side of the binding.
+        net: NetBitId,
+    },
+    /// Cell input and the revision's exact reverse connectivity disagree.
+    #[error("cell {cell:?} and net {net:?} disagree on their consumer binding")]
+    ConsumerIndexMismatch {
+        /// Consumer cell.
+        cell: CellId,
+        /// Consumed net.
         net: NetBitId,
     },
     /// Persistent directory and record slot disagree.
@@ -1251,6 +1347,47 @@ mod tests {
             base.commit(vec![replacement], |_| Ok(())).unwrap_err(),
             DesignError::IncompleteSemanticOutput(NetBitId::from_bytes(digest(11)))
         );
+    }
+
+    #[test]
+    fn boundary_validation_tracks_consumer_rewrites_incrementally() {
+        let mut builder = DesignBuilder::new(DesignRevisionId::from_bytes(digest(90)));
+        builder.add_net(net(10, None));
+        builder.add_net(net(11, Some((1, 0))));
+        builder.add_net(net(12, Some((3, 0))));
+        builder.add_cell(cell(1, "producer", &[10], &[11]));
+        builder.add_cell(cell(3, "consumer", &[11], &[12]));
+        let base = builder.seal().unwrap();
+        let detached = base
+            .commit(
+                vec![RewriteDelta {
+                    id: RewriteDeltaId::from_bytes(digest(40)),
+                    footprint: footprint(
+                        base.revision(),
+                        vec![
+                            EntityId::Cell(CellId::from_bytes(digest(3))),
+                            EntityId::NetBit(NetBitId::from_bytes(digest(10))),
+                        ],
+                        vec![EntityId::Cell(CellId::from_bytes(digest(3)))],
+                    ),
+                    cells: vec![cell(3, "detached-consumer", &[10], &[12])].into_boxed_slice(),
+                    nets: Box::new([]),
+                    semantic: SemanticBinding {
+                        inputs: vec![NetBitId::from_bytes(digest(10))].into_boxed_slice(),
+                        outputs: Box::new([]),
+                    },
+                    proof: EquivalenceCertificate {
+                        regime: EquivalenceRegime::ByConstruction,
+                        digest: digest(41),
+                    },
+                }],
+                |_| Ok(()),
+            )
+            .unwrap();
+        let mut replacement = delta(50, detached.revision(), "replacement");
+        replacement.semantic.outputs = Box::new([]);
+
+        detached.commit(vec![replacement], |_| Ok(())).unwrap();
     }
 
     #[test]
