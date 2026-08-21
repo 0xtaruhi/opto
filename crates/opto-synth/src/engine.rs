@@ -556,7 +556,6 @@ struct LoweredState {
     region_binding: crate::boolean::bitblast::LoweredRegionBinding,
     contracts: crate::regional::RegionContractSet,
     regional_plans: Box<[regional_mapping::RegionalPlanRow]>,
-    sequential_operations: Box<[crate::mapping::materialize::SequentialRegionBinding]>,
     synthesized: word::WordModule,
     provenance: ProvenanceBuilder,
     operator_manifest: crate::OperatorManifest,
@@ -743,11 +742,10 @@ fn map_initial_logic(
         regional_mapping::RegionalMappingRequest {
             module: &lowered.synthesized,
             provenance: &mut lowered.provenance,
-            regions: lowered.work.regions(),
+            work: &lowered.work,
             region_binding: &lowered.region_binding,
             contracts: &lowered.contracts,
             regional_plans: &lowered.regional_plans,
-            sequential_operations: &lowered.sequential_operations,
             config: MappingConfig {
                 options: &lowered.environment.options,
                 port_bindings: &lowered.environment.port_bindings,

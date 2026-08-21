@@ -550,7 +550,7 @@ fn removes_unreachable_states_before_reencoding() {
 }
 
 #[test]
-fn preserves_an_observable_state_encoding() {
+fn reencodes_state_behind_an_exact_visible_decoder() {
     let (mut module, state) = sparse_fsm(true);
     let state_type = module.signal(state).unwrap().ty;
     let output = module
@@ -575,7 +575,7 @@ fn preserves_an_observable_state_encoding() {
 
     assert_eq!(
         optimize_with_objective(&mut module, FsmObjective::Area).unwrap(),
-        0
+        1
     );
     let register_width = module
         .operations()
@@ -585,7 +585,7 @@ fn preserves_an_observable_state_encoding() {
                 .then(|| module.value(operation.result).unwrap().ty.width())
         })
         .unwrap();
-    assert_eq!(register_width, 8);
+    assert_eq!(register_width, 1);
 }
 
 #[test]

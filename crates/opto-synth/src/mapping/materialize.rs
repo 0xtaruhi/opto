@@ -26,8 +26,8 @@ use crate::artifact::MappedCellSource;
 pub(crate) use region_delta::REGION_CELL_PREFIX;
 pub(crate) use sequential_delta::{
     MappedSequentialArtifact, RegionalSequentialCellPlan, SequentialRegionBinding,
-    local_sequential_bindings, lowered_sequential_binding_values, lowered_sequential_operations,
-    plan_regional_sequential_cells, reconcile_sequential_publication, sequential_binding_values,
+    local_sequential_bindings, lowered_sequential_operations, plan_regional_sequential_cells,
+    reconcile_sequential_publication, sequential_binding_values, sequential_plan_values,
     sequential_region_bindings,
 };
 

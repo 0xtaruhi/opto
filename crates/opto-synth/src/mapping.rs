@@ -36,8 +36,8 @@ pub(crate) use materialize::MappedOutput;
 #[cfg(test)]
 pub(crate) use materialize::build_test_substrate;
 pub(crate) use region_binding::{
-    CandidateBindingDomain, RegionPlanBinding, RegionPlanValueBinding, SequentialPinKey,
-    SequentialPinRole, build_candidate_binding,
+    CandidateBinding, CandidateBindingDomain, RegionPlanBinding, RegionPlanValueBinding,
+    SequentialEndpoint, SequentialPinKey, SequentialPinRole, build_candidate_binding,
 };
 use sequential::SequentialCellCatalog;
 

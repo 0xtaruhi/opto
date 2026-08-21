@@ -153,10 +153,15 @@ impl MappedRegionArtifact {
         let inputs = input_values
             .iter()
             .copied()
-            .map(|value| {
-                mapped_values
-                    .require(value)
-                    .map(|signal| nets.signal(signal))
+            .zip(plan_binding.inputs.iter().copied())
+            .map(|(value, binding)| {
+                let signal = match binding {
+                    crate::mapping::RegionPlanValueBinding::SequentialPinBit { pin, .. } => {
+                        MappedValueSignal::Net(sequential_pins.require(pin)?)
+                    }
+                    _ => mapped_values.require(value)?,
+                };
+                Ok::<_, crate::SynthError>(nets.signal(signal))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut output_targets = vec![[None::<ArtifactSignal>; 2]; cover.cells().len()];
@@ -165,7 +170,7 @@ impl MappedRegionArtifact {
                 crate::mapping::RegionPlanValueBinding::Lowered(value) => {
                     nets.signal(mapped_values.require(value)?)
                 }
-                crate::mapping::RegionPlanValueBinding::SequentialPinBit(pin) => {
+                crate::mapping::RegionPlanValueBinding::SequentialPinBit { pin, .. } => {
                     nets.signal(MappedValueSignal::Net(sequential_pins.require(pin)?))
                 }
                 crate::mapping::RegionPlanValueBinding::SourceBit { .. }

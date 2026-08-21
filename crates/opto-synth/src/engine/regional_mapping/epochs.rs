@@ -183,19 +183,22 @@ impl RegionalMapper<'_> {
         &self,
         state: &mut RegionalMappingState<'_>,
     ) -> Result<RegionalMappedState, crate::SynthError> {
-        let boundary_values = boundary_observation_values(self.regions, state.region_binding)?;
+        let boundary_values =
+            boundary_observation_values(self.work.regions(), state.region_binding)?;
         let sequential_publication = materialize::reconcile_sequential_publication(
             state.module,
-            state.sequential_operations,
+            state.region_binding,
             state.rows.iter().flat_map(|row| row.sequential.iter()),
+            self.work.state_cells(),
         )?;
         let mut observed_values = materialize::region_delta::regional_binding_values(
             state.rows.iter().map(|row| &row.binding),
         )
         .into_vec();
-        observed_values.extend(materialize::lowered_sequential_binding_values(
+        observed_values.extend(materialize::sequential_plan_values(
             state.module,
-            sequential_publication.operations(),
+            state.region_binding,
+            state.rows.iter().flat_map(|row| row.sequential.iter()),
         )?);
         observed_values.extend(
             boundary_values
@@ -207,7 +210,23 @@ impl RegionalMapper<'_> {
         let mut sequential_pins = state
             .rows
             .iter()
-            .flat_map(|row| row.binding.sequential_pins())
+            .flat_map(|row| {
+                row.binding.sequential_pins().chain(
+                    row.sequential
+                        .iter()
+                        .flat_map(|plan| {
+                            plan.inputs
+                                .iter()
+                                .map(|(_, endpoint)| endpoint)
+                                .chain(std::iter::once(&plan.output.1))
+                        })
+                        .filter_map(|endpoint| match *endpoint {
+                            crate::mapping::SequentialEndpoint::Pin(pin) => Some(pin),
+                            crate::mapping::SequentialEndpoint::SourceBit { .. }
+                            | crate::mapping::SequentialEndpoint::Constant(_) => None,
+                        }),
+                )
+            })
             .collect::<Vec<_>>();
         sequential_pins.sort_unstable();
         sequential_pins.dedup();
@@ -269,8 +288,8 @@ impl RegionalMapper<'_> {
         };
         let sequential = materialize::MappedSequentialArtifact::from_module(
             state.module,
+            state.region_binding,
             &mapped.signals,
-            sequential_publication.operations(),
             state.rows.iter().flat_map(|row| row.sequential.iter()),
             &mapped.sequential_pins,
             &self.config,
@@ -679,16 +698,18 @@ impl RegionalMapper<'_> {
         state: &RegionalMappingState<'_>,
         row: crate::RegionRowId,
     ) -> Result<crate::RegionContextKey, crate::SynthError> {
-        let region = self
-            .regions
-            .region(row)
-            .ok_or_else(|| crate::SynthError::invariant("dirty regional row is out of range"))?;
+        let region =
+            self.work.regions().region(row).ok_or_else(|| {
+                crate::SynthError::invariant("dirty regional row is out of range")
+            })?;
         let predecessors = self
-            .regions
+            .work
+            .regions()
             .predecessors(region)
             .iter()
             .map(|&predecessor| {
-                self.regions
+                self.work
+                    .regions()
                     .region(predecessor)
                     .ok_or_else(|| {
                         crate::SynthError::invariant("regional predecessor row is out of range")

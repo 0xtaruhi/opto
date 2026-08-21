@@ -3,7 +3,7 @@
 
 //! Publishes one regional construction for target-library mapping.
 
-use super::roots::{MappingRoot, mapping_roots, merge_by_value};
+use super::roots::{MappingRoot, combinational_mapping_roots, mapping_roots, merge_by_value};
 use crate::artifact::provenance::{PrivateArchitecturePublication, ProvenanceBuilder};
 use crate::boolean::bitblast::{
     LocalRegionBooleanLowering, LocalRegionBooleanRequest, LoweredRegionBinding,
@@ -69,7 +69,6 @@ struct LoweredPrivateRegion {
     operators: DurableOperatorArena,
     lowering: LocalRegionBooleanLowering,
     state_operations: Box<[super::materialize::SequentialRegionBinding]>,
-    sequential: Box<[super::materialize::RegionalSequentialCellPlan]>,
 }
 
 #[derive(Clone, Copy)]
@@ -468,7 +467,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
             operators,
             lowering,
             state_operations,
-            sequential,
         } = private;
         let empty_port_bindings = opto_timing::PortBindings::new([]);
         let LocalRegionBooleanLowering {
@@ -505,25 +503,26 @@ impl RegionArchitectureMaterializer<'_, '_> {
             )?
         };
         let response_models = super::cover::CoverResponseModels::new(self.request.scenarios);
-        let (rematerialized, binding) = match analysis {
+        let domain = CandidateBindingDomain {
+            source_module: self.request.source,
+            local_module: &module,
+            source_to_local: &source_to_local,
+            boundary_bindings: &boundary_bindings,
+            owned_memory_logic: &owned_memory_logic,
+            memory_states: &memory_states,
+            source_cells: self.source_cells,
+            sequential_operations: &state_operations,
+            root_bindings: &root_bindings,
+            region_binding: &lowered_binding,
+        };
+        let (rematerialized, candidate) = match analysis {
             super::cover::RegionCoverAnalysis::NoCombinationalLogic => (
                 empty_target_plan(region, context, self.request.contracts, decision_key)?,
-                RegionPlanBinding::empty(),
+                crate::mapping::build_candidate_binding(domain, &[], std::iter::empty())?,
             ),
             super::cover::RegionCoverAnalysis::Covered(mut analysis) => {
                 let binding = analysis.candidate_binding(
-                    CandidateBindingDomain {
-                        source_module: self.request.source,
-                        local_module: &module,
-                        source_to_local: &source_to_local,
-                        boundary_bindings: &boundary_bindings,
-                        owned_memory_logic: &owned_memory_logic,
-                        memory_states: &memory_states,
-                        source_cells: self.source_cells,
-                        sequential_operations: &state_operations,
-                        root_bindings: &root_bindings,
-                        region_binding: &lowered_binding,
-                    },
+                    domain,
                     &self.request.mapping_context.combinational_catalog,
                 )?;
                 let plan = analysis.compact_plan(
@@ -550,9 +549,16 @@ impl RegionArchitectureMaterializer<'_, '_> {
             }
             None => rematerialized,
         };
+        let sequential = super::materialize::plan_regional_sequential_cells(
+            &module,
+            self.request.source,
+            &state_operations,
+            self.request.mapping_context,
+            &candidate.state_endpoints,
+        )?;
         Ok(RegionalArchitectureMapping {
             plan,
-            binding,
+            binding: candidate.binding,
             architecture,
             operators,
             publication,
@@ -588,14 +594,24 @@ impl RegionArchitectureMaterializer<'_, '_> {
             runtime,
         )?;
         operation_sources.inherit_appended(&module)?;
-        for &(replaced, replacement) in fsm.rewrites() {
+        let mut state_relations = BTreeMap::new();
+        for rewrite in fsm.rewrites() {
             let sources = operation_sources
-                .sources(replaced)
+                .sources(rewrite.replaced)
                 .ok_or_else(|| SynthError::invariant("replaced FSM has no source relation"))?
                 .to_vec();
-            operation_sources.set(replacement, sources)?;
+            for &source in &sources {
+                if state_relations
+                    .insert(source, rewrite.state_relation)
+                    .is_some_and(|proof| proof != rewrite.state_relation)
+                {
+                    return Err(SynthError::invariant(
+                        "source state has conflicting FSM relations",
+                    ));
+                }
+            }
+            operation_sources.set(rewrite.replacement, sources)?;
         }
-        let _fsm_proof = fsm.proof();
         let canonical = crate::planning::dataflow::optimize_combinational_dataflow(&mut module)?;
         remap_private_values(
             &canonical,
@@ -669,6 +685,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             &mut owned_memory_logic,
             &mut memory_states,
         );
+        let observability = crate::word::uses::netlist_observability(&module)?;
         let state_roots = module
             .operations()
             .iter()
@@ -677,9 +694,16 @@ impl RegionArchitectureMaterializer<'_, '_> {
                     operation.kind,
                     word::OpKind::Register(_) | word::OpKind::Latch(_)
                 )
-                .then_some(sharing.representatives()[operation.result.index()])
+                .then_some(operation)
             })
-            .collect::<std::collections::BTreeSet<_>>()
+            .filter_map(
+                |operation| match observability.observes_value(operation.result) {
+                    Ok(true) => Some(Ok(sharing.representatives()[operation.result.index()])),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                },
+            )
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?
             .into_iter()
             .collect::<Vec<_>>();
         compact_private_module(
@@ -790,9 +814,11 @@ impl RegionArchitectureMaterializer<'_, '_> {
         };
         let source_sequential = super::materialize::local_sequential_bindings(
             &module,
+            self.request.source,
             region.id(),
             &operation_sources,
             self.source_cells,
+            &state_relations,
         )?;
         let state_binding = crate::boolean::bitblast::lower_private_word_values(
             &mut module,
@@ -837,11 +863,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 },
             )
         }?;
-        let sequential = super::materialize::plan_regional_sequential_cells(
-            &module,
-            &lowered_sequential,
-            self.request.mapping_context,
-        )?;
         Ok((
             LoweredPrivateRegion {
                 module,
@@ -854,7 +875,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 operators,
                 lowering,
                 state_operations: lowered_sequential,
-                sequential,
             },
             root_pairs,
         ))
@@ -909,7 +929,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             &self.request.mapping_context.combinational_catalog,
         )?;
         let empty_port_bindings = opto_timing::PortBindings::new([]);
-        let mut roots = mapping_roots(
+        let mut roots = combinational_mapping_roots(
             &private.module,
             self.request.timing,
             &empty_port_bindings,
@@ -1234,19 +1254,22 @@ fn append_local_mapping_roots(
     roots: Vec<MappingRoot>,
     root_pairs: &mut Vec<(MappingRoot, word::ValueId)>,
 ) -> Result<(), SynthError> {
-    for mut root in roots {
+    for root in roots {
         let bits = binding
             .lowered_bits(root.value)
             .map_or_else(|| vec![root.value], <[word::ValueId]>::to_vec);
-        let all_outputs_are_substrate = bits
-            .into_iter()
-            .map(|bit| mapping_root_pair_key(module, semantics, bit))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .all(|key| substrate_outputs.contains(&key));
-        root.requires_combinational_cover =
-            semantics.requires_artifact(root.value)? && !all_outputs_are_substrate;
-        root_pairs.push((root, root.value));
+        for bit in bits {
+            let requires_combinational_cover = semantics.requires_artifact(bit)?
+                && !substrate_outputs.contains(&mapping_root_pair_key(module, semantics, bit)?);
+            root_pairs.push((
+                MappingRoot {
+                    value: bit,
+                    requires_combinational_cover,
+                    ..root
+                },
+                bit,
+            ));
+        }
     }
     Ok(())
 }

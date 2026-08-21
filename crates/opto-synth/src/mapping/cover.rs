@@ -13,7 +13,6 @@ mod portable;
 mod response;
 mod search;
 
-use crate::mapping::RegionPlanBinding;
 pub(crate) use portable::{decode as decode_portable_cover, empty_plan_key};
 pub(crate) use response::CoverResponseModels;
 
@@ -51,7 +50,7 @@ impl AnalyzedRegionCover {
         &mut self,
         domain: crate::mapping::CandidateBindingDomain<'_>,
         catalog: &CombinationalCellCatalog,
-    ) -> Result<RegionPlanBinding, crate::SynthError> {
+    ) -> Result<crate::mapping::CandidateBinding, crate::SynthError> {
         let candidate = crate::mapping::build_candidate_binding(
             domain,
             &self.inputs,
@@ -83,7 +82,7 @@ impl AnalyzedRegionCover {
         self.cover.outputs = cover_outputs.into_boxed_slice();
         self.cover.output_costs = output_costs.into_boxed_slice();
         self.cover.isolate_outputs(catalog)?;
-        Ok(candidate.binding)
+        Ok(candidate)
     }
 
     pub(crate) fn compact_plan(

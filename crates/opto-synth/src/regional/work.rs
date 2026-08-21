@@ -344,6 +344,17 @@ impl WorkGraph {
         &self.regions
     }
 
+    pub(crate) fn state_cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.design
+            .0
+            .cells()
+            .filter(|cell| {
+                cell.class == CellClass::StateBoundary
+                    && matches!(cell.kind, LogicalCell::Operation(_))
+            })
+            .map(|cell| cell.id)
+    }
+
     pub(crate) fn region(&self, item: usize) -> Option<crate::RegionRowId> {
         self.item_regions.get(item).copied()
     }

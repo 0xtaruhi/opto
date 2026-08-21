@@ -18,6 +18,103 @@ fn mux_target_cell(area: f64) -> TargetCell {
     )
 }
 
+fn sparse_encoded_fsm() -> WordModule {
+    let mut module = WordModule::new("encoded_fsm");
+    let state_type = WordType::bits(8).unwrap();
+    let [clock, reset, select] = ["clock", "reset", "select"].map(|name| {
+        module
+            .add_port(name, PortDirection::Input, bit(), test_span())
+            .unwrap()
+    });
+    let active = module
+        .add_port("active", PortDirection::Output, bit(), test_span())
+        .unwrap();
+    let state = module.add_wire("state", state_type, test_span()).unwrap();
+    let [clock, reset, select] = [clock, reset, select].map(|port| read_port(&mut module, port));
+    let state_read = module.read_signal(state, test_span()).unwrap();
+    let mut constant = |text: &str| {
+        module
+            .constant(
+                ConstBits::from_bin_str(text).unwrap(),
+                state_type,
+                test_span(),
+            )
+            .unwrap()
+    };
+    let idle = constant("00000000");
+    let first = constant("00010000");
+    let second = constant("00100000");
+    let is_active = module
+        .binary(BinaryOp::Eq, state_read, second, test_span())
+        .unwrap();
+    connect_port(&mut module, active, is_active);
+    let first_or_hold = module.mux(select, first, state_read, test_span()).unwrap();
+    let next = module
+        .mux(select, second, first_or_hold, test_span())
+        .unwrap();
+    let state_value = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: next,
+                clock,
+                edge: Edge::Pos,
+                enable: None,
+                resets: vec![word::Reset {
+                    kind: word::ResetKind::Sync,
+                    value: reset,
+                    active_high: true,
+                    reset_value: idle,
+                }],
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(LValue::signal(state), state_value, test_span())
+        .unwrap();
+    module
+}
+
+#[test]
+fn synthesize_publishes_encoded_fsm_state_through_its_proved_relation() {
+    let mut module = sparse_encoded_fsm();
+    let cells = vec![
+        simple_dff_target_cell(),
+        mux_target_cell(1.0),
+        target_cell(
+            "AND2",
+            1.0,
+            &[
+                ("A", TargetPinDirection::Input, None),
+                ("B", TargetPinDirection::Input, None),
+                ("Z", TargetPinDirection::Output, Some("A*B")),
+            ],
+        ),
+        target_cell(
+            "INV",
+            1.0,
+            &[
+                ("A", TargetPinDirection::Input, None),
+                ("Z", TargetPinDirection::Output, Some("!A")),
+            ],
+        ),
+    ];
+
+    let synthesized = synthesize_test_module(
+        &mut module,
+        SynthesisOptions {
+            target_cells: cells.into(),
+        },
+    )
+    .unwrap();
+    let text = synthesized.mapped_verilog();
+
+    assert_eq!(text.matches("DFD1 ").count(), 1, "{text}");
+    assert!(!text.contains(".Q(\\state["), "{text}");
+    assert!(text.contains("active"), "{text}");
+}
+
 #[test]
 fn regional_target_mapping_is_deterministic_across_worker_counts() {
     fn synthesize_with_threads(max_threads: usize) -> String {

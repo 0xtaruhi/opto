@@ -32,17 +32,16 @@ type BoundaryValueObservation = ([u8; 32], Box<[word::ValueId]>);
 pub(crate) struct RegionalMappingRequest<'a> {
     pub(crate) module: &'a word::WordModule,
     pub(crate) provenance: &'a mut ProvenanceBuilder,
-    pub(crate) regions: &'a crate::SynthesisRegionGraph,
+    pub(crate) work: &'a crate::regional::WorkGraph,
     pub(crate) region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
     pub(crate) contracts: &'a crate::regional::RegionContractSet,
     pub(crate) regional_plans: &'a [RegionalPlanRow],
-    pub(crate) sequential_operations: &'a [materialize::SequentialRegionBinding],
     pub(crate) config: MappingConfig<'a>,
 }
 
 /// Read-only context shared by every regional mapping epoch.
 struct RegionalMapper<'a> {
-    regions: &'a crate::SynthesisRegionGraph,
+    work: &'a crate::regional::WorkGraph,
     response_models: cover::CoverResponseModels<'a>,
     config: MappingConfig<'a>,
     runtime: &'a ExecutionContext,
@@ -58,7 +57,6 @@ struct RegionalMappingState<'a> {
     module: &'a word::WordModule,
     provenance: &'a mut ProvenanceBuilder,
     region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
-    sequential_operations: &'a [materialize::SequentialRegionBinding],
     contracts: crate::regional::RegionContractSet,
     rows: Vec<RegionalPlanRow>,
     plan_journal:
@@ -145,13 +143,13 @@ pub(crate) fn map_mapping_library_cells(
     let RegionalMappingRequest {
         module,
         provenance,
-        regions,
+        work,
         region_binding,
         contracts,
         regional_plans,
-        sequential_operations,
         config,
     } = request;
+    let regions = work.regions();
     if regional_plans.len() != regions.regions().len()
         || regional_plans
             .iter()
@@ -166,7 +164,6 @@ pub(crate) fn map_mapping_library_cells(
         module,
         provenance,
         region_binding,
-        sequential_operations,
         contracts: contracts.clone(),
         rows: regional_plans.to_vec(),
         plan_journal: std::collections::BTreeMap::new(),
@@ -174,7 +171,7 @@ pub(crate) fn map_mapping_library_cells(
     let trace =
         crate::api::diagnostics::SynthTrace::timing(config.mapping_context.config.diagnostics);
     let mapper = RegionalMapper {
-        regions,
+        work,
         response_models: cover::CoverResponseModels::new(config.scenarios),
         config,
         runtime,

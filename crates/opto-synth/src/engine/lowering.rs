@@ -149,11 +149,6 @@ pub(super) fn lower_logic(
         )?;
         Ok::<_, crate::SynthError>((provenance, binding, regional_plans))
     }?;
-    let sequential_operations = crate::mapping::materialize::lowered_sequential_operations(
-        &source,
-        &region_binding,
-        &source_sequential_operations,
-    )?;
     {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.binding_materialization".to_string()
@@ -174,7 +169,6 @@ pub(super) fn lower_logic(
         region_binding,
         contracts,
         regional_plans: regional_plans.into_boxed_slice(),
-        sequential_operations,
         synthesized: source,
         provenance,
         operator_manifest,
