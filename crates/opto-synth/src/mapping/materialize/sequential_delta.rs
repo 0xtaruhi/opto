@@ -6,7 +6,9 @@
 //! Sequential cells are immutable state-region substrate objects: regional
 //! epochs replace only combinational covers. This module therefore prepares one
 //! deterministic delta from the lowered Word model without first emitting
-//! target instances back into that model.
+//! target instances back into that model. Enable polarity is normalized in
+//! the private Word model, so any inverter is covered by the ordinary Boolean
+//! mapper rather than introduced by this publication layer.
 
 use super::region_delta::{MappedValueSignal, WordMappedSignals};
 use super::{
@@ -22,9 +24,7 @@ use std::collections::BTreeSet;
 
 /// Immutable topology for every live register and latch in one lowered design.
 ///
-/// Existing nets are explicit and sorted.  Nets introduced solely to adapt a
-/// library cell's enable polarity stay artifact-local until a caller appends
-/// the artifact to its transaction.
+/// Existing nets are explicit and sorted.
 #[derive(Debug, Clone)]
 pub(crate) struct MappedSequentialArtifact {
     nets: ArtifactNetTable,
@@ -308,7 +308,6 @@ impl<'a> ArtifactBuilder<'a> {
             region,
         };
         if let Some(enable) = register.enable {
-            let enable_signal = context.mapped_values.require(enable.value)?;
             let SelectedRegisterCell::Enabled(cell) = context.sequential_catalog.select_register(
                 context.module,
                 register,
@@ -319,14 +318,11 @@ impl<'a> ArtifactBuilder<'a> {
                     "enabled register selected a simple DFF",
                 ));
             };
-            let enable_signal = self.adapt_enable(
-                operation_id,
-                enable.value,
-                region,
-                enable_signal,
-                enable.active_high != cell.enable_active_high(),
-                context,
-            )?;
+            if enable.active_high != cell.enable_active_high() {
+                return Err(crate::SynthError::invariant(
+                    "enabled register reached publication with unnormalized polarity",
+                ));
+            }
             let mapped = cell.mapped_cell(
                 register.d,
                 enable.value,
@@ -340,14 +336,7 @@ impl<'a> ArtifactBuilder<'a> {
                 None,
             );
             let name = self.name(operation_id, "");
-            return self.push_library_cell(
-                context,
-                name,
-                mapped,
-                &[(1, enable_signal)],
-                &[(0, output)],
-                source,
-            );
+            return self.push_library_cell(context, name, mapped, &[], &[(0, output)], source);
         }
         let SelectedRegisterCell::Simple(cell) = context.sequential_catalog.select_register(
             context.module,
@@ -384,7 +373,6 @@ impl<'a> ArtifactBuilder<'a> {
     ) -> Result<(), crate::SynthError> {
         let reset_requests =
             crate::mapping::sequential::async_reset_requests(context.module, &latch.resets)?;
-        let enable_signal = context.mapped_values.require(latch.enable.value)?;
         let cell = context
             .sequential_catalog
             .best_latch(
@@ -398,14 +386,11 @@ impl<'a> ArtifactBuilder<'a> {
                 ),
             )
             .ok_or_else(|| crate::SynthError::mapping("target library has no compatible latch"))?;
-        let enable_signal = self.adapt_enable(
-            operation_id,
-            latch.enable.value,
-            region,
-            enable_signal,
-            latch.enable.active_high != cell.enable_active_high(),
-            context,
-        )?;
+        if latch.enable.active_high != cell.enable_active_high() {
+            return Err(crate::SynthError::invariant(
+                "latch reached publication with unnormalized enable polarity",
+            ));
+        }
         let mapped = cell.mapped_cell(
             latch.d,
             latch.enable.value,
@@ -423,53 +408,13 @@ impl<'a> ArtifactBuilder<'a> {
             context,
             name,
             mapped,
-            &[(1, enable_signal)],
+            &[],
             &[(0, output)],
             MappedCellSource::Value {
                 value: result,
                 region,
             },
         )
-    }
-
-    fn adapt_enable(
-        &mut self,
-        operation_id: word::OpId,
-        value: word::ValueId,
-        region: crate::RegionAnchorId,
-        signal: MappedValueSignal,
-        invert: bool,
-        context: &LibraryContext<'_>,
-    ) -> Result<ArtifactSignal, crate::SynthError> {
-        if !invert {
-            return Ok(self.nets.signal(signal));
-        }
-        if let MappedValueSignal::Constant(value) = signal {
-            return Ok(ArtifactSignal::Constant(!value));
-        }
-        let binding = context
-            .combinational_catalog
-            .best_binding_for_truth(crate::boolean::logic::inverter_truth())
-            .ok_or_else(|| crate::SynthError::mapping("target library has no inverter"))?;
-        let signature = crate::boolean::logic::LogicSignature {
-            inputs: crate::boolean::logic::LogicInputs::from_slice(&[value])
-                .expect("one inverter input fits a logic signature"),
-            truth: crate::boolean::logic::inverter_truth(),
-        };
-        let mapped = context
-            .combinational_catalog
-            .cell_for_binding(binding, &signature, value);
-        let internal = self.allocate_internal_net()?;
-        let name = self.name(operation_id, "_enable_inv");
-        self.push_library_cell(
-            context,
-            name,
-            mapped,
-            &[],
-            &[(0, internal)],
-            MappedCellSource::Value { value, region },
-        )?;
-        Ok(internal)
     }
 
     fn push_library_cell(
@@ -531,10 +476,6 @@ impl<'a> ArtifactBuilder<'a> {
             metadata: source,
         });
         Ok(())
-    }
-
-    fn allocate_internal_net(&mut self) -> Result<ArtifactSignal, crate::SynthError> {
-        self.nets.allocate_local()
     }
 
     /// Names one sequential cell.

@@ -106,6 +106,12 @@ impl TargetMappingContext {
             // an enabled cell becomes a next-state mux here.
             sequential::expand_unsupported_enables(module, &self.sequential_catalog)?;
             finish_stage("expand enables");
+            sequential::normalize_enable_polarities(
+                module,
+                &self.sequential_catalog,
+                &self.combinational_catalog,
+            )?;
+            finish_stage("normalize enable polarities");
         }
         Ok(())
     }

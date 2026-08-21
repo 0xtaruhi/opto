@@ -62,6 +62,80 @@ pub(crate) fn expand_unsupported_enables(
     Ok(())
 }
 
+/// Rewrites retained enable controls to the polarity of the selected target
+/// state cell so the ordinary Boolean mapper owns every required inverter.
+pub(crate) fn normalize_enable_polarities(
+    module: &mut word::WordModule,
+    sequential_catalog: &super::SequentialCellCatalog,
+    combinational_catalog: &crate::mapping::library::CombinationalCellCatalog,
+) -> Result<(), crate::SynthError> {
+    let mut rewrites = Vec::new();
+    for (index, operation) in module.operations().iter().enumerate() {
+        let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+        let (enable, selected_active_high) = match &operation.kind {
+            word::OpKind::Register(register) => {
+                let Some(enable) = register.enable else {
+                    continue;
+                };
+                let super::SelectedRegisterCell::Enabled(cell) =
+                    sequential_catalog.select_register(module, register, combinational_catalog)?
+                else {
+                    return Err(crate::SynthError::invariant(
+                        "retained register enable selected a simple DFF",
+                    ));
+                };
+                (enable, cell.enable_active_high())
+            }
+            word::OpKind::Latch(latch) => {
+                let requests = super::async_reset_requests(module, &latch.resets)?;
+                let cell = sequential_catalog
+                    .best_latch(
+                        &requests,
+                        latch.enable.active_high,
+                        false,
+                        super::enable_inverter_cost(
+                            module,
+                            latch.enable.value,
+                            combinational_catalog,
+                        ),
+                    )
+                    .ok_or_else(|| {
+                        crate::SynthError::mapping("target library has no compatible latch")
+                    })?;
+                (latch.enable, cell.enable_active_high())
+            }
+            _ => continue,
+        };
+        if enable.active_high != selected_active_high {
+            rewrites.push((
+                operation_id,
+                enable,
+                selected_active_high,
+                operation.source.clone(),
+            ));
+        }
+    }
+    for (operation, enable, active_high, source) in rewrites {
+        let value = module
+            .unary(word::UnaryOp::BitNot, enable.value, source)
+            .map_err(crate::SynthError::from)?;
+        let stored = module.operation_mut(operation).ok_or_else(|| {
+            crate::SynthError::invariant("sequential enable-polarity target disappeared")
+        })?;
+        let normalized = word::Enable { value, active_high };
+        match &mut stored.kind {
+            word::OpKind::Register(register) => register.enable = Some(normalized),
+            word::OpKind::Latch(latch) => latch.enable = normalized,
+            _ => {
+                return Err(crate::SynthError::invariant(
+                    "sequential enable-polarity target changed operation kind",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Normalizes resets while retaining enables for their owning passes.
 pub(crate) fn lower_controls(module: &mut word::WordModule) -> Result<(), crate::SynthError> {
     let mut controlled = Vec::new();

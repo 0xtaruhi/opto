@@ -236,6 +236,37 @@ fn synthesize_maps_semantic_clock_enable_to_an_enable_dff_pin() {
 }
 
 #[test]
+fn synthesize_covers_enable_polarity_in_the_boolean_network() {
+    let mut module = module_with_enable_flop_process();
+    let mut enabled = enable_dff_target_cell();
+    enabled.name = "EDFND1".to_string();
+    enabled.sequential[0].next_state = Some(BooleanFunction::parse("(D*!DE)+(IQ*DE)").unwrap());
+    let options = SynthesisOptions {
+        target_cells: vec![
+            simple_dff_target_cell(),
+            enabled,
+            target_cell(
+                "INV",
+                0.1,
+                &[
+                    ("A", TargetPinDirection::Input, None),
+                    ("Z", TargetPinDirection::Output, Some("!A")),
+                ],
+            ),
+        ]
+        .into(),
+    };
+
+    let report = synthesize_test_module(&mut module, options).unwrap();
+    let text = report.mapped_verilog();
+
+    assert_eq!(report.report.cells, 2, "{text}");
+    assert!(text.contains("INV"), "{text}");
+    assert!(text.contains("EDFND1"), "{text}");
+    assert!(text.contains(".DE(n1)"), "{text}");
+}
+
+#[test]
 fn synthesize_keeps_a_lowered_feedback_mux_as_ordinary_logic() {
     let mut module = module_with_lowered_feedback_mux_flop();
     let options = SynthesisOptions {

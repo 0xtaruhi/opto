@@ -11,7 +11,8 @@ use opto_ir::word;
 pub(crate) use catalog::cells::{AsyncResetRequest, AsyncResetRequests};
 pub(crate) use catalog::*;
 pub(crate) use planning::{
-    expand_unsupported_enables, lower_controls, normalize_sequential_controls,
+    expand_unsupported_enables, lower_controls, normalize_enable_polarities,
+    normalize_sequential_controls,
 };
 
 pub(crate) fn async_reset_requests(
