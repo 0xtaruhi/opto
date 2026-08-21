@@ -42,13 +42,14 @@ pub(crate) struct PendingMappedSequential {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SourceSequentialBinding {
     operation: word::OpId,
+    cell: opto_ir::design::CellId,
     region: crate::RegionAnchorId,
 }
 
 /// One source-visible state bit implemented by a lowered state operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SequentialSourceBit {
-    pub(crate) operation: word::OpId,
+    pub(crate) cell: opto_ir::design::CellId,
     pub(crate) bit: u32,
 }
 
@@ -101,6 +102,7 @@ pub(crate) fn sequential_region_bindings(
             ) {
                 operations.push(SourceSequentialBinding {
                     operation,
+                    cell: crate::regional::logical_operation_cell_id(regions, operation)?,
                     region: region.id(),
                 });
             }
@@ -164,7 +166,7 @@ pub(crate) fn lowered_sequential_operations(
                 ));
             }
             row.1.push(SequentialSourceBit {
-                operation: source_binding.operation,
+                cell: source_binding.cell,
                 bit,
             });
         }
@@ -234,6 +236,11 @@ impl MappedSequentialArtifact {
             target_cells: &config.options.target_cells,
         };
         for binding in operations {
+            if binding.sources.is_empty() {
+                return Err(crate::SynthError::invariant(
+                    "lowered sequential operation has no stable source-state relation",
+                ));
+            }
             let operation_id = binding.operation;
             let operation = module.operation(operation_id).ok_or_else(|| {
                 crate::SynthError::invariant("live sequential operation disappeared")
@@ -730,7 +737,7 @@ mod tests {
         assert_eq!(
             lowered[0].sources.as_ref(),
             &[SequentialSourceBit {
-                operation: source_operations[0].operation,
+                cell: source_operations[0].cell,
                 bit: 0,
             }]
         );

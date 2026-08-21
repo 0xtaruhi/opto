@@ -697,6 +697,7 @@ fn signal_nets(
         .collect()
 }
 
+#[cfg(test)]
 fn same_design(left: &DesignRevision<LogicalCell>, right: &DesignRevision<LogicalCell>) -> bool {
     left.cell_count() == right.cell_count()
         && left.net_count() == right.net_count()
@@ -1078,6 +1079,13 @@ fn operation_cell_id(
         b"opto/logical-operation-cell/v1\0",
         [anchor.bytes()],
     )))
+}
+
+pub(crate) fn logical_operation_cell_id(
+    regions: &crate::SynthesisRegionGraph,
+    operation: word::OpId,
+) -> Result<CellId, crate::SynthError> {
+    operation_cell_id(regions, operation)
 }
 
 fn memory_cell_id(
