@@ -159,12 +159,6 @@ impl WorkGraph {
                 "work contexts do not cover the sealed region graph",
             ));
         }
-        let expected = seal_logical_design(module, regions)?;
-        if !same_design(&design.0, &expected) {
-            return Err(crate::SynthError::invariant(
-                "work graph and immutable design revision disagree",
-            ));
-        }
         let design = &design.0;
         let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
         let mut rows = Vec::new();
