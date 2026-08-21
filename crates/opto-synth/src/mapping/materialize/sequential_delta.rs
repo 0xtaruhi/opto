@@ -229,7 +229,7 @@ pub(crate) fn plan_regional_sequential_cells(
             })?;
             let (mapped, roles) = match &operation.kind {
                 word::OpKind::Register(register) => {
-                    let selected = mapping.sequential_catalog.select_register(
+                    let selected = mapping.sequential_catalog.select_scalar_register(
                         module,
                         register,
                         &mapping.combinational_catalog,

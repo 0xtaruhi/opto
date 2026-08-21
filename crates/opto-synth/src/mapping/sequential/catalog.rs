@@ -40,10 +40,16 @@ impl SequentialTimingProjection {
             let word::OpKind::Register(register) = &operation.kind else {
                 continue;
             };
+            if module
+                .value(operation.result)
+                .is_some_and(|value| value.ty.width() != 1)
+            {
+                continue;
+            }
             if !observability.observes_value(operation.result)? {
                 continue;
             }
-            let selected = sequential.select_register(module, register, combinational)?;
+            let selected = sequential.select_scalar_register(module, register, combinational)?;
             rows.push((operation.result, selected.timing()));
         }
         rows.sort_unstable_by_key(|&(value, _)| value);
@@ -246,7 +252,7 @@ impl SequentialCellCatalog {
         })
     }
 
-    pub(crate) fn select_register<'a>(
+    pub(crate) fn select_scalar_register<'a>(
         &'a self,
         module: &word::WordModule,
         register: &word::RegisterOp,

@@ -149,6 +149,72 @@ fn recognizes_enable_flip_flops_in_either_polarity() {
 }
 
 #[test]
+fn timing_projection_ignores_word_state_before_bit_lowering() {
+    let mut dff = flip_flop("DFFR", 1.0, "CP");
+    dff.pins.push(pin("R", TargetPinDirection::Input, None));
+    dff.sequential[0].clear = Some(crate::BooleanFunction::parse("R").unwrap());
+    let options = SynthesisOptions {
+        target_cells: vec![dff].into(),
+    };
+    let catalog = SequentialCellCatalog::new(&options);
+    let mut module = word::WordModule::new("top");
+    let vector = word::WordType::bits(4).unwrap();
+    let source = word::SourceSpan::default();
+    let clock = module
+        .add_wire("clk", word::WordType::bits(1).unwrap(), source.clone())
+        .unwrap();
+    let reset = module
+        .add_wire("reset", word::WordType::bits(1).unwrap(), source.clone())
+        .unwrap();
+    let data = module.add_wire("d", vector, source.clone()).unwrap();
+    let output = module
+        .add_port("q", word::PortDirection::Output, vector, source.clone())
+        .unwrap();
+    let [clock, reset, data] =
+        [clock, reset, data].map(|signal| module.read_signal(signal, source.clone()).unwrap());
+    let zero = module
+        .constant(
+            opto_ir::ConstBits::from_bits(vec![opto_ir::BitVal::Zero; 4]).unwrap(),
+            vector,
+            source.clone(),
+        )
+        .unwrap();
+    let result = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: data,
+                clock,
+                edge: word::Edge::Pos,
+                enable: None,
+                resets: vec![word::Reset {
+                    kind: word::ResetKind::Async,
+                    value: reset,
+                    active_high: true,
+                    reset_value: zero,
+                }],
+            },
+            source,
+        )
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(module.port(output).unwrap().signal),
+            result,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+
+    let projection = SequentialTimingProjection::build(
+        &module,
+        &catalog,
+        &crate::mapping::library::CombinationalCellCatalog::default(),
+    )
+    .unwrap();
+    assert_eq!(projection.clock_to_q(result), None);
+}
+
+#[test]
 fn indexes_smallest_simple_flip_flop_by_edge() {
     let options = SynthesisOptions {
         target_cells: vec![
