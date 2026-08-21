@@ -236,8 +236,7 @@ pub(crate) fn prepare_regional_architectures(
             SynthError::invariant("regional task references an unknown compilation shard")
         })?;
         items
-            .into_iter()
-            .map(|(item, _)| {
+            .map(|(item, work_item)| {
                 let region_row = binding.region(item).ok_or_else(|| {
                     SynthError::invariant("regional work item has no local import binding")
                 })?;
@@ -247,6 +246,11 @@ pub(crate) fn prepare_regional_architectures(
                 });
                 let region = request.regions.regions()[region_index];
                 let decision = &request.decisions[region_index];
+                if work_item.context() != decision.context().into() {
+                    return Err(SynthError::invariant(
+                        "regional worker received a mismatched analysis context",
+                    ));
+                }
                 let memory_implementations =
                     crate::planning::regional::decode_memory_implementations(
                         decision.memory_implementations(),

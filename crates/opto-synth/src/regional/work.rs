@@ -120,6 +120,12 @@ pub(crate) struct WorkItem {
     estimated_memory: u64,
 }
 
+impl WorkItem {
+    pub(crate) const fn context(&self) -> WorkContextKey {
+        self.context
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct CompilationShard {
     id: CompilationShardId,
@@ -302,14 +308,13 @@ impl WorkGraph {
             .collect()
     }
 
-    pub(crate) fn shard_items(&self, shard: usize) -> Option<Vec<(usize, &WorkItem)>> {
-        self.shards.get(shard).map(|shard| {
-            shard
-                .items
-                .iter()
-                .map(|&item| (item, &self.items[item]))
-                .collect()
-        })
+    pub(crate) fn shard_items(
+        &self,
+        shard: usize,
+    ) -> Option<impl Iterator<Item = (usize, &WorkItem)>> {
+        self.shards
+            .get(shard)
+            .map(|shard| shard.items.iter().map(|&item| (item, &self.items[item])))
     }
 
     fn validate(&self) -> Result<(), crate::SynthError> {
