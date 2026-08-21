@@ -383,6 +383,9 @@ fn publication_endpoint(
     value: word::ValueId,
 ) -> Option<RegionalEndpoint> {
     bindings.iter().find_map(|binding| match *binding {
+        RegionPlanValueBinding::SourceBit { value, bit } => {
+            Some(RegionalEndpoint::SourceBit { value, bit })
+        }
         RegionPlanValueBinding::ArtifactPinBit { pin, value: output } if output == value => {
             Some(RegionalEndpoint::Pin(pin))
         }
@@ -531,22 +534,18 @@ fn bind_artifact_output(
     outputs.entry(lowered).or_default().push(binding);
 }
 
-fn compact_publication_bindings(
+fn canonical_publication_bindings(
     mut bindings: Vec<RegionPlanValueBinding>,
 ) -> Vec<RegionPlanValueBinding> {
     let has_source = bindings
         .iter()
         .any(|binding| matches!(binding, RegionPlanValueBinding::SourceBit { .. }));
-    let mut kept_artifact = false;
+    let mut artifact = false;
     bindings.retain(|binding| match binding {
-        RegionPlanValueBinding::ArtifactPinBit { .. } if has_source => false,
         RegionPlanValueBinding::ArtifactPinBit { .. } => {
-            !std::mem::replace(&mut kept_artifact, true)
+            !has_source && !std::mem::replace(&mut artifact, true)
         }
-        RegionPlanValueBinding::SourceBit { .. }
-        | RegionPlanValueBinding::MemoryLogicBit { .. }
-        | RegionPlanValueBinding::MemoryStateBit { .. }
-        | RegionPlanValueBinding::Lowered(_) => true,
+        _ => true,
     });
     bindings
 }
@@ -595,9 +594,16 @@ fn bind_root_outputs(
             let bindings = local_to_sources
                 .entry(semantics.canonical_root(target)?)
                 .or_default();
-            // A frozen root endpoint supersedes private-shell producer handles;
-            // publishing both would drive the producer back into itself.
-            bindings.retain(|binding| matches!(binding, RegionPlanValueBinding::SourceBit { .. }));
+            // Root publication replaces private logical handles. Artifact
+            // pins remain until endpoint resolution can bind every sink to
+            // this stable source net.
+            bindings.retain(|binding| {
+                matches!(
+                    binding,
+                    RegionPlanValueBinding::SourceBit { .. }
+                        | RegionPlanValueBinding::ArtifactPinBit { .. }
+                )
+            });
             bindings.push(RegionPlanValueBinding::SourceBit { value: source, bit });
         }
     }
@@ -753,7 +759,7 @@ pub(crate) fn build_candidate_binding<'a>(
         local_to_outputs
             .get(&value)
             .cloned()
-            .map(compact_publication_bindings)
+            .map(canonical_publication_bindings)
             .map(Vec::into_boxed_slice)
             .ok_or_else(|| {
                 let operation = local_module.value(value).and_then(|stored| match stored.kind {

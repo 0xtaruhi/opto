@@ -12,6 +12,7 @@ use opto_ir::mapped::{
 };
 use opto_ir::word;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 pub(crate) mod region_delta;
 mod sequential_delta;
@@ -19,11 +20,13 @@ mod sequential_delta;
 /// The prefix every synthetic internal net name carries.
 pub(crate) const MAPPED_NET_PREFIX: &str = "_mapped_net_";
 
+/// The prefix every region-scoped synthetic cell name carries.
+pub(crate) const REGION_CELL_PREFIX: &str = "__opto_region_";
+
 /// Prefix for physical tri-state drivers introduced at the global boundary.
 const TRI_STATE_CELL_PREFIX: &str = "_tri_state_";
 
 use crate::artifact::MappedCellSource;
-pub(crate) use region_delta::REGION_CELL_PREFIX;
 pub(crate) use sequential_delta::{
     MappedFixedSubstrateArtifact, RegionalSequentialCellPlan, RegionalSubstrateCellPlan,
     RegionalSubstrateConnection, SequentialRegionBinding, local_sequential_bindings,
@@ -31,6 +34,23 @@ pub(crate) use sequential_delta::{
     reconcile_sequential_publication, sequential_binding_values, sequential_plan_values,
     sequential_region_bindings,
 };
+
+fn region_instance_prefix(region: crate::RegionAnchorId) -> String {
+    let mut prefix = String::with_capacity(79);
+    prefix.push_str(REGION_CELL_PREFIX);
+    for byte in region.bytes() {
+        write!(&mut prefix, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    prefix.push_str("_cell_");
+    prefix
+}
+
+fn regional_substrate_instance_name(region: crate::RegionAnchorId, local: &str) -> String {
+    let mut name = region_instance_prefix(region);
+    name.push_str("substrate_");
+    name.push_str(local);
+    name
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ArtifactNetId(usize);

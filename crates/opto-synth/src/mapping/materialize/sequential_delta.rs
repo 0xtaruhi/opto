@@ -831,8 +831,10 @@ impl ArtifactBuilder {
                 ))
             })
             .collect::<Result<Box<[_]>, crate::SynthError>>()?;
+        let instance_name =
+            super::regional_substrate_instance_name(plan.region, &plan.instance_name);
         self.push_cell(
-            &plan.instance_name,
+            &instance_name,
             &plan.cell_name,
             library_cell,
             connections,

@@ -93,34 +93,7 @@ fn memory_logic_ownership_is_always_a_cover_output() {
 }
 
 #[test]
-fn one_logic_value_keeps_every_artifact_sink() {
-    let value = word::ValueId::from_index(0).unwrap();
-    let mut outputs = BindingMap::new();
-    for (bit, byte) in [(3, 3), (17, 17)] {
-        bind_artifact_output(
-            &mut outputs,
-            value,
-            RegionPlanValueBinding::ArtifactPinBit {
-                pin: SequentialPinKey {
-                    state: opto_ir::design::CellId::from_bytes([byte; 32]),
-                    role: SequentialPinRole::Data,
-                    bit,
-                }
-                .into(),
-                value,
-            },
-        );
-    }
-
-    assert_eq!(outputs[&value].len(), 2);
-    assert_eq!(
-        compact_publication_bindings(outputs.remove(&value).unwrap()).len(),
-        1
-    );
-}
-
-#[test]
-fn generated_target_output_is_one_frozen_artifact_endpoint() {
+fn source_publication_drives_a_generated_target_sink() {
     let ty = word::WordType::bits(1).unwrap();
     let span = word::SourceSpan::default();
     let mut source = word::WordModule::new("source");
@@ -176,10 +149,18 @@ fn generated_target_output_is_one_frozen_artifact_endpoint() {
             substrate_instances: &["gate".into()],
         },
         &[gated_clock],
-        std::iter::empty(),
+        [std::slice::from_ref(&local_clock)],
     )
     .unwrap();
 
+    assert_eq!(candidate.output_widths.as_ref(), &[1]);
+    assert!(matches!(
+        candidate.binding.outputs[0],
+        RegionPlanValueBinding::SourceBit {
+            value,
+            bit: 0
+        } if value == source_clock
+    ));
     assert!(matches!(
         candidate.binding.inputs[0],
         RegionPlanValueBinding::ArtifactPinBit { .. }

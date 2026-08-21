@@ -20,7 +20,6 @@ use opto_ir::mapped::{
     AppliedRegionDelta, CellId, NetId, RegionDelta, RegionSnapshot, TempCellId, TempNetId,
 };
 use opto_ir::word;
-use std::fmt::Write as _;
 
 mod aliases;
 
@@ -214,7 +213,7 @@ impl MappedRegionArtifact {
                 Ok([Some(primary), secondary])
             })
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
-        let prefix = region_instance_prefix(plan.region());
+        let prefix = super::region_instance_prefix(plan.region());
         let mut cells = Vec::with_capacity(cover.cells().len());
         let mut pin_count = 0usize;
         for (index, cell) in cover.cells().iter().enumerate() {
@@ -694,19 +693,6 @@ fn finish_artifact(
         roots: roots.into_boxed_slice(),
         leaves: leaves.into_boxed_slice(),
     })
-}
-
-/// The prefix every region-scoped synthetic cell name carries.
-pub(crate) const REGION_CELL_PREFIX: &str = "__opto_region_";
-
-fn region_instance_prefix(region: crate::RegionAnchorId) -> String {
-    let mut prefix = String::with_capacity(79);
-    prefix.push_str(REGION_CELL_PREFIX);
-    for byte in region.bytes() {
-        write!(&mut prefix, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    prefix.push_str("_cell_");
-    prefix
 }
 
 #[cfg(test)]
