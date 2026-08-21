@@ -557,7 +557,7 @@ struct LoweredState {
     region_binding: crate::boolean::bitblast::LoweredRegionBinding,
     contracts: crate::regional::RegionContractSet,
     regional_plans: Box<[regional_mapping::RegionalPlanRow]>,
-    sequential_operations: Box<[crate::mapping::materialize::FrozenSequentialOperation]>,
+    sequential_operations: Box<[crate::mapping::materialize::SequentialRegionBinding]>,
     synthesized: word::WordModule,
     provenance: ProvenanceBuilder,
     operator_manifest: crate::OperatorManifest,

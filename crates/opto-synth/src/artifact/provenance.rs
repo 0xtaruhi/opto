@@ -83,7 +83,6 @@ pub(crate) struct ProvenanceBuilder {
 struct PublishedOperator {
     id: OperatorId,
     candidate: crate::ImplementationCandidateId,
-    owner: Option<crate::RegionAnchorId>,
     source_operations: Box<[word::OpId]>,
     width: u32,
     lines: Box<[Option<u32>]>,
@@ -103,17 +102,17 @@ pub(crate) fn resolve_private_operator_sources(
     source: &word::WordModule,
     local: &word::WordModule,
     decisions: &ArchitectureDecisions,
-    owned_operations: &[word::OpId],
+    region_operations: &[word::OpId],
     operation_sources: &crate::planning::regional::LocalOperationProvenance,
 ) -> Result<Box<[Box<[word::OpId]>]>, crate::SynthError> {
-    let owned_operations = owned_operations
+    let region_operations = region_operations
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
-    for &operation_id in &owned_operations {
+    for &operation_id in &region_operations {
         source.operation(operation_id).ok_or_else(|| {
             crate::SynthError::invariant(
-                "private architecture owner references an unknown source operation",
+                "private architecture scope references an unknown source operation",
             )
         })?;
     }
@@ -156,9 +155,9 @@ pub(crate) fn resolve_private_operator_sources(
                     "private semantic operator has no source-operation provenance",
                 ));
             }
-            if !sources.is_subset(&owned_operations) {
+            if !sources.is_subset(&region_operations) {
                 return Err(crate::SynthError::invariant(
-                    "private semantic operator provenance crosses its frozen owner",
+                    "private semantic operator provenance crosses its sealed scope",
                 ));
             }
             Ok(sources.into_iter().collect())
@@ -170,7 +169,6 @@ impl PrivateArchitecturePublication {
     pub(crate) fn capture_resolved(
         source: &word::WordModule,
         decisions: &ArchitectureDecisions,
-        owner: crate::RegionAnchorId,
         resolved_sources: &[Box<[word::OpId]>],
     ) -> Result<Self, crate::SynthError> {
         if resolved_sources.len() != decisions.operators().len() {
@@ -192,7 +190,6 @@ impl PrivateArchitecturePublication {
             published.push(PublishedOperator {
                 id: semantic.id(),
                 candidate: candidate.id(),
-                owner: Some(owner),
                 source_operations: source_operations.clone(),
                 width: semantic.width(),
                 lines: spans.iter().map(|span| span.line()).collect(),
@@ -274,7 +271,6 @@ impl ProvenanceBuilder {
             operators.push(PublishedOperator {
                 id: operator.id(),
                 candidate: candidate.id(),
-                owner: None,
                 source_operations: source_operations.into(),
                 width: operator.width(),
                 lines: spans
@@ -528,10 +524,8 @@ impl ProvenanceBuilder {
             let raw_id = regions.len().try_into().map_err(|_| {
                 crate::SynthError::capacity("implementation region ID exceeds 32-bit capacity")
             })?;
-            let synthesis_region = match operator.owner {
-                Some(owner) => owner,
-                None => operator_region_id(&operator.source_operations, synthesis_regions)?,
-            };
+            let synthesis_region =
+                operator_region_id(&operator.source_operations, synthesis_regions)?;
             let source_operations = operator
                 .source_operations
                 .iter()
@@ -661,7 +655,7 @@ fn operator_region_id(
     let (&first, rest) = sources
         .split_first()
         .ok_or_else(|| crate::SynthError::invariant("semantic operator has no source operation"))?;
-    let owner = graph
+    let region = graph
         .operation_region(first)
         .map(|region| region.id())
         .ok_or_else(|| {
@@ -669,13 +663,13 @@ fn operator_region_id(
         })?;
     if rest
         .iter()
-        .any(|&source| graph.operation_region(source).map(|region| region.id()) != Some(owner))
+        .any(|&source| graph.operation_region(source).map(|region| region.id()) != Some(region))
     {
         return Err(crate::SynthError::invariant(
             "resource-affinity operator crosses synthesis regions",
         ));
     }
-    Ok(owner)
+    Ok(region)
 }
 
 #[cfg(test)]

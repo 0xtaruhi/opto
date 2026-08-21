@@ -36,7 +36,7 @@ pub(crate) struct RegionalMappingRequest<'a> {
     pub(crate) region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
     pub(crate) contracts: &'a crate::regional::RegionContractSet,
     pub(crate) regional_plans: &'a [RegionalPlanRow],
-    pub(crate) sequential_operations: &'a [materialize::FrozenSequentialOperation],
+    pub(crate) sequential_operations: &'a [materialize::SequentialRegionBinding],
     pub(crate) config: MappingConfig<'a>,
 }
 
@@ -58,7 +58,7 @@ struct RegionalMappingState<'a> {
     module: &'a word::WordModule,
     provenance: &'a mut ProvenanceBuilder,
     region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
-    sequential_operations: &'a [materialize::FrozenSequentialOperation],
+    sequential_operations: &'a [materialize::SequentialRegionBinding],
     contracts: crate::regional::RegionContractSet,
     rows: Vec<RegionalPlanRow>,
     plan_journal:

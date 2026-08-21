@@ -33,7 +33,6 @@ impl ArithmeticKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SourceKey {
-    region: crate::RegionRowId,
     kind: ArithmeticKind,
     width: u32,
     signed: bool,
@@ -52,29 +51,9 @@ pub(in crate::planning::operator::sharing) struct ShareCandidate {
 pub(crate) fn share_muxed_arithmetic(
     module: &mut word::WordModule,
 ) -> Result<Box<[OperationRewrite]>, crate::SynthError> {
-    let region = crate::RegionRowId::from_index(0)?;
-    let owners = vec![Some(region); module.operations().len()];
-    share_muxed_arithmetic_by_region(module, &owners)
-}
-
-#[cfg(test)]
-fn share_muxed_arithmetic_in_regions(
-    module: &mut word::WordModule,
-    operation_regions: &[Option<crate::RegionRowId>],
-) -> Result<Box<[OperationRewrite]>, crate::SynthError> {
-    share_muxed_arithmetic_by_region(module, operation_regions)
-}
-
-fn share_muxed_arithmetic_by_region(
-    module: &mut word::WordModule,
-    operation_regions: &[Option<crate::RegionRowId>],
-) -> Result<Box<[OperationRewrite]>, crate::SynthError> {
     let uses = UseIndex::build(module)?;
     let mut buckets = BTreeMap::<SourceKey, Vec<ShareCandidate>>::new();
-    for (index, &region) in operation_regions.iter().enumerate() {
-        let Some(region) = region else {
-            continue;
-        };
+    for index in 0..module.operations().len() {
         let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
         let operation = module.operation(operation_id).ok_or_else(|| {
             crate::SynthError::invariant(format!("unknown arithmetic operation {operation_id:?}"))
@@ -96,7 +75,6 @@ fn share_muxed_arithmetic_by_region(
             continue;
         };
         let key = SourceKey {
-            region,
             kind,
             width: result.ty.width(),
             signed: result.ty.is_signed(),
@@ -260,25 +238,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut split = module.clone();
-        let mut split_regions =
-            vec![Some(crate::RegionRowId::from_index(0).unwrap()); module.operations().len()];
-        split_regions[1] = Some(crate::RegionRowId::from_index(1).unwrap());
-        assert_eq!(
-            share_muxed_arithmetic_in_regions(&mut split, &split_regions)
-                .unwrap()
-                .len(),
-            0
-        );
-
-        let regions =
-            vec![Some(crate::RegionRowId::from_index(0).unwrap()); module.operations().len()];
-        assert_eq!(
-            share_muxed_arithmetic_in_regions(&mut module, &regions)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(share_muxed_arithmetic(&mut module).unwrap().len(), 1);
         let plan = crate::planning::operator::ArchitectureDecisions::for_private_region(
             &module,
             &[],

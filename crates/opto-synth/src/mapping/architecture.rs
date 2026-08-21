@@ -349,7 +349,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
         let architecture = PrivateArchitecturePublication::capture_resolved(
             self.request.source,
             decisions,
-            region.id(),
             &sources,
         )?;
         let arena = DurableOperatorArena::capture(module, decisions, &sources, |operation| {

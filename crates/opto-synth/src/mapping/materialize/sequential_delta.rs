@@ -38,11 +38,11 @@ pub(crate) struct PendingMappedSequential {
     cells: Box<[(TempCellId, MappedCellSource)]>,
 }
 
-/// One live state operation and its owner frozen before bit lowering.
+/// Stable region binding for one live state operation across bit lowering.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FrozenSequentialOperation {
+pub(crate) struct SequentialRegionBinding {
     operation: word::OpId,
-    owner: crate::RegionRowId,
+    region: crate::RegionAnchorId,
 }
 
 impl PendingMappedSequential {
@@ -68,47 +68,48 @@ impl PendingMappedSequential {
 
 /// Projects the frozen region-graph membership onto sequential operations
 /// before bit lowering changes the representation of state boundaries.
-pub(crate) fn frozen_sequential_operations(
+pub(crate) fn sequential_region_bindings(
     module: &word::WordModule,
-    operation_regions: &[Option<crate::RegionRowId>],
-) -> Result<Box<[FrozenSequentialOperation]>, crate::SynthError> {
-    if operation_regions.len() != module.operations().len() {
-        return Err(crate::SynthError::invariant(
-            "frozen sequential projection does not cover the Word operation arena",
-        ));
-    }
+    regions: &crate::SynthesisRegionGraph,
+) -> Result<Box<[SequentialRegionBinding]>, crate::SynthError> {
     let mut operations = Vec::new();
-    for (index, operation) in module.operations().iter().enumerate() {
-        if matches!(
-            operation.kind,
-            word::OpKind::Register(_) | word::OpKind::Latch(_)
-        ) && let Some(owner) = operation_regions[index]
-        {
-            operations.push(FrozenSequentialOperation {
-                operation: word::OpId::from_index(index).map_err(crate::SynthError::Word)?,
-                owner,
-            });
+    for &region in regions.regions() {
+        for &operation in regions.operations(region) {
+            let stored = module.operation(operation).ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "sequential region binding references an unknown operation",
+                )
+            })?;
+            if matches!(
+                stored.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            ) {
+                operations.push(SequentialRegionBinding {
+                    operation,
+                    region: region.id(),
+                });
+            }
         }
     }
     Ok(operations.into_boxed_slice())
 }
 
-/// Resolves frozen source state operations to the scalar state operations
-/// emitted by global bit lowering while preserving their frozen region owner.
+/// Resolves source state operations to scalar state operations while retaining
+/// the stable region identity established by the sealed work graph.
 pub(crate) fn lowered_sequential_operations(
     module: &word::WordModule,
     binding: &crate::boolean::bitblast::LoweredRegionBinding,
-    source_operations: &[FrozenSequentialOperation],
-) -> Result<Box<[FrozenSequentialOperation]>, crate::SynthError> {
+    source_operations: &[SequentialRegionBinding],
+) -> Result<Box<[SequentialRegionBinding]>, crate::SynthError> {
     let mut lowered = std::collections::BTreeMap::new();
-    for frozen in source_operations {
-        let source = module.operation(frozen.operation).ok_or_else(|| {
-            crate::SynthError::invariant("frozen source sequential operation disappeared")
+    for source_binding in source_operations {
+        let source = module.operation(source_binding.operation).ok_or_else(|| {
+            crate::SynthError::invariant("source sequential operation disappeared")
         })?;
         let values = binding.lowered_bits(source.result).ok_or_else(|| {
             crate::SynthError::invariant(format!(
                 "frozen sequential operation {:?} has no lowered state values",
-                frozen.operation
+                source_binding.operation
             ))
         })?;
         for &value in values {
@@ -135,30 +136,30 @@ pub(crate) fn lowered_sequential_operations(
                 ));
             }
             if lowered
-                .insert(operation, frozen.owner)
-                .is_some_and(|owner| owner != frozen.owner)
+                .insert(operation, source_binding.region)
+                .is_some_and(|region| region != source_binding.region)
             {
                 return Err(crate::SynthError::invariant(
-                    "one lowered sequential operation has conflicting frozen owners",
+                    "one lowered sequential operation has conflicting region bindings",
                 ));
             }
         }
     }
     Ok(lowered
         .into_iter()
-        .map(|(operation, owner)| FrozenSequentialOperation { operation, owner })
+        .map(|(operation, region)| SequentialRegionBinding { operation, region })
         .collect())
 }
 
 /// Returns every value needed to materialize a frozen sequential operation set.
 pub(crate) fn sequential_binding_values(
     module: &word::WordModule,
-    operations: &[FrozenSequentialOperation],
+    operations: &[SequentialRegionBinding],
 ) -> Result<Box<[word::ValueId]>, crate::SynthError> {
     let mut values = BTreeSet::new();
-    for frozen in operations {
+    for binding in operations {
         let operation = module
-            .operation(frozen.operation)
+            .operation(binding.operation)
             .ok_or_else(|| crate::SynthError::invariant("live sequential operation disappeared"))?;
         values.insert(operation.result);
         values.extend(crate::word::operation_inputs(&operation.kind));
@@ -174,8 +175,7 @@ impl MappedSequentialArtifact {
     pub(crate) fn from_module(
         module: &word::WordModule,
         mapped_values: &WordMappedSignals,
-        regions: &crate::SynthesisRegionGraph,
-        operations: &[FrozenSequentialOperation],
+        operations: &[SequentialRegionBinding],
         config: &crate::mapping::MappingConfig<'_>,
     ) -> Result<Self, crate::SynthError> {
         let mut artifact = ArtifactBuilder::new(module)?;
@@ -186,28 +186,20 @@ impl MappedSequentialArtifact {
             combinational_catalog: &config.mapping_context.combinational_catalog,
             target_cells: &config.options.target_cells,
         };
-        for frozen in operations {
-            let operation_id = frozen.operation;
+        for binding in operations {
+            let operation_id = binding.operation;
             let operation = module.operation(operation_id).ok_or_else(|| {
                 crate::SynthError::invariant("live sequential operation disappeared")
             })?;
             require_scalar(module, operation.result, "sequential result")?;
-            let owner = regions
-                .region(frozen.owner)
-                .map(|region| region.id())
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(format!(
-                        "sequential artifact for {operation_id:?} at {:?} references unknown frozen region {:?}",
-                        operation.source, frozen.owner
-                    ))
-                })?;
+            let region = binding.region;
             match &operation.kind {
                 word::OpKind::Register(register) => {
                     artifact.push_library_register(
                         &library,
                         operation_id,
                         operation.result,
-                        owner,
+                        region,
                         register,
                     )?;
                 }
@@ -216,7 +208,7 @@ impl MappedSequentialArtifact {
                         &library,
                         operation_id,
                         operation.result,
-                        owner,
+                        region,
                         latch,
                     )?;
                 }
@@ -307,13 +299,13 @@ impl<'a> ArtifactBuilder<'a> {
         context: &LibraryContext<'_>,
         operation_id: word::OpId,
         result: word::ValueId,
-        owner: crate::RegionAnchorId,
+        region: crate::RegionAnchorId,
         register: &word::RegisterOp,
     ) -> Result<(), crate::SynthError> {
         let output = require_output(&mut self.nets, context.mapped_values, result)?;
         let source = MappedCellSource::Value {
             value: result,
-            region: owner,
+            region,
         };
         if let Some(enable) = register.enable {
             let enable_signal = context.mapped_values.require(enable.value)?;
@@ -330,7 +322,7 @@ impl<'a> ArtifactBuilder<'a> {
             let enable_signal = self.adapt_enable(
                 operation_id,
                 enable.value,
-                owner,
+                region,
                 enable_signal,
                 enable.active_high != cell.enable_active_high(),
                 context,
@@ -387,7 +379,7 @@ impl<'a> ArtifactBuilder<'a> {
         context: &LibraryContext<'_>,
         operation_id: word::OpId,
         result: word::ValueId,
-        owner: crate::RegionAnchorId,
+        region: crate::RegionAnchorId,
         latch: &word::LatchOp,
     ) -> Result<(), crate::SynthError> {
         let reset_requests =
@@ -409,7 +401,7 @@ impl<'a> ArtifactBuilder<'a> {
         let enable_signal = self.adapt_enable(
             operation_id,
             latch.enable.value,
-            owner,
+            region,
             enable_signal,
             latch.enable.active_high != cell.enable_active_high(),
             context,
@@ -435,7 +427,7 @@ impl<'a> ArtifactBuilder<'a> {
             &[(0, output)],
             MappedCellSource::Value {
                 value: result,
-                region: owner,
+                region,
             },
         )
     }
@@ -444,7 +436,7 @@ impl<'a> ArtifactBuilder<'a> {
         &mut self,
         operation_id: word::OpId,
         value: word::ValueId,
-        owner: crate::RegionAnchorId,
+        region: crate::RegionAnchorId,
         signal: MappedValueSignal,
         invert: bool,
         context: &LibraryContext<'_>,
@@ -475,10 +467,7 @@ impl<'a> ArtifactBuilder<'a> {
             mapped,
             &[],
             &[(0, internal)],
-            MappedCellSource::Value {
-                value,
-                region: owner,
-            },
+            MappedCellSource::Value { value, region },
         )?;
         Ok(internal)
     }
@@ -685,23 +674,24 @@ mod tests {
     use opto_ir::word::{Edge, LValue, PortDirection, RegisterOp, SourceSpan, WordType};
 
     #[test]
-    fn frozen_state_owner_follows_the_scalar_operation_emitted_by_bit_lowering() {
-        let mut module = word::WordModule::new("frozen_state_owner");
+    fn stable_state_region_follows_the_scalar_operation_emitted_by_bit_lowering() {
+        let mut module = word::WordModule::new("stable_state_region");
         let bit = WordType::bits(1).unwrap();
+        let source = SourceSpan::stable("stable state region test");
         let clock = module
-            .add_port("clock", PortDirection::Input, bit, SourceSpan::default())
+            .add_port("clock", PortDirection::Input, bit, source.clone())
             .unwrap();
         let data = module
-            .add_port("data", PortDirection::Input, bit, SourceSpan::default())
+            .add_port("data", PortDirection::Input, bit, source.clone())
             .unwrap();
         let output = module
-            .add_port("q", PortDirection::Output, bit, SourceSpan::default())
+            .add_port("q", PortDirection::Output, bit, source.clone())
             .unwrap();
         let clock = module
-            .read_signal(module.port(clock).unwrap().signal, SourceSpan::default())
+            .read_signal(module.port(clock).unwrap().signal, source.clone())
             .unwrap();
         let data = module
-            .read_signal(module.port(data).unwrap().signal, SourceSpan::default())
+            .read_signal(module.port(data).unwrap().signal, source.clone())
             .unwrap();
         let state = module
             .register(
@@ -713,38 +703,41 @@ mod tests {
                     enable: None,
                     resets: Vec::new(),
                 },
-                SourceSpan::default(),
+                source.clone(),
             )
             .unwrap();
         module
             .connect(
                 LValue::signal(module.port(output).unwrap().signal),
                 state,
-                SourceSpan::default(),
+                source,
             )
             .unwrap();
-        let owner = crate::RegionRowId::from_index(0).unwrap();
-        let source_operations = frozen_sequential_operations(&module, &[Some(owner)]).unwrap();
+        let regions = crate::regional::region_graph::partition::build(
+            &module,
+            crate::regional::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let source_operations = sequential_region_bindings(&module, &regions).unwrap();
         let required = sequential_binding_values(&module, &source_operations).unwrap();
         let shell = crate::planning::operator::ArchitectureDecisions::for_regional_shell(&module);
         let mut provenance =
             crate::artifact::provenance::ProvenanceBuilder::new(&module, &shell).unwrap();
 
-        let ownership = crate::boolean::bitblast::bitblast_module_with_regions(
+        let binding = crate::boolean::bitblast::bitblast_module_with_regions(
             &mut module,
             &shell,
             &mut provenance,
-            &[Some(owner)],
+            regions.operation_region_rows(),
             &required,
             &[],
             crate::boolean::bitblast::GlobalBitblastScope::RegionalShell,
         )
         .unwrap();
-        let lowered =
-            lowered_sequential_operations(&module, &ownership, &source_operations).unwrap();
+        let lowered = lowered_sequential_operations(&module, &binding, &source_operations).unwrap();
 
         assert_eq!(lowered.len(), 1);
-        assert_eq!(lowered[0].owner, owner);
+        assert_eq!(lowered[0].region, source_operations[0].region);
         assert_ne!(lowered[0].operation, source_operations[0].operation);
         assert!(matches!(
             module.operation(lowered[0].operation).unwrap().kind,

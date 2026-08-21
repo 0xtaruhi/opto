@@ -108,7 +108,7 @@ pub(super) fn lower_logic(
     regional_binding_values.sort_unstable();
     regional_binding_values.dedup();
     let source_sequential_operations =
-        crate::mapping::materialize::frozen_sequential_operations(&source, &operation_regions)?;
+        crate::mapping::materialize::sequential_region_bindings(&source, &regions)?;
     regional_binding_values.extend(crate::mapping::materialize::sequential_binding_values(
         &source,
         &source_sequential_operations,

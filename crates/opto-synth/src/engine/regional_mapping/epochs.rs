@@ -249,7 +249,6 @@ impl RegionalMapper<'_> {
         let sequential = materialize::MappedSequentialArtifact::from_module(
             state.module,
             &mapped.signals,
-            self.regions,
             state.sequential_operations,
             &self.config,
         )?;
