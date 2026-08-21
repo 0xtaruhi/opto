@@ -17,6 +17,7 @@ use crate::mapping::sequential::SelectedRegisterCell;
 use opto_ir::mapped::{AppliedRegionDelta, CellId, NetId, RegionDelta, TempCellId};
 use opto_ir::word;
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 /// Immutable topology for every live register and latch in one lowered design.
 ///
@@ -238,6 +239,7 @@ pub(crate) fn plan_regional_sequential_cells(
                         .iter()
                         .map(|reset| reset.value)
                         .collect::<Vec<_>>();
+                    let reset_roles = reset_control_roles(resets.len())?;
                     match selected {
                         SelectedRegisterCell::Simple(cell) => (
                             cell.mapped_cell(
@@ -249,9 +251,7 @@ pub(crate) fn plan_regional_sequential_cells(
                             ),
                             std::iter::once(crate::mapping::SequentialPinRole::Data)
                                 .chain(std::iter::once(crate::mapping::SequentialPinRole::Clock))
-                                .chain((0..resets.len()).map(|index| {
-                                    crate::mapping::SequentialPinRole::ResetControl(index as u32)
-                                }))
+                                .chain(reset_roles)
                                 .collect::<Vec<_>>(),
                         ),
                         SelectedRegisterCell::Enabled(cell) => {
@@ -281,11 +281,7 @@ pub(crate) fn plan_regional_sequential_cells(
                                     .chain(std::iter::once(
                                         crate::mapping::SequentialPinRole::Clock,
                                     ))
-                                    .chain((0..resets.len()).map(|index| {
-                                        crate::mapping::SequentialPinRole::ResetControl(
-                                            index as u32,
-                                        )
-                                    }))
+                                    .chain(reset_roles)
                                     .collect::<Vec<_>>(),
                             )
                         }
@@ -319,6 +315,7 @@ pub(crate) fn plan_regional_sequential_cells(
                         .iter()
                         .map(|reset| reset.value)
                         .collect::<Vec<_>>();
+                    let reset_roles = reset_control_roles(resets.len())?;
                     (
                         cell.mapped_cell(
                             latch.d,
@@ -329,9 +326,7 @@ pub(crate) fn plan_regional_sequential_cells(
                         ),
                         std::iter::once(crate::mapping::SequentialPinRole::Data)
                             .chain(std::iter::once(crate::mapping::SequentialPinRole::Enable))
-                            .chain((0..resets.len()).map(|index| {
-                                crate::mapping::SequentialPinRole::ResetControl(index as u32)
-                            }))
+                            .chain(reset_roles)
                             .collect::<Vec<_>>(),
                     )
                 }
@@ -383,6 +378,18 @@ pub(crate) fn plan_regional_sequential_cells(
                     endpoint(crate::mapping::SequentialPinRole::StateOutput)?,
                 ),
             })
+        })
+        .collect()
+}
+
+fn reset_control_roles(
+    count: usize,
+) -> Result<Vec<crate::mapping::SequentialPinRole>, crate::SynthError> {
+    (0..count)
+        .map(|index| {
+            u32::try_from(index)
+                .map(crate::mapping::SequentialPinRole::ResetControl)
+                .map_err(|_| crate::SynthError::capacity("regional sequential reset index"))
         })
         .collect()
 }
@@ -793,7 +800,7 @@ impl ArtifactBuilder {
             })
             .unwrap_or_else(|| format!("__opto_seq_{}", operation.index()));
         if stored.ty.width() > 1 && target.is_none_or(|target| target.range.is_none()) {
-            base.push_str(&format!("_{}_", source.bit));
+            write!(&mut base, "_{}_", source.bit).expect("writing to a String cannot fail");
         }
         Ok(unique_instance_name(module, base))
     }

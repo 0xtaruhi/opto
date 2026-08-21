@@ -25,4 +25,6 @@ pub(crate) use contract::RegionContractSet;
 pub(crate) use epoch::{EpochDecision, RegionalEpochCoordinator};
 pub use plan::{BoundaryResponse, BoundaryResponseRow, RegionCoverPlan, RegionPlanCost};
 pub(crate) use plan::{RegionCoverPlanRecord, RegionImplementationCell, RegionalSharedAllocations};
-pub(crate) use work::{WorkContext, WorkDesign, WorkGraph, logical_operation_cell_id};
+pub(crate) use work::{
+    SynthesisExecutor, WorkContext, WorkDesign, WorkGraph, WorkProduct, logical_operation_cell_id,
+};

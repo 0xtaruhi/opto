@@ -201,8 +201,8 @@ impl RegionPlanBinding {
                     })?,
                     bit,
                 ),
-                RegionPlanValueBinding::SequentialPinBit { .. } => return Ok(()),
-                RegionPlanValueBinding::Lowered(_) => return Ok(()),
+                RegionPlanValueBinding::SequentialPinBit { .. }
+                | RegionPlanValueBinding::Lowered(_) => return Ok(()),
             };
             let stored = module.value(value).ok_or_else(|| {
                 crate::SynthError::invariant(
@@ -489,108 +489,12 @@ pub(crate) fn build_candidate_binding<'a>(
         region_binding,
         &mut local_to_outputs,
     )?;
-    for state_binding in sequential_operations {
-        let operation = local_module
-            .operation(state_binding.operation)
-            .ok_or_else(|| crate::SynthError::invariant("regional state plan is not live"))?;
-        let source_bit = state_binding.sources.first().ok_or_else(|| {
-            crate::SynthError::invariant("regional state relation has no source state bit")
-        })?;
-        let source_operation = source_operations
-            .get(&source_bit.cell)
-            .copied()
-            .ok_or_else(|| {
-                crate::SynthError::invariant("regional state relation has no source operation")
-            })?;
-        let source_result = source_module
-            .operation(source_operation)
-            .ok_or_else(|| crate::SynthError::invariant("source state operation is not live"))?
-            .result;
-        let Some([output]) = region_binding.lowered_bits(operation.result) else {
-            return Err(crate::SynthError::invariant(
-                "regional scalar state output did not lower to one bit",
-            ));
-        };
-        let implementation_output = source_bit.state_relation.map(|_| SequentialPinKey {
-            state: source_bit.cell,
-            role: SequentialPinRole::StateOutput,
-            bit: source_bit.bit,
-        });
-        local_to_sources.entry(*output).or_insert_with(|| {
-            vec![implementation_output.map_or(
-                RegionPlanValueBinding::SourceBit {
-                    value: source_result,
-                    bit: source_bit.bit,
-                },
-                |pin| RegionPlanValueBinding::SequentialPinBit {
-                    pin,
-                    value: *output,
-                },
-            )]
-        });
-        for &lowering_source in &state_binding.lowering_sources {
-            let source = local_module
-                .operation(lowering_source)
-                .ok_or_else(|| crate::SynthError::invariant("state lowering source is not live"))?
-                .result;
-            let Some(lowered) = region_binding
-                .lowered_bits(source)
-                .and_then(|bits| bits.get(source_bit.bit as usize))
-                .copied()
-            else {
-                continue;
-            };
-            local_to_sources.entry(lowered).or_insert_with(|| {
-                vec![implementation_output.map_or(
-                    RegionPlanValueBinding::SourceBit {
-                        value: source_result,
-                        bit: source_bit.bit,
-                    },
-                    |pin| RegionPlanValueBinding::SequentialPinBit {
-                        pin,
-                        value: lowered,
-                    },
-                )]
-            });
-        }
-        for (role, value) in sequential_inputs(&operation.kind)? {
-            let Some(bits) = region_binding.lowered_bits(value) else {
-                continue;
-            };
-            let [lowered] = bits else {
-                return Err(crate::SynthError::invariant(
-                    "regional scalar state pin did not lower to one bit",
-                ));
-            };
-            let source = source_module
-                .operation(source_operation)
-                .and_then(|operation| sequential_input(&operation.kind, role));
-            let source_lowered = source
-                .and_then(|source| source_to_local.get(&source).copied())
-                .and_then(|local| region_binding.lowered_bits(local))
-                .and_then(|bits| bits.get(source_bit.bit as usize))
-                .copied();
-            if source_bit.state_relation.is_none() && source_lowered == Some(*lowered) {
-                local_to_sources.entry(*lowered).or_insert_with(|| {
-                    vec![RegionPlanValueBinding::SourceBit {
-                        value: source.expect("matching source state pin has a source value"),
-                        bit: source_bit.bit,
-                    }]
-                });
-            }
-            let binding = RegionPlanValueBinding::SequentialPinBit {
-                pin: SequentialPinKey {
-                    state: source_bit.cell,
-                    role,
-                    bit: source_bit.bit,
-                },
-                value: *lowered,
-            };
-            local_to_outputs
-                .entry(*lowered)
-                .or_insert_with(|| vec![binding]);
-        }
-    }
+    bind_sequential_values(
+        domain,
+        &source_operations,
+        &mut local_to_sources,
+        &mut local_to_outputs,
+    )?;
     for operation in local_module.operations() {
         let Some(source) = super::roots::scalar_projection_input(local_module, operation) else {
             continue;
@@ -685,11 +589,137 @@ pub(crate) fn build_candidate_binding<'a>(
         .flatten()
         .collect::<Vec<_>>()
         .into();
-    let mut state_endpoints = std::collections::BTreeMap::new();
+    let state_endpoints = build_state_endpoints(
+        local_module,
+        sequential_operations,
+        &local_to_sources,
+        &outputs,
+    )?;
+    Ok(CandidateBinding {
+        binding: RegionPlanBinding { inputs, outputs },
+        output_widths: output_widths.into_boxed_slice(),
+        state_endpoints,
+    })
+}
+
+fn bind_sequential_values(
+    domain: CandidateBindingDomain<'_>,
+    source_operations: &std::collections::BTreeMap<opto_ir::design::CellId, word::OpId>,
+    inputs: &mut BindingMap,
+    outputs: &mut BindingMap,
+) -> Result<(), crate::SynthError> {
+    for state in domain.sequential_operations {
+        let operation = domain
+            .local_module
+            .operation(state.operation)
+            .ok_or_else(|| crate::SynthError::invariant("regional state plan is not live"))?;
+        let source_bit = state.sources.first().ok_or_else(|| {
+            crate::SynthError::invariant("regional state relation has no source state bit")
+        })?;
+        let source_operation = source_operations
+            .get(&source_bit.cell)
+            .copied()
+            .ok_or_else(|| {
+                crate::SynthError::invariant("regional state relation has no source operation")
+            })?;
+        let source_result = domain
+            .source_module
+            .operation(source_operation)
+            .ok_or_else(|| crate::SynthError::invariant("source state operation is not live"))?
+            .result;
+        let Some([output]) = domain.region_binding.lowered_bits(operation.result) else {
+            return Err(crate::SynthError::invariant(
+                "regional scalar state output did not lower to one bit",
+            ));
+        };
+        let implementation_output = source_bit.state_relation.map(|_| SequentialPinKey {
+            state: source_bit.cell,
+            role: SequentialPinRole::StateOutput,
+            bit: source_bit.bit,
+        });
+        let state_binding = |value| {
+            implementation_output.map_or(
+                RegionPlanValueBinding::SourceBit {
+                    value: source_result,
+                    bit: source_bit.bit,
+                },
+                |pin| RegionPlanValueBinding::SequentialPinBit { pin, value },
+            )
+        };
+        inputs
+            .entry(*output)
+            .or_insert_with(|| vec![state_binding(*output)]);
+        for &lowering_source in &state.lowering_sources {
+            let source = domain
+                .local_module
+                .operation(lowering_source)
+                .ok_or_else(|| crate::SynthError::invariant("state lowering source is not live"))?
+                .result;
+            let Some(lowered) = domain
+                .region_binding
+                .lowered_bits(source)
+                .and_then(|bits| bits.get(source_bit.bit as usize))
+                .copied()
+            else {
+                continue;
+            };
+            inputs
+                .entry(lowered)
+                .or_insert_with(|| vec![state_binding(lowered)]);
+        }
+        for (role, value) in sequential_inputs(&operation.kind)? {
+            let Some(bits) = domain.region_binding.lowered_bits(value) else {
+                continue;
+            };
+            let [lowered] = bits else {
+                return Err(crate::SynthError::invariant(
+                    "regional scalar state pin did not lower to one bit",
+                ));
+            };
+            let source = domain
+                .source_module
+                .operation(source_operation)
+                .and_then(|operation| sequential_input(&operation.kind, role));
+            let direct = source
+                .and_then(|source| domain.source_to_local.get(&source).copied())
+                .and_then(|local| domain.region_binding.lowered_bits(local))
+                .and_then(|bits| bits.get(source_bit.bit as usize))
+                .copied()
+                == Some(*lowered);
+            if source_bit.state_relation.is_none() && direct {
+                inputs.entry(*lowered).or_insert_with(|| {
+                    vec![RegionPlanValueBinding::SourceBit {
+                        value: source.expect("direct state pin has a source value"),
+                        bit: source_bit.bit,
+                    }]
+                });
+            }
+            outputs.entry(*lowered).or_insert_with(|| {
+                vec![RegionPlanValueBinding::SequentialPinBit {
+                    pin: SequentialPinKey {
+                        state: source_bit.cell,
+                        role,
+                        bit: source_bit.bit,
+                    },
+                    value: *lowered,
+                }]
+            });
+        }
+    }
+    Ok(())
+}
+
+fn build_state_endpoints(
+    module: &word::WordModule,
+    states: &[crate::mapping::materialize::SequentialRegionBinding],
+    sources: &BindingMap,
+    outputs: &[RegionPlanValueBinding],
+) -> Result<std::collections::BTreeMap<SequentialPinKey, SequentialEndpoint>, crate::SynthError> {
+    let mut endpoints = std::collections::BTreeMap::new();
     let mut state_outputs = std::collections::BTreeMap::new();
-    let semantics = super::roots::FullDomainRootSemantics::new(local_module)?;
+    let semantics = super::roots::FullDomainRootSemantics::new(module)?;
     let source_endpoint = |value| {
-        local_to_sources.get(&value).and_then(|bindings| {
+        sources.get(&value).and_then(|bindings| {
             bindings.iter().find_map(|binding| match *binding {
                 RegionPlanValueBinding::SourceBit { value, bit } => {
                     Some(SequentialEndpoint::SourceBit { value, bit })
@@ -702,11 +732,9 @@ pub(crate) fn build_candidate_binding<'a>(
         })
     };
     let constant_endpoint = |value| -> Result<Option<SequentialEndpoint>, crate::SynthError> {
-        let Some(stored) = local_module.value(value) else {
-            return Err(crate::SynthError::invariant(
-                "regional state endpoint is not live",
-            ));
-        };
+        let stored = module
+            .value(value)
+            .ok_or_else(|| crate::SynthError::invariant("regional state endpoint is not live"))?;
         let word::ValueKind::Constant(bits) = &stored.kind else {
             return Ok(None);
         };
@@ -715,11 +743,11 @@ pub(crate) fn build_candidate_binding<'a>(
                 "regional state endpoint constant is not scalar",
             ));
         };
-        crate::boolean::resolve_publication_bit(*bit, local_module.name(), &stored.source)
+        crate::boolean::resolve_publication_bit(*bit, module.name(), &stored.source)
             .map(|bit| Some(SequentialEndpoint::Constant(bit == opto_ir::BitVal::One)))
     };
-    for state in sequential_operations {
-        let operation = local_module
+    for state in states {
+        let operation = module
             .operation(state.operation)
             .ok_or_else(|| crate::SynthError::invariant("regional state endpoint is not live"))?;
         let source = state.sources.first().ok_or_else(|| {
@@ -732,25 +760,16 @@ pub(crate) fn build_candidate_binding<'a>(
         };
         let canonical = semantics.canonical_root(operation.result)?;
         let endpoint = source_endpoint(canonical).unwrap_or(SequentialEndpoint::Pin(key));
-        if state_outputs
-            .insert(canonical, endpoint)
-            .is_some_and(|old| old != endpoint)
-        {
-            return Err(crate::SynthError::invariant(
-                "regional state outputs have conflicting stable endpoints",
-            ));
-        }
-        if state_endpoints
-            .insert(key, endpoint)
-            .is_some_and(|old| old != endpoint)
-        {
-            return Err(crate::SynthError::invariant(
-                "regional state output has conflicting stable endpoints",
-            ));
-        }
+        insert_endpoint(
+            &mut state_outputs,
+            canonical,
+            endpoint,
+            "state output value",
+        )?;
+        insert_endpoint(&mut endpoints, key, endpoint, "state output")?;
     }
-    for state in sequential_operations {
-        let operation = local_module
+    for state in states {
+        let operation = module
             .operation(state.operation)
             .ok_or_else(|| crate::SynthError::invariant("regional state endpoint is not live"))?;
         let source = state.sources.first().ok_or_else(|| {
@@ -767,40 +786,44 @@ pub(crate) fn build_candidate_binding<'a>(
                 .get(&canonical)
                 .copied()
                 .or_else(|| source_endpoint(canonical))
-                .or(constant_endpoint(canonical)?);
-            let endpoint = match endpoint {
-                Some(endpoint) => endpoint,
-                None if outputs.iter().any(|binding| {
-                    matches!(
-                        binding,
-                        RegionPlanValueBinding::SequentialPinBit { pin, .. }
-                                if pin == &key
-                    )
-                }) =>
-                {
-                    SequentialEndpoint::Pin(key)
-                }
-                None => {
-                    return Err(crate::SynthError::invariant(format!(
+                .or(constant_endpoint(canonical)?)
+                .or_else(|| {
+                    outputs
+                        .iter()
+                        .any(|binding| {
+                            matches!(
+                                binding,
+                                RegionPlanValueBinding::SequentialPinBit { pin, .. } if pin == &key
+                            )
+                        })
+                        .then_some(SequentialEndpoint::Pin(key))
+                })
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(format!(
                         "regional state pin {key:?} value {value:?} has neither a stable source nor a cover output"
-                    )));
-                }
-            };
-            if state_endpoints
-                .insert(key, endpoint)
-                .is_some_and(|old| old != endpoint)
-            {
-                return Err(crate::SynthError::invariant(
-                    "regional state pin has conflicting stable endpoints",
-                ));
-            }
+                    ))
+                })?;
+            insert_endpoint(&mut endpoints, key, endpoint, "state pin")?;
         }
     }
-    Ok(CandidateBinding {
-        binding: RegionPlanBinding { inputs, outputs },
-        output_widths: output_widths.into_boxed_slice(),
-        state_endpoints,
-    })
+    Ok(endpoints)
+}
+
+fn insert_endpoint<K: Ord + Copy>(
+    endpoints: &mut std::collections::BTreeMap<K, SequentialEndpoint>,
+    key: K,
+    endpoint: SequentialEndpoint,
+    description: &str,
+) -> Result<(), crate::SynthError> {
+    if endpoints
+        .insert(key, endpoint)
+        .is_some_and(|old| old != endpoint)
+    {
+        return Err(crate::SynthError::invariant(format!(
+            "regional {description} has conflicting stable endpoints"
+        )));
+    }
+    Ok(())
 }
 
 fn canonicalize_bindings(
@@ -956,7 +979,6 @@ pub(crate) fn sequential_input(
     role: SequentialPinRole,
 ) -> Option<word::ValueId> {
     match (operation, role) {
-        (_, SequentialPinRole::StateOutput) => None,
         (word::OpKind::Register(register), SequentialPinRole::Data) => Some(register.d),
         (word::OpKind::Register(register), SequentialPinRole::Clock) => Some(register.clock),
         (word::OpKind::Register(register), SequentialPinRole::Enable) => {
@@ -978,7 +1000,8 @@ pub(crate) fn sequential_input(
             .resets
             .get(index as usize)
             .map(|reset| reset.reset_value),
-        (word::OpKind::Latch(_), SequentialPinRole::Clock)
+        (_, SequentialPinRole::StateOutput)
+        | (word::OpKind::Latch(_), SequentialPinRole::Clock)
         | (
             word::OpKind::Unary { .. }
             | word::OpKind::Binary { .. }

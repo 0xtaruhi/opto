@@ -69,11 +69,15 @@ impl RegionalMapper<'_> {
                     .cloned()
                     .zip(rows.iter().map(|row| row.binding.clone()))
                     .zip(rows.iter().map(|row| row.sequential.clone()))
-                    .map(|((plan, binding), sequential)| super::RegionalPlanRow {
-                        plan,
-                        binding,
-                        sequential,
-                    })
+                    .zip(rows.iter().map(|row| row.proof))
+                    .map(
+                        |(((plan, binding), sequential), proof)| super::RegionalPlanRow {
+                            plan,
+                            binding,
+                            sequential,
+                            proof,
+                        },
+                    )
                     .collect();
                 best = Some(BestMapping {
                     objective,
@@ -183,6 +187,15 @@ impl RegionalMapper<'_> {
         &self,
         state: &mut RegionalMappingState<'_>,
     ) -> Result<RegionalMappedState, crate::SynthError> {
+        if state
+            .rows
+            .iter()
+            .any(|row| row.proof != crate::mapping::regional_proof(&row.plan, &row.sequential))
+        {
+            return Err(crate::SynthError::invariant(
+                "regional compiled artifact failed proof identity validation",
+            ));
+        }
         let boundary_values =
             boundary_observation_values(self.work.regions(), state.region_binding)?;
         let sequential_publication = materialize::reconcile_sequential_publication(
@@ -689,6 +702,10 @@ impl RegionalMapper<'_> {
                 .with_context_and_contracts(context, state.contracts.contracts(row).to_vec());
             state.journal_compacted_plan(index, &plan)?;
             state.rows[index].plan = plan;
+            state.rows[index].proof = crate::mapping::regional_proof(
+                &state.rows[index].plan,
+                &state.rows[index].sequential,
+            );
         }
         Ok(())
     }

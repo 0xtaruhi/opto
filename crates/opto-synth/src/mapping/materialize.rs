@@ -860,7 +860,7 @@ pub(crate) fn build_test_substrate(
 /// Builds the immutable global substrate and Word-value net bindings.
 ///
 /// Only full-domain aliases, constants, ports, retained instances, state, and
-/// explicitly observed roots enter this owner. Region-local care reductions
+/// explicitly observed roots enter this substrate. Region-local care reductions
 /// cannot create substrate equivalence or erase publication obligations.
 pub(crate) fn build_mapped_substrate(
     request: MappedSubstrateRequest<'_>,
@@ -992,14 +992,99 @@ pub(crate) fn build_mapped_substrate(
             .map_err(crate::SynthError::from)?;
     }
 
+    let mut cell_sources = Vec::new();
+    let mut prepared_cells = prepare_substrate_instances(
+        SubstrateInstanceDomain {
+            module,
+            options,
+            design_references,
+            reference_ports,
+            source_instances,
+            offsets: &offsets,
+            signal_bit_count,
+            root_nets: &root_nets,
+        },
+        &mut aliases,
+        &mut builder,
+    )?;
+    append_tri_state_cells(
+        module,
+        options,
+        &offsets,
+        signal_bit_count,
+        &mut aliases,
+        &root_nets,
+        &mut prepared_cells,
+    )?;
+    append_packed_cells(&mut builder, &mut cell_sources, prepared_cells)?;
+
+    let observed_nets = observed_values
+        .iter()
+        .copied()
+        .map(
+            |value| match scalar_signal(module, &offsets, signal_bit_count, value)? {
+                ScalarSignal::Bit(bit) => net_for_bit(&mut aliases, &root_nets, bit).map(Some),
+                ScalarSignal::Constant(_) => Ok(None),
+            },
+        )
+        .collect::<Result<Vec<_>, crate::SynthError>>()?;
+    for (root, value) in constants {
+        if let Some(net) = root_nets[root] {
+            builder.drive_constant(net, value);
+        }
+    }
+    let netlist = builder.freeze().map_err(crate::SynthError::from)?;
+    if cell_sources.len() != netlist.cell_count() {
+        return Err(crate::SynthError::invariant(format!(
+            "{} live mapped cells have {} provenance sources",
+            netlist.cell_count(),
+            cell_sources.len()
+        )));
+    }
+    Ok((
+        MappedOutput {
+            netlist,
+            cell_sources: cell_sources.into_boxed_slice(),
+        },
+        observed_nets.into_boxed_slice(),
+        SequentialMappedPins(sequential_pins),
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct SubstrateInstanceDomain<'a> {
+    module: &'a word::WordModule,
+    options: &'a SynthesisOptions,
+    design_references: &'a BTreeSet<String>,
+    reference_ports: &'a crate::ReferencePortMap,
+    source_instances: &'a SourceInstanceProvenance,
+    offsets: &'a [usize],
+    signal_bit_count: usize,
+    root_nets: &'a [Option<NetId>],
+}
+
+fn prepare_substrate_instances(
+    domain: SubstrateInstanceDomain<'_>,
+    aliases: &mut DisjointSets,
+    builder: &mut MappedBuilder,
+) -> Result<Vec<(MappedCellSpec, MappedCellSource)>, crate::SynthError> {
+    let SubstrateInstanceDomain {
+        module,
+        options,
+        design_references,
+        reference_ports,
+        source_instances,
+        offsets,
+        signal_bit_count,
+        root_nets,
+    } = domain;
     let instance_is_source = (0..module.instances().len())
         .map(|index| {
             let instance = word::InstId::from_index(index).map_err(crate::SynthError::Word)?;
             source_instances.is_source_instance(module, instance)
         })
         .collect::<Result<Vec<_>, crate::SynthError>>()?;
-    let mut cell_sources = Vec::new();
-    let mut prepared_cells = Vec::new();
+    let mut prepared = Vec::new();
     for (instance_index, instance) in module.instances().iter().enumerate() {
         let cell_type = module.name_str(instance.module);
         let is_source_instance = instance_is_source[instance_index];
@@ -1012,11 +1097,11 @@ pub(crate) fn build_mapped_substrate(
             }
             let mut connections = Vec::with_capacity(instance.connections.len());
             for connection in &instance.connections {
-                let signals = scalar_signals(module, &offsets, signal_bit_count, connection.value)?
+                let signals = scalar_signals(module, offsets, signal_bit_count, connection.value)?
                     .into_iter()
                     .map(|signal| match signal {
                         ScalarSignal::Bit(bit) => {
-                            net_for_bit(&mut aliases, &root_nets, bit).map(ConnectionSignal::Net)
+                            net_for_bit(aliases, root_nets, bit).map(ConnectionSignal::Net)
                         }
                         ScalarSignal::Constant(value) => Ok(ConnectionSignal::Constant(value)),
                     })
@@ -1078,21 +1163,19 @@ pub(crate) fn build_mapped_substrate(
                     module.name_str(instance.name)
                 )));
             }
-            let signal = match scalar_signal(module, &offsets, signal_bit_count, connection.value)?
-            {
+            let signal = match scalar_signal(module, offsets, signal_bit_count, connection.value)? {
                 ScalarSignal::Bit(bit) => {
-                    ConnectionSignal::Net(net_for_bit(&mut aliases, &root_nets, bit)?)
+                    ConnectionSignal::Net(net_for_bit(aliases, root_nets, bit)?)
                 }
                 ScalarSignal::Constant(value) => ConnectionSignal::Constant(value),
             };
             connections.push((pin.to_string(), library_pin, signal));
         }
-        let instance_name = module.name_str(instance.name).to_string();
         let instance_id =
             word::InstId::from_index(instance_index).map_err(crate::SynthError::Word)?;
-        prepared_cells.push((
+        prepared.push((
             MappedCellSpec {
-                name: instance_name,
+                name: module.name_str(instance.name).to_string(),
                 cell_type: cell_type.to_string(),
                 library_cell,
                 connections,
@@ -1100,48 +1183,7 @@ pub(crate) fn build_mapped_substrate(
             MappedCellSource::Instance(instance_id),
         ));
     }
-    append_tri_state_cells(
-        module,
-        options,
-        &offsets,
-        signal_bit_count,
-        &mut aliases,
-        &root_nets,
-        &mut prepared_cells,
-    )?;
-    append_packed_cells(&mut builder, &mut cell_sources, prepared_cells)?;
-
-    let observed_nets = observed_values
-        .iter()
-        .copied()
-        .map(
-            |value| match scalar_signal(module, &offsets, signal_bit_count, value)? {
-                ScalarSignal::Bit(bit) => net_for_bit(&mut aliases, &root_nets, bit).map(Some),
-                ScalarSignal::Constant(_) => Ok(None),
-            },
-        )
-        .collect::<Result<Vec<_>, crate::SynthError>>()?;
-    for (root, value) in constants {
-        if let Some(net) = root_nets[root] {
-            builder.drive_constant(net, value);
-        }
-    }
-    let netlist = builder.freeze().map_err(crate::SynthError::from)?;
-    if cell_sources.len() != netlist.cell_count() {
-        return Err(crate::SynthError::invariant(format!(
-            "{} live mapped cells have {} provenance sources",
-            netlist.cell_count(),
-            cell_sources.len()
-        )));
-    }
-    Ok((
-        MappedOutput {
-            netlist,
-            cell_sources: cell_sources.into_boxed_slice(),
-        },
-        observed_nets.into_boxed_slice(),
-        SequentialMappedPins(sequential_pins),
-    ))
+    Ok(prepared)
 }
 
 fn required_substrate_roots(

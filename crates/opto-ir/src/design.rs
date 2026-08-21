@@ -24,7 +24,18 @@ use directory::{PersistentDirectory, StableKey};
 
 macro_rules! stable_id {
     ($name:ident, $kind:literal) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            serde::Serialize,
+            serde::Deserialize,
+        )]
         #[repr(transparent)]
         #[doc = concat!("Stable identity of one ", $kind, ".")]
         pub struct $name([u8; 32]);
@@ -56,7 +67,9 @@ stable_id!(NetBitId, "design net bit");
 stable_id!(DesignRevisionId, "design revision");
 stable_id!(RewriteDeltaId, "rewrite delta");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 /// Stable design entity identity accepted by read and replacement footprints.
 pub enum EntityId {
     /// Cell entity.
@@ -65,7 +78,7 @@ pub enum EntityId {
     NetBit(NetBitId),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Sorted exact entity set used as a transaction footprint.
 pub struct EntitySet(Box<[EntityId]>);
 
@@ -107,7 +120,7 @@ impl EntitySet {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Exact driver endpoint of one canonical net bit.
 pub enum NetDriver {
     /// Output pin of a design cell.
@@ -132,7 +145,7 @@ pub struct NetBit {
     pub driver: Option<NetDriver>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Whether a cell propagates input changes combinationally to its outputs.
 pub enum CellClass {
     /// Every output may depend combinationally on the inputs.
@@ -167,7 +180,7 @@ pub trait DesignPayload {
     fn semantic_fingerprint(&self) -> [u8; 32];
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Proof regime carried by one rewrite transaction.
 pub enum EquivalenceRegime {
     /// Combinational boundary equivalence.
@@ -178,7 +191,7 @@ pub enum EquivalenceRegime {
     ByConstruction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Immutable certificate identity validated before a rewrite is published.
 pub struct EquivalenceCertificate {
     /// Proof regime required by the semantic change.

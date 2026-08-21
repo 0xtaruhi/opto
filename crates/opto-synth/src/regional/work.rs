@@ -9,6 +9,7 @@ use opto_ir::design::{
 };
 use opto_ir::word;
 use opto_runtime::{Task, TaskKey};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -17,7 +18,9 @@ const COARSE_GROUP_SHARDS: usize = 16;
 
 macro_rules! digest_id {
     ($name:ident, $doc:literal) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
         #[doc = $doc]
         pub(crate) struct $name([u8; 32]);
 
@@ -130,13 +133,73 @@ pub(crate) struct WorkItem {
     estimated_memory: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkContext {
     key: WorkContextKey,
     design: DesignRevisionId,
     scenarios: opto_timing::ScenarioGeneration,
     target: [u8; 32],
-    contracts: Box<[crate::BoundaryContract]>,
+    boundaries: Box<[WorkBoundaryContext]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkBoundaryContext {
+    semantic_key: [u8; 32],
+    input: bool,
+    scenarios: opto_timing::ScenarioGeneration,
+    generation: [u8; 32],
+    rows: Box<[crate::BoundaryContractRow]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkPacketItem {
+    id: WorkItemId,
+    core: EntitySet,
+    halo: EntitySet,
+    context: WorkContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkPacket {
+    schema: u32,
+    design: DesignRevisionId,
+    shard: CompilationShardId,
+    items: Box<[WorkPacketItem]>,
+    estimated_work: u64,
+    estimated_memory: u64,
+}
+
+pub(crate) struct WorkProduct<T> {
+    pub(crate) proof: opto_ir::design::EquivalenceCertificate,
+    pub(crate) output: T,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct WorkResult<T> {
+    item: WorkItemId,
+    shard: CompilationShardId,
+    base: DesignRevisionId,
+    context: WorkContextKey,
+    reads: EntitySet,
+    replaces: EntitySet,
+    proof: opto_ir::design::EquivalenceCertificate,
+    output: T,
+}
+
+pub(crate) trait SynthesisExecutor {
+    fn execute<T, F>(
+        &self,
+        packets: Vec<Task<WorkPacket>>,
+        operation: F,
+    ) -> Result<Vec<WorkResult<T>>, crate::SynthError>
+    where
+        T: Send,
+        F: Fn(
+                &WorkPacketItem,
+                &opto_runtime::ExecutionContext,
+            ) -> Result<WorkProduct<T>, crate::SynthError>
+            + Send
+            + Sync;
 }
 
 impl WorkContext {
@@ -152,14 +215,23 @@ impl WorkContext {
             design,
             scenarios,
             target,
-            contracts: contracts.into(),
+            boundaries: contracts
+                .iter()
+                .map(|contract| WorkBoundaryContext {
+                    semantic_key: contract.port().semantic_key(),
+                    input: contract.port().direction() == crate::RegionPortDirection::Input,
+                    scenarios: contract.scenario_generation(),
+                    generation: contract.generation().bytes(),
+                    rows: contract.rows().into(),
+                })
+                .collect(),
         }
     }
 }
 
-impl WorkItem {
-    pub(crate) const fn context(&self) -> WorkContextKey {
-        self.context
+impl WorkPacketItem {
+    pub(crate) const fn id(&self) -> WorkItemId {
+        self.id
     }
 }
 
@@ -178,6 +250,7 @@ pub(crate) struct WorkGraph {
     item_regions: Box<[crate::RegionRowId]>,
     contexts: Box<[WorkContext]>,
     items: Box<[WorkItem]>,
+    item_rows: BTreeMap<WorkItemId, usize>,
     shards: Box<[CompilationShard]>,
     coarse_groups: opto_core::PackedRows<CompilationShardId>,
     predecessors: opto_core::PackedRows<WorkItemId>,
@@ -259,6 +332,11 @@ impl WorkGraph {
         })?;
         let item_regions = rows.iter().map(|row| row.1).collect();
         let items = rows.into_iter().map(|row| row.2).collect::<Vec<_>>();
+        let item_rows = items
+            .iter()
+            .enumerate()
+            .map(|(row, item)| (item.id, row))
+            .collect();
         let dependency_rows = |predecessors: bool| -> Result<Vec<Vec<_>>, crate::SynthError> {
             runtime.analyze_indexed(items.len(), |index| {
                 let region = regions.regions()[index];
@@ -280,6 +358,7 @@ impl WorkGraph {
             item_regions,
             contexts,
             items: items.into_boxed_slice(),
+            item_rows,
             shards: Box::new([]),
             coarse_groups: opto_core::PackedRows::try_from_rows(Vec::<Vec<_>>::new())
                 .map_err(|_| crate::SynthError::capacity("coarse compilation groups"))?,
@@ -328,25 +407,36 @@ impl WorkGraph {
         self.rebatch(self.items.len().div_ceil(target_shards).max(1))
     }
 
-    pub(crate) fn tasks(&self) -> Vec<Task<usize>> {
+    pub(crate) fn packet_tasks(&self) -> Vec<Task<WorkPacket>> {
         self.shards
             .iter()
             .enumerate()
-            .map(|(index, shard)| {
-                Task::new(TaskKey::new(WORK_TASK_DOMAIN, index as u64), index)
-                    .with_estimated_work(shard.estimated_work)
-                    .with_estimated_memory(shard.estimated_memory)
+            .map(|(ordinal, shard)| {
+                let items = shard
+                    .items
+                    .iter()
+                    .map(|&row| WorkPacketItem {
+                        id: self.items[row].id,
+                        core: self.items[row].core.clone(),
+                        halo: self.items[row].halo.clone(),
+                        context: self.contexts[row].clone(),
+                    })
+                    .collect();
+                Task::new(
+                    TaskKey::new(WORK_TASK_DOMAIN, ordinal as u64),
+                    WorkPacket {
+                        schema: 1,
+                        design: self.design.0.revision(),
+                        shard: shard.id,
+                        items,
+                        estimated_work: shard.estimated_work,
+                        estimated_memory: shard.estimated_memory,
+                    },
+                )
+                .with_estimated_work(shard.estimated_work)
+                .with_estimated_memory(shard.estimated_memory)
             })
             .collect()
-    }
-
-    pub(crate) fn shard_items(
-        &self,
-        shard: usize,
-    ) -> Option<impl Iterator<Item = (usize, &WorkItem)>> {
-        self.shards
-            .get(shard)
-            .map(|shard| shard.items.iter().map(|&item| (item, &self.items[item])))
     }
 
     pub(crate) fn regions(&self) -> &crate::SynthesisRegionGraph {
@@ -364,8 +454,67 @@ impl WorkGraph {
             .map(|cell| cell.id)
     }
 
-    pub(crate) fn region(&self, item: usize) -> Option<crate::RegionRowId> {
-        self.item_regions.get(item).copied()
+    pub(crate) fn item_region(&self, item: WorkItemId) -> Option<crate::RegionRowId> {
+        self.item_rows
+            .get(&item)
+            .and_then(|&row| self.item_regions.get(row))
+            .copied()
+    }
+
+    pub(crate) fn accept_results<T>(
+        &self,
+        results: Vec<WorkResult<T>>,
+    ) -> Result<Box<[WorkProduct<T>]>, crate::SynthError> {
+        if results.len() != self.items.len() {
+            return Err(crate::SynthError::invariant(
+                "work execution did not return exactly one result per item",
+            ));
+        }
+        let mut outputs = std::iter::repeat_with(|| None)
+            .take(self.items.len())
+            .collect::<Vec<_>>();
+        for result in results {
+            let row = self.item_rows.get(&result.item).copied().ok_or_else(|| {
+                crate::SynthError::invariant("work result references an unknown item")
+            })?;
+            let item = &self.items[row];
+            let reads = item_read_set(item)?;
+            let shard = self
+                .shards
+                .iter()
+                .find(|shard| shard.items.binary_search(&row).is_ok())
+                .map(|shard| shard.id)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("work result item has no compilation shard")
+                })?;
+            if result.base != self.design.0.revision()
+                || result.shard != shard
+                || result.context != item.context
+                || result.reads != reads
+                || result.replaces != item.core
+            {
+                return Err(crate::SynthError::invariant(
+                    "work result does not match its immutable revision, context, or footprint",
+                ));
+            }
+            if outputs[row]
+                .replace(WorkProduct {
+                    proof: result.proof,
+                    output: result.output,
+                })
+                .is_some()
+            {
+                return Err(crate::SynthError::invariant(
+                    "work item produced more than one result",
+                ));
+            }
+        }
+        outputs
+            .into_iter()
+            .map(|output| {
+                output.ok_or_else(|| crate::SynthError::invariant("work item produced no result"))
+            })
+            .collect()
     }
 
     fn validate(&self) -> Result<(), crate::SynthError> {
@@ -373,6 +522,7 @@ impl WorkGraph {
             || self.successors.row_count() != self.items.len()
             || self.item_regions.len() != self.items.len()
             || self.contexts.len() != self.items.len()
+            || self.item_rows.len() != self.items.len()
             || self.coarse_groups.value_count() != self.shards.len()
         {
             return Err(crate::SynthError::invariant(
@@ -388,9 +538,9 @@ impl WorkGraph {
                 context.key != item.context
                     || context.design != revision
                     || context
-                        .contracts
+                        .boundaries
                         .iter()
-                        .any(|contract| contract.scenario_generation() != context.scenarios)
+                        .any(|boundary| boundary.scenarios != context.scenarios)
             })
             || self.contexts.windows(2).any(|pair| {
                 pair[0].scenarios != pair[1].scenarios || pair[0].target != pair[1].target
@@ -438,6 +588,16 @@ impl WorkGraph {
             .iter()
             .map(|item| item.id)
             .collect::<std::collections::BTreeSet<_>>();
+        if self
+            .items
+            .iter()
+            .enumerate()
+            .any(|(row, item)| self.item_rows.get(&item.id) != Some(&row))
+        {
+            return Err(crate::SynthError::invariant(
+                "work-item directory does not match its stable identities",
+            ));
+        }
         if (0..self.items.len()).any(|row| {
             self.predecessors[row]
                 .iter()
@@ -450,6 +610,69 @@ impl WorkGraph {
         }
         Ok(())
     }
+}
+
+impl SynthesisExecutor for opto_runtime::ExecutionContext {
+    fn execute<T, F>(
+        &self,
+        packets: Vec<Task<WorkPacket>>,
+        operation: F,
+    ) -> Result<Vec<WorkResult<T>>, crate::SynthError>
+    where
+        T: Send,
+        F: Fn(
+                &WorkPacketItem,
+                &opto_runtime::ExecutionContext,
+            ) -> Result<WorkProduct<T>, crate::SynthError>
+            + Send
+            + Sync,
+    {
+        self.map_ordered_composite(packets, |packet, runtime| {
+            if packet.schema != 1 {
+                return Err(crate::SynthError::invariant(
+                    "work packet has an unsupported schema",
+                ));
+            }
+            if packet.estimated_work == 0 || packet.estimated_memory == 0 {
+                return Err(crate::SynthError::invariant(
+                    "work packet has an invalid work or memory estimate",
+                ));
+            }
+            packet
+                .items
+                .iter()
+                .map(|item| {
+                    let product = operation(item, runtime)?;
+                    Ok(WorkResult {
+                        item: item.id,
+                        shard: packet.shard,
+                        base: packet.design,
+                        context: item.context.key,
+                        reads: entity_union(&item.core, &item.halo)?,
+                        replaces: item.core.clone(),
+                        proof: product.proof,
+                        output: product.output,
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::SynthError>>()
+        })
+        .map(|rows| rows.into_iter().flatten().collect())
+    }
+}
+
+fn item_read_set(item: &WorkItem) -> Result<EntitySet, crate::SynthError> {
+    entity_union(&item.core, &item.halo)
+}
+
+fn entity_union(left: &EntitySet, right: &EntitySet) -> Result<EntitySet, crate::SynthError> {
+    EntitySet::new(
+        left.as_slice()
+            .iter()
+            .chain(right.as_slice())
+            .copied()
+            .collect(),
+    )
+    .map_err(|error| crate::SynthError::invariant(error.to_string()))
 }
 
 impl WorkDesign {
@@ -675,13 +898,15 @@ fn region_value_entities(
     Ok(entities)
 }
 
+type MemoryNetBinding = (Box<[NetBitId]>, Box<[NetBitId]>);
+
 fn memory_nets(
     module: &word::WordModule,
     regions: &crate::SynthesisRegionGraph,
     connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
     memory: word::MemoryId,
     nets: &mut BTreeMap<NetBitId, NetBit>,
-) -> Result<(Box<[NetBitId]>, Box<[NetBitId]>), crate::SynthError> {
+) -> Result<MemoryNetBinding, crate::SynthError> {
     let reads = module
         .memory_read_ports()
         .iter()
@@ -1026,7 +1251,7 @@ fn logical_revision_id(
             Some(NetDriver::Constant(value)) => {
                 digest.update(&[2, bit_value_tag(value)]);
             }
-        };
+        }
     }
     DesignRevisionId::from_bytes(*digest.finalize().as_bytes())
 }
@@ -1081,7 +1306,7 @@ fn hash_logical_cell(digest: &mut blake3::Hasher, cell: &LogicalCell) {
                     digest.update(&[7, u8::from(*enable_active_high)]);
                     hash_resets(digest, resets);
                 }
-            };
+            }
             for operand in &operation.operands {
                 hash_word_type(digest, *operand);
             }
@@ -1432,9 +1657,9 @@ mod tests {
         assert_eq!(work.design.0.revision(), design.0.revision());
         assert!(design.0.cell_count() >= regions.regions().len());
         assert_eq!(work.items.len(), regions.regions().len());
-        assert_eq!(work.tasks().len(), regions.regions().len());
+        assert_eq!(work.packet_tasks().len(), regions.regions().len());
         for (index, &region) in regions.regions().iter().enumerate() {
-            assert_eq!(work.region(index), Some(region.row()));
+            assert_eq!(work.item_regions[index], region.row());
             for &operation in regions.operations(region) {
                 let _ = logical_operation(&module, operation).unwrap();
                 assert!(
@@ -1446,6 +1671,37 @@ mod tests {
             }
         }
         let semantic_items = work.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let execute = |work: &WorkGraph| {
+            let results = SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, _| {
+                Ok(WorkProduct {
+                    proof: opto_ir::design::EquivalenceCertificate {
+                        regime: opto_ir::design::EquivalenceRegime::ByConstruction,
+                        digest: item.id.0,
+                    },
+                    output: item.id,
+                })
+            })
+            .unwrap();
+            work.accept_results(results)
+                .unwrap()
+                .into_vec()
+                .into_iter()
+                .map(|result| result.output)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(execute(&work), semantic_items);
+        let mut invalid = SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, _| {
+            Ok(WorkProduct {
+                proof: opto_ir::design::EquivalenceCertificate {
+                    regime: opto_ir::design::EquivalenceRegime::ByConstruction,
+                    digest: item.id.0,
+                },
+                output: item.id,
+            })
+        })
+        .unwrap();
+        invalid[0].replaces = EntitySet::new(vec![]).unwrap();
+        assert!(work.accept_results(invalid).is_err());
         let serial =
             opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 })
                 .unwrap();
@@ -1473,7 +1729,10 @@ mod tests {
                 })
         );
         work.rebatch(2).unwrap();
-        assert_eq!(work.tasks().len(), regions.regions().len().div_ceil(2));
+        assert_eq!(
+            work.packet_tasks().len(),
+            regions.regions().len().div_ceil(2)
+        );
         assert_eq!(
             work.shards
                 .iter()
@@ -1481,8 +1740,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             semantic_items
         );
+        assert_eq!(execute(&work), semantic_items);
         for (index, &region) in regions.regions().iter().enumerate() {
-            assert_eq!(work.region(index), Some(region.row()));
+            assert_eq!(work.item_regions[index], region.row());
         }
     }
 

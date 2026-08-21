@@ -69,6 +69,7 @@ pub(super) struct RegionalPlanRow {
     pub(super) plan: crate::RegionCoverPlan,
     pub(super) binding: RegionPlanBinding,
     pub(super) sequential: Box<[materialize::RegionalSequentialCellPlan]>,
+    pub(super) proof: opto_ir::design::EquivalenceCertificate,
 }
 
 impl RegionalMappingState<'_> {

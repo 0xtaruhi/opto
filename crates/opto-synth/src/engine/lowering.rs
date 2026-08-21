@@ -105,7 +105,7 @@ pub(super) fn lower_logic(
     regional_binding_values.sort_unstable();
     regional_binding_values.dedup();
     let source_sequential_operations =
-        crate::mapping::materialize::sequential_region_bindings(&source, &regions)?;
+        crate::mapping::materialize::sequential_region_bindings(&source, regions)?;
     regional_binding_values.extend(crate::mapping::materialize::sequential_binding_values(
         &source,
         &source_sequential_operations,
@@ -130,12 +130,14 @@ pub(super) fn lower_logic(
                 operators: _,
                 publication: _,
                 sequential,
+                proof,
             } = prepared;
             provenance.import_private_architecture(architecture, &source)?;
             regional_plans.push(super::regional_mapping::RegionalPlanRow {
                 plan,
                 binding,
                 sequential,
+                proof,
             });
         }
         let binding = crate::boolean::bitblast::bitblast_module_with_regions(
