@@ -130,7 +130,7 @@ pub(crate) struct CompilationShard {
 
 #[derive(Debug)]
 pub(crate) struct WorkGraph {
-    design: DesignRevision<LogicalCell>,
+    design: DesignRevisionId,
     items: Box<[WorkItem]>,
     shards: Box<[CompilationShard]>,
     coarse_groups: opto_core::PackedRows<CompilationShardId>,
@@ -159,7 +159,7 @@ impl WorkGraph {
                 "work graph and immutable design revision disagree",
             ));
         }
-        let design = design.0.clone();
+        let design = &design.0;
         let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
         let mut rows = Vec::new();
         let mut item_by_region = vec![None; regions.regions().len()];
@@ -240,7 +240,7 @@ impl WorkGraph {
         let successors = opto_core::PackedRows::try_from_rows(dependency_rows(false))
             .map_err(|_| crate::SynthError::capacity("work-item successors"))?;
         let mut graph = Self {
-            design,
+            design: design.revision(),
             items: items.into_boxed_slice(),
             shards: Box::new([]),
             coarse_groups: opto_core::PackedRows::try_from_rows(Vec::<Vec<_>>::new())
@@ -267,7 +267,7 @@ impl WorkGraph {
                     total.saturating_add(self.items[index].estimated_memory)
                 });
                 CompilationShard {
-                    id: shard_id(self.design.revision(), indices, &self.items),
+                    id: shard_id(self.design, indices, &self.items),
                     items: indices.into(),
                     estimated_work,
                     estimated_memory,
@@ -339,7 +339,7 @@ impl WorkGraph {
         if scheduled != (0..self.items.len()).collect::<Vec<_>>()
             || self.shards.iter().any(|shard| {
                 shard.items.is_empty()
-                    || shard.id != shard_id(self.design.revision(), &shard.items, &self.items)
+                    || shard.id != shard_id(self.design, &shard.items, &self.items)
                     || shard.estimated_work
                         != shard.items.iter().fold(0_u64, |total, &item| {
                             total.saturating_add(self.items[item].estimated_work)
@@ -1351,7 +1351,8 @@ mod tests {
         let design = WorkDesign::seal(&module, &regions).unwrap();
         let (mut work, binding) = WorkGraph::build(&module, &regions, &design, &contexts).unwrap();
 
-        assert!(work.design.cell_count() >= regions.regions().len());
+        assert_eq!(work.design, design.0.revision());
+        assert!(design.0.cell_count() >= regions.regions().len());
         assert_eq!(work.items.len(), regions.regions().len());
         assert_eq!(work.tasks().len(), regions.regions().len());
         for (index, &region) in regions.regions().iter().enumerate() {
@@ -1359,7 +1360,8 @@ mod tests {
             for &operation in regions.operations(region) {
                 let _ = logical_operation(&module, operation).unwrap();
                 assert!(
-                    work.design
+                    design
+                        .0
                         .cell(operation_cell_id(&regions, operation).unwrap())
                         .is_some()
                 );
