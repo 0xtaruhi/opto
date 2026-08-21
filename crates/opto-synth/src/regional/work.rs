@@ -10,7 +10,7 @@ use opto_ir::design::{
 use opto_ir::word;
 use opto_runtime::{Task, TaskKey};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 const WORK_TASK_DOMAIN: u32 = 0x574f_524b;
@@ -57,14 +57,14 @@ impl From<crate::RegionContextKey> for WorkContextKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LogicalOperation {
     kind: LogicalOperationKind,
     operands: Box<[word::WordType]>,
     result: word::WordType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum LogicalOperationKind {
     Unary(word::UnaryOp),
     Binary(word::BinaryOp),
@@ -93,13 +93,13 @@ enum LogicalOperationKind {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct LogicalReset {
     kind: word::ResetKind,
     active_high: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum LogicalCell {
     Operation(LogicalOperation),
     Connection,
@@ -159,11 +159,98 @@ pub(crate) struct WorkPacketItem {
     context: WorkContext,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkPacketDesign {
+    revision: DesignRevisionId,
+    cells: Box<[Cell<LogicalCell>]>,
+    nets: Box<[NetBit]>,
+}
+
+impl WorkPacketDesign {
+    fn validate(&self, items: &[WorkPacketItem]) -> Result<(), crate::SynthError> {
+        if self.cells.windows(2).any(|pair| pair[0].id >= pair[1].id)
+            || self.nets.windows(2).any(|pair| pair[0].id >= pair[1].id)
+        {
+            return Err(crate::SynthError::invariant(
+                "work packet design records are not in stable identity order",
+            ));
+        }
+        let cells = self
+            .cells
+            .iter()
+            .map(|cell| cell.id)
+            .collect::<BTreeSet<_>>();
+        let nets = self.nets.iter().map(|net| net.id).collect::<BTreeSet<_>>();
+        let halo_nets = items
+            .iter()
+            .flat_map(|item| item.halo.as_slice())
+            .filter_map(|entity| match *entity {
+                EntityId::NetBit(net) => Some(net),
+                EntityId::Cell(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if items.iter().any(|item| {
+            item.core
+                .as_slice()
+                .iter()
+                .chain(item.halo.as_slice())
+                .any(|entity| match *entity {
+                    EntityId::Cell(cell) => !cells.contains(&cell),
+                    EntityId::NetBit(net) => !nets.contains(&net),
+                })
+        }) {
+            return Err(crate::SynthError::invariant(
+                "work packet omits a core or halo design record",
+            ));
+        }
+        for cell in &self.cells {
+            if cell
+                .inputs
+                .iter()
+                .chain(&cell.outputs)
+                .any(|net| !nets.contains(net))
+            {
+                return Err(crate::SynthError::invariant(
+                    "work packet cell references a net outside its fragment",
+                ));
+            }
+            for (output, &net) in cell.outputs.iter().enumerate() {
+                let output = u32::try_from(output)
+                    .map_err(|_| crate::SynthError::capacity("packet cell output ordinal"))?;
+                if self
+                    .nets
+                    .binary_search_by_key(&net, |candidate| candidate.id)
+                    .ok()
+                    .and_then(|index| self.nets[index].driver)
+                    != Some(NetDriver::Cell {
+                        cell: cell.id,
+                        output,
+                    })
+                {
+                    return Err(crate::SynthError::invariant(
+                        "work packet cell and output net disagree",
+                    ));
+                }
+            }
+        }
+        if self.nets.iter().any(|net| {
+            matches!(net.driver, Some(NetDriver::Cell { cell, .. }) if !cells.contains(&cell))
+                && !halo_nets.contains(&net.id)
+        }) {
+            return Err(crate::SynthError::invariant(
+                "work packet core net has a driver outside its fragment",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkPacket {
     schema: u32,
     design: DesignRevisionId,
     shard: CompilationShardId,
+    fragment: WorkPacketDesign,
     items: Box<[WorkPacketItem]>,
     estimated_work: u64,
     estimated_memory: u64,
@@ -194,6 +281,7 @@ pub(crate) trait SynthesisExecutor {
         T: Send,
         F: Fn(
                 &WorkPacketItem,
+                &WorkPacketDesign,
                 &opto_runtime::ExecutionContext,
             ) -> Result<WorkProduct<T>, crate::SynthError>
             + Send
@@ -410,7 +498,7 @@ impl WorkGraph {
             .iter()
             .enumerate()
             .map(|(ordinal, shard)| {
-                let items = shard
+                let items: Box<[WorkPacketItem]> = shard
                     .items
                     .iter()
                     .map(|&row| WorkPacketItem {
@@ -420,12 +508,16 @@ impl WorkGraph {
                         context: self.contexts[row].clone(),
                     })
                     .collect();
+                let fragment = self
+                    .packet_design(shard, &items)
+                    .expect("validated work shard resolves its exact design fragment");
                 Task::new(
                     TaskKey::new(WORK_TASK_DOMAIN, ordinal as u64),
                     WorkPacket {
                         schema: 1,
                         design: self.design.0.revision(),
                         shard: shard.id,
+                        fragment,
                         items,
                         estimated_work: shard.estimated_work,
                         estimated_memory: shard.estimated_memory,
@@ -435,6 +527,58 @@ impl WorkGraph {
                 .with_estimated_memory(shard.estimated_memory)
             })
             .collect()
+    }
+
+    fn packet_design(
+        &self,
+        shard: &CompilationShard,
+        items: &[WorkPacketItem],
+    ) -> Result<WorkPacketDesign, crate::SynthError> {
+        let entities = shard
+            .items
+            .iter()
+            .flat_map(|&row| {
+                self.items[row]
+                    .core
+                    .as_slice()
+                    .iter()
+                    .chain(self.items[row].halo.as_slice())
+            })
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let cells = entities
+            .iter()
+            .filter_map(|entity| match *entity {
+                EntityId::Cell(id) => Some(
+                    self.design
+                        .0
+                        .cell(id)
+                        .cloned()
+                        .ok_or_else(|| crate::SynthError::invariant("packet cell is not live")),
+                ),
+                EntityId::NetBit(_) => None,
+            })
+            .collect::<Result<_, _>>()?;
+        let nets = entities
+            .iter()
+            .filter_map(|entity| match *entity {
+                EntityId::NetBit(id) => Some(
+                    self.design
+                        .0
+                        .net(id)
+                        .cloned()
+                        .ok_or_else(|| crate::SynthError::invariant("packet net is not live")),
+                ),
+                EntityId::Cell(_) => None,
+            })
+            .collect::<Result<_, _>>()?;
+        let fragment = WorkPacketDesign {
+            revision: self.design.0.revision(),
+            cells,
+            nets,
+        };
+        fragment.validate(items)?;
+        Ok(fragment)
     }
 
     pub(crate) fn regions(&self) -> &crate::SynthesisRegionGraph {
@@ -620,6 +764,7 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
         T: Send,
         F: Fn(
                 &WorkPacketItem,
+                &WorkPacketDesign,
                 &opto_runtime::ExecutionContext,
             ) -> Result<WorkProduct<T>, crate::SynthError>
             + Send
@@ -631,6 +776,12 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                     "work packet has an unsupported schema",
                 ));
             }
+            if packet.design != packet.fragment.revision {
+                return Err(crate::SynthError::invariant(
+                    "work packet fragment belongs to another design revision",
+                ));
+            }
+            packet.fragment.validate(&packet.items)?;
             if packet.estimated_work == 0 || packet.estimated_memory == 0 {
                 return Err(crate::SynthError::invariant(
                     "work packet has an invalid work or memory estimate",
@@ -640,7 +791,7 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                 .items
                 .iter()
                 .map(|item| {
-                    let product = operation(item, runtime)?;
+                    let product = operation(item, &packet.fragment, runtime)?;
                     Ok(WorkResult {
                         item: item.id,
                         shard: packet.shard,
@@ -1672,7 +1823,30 @@ mod tests {
         }
         let semantic_items = work.items.iter().map(|item| item.id).collect::<Vec<_>>();
         let execute = |work: &WorkGraph| {
-            let results = SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, _| {
+            let results =
+                SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, fragment, _| {
+                    let bytes = opto_archive::to_bytes(fragment).unwrap();
+                    let restored: WorkPacketDesign = opto_archive::from_bytes(&bytes).unwrap();
+                    assert_eq!(&restored, fragment);
+                    Ok(WorkProduct {
+                        proof: opto_ir::design::EquivalenceCertificate {
+                            regime: opto_ir::design::EquivalenceRegime::ByConstruction,
+                            digest: item.id.0,
+                        },
+                        output: item.id,
+                    })
+                })
+                .unwrap();
+            work.accept_results(results)
+                .unwrap()
+                .into_vec()
+                .into_iter()
+                .map(|result| result.output)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(execute(&work), semantic_items);
+        let mut invalid =
+            SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, _, _| {
                 Ok(WorkProduct {
                     proof: opto_ir::design::EquivalenceCertificate {
                         regime: opto_ir::design::EquivalenceRegime::ByConstruction,
@@ -1682,24 +1856,6 @@ mod tests {
                 })
             })
             .unwrap();
-            work.accept_results(results)
-                .unwrap()
-                .into_vec()
-                .into_iter()
-                .map(|result| result.output)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(execute(&work), semantic_items);
-        let mut invalid = SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, _| {
-            Ok(WorkProduct {
-                proof: opto_ir::design::EquivalenceCertificate {
-                    regime: opto_ir::design::EquivalenceRegime::ByConstruction,
-                    digest: item.id.0,
-                },
-                output: item.id,
-            })
-        })
-        .unwrap();
         invalid[0].footprint.replaces = EntitySet::new(vec![]).unwrap();
         assert!(work.accept_results(invalid).is_err());
         let serial =

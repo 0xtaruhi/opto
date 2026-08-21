@@ -287,7 +287,7 @@ pub(crate) fn prepare_regional_architectures(
     let results = crate::regional::SynthesisExecutor::execute(
         runtime,
         work.packet_tasks(),
-        |item, regional_runtime| {
+        |item, _, regional_runtime| {
             let region_row = work.item_region(item.id()).ok_or_else(|| {
                 SynthError::invariant("regional work item has no local import binding")
             })?;

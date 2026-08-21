@@ -145,7 +145,7 @@ pub enum NetDriver {
     Constant(crate::BitVal),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Canonical scalar net with stable identity and at most one logical driver.
 pub struct NetBit {
     /// Stable net identity.
@@ -165,7 +165,7 @@ pub enum CellClass {
     StateBoundary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Canonical logical cell with exact input and output net bits.
 pub struct Cell<L> {
     /// Stable cell identity independent of record slot and work shard.

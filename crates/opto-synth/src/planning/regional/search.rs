@@ -57,7 +57,7 @@ pub(crate) fn select_architectures(
         })
         .collect::<Vec<_>>();
     let results =
-        crate::regional::SynthesisExecutor::execute(runtime, work.packet_tasks(), |item, _| {
+        crate::regional::SynthesisExecutor::execute(runtime, work.packet_tasks(), |item, _, _| {
             let region_row = work.item_region(item.id()).ok_or_else(|| {
                 crate::SynthError::invariant("architecture work item has no region binding")
             })?;
