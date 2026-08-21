@@ -9,7 +9,7 @@ use crate::boolean::bitblast::{
     LocalRegionBooleanLowering, LocalRegionBooleanRequest, LoweredRegionBinding,
     implementation_providers, lower_local_region_boolean,
 };
-use crate::boolean::logic::RegionLogicOptions;
+use crate::boolean::logic::{ChoiceGraph, ChoiceScopeId, ChoiceSubject, RegionLogicOptions};
 use crate::mapping::{CandidateBindingDomain, RegionPlanBinding, TargetMappingContext};
 use crate::planning::operator::ArchitectureDecisions;
 use crate::planning::regional::{
@@ -71,11 +71,30 @@ struct LoweredPrivateRegion {
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
     architecture: PrivateArchitecturePublication,
     operators: DurableOperatorArena,
-    lowering: LocalRegionBooleanLowering,
+    lowered_binding: LoweredRegionBinding,
     state_operations: Box<[super::materialize::SequentialRegionBinding]>,
     mapping_roots: Box<[MappingRoot]>,
     sequential_timing: super::sequential::SequentialTimingProjection,
     substrate_instances: Box<[Box<str>]>,
+}
+
+struct PreparedRegionalChoice {
+    private: LoweredPrivateRegion,
+    cover: PreparedRegionCover,
+}
+
+struct LoweredRegionalChoice {
+    private: LoweredPrivateRegion,
+    root_pairs: Vec<(MappingRoot, word::ValueId)>,
+    canonical: crate::boolean::logic::CanonicalRegionLogic,
+}
+
+struct RegionalMaterialization {
+    restored_plan: Option<RegionCoverPlan>,
+    region: SynthesisRegion,
+    context: RegionContextKey,
+    prepared: PreparedRegionalChoice,
+    analysis: super::cover::RegionCoverAnalysis,
 }
 
 struct OptimizedPrivateRegion {
@@ -101,6 +120,12 @@ struct RegionalCharacterization {
     restored_plan: Option<RegionCoverPlan>,
     context: RegionContextKey,
     private: CharacterizedPrivateRegion,
+}
+
+struct SelectedRegionalContext {
+    memory_implementations: Box<[MemoryImplementationCandidate]>,
+    restored_plan: Option<RegionCoverPlan>,
+    context: RegionContextKey,
 }
 
 #[derive(Clone, Copy)]
@@ -365,32 +390,116 @@ pub(crate) fn prepare_regional_architectures(
             .with_estimated_memory(region.estimated_work().max(1))
         })
         .collect();
-    let mapped_regions = runtime.map_ordered_composite(
-        tasks,
-        |(region, candidate), regional_runtime| {
-            let mapped = materializer.materialize(
-                &candidate.memory_implementations,
-                candidate.restored_plan,
+    let prepared =
+        runtime.map_ordered_composite(tasks, |(region, candidate), _regional_runtime| {
+            let RegionalCharacterization {
+                memory_implementations,
+                restored_plan,
+                context,
+                private,
+            } = candidate;
+            let LoweredRegionalChoice {
+                private,
+                root_pairs,
+                canonical,
+            } = materializer.lower_characterized_region(private, region)?;
+            let cover = materializer.prepare_region_cover(
+                &private,
+                &canonical.inputs,
+                root_pairs,
+                &memory_implementations,
                 region,
-                candidate.context,
-                candidate.private,
-                regional_runtime,
             )?;
+            let subject = ChoiceSubject {
+                canonical,
+                roots: cover.slice.roots().iter().map(|root| root.value).collect(),
+                requirements: cover
+                    .slice
+                    .roots()
+                    .iter()
+                    .map(|root| root.required_time)
+                    .collect(),
+            };
+            Ok::<_, SynthError>((
+                SelectedRegionalContext {
+                    memory_implementations,
+                    restored_plan,
+                    context,
+                },
+                PreparedRegionalChoice { private, cover },
+                subject,
+            ))
+        })?;
+    let (prepared, subjects): (Vec<_>, Vec<_>) = prepared
+        .into_iter()
+        .map(|(selection, prepared, subject)| ((selection, prepared), subject))
+        .unzip();
+    let (choices, compiled) = compile_design_choices(subjects, &prepared, request, runtime)?;
+    let cover_scopes = prepared
+        .iter()
+        .enumerate()
+        .map(|(row, (_, prepared))| {
+            Ok(super::cover::DesignCoverScope {
+                module: &prepared.private.module,
+                roots: prepared.cover.slice.roots(),
+                regional_slice: &prepared.cover.slice,
+                scope: ChoiceScopeId::from_index(row)?,
+            })
+        })
+        .collect::<Result<Vec<_>, SynthError>>()?;
+    let cover_results = super::cover::analyze_design_cover(
+        &choices,
+        &compiled,
+        &cover_scopes,
+        request.timing,
+        &opto_timing::PortBindings::new([]),
+        request.mapping_context,
+        runtime,
+    )?;
+    let tasks = prepared
+        .into_iter()
+        .zip(cover_results)
+        .enumerate()
+        .map(|(row, (prepared, analysis))| {
+            let region = regions.regions()[row];
+            Task::new(
+                TaskKey::new(REGIONAL_MATERIALIZATION_TASK_DOMAIN + 1, row as u64),
+                (region, prepared, analysis),
+            )
+            .with_estimated_work(region.estimated_work().max(1))
+            .with_estimated_memory(region.estimated_work().max(1))
+        })
+        .collect::<Vec<_>>();
+    let mapped_regions = runtime.map_ordered_composite(tasks, |task, _regional_runtime| {
+        let (region, (selection, prepared), cover_result) = task;
+        let SelectedRegionalContext {
+            memory_implementations,
+            restored_plan,
+            context,
+        } = selection;
+        let mapped = materializer.materialize(
+            RegionalMaterialization {
+                restored_plan,
+                region,
+                context,
+                prepared,
+                analysis: cover_result,
+            },
+        )?;
             crate::api::diagnostics::trace!(
                 crate::api::diagnostics::SynthTrace::new(self::diagnostics_enabled(&materializer)),
                 "regional.architecture",
                 "row={} lowering_work={} nested_lanes={} area={:.4} cells={} violation={:.6} slack={:.4}",
                 region.row().raw(),
                 region.estimated_work().max(1),
-                regional_runtime.parallelism(),
+                runtime.parallelism(),
                 mapped.plan.cost().area.get(),
                 mapped.plan.cost().cell_count,
                 mapped.plan.cost().worst_normalized_violation.get(),
                 mapped.plan.cost().minimum_slack.get(),
             );
-            Ok::<_, SynthError>((candidate.memory_implementations, mapped))
-        },
-    )?;
+        Ok::<_, SynthError>((memory_implementations, mapped))
+    })?;
     let mut prepared_regions = Vec::with_capacity(mapped_regions.len());
     let mut selected_memories = vec![None; request.source.memories().len()];
     for (row, (memory_implementations, mapped)) in mapped_regions.into_iter().enumerate() {
@@ -422,6 +531,50 @@ pub(crate) fn prepare_regional_architectures(
         prepared_regions.into_boxed_slice(),
         selected_memories.into_boxed_slice(),
     ))
+}
+
+fn compile_design_choices(
+    subjects: Vec<ChoiceSubject>,
+    prepared: &[(SelectedRegionalContext, PreparedRegionalChoice)],
+    request: &RegionalArchitectureRequest<'_>,
+    runtime: &ExecutionContext,
+) -> Result<(ChoiceGraph, super::cover::CompiledChoiceMapping), SynthError> {
+    let choices = ChoiceGraph::from_subjects(
+        subjects,
+        RegionLogicOptions {
+            optimize: request.mapping_context.combinational_catalog.can_invert(),
+            config: request.mapping_context.config,
+            runtime,
+            incremental: Some(crate::boolean::logic::RewriteIncremental::new(
+                request.rewrite_recipes,
+                request.incremental_metrics,
+            )),
+        },
+    )?;
+    let mut outputs = Vec::new();
+    for (row, (_, prepared)) in prepared.iter().enumerate() {
+        let scope = ChoiceScopeId::from_index(row)?;
+        for root in prepared
+            .cover
+            .slice
+            .roots()
+            .iter()
+            .filter(|root| root.requires_combinational_cover)
+        {
+            outputs.push(choices.node(scope, root.value).ok_or_else(|| {
+                SynthError::invariant("design-wide choice graph omitted an active regional root")
+            })?);
+        }
+    }
+    outputs.sort_unstable();
+    outputs.dedup();
+    let compiled = super::cover::compile_choice_mapping(
+        &choices,
+        &outputs,
+        &request.mapping_context.combinational_catalog,
+        runtime,
+    )?;
+    Ok((choices, compiled))
 }
 
 fn characterization_proof(
@@ -508,31 +661,21 @@ impl RegionArchitectureMaterializer<'_, '_> {
 
     fn materialize(
         &self,
-        memory_implementations: &[MemoryImplementationCandidate],
-        restored_plan: Option<RegionCoverPlan>,
-        region: SynthesisRegion,
-        context: RegionContextKey,
-        private: CharacterizedPrivateRegion,
-        runtime: &ExecutionContext,
+        request: RegionalMaterialization,
     ) -> Result<RegionalArchitectureMapping, SynthError> {
-        let profiling = self.request.mapping_context.config.diagnostics.timing;
-        let row = region.row().raw();
-        let (private, root_pairs) = {
-            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-                format!("logic_lowering.region[{row}].private_lowering")
-            });
-            self.lower_characterized_region(private, region)?
-        };
+        let RegionalMaterialization {
+            restored_plan,
+            region,
+            context,
+            prepared,
+            analysis,
+        } = request;
+        let PreparedRegionalChoice { private, cover } = prepared;
         let PreparedRegionCover {
             slice,
             decision_key,
             publication,
-        } = {
-            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-                format!("logic_lowering.region[{row}].cover_preparation")
-            });
-            self.prepare_region_cover(&private, root_pairs, memory_implementations, region)?
-        };
+        } = cover;
         let LoweredPrivateRegion {
             module,
             source_to_local,
@@ -542,46 +685,12 @@ impl RegionArchitectureMaterializer<'_, '_> {
             root_bindings,
             architecture,
             operators,
-            lowering,
+            lowered_binding,
             state_operations,
             mapping_roots: _,
             sequential_timing: _,
             substrate_instances,
         } = private;
-        let empty_port_bindings = opto_timing::PortBindings::new([]);
-        let LocalRegionBooleanLowering {
-            binding: lowered_binding,
-            subject,
-        } = lowering;
-        let analysis = {
-            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-                format!("logic_lowering.region[{row}].cover_analysis")
-            });
-            super::cover::analyze_region_cover(
-                &module,
-                super::cover::RegionCoverRequest {
-                    roots: slice.roots(),
-                    timing: self.request.timing,
-                    port_bindings: &empty_port_bindings,
-                    catalog: &self.request.mapping_context.combinational_catalog,
-                    options: RegionLogicOptions {
-                        optimize: self
-                            .request
-                            .mapping_context
-                            .combinational_catalog
-                            .can_invert(),
-                        config: self.request.mapping_context.config,
-                        runtime,
-                        incremental: Some(crate::boolean::logic::RewriteIncremental::new(
-                            self.request.rewrite_recipes,
-                            self.request.incremental_metrics,
-                        )),
-                    },
-                    regional_slice: &slice,
-                },
-                subject,
-            )?
-        };
         let response_models = super::cover::CoverResponseModels::new(self.request.scenarios);
         let domain = CandidateBindingDomain {
             source_module: self.request.source,
@@ -656,7 +765,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         &self,
         private: CharacterizedPrivateRegion,
         region: SynthesisRegion,
-    ) -> Result<(LoweredPrivateRegion, Vec<(MappingRoot, word::ValueId)>), SynthError> {
+    ) -> Result<LoweredRegionalChoice, SynthError> {
         let CharacterizedPrivateRegion {
             optimized,
             decisions: local_decisions,
@@ -780,8 +889,12 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 },
             )
         }?;
-        Ok((
-            LoweredPrivateRegion {
+        let LocalRegionBooleanLowering {
+            binding: lowered_binding,
+            subject,
+        } = lowering;
+        Ok(LoweredRegionalChoice {
+            private: LoweredPrivateRegion {
                 module,
                 source_to_local,
                 boundary_bindings,
@@ -790,14 +903,15 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 root_bindings,
                 architecture,
                 operators,
-                lowering,
+                lowered_binding,
                 state_operations: lowered_sequential,
                 mapping_roots: mapping_roots.into_boxed_slice(),
                 sequential_timing,
                 substrate_instances,
             },
             root_pairs,
-        ))
+            canonical: subject,
+        })
     }
 
     fn characterize_private_region(
@@ -1048,6 +1162,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
     fn prepare_region_cover(
         &self,
         private: &LoweredPrivateRegion,
+        subject_inputs: &[word::ValueId],
         root_pairs: Vec<(MappingRoot, word::ValueId)>,
         memory_implementations: &[MemoryImplementationCandidate],
         region: SynthesisRegion,
@@ -1058,7 +1173,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         } = expand_mapping_root_pairs(
             self.request.source,
             self.semantics,
-            &private.lowering.binding,
+            &private.lowered_binding,
             &self
                 .request
                 .work
@@ -1084,14 +1199,14 @@ impl RegionArchitectureMaterializer<'_, '_> {
         suppress_substrate_roots(
             &private.module,
             &local_semantics,
-            &private.lowering.binding,
+            &private.lowered_binding,
             &substrate_outputs,
             &mut root_pairs,
         )?;
         append_local_mapping_roots(
             &private.module,
             &local_semantics,
-            &private.lowering.binding,
+            &private.lowered_binding,
             &substrate_outputs,
             private.mapping_roots.iter().copied(),
             &mut root_pairs,
@@ -1103,9 +1218,9 @@ impl RegionArchitectureMaterializer<'_, '_> {
             decision_key,
             super::logic_partition::RegionLogicDomain {
                 module: &private.module,
-                subject_inputs: &private.lowering.subject.inputs,
+                subject_inputs,
                 source_to_local: &private.source_to_local,
-                region_binding: &private.lowering.binding,
+                region_binding: &private.lowered_binding,
                 contracts: self.request.contracts.contracts(region.row()),
                 roots: &root_pairs,
             },

@@ -91,17 +91,17 @@ fn cover_compiled(
     })
 }
 
-pub(crate) fn cover_choice_graph(
+pub(super) fn cover_choice_graph(
     choices: &crate::boolean::logic::ChoiceGraph,
+    mapping: &CompiledMapping,
     outputs: &[LogicNodeId],
     catalog: &CombinationalCellCatalog,
     timing_constraints: CoverTiming<'_>,
     runtime: &ExecutionContext,
 ) -> Result<Option<LibraryCover>, crate::SynthError> {
-    let mapping = CompiledMapping::for_choices(choices, outputs, catalog, runtime)?;
     cover_compiled(
         choices.network(),
-        &mapping,
+        mapping,
         outputs,
         catalog,
         timing_constraints,
@@ -310,7 +310,7 @@ struct CandidateIndex {
 }
 
 /// Immutable target compilation for one choice graph and root set.
-struct CompiledMapping {
+pub(super) struct CompiledMapping {
     cuts: CutDatabase,
     truths: CutTruthDatabase,
     live_nodes: Box<[bool]>,

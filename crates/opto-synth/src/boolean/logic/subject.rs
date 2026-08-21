@@ -3,15 +3,38 @@
 
 use super::network::{LogicGraph, LogicNodeId};
 use opto_ir::word;
-use opto_runtime::ExecutionContext;
+use opto_runtime::{ExecutionContext, Task, TaskKey};
+
+const CHOICE_SCOPE_TASK_DOMAIN: u32 = 0x4348_4f49;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ChoiceScopeId(u32);
+
+impl ChoiceScopeId {
+    pub(crate) fn from_index(index: usize) -> Result<Self, crate::SynthError> {
+        Ok(Self(u32::try_from(index).map_err(|_| {
+            crate::SynthError::capacity("choice scope ID exceeds 32-bit capacity")
+        })?))
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// One immutable Boolean arena with proved implementation alternatives.
 pub(crate) struct ChoiceGraph {
     network: LogicGraph,
     alternatives: opto_core::PackedRows<LogicNodeId>,
-    value_nodes: Box<[(word::ValueId, LogicNodeId)]>,
-    dont_care_values: Box<[word::ValueId]>,
-    inputs: Box<[word::ValueId]>,
+    value_nodes: opto_core::PackedRows<(word::ValueId, LogicNodeId)>,
+    dont_care_values: opto_core::PackedRows<word::ValueId>,
+    inputs: opto_core::PackedRows<word::ValueId>,
+}
+
+pub(crate) struct ChoiceSubject {
+    pub(crate) canonical: CanonicalRegionLogic,
+    pub(crate) roots: Box<[word::ValueId]>,
+    pub(crate) requirements: Box<[Option<f64>]>,
 }
 
 /// Canonical AXM network and its stable region-local Word binding identities.
@@ -31,6 +54,99 @@ pub(crate) struct RegionLogicOptions<'a> {
 }
 
 impl ChoiceGraph {
+    pub(crate) fn from_subjects(
+        subjects: Vec<ChoiceSubject>,
+        options: RegionLogicOptions<'_>,
+    ) -> Result<Self, crate::SynthError> {
+        let tasks = subjects
+            .into_iter()
+            .enumerate()
+            .map(|(index, subject)| {
+                let work = subject.canonical.network.node_count().max(1) as u64;
+                Task::new(
+                    TaskKey::new(CHOICE_SCOPE_TASK_DOMAIN, index as u64),
+                    subject,
+                )
+                .with_estimated_work(work)
+                .with_estimated_memory(work)
+            })
+            .collect();
+        let optimized = options
+            .runtime
+            .map_ordered_composite(tasks, |subject, runtime| {
+                Self::from_canonical(
+                    subject.canonical,
+                    &subject.roots,
+                    &subject.requirements,
+                    RegionLogicOptions { runtime, ..options },
+                )
+            })?;
+        Self::merge(optimized)
+    }
+
+    fn merge(scopes: Vec<Self>) -> Result<Self, crate::SynthError> {
+        let mut network = LogicGraph::new();
+        let mut alternatives = vec![Vec::new()];
+        let mut value_nodes = Vec::with_capacity(scopes.len());
+        let mut dont_care_values = Vec::with_capacity(scopes.len());
+        let mut inputs = Vec::with_capacity(scopes.len());
+        let mut variable_offset = 0usize;
+        for scope in scopes {
+            if (0..scope.network.node_count()).any(|index| {
+                matches!(
+                    scope.network.node(LogicNodeId::from_index(index)),
+                    super::network::LogicNode::Var(origin)
+                        if origin as usize >= scope.inputs.value_count()
+                )
+            }) {
+                return Err(crate::SynthError::invariant(
+                    "choice scope input bindings do not cover its variables",
+                ));
+            }
+            let remap = network.append(&scope.network, variable_offset)?;
+            variable_offset = variable_offset
+                .checked_add(scope.inputs.value_count())
+                .ok_or_else(|| crate::SynthError::capacity("design-wide logic input count"))?;
+            alternatives.resize_with(network.node_count(), Vec::new);
+            for index in 0..scope.network.node_count() {
+                let representative = remap[index].positive().index();
+                alternatives[representative].extend(
+                    scope.alternatives[index]
+                        .iter()
+                        .copied()
+                        .map(|alternative| remap_literal(&remap, alternative))
+                        .filter(|alternative| alternative.positive().index() != representative),
+                );
+            }
+            value_nodes.push(
+                scope
+                    .value_nodes
+                    .values()
+                    .iter()
+                    .map(|&(value, node)| (value, remap_literal(&remap, node)))
+                    .collect::<Vec<_>>(),
+            );
+            dont_care_values.push(scope.dont_care_values.values().to_vec());
+            inputs.push(scope.inputs.values().to_vec());
+        }
+        for row in &mut alternatives {
+            row.sort_unstable();
+            row.dedup();
+        }
+        network.freeze();
+        Ok(Self {
+            network,
+            alternatives: opto_core::PackedRows::try_from_rows(alternatives)
+                .map_err(|_| crate::SynthError::capacity("design-wide choice alternatives"))?,
+            value_nodes: opto_core::PackedRows::try_from_rows(value_nodes)
+                .map_err(|_| crate::SynthError::capacity("design-wide choice bindings"))?,
+            dont_care_values: opto_core::PackedRows::try_from_rows(dont_care_values)
+                .map_err(|_| crate::SynthError::capacity("design-wide don't-care bindings"))?,
+            inputs: opto_core::PackedRows::try_from_rows(inputs)
+                .map_err(|_| crate::SynthError::capacity("design-wide choice inputs"))?,
+        })
+    }
+
     pub(crate) fn from_canonical(
         mut subject: CanonicalRegionLogic,
         roots: &[word::ValueId],
@@ -103,9 +219,14 @@ impl ChoiceGraph {
         Ok(Self {
             network: optimized.network,
             alternatives: optimized.alternatives,
-            value_nodes: value_nodes.into_boxed_slice(),
-            dont_care_values: subject.dont_care_values,
-            inputs: subject.inputs,
+            value_nodes: opto_core::PackedRows::try_from_rows(vec![value_nodes])
+                .map_err(|_| crate::SynthError::capacity("choice value bindings"))?,
+            dont_care_values: opto_core::PackedRows::try_from_rows(vec![
+                subject.dont_care_values.into_vec(),
+            ])
+            .map_err(|_| crate::SynthError::capacity("choice don't-care bindings"))?,
+            inputs: opto_core::PackedRows::try_from_rows(vec![subject.inputs.into_vec()])
+                .map_err(|_| crate::SynthError::capacity("choice input bindings"))?,
         })
     }
 
@@ -142,22 +263,39 @@ impl ChoiceGraph {
         live.into_boxed_slice()
     }
 
-    pub(crate) fn inputs(&self) -> &[word::ValueId] {
-        &self.inputs
+    pub(crate) fn inputs(&self, scope: ChoiceScopeId) -> &[word::ValueId] {
+        &self.inputs[scope.index()]
+    }
+
+    pub(crate) fn input_range(&self, scope: ChoiceScopeId) -> std::ops::Range<usize> {
+        self.inputs
+            .row_range(scope.index())
+            .expect("choice scope belongs to the design-wide graph")
     }
 
     /// The subject node implementing one region-local Word value.
-    pub(crate) fn node(&self, value: word::ValueId) -> Option<LogicNodeId> {
-        let index = self
-            .value_nodes
+    pub(crate) fn node(&self, scope: ChoiceScopeId, value: word::ValueId) -> Option<LogicNodeId> {
+        let values = &self.value_nodes[scope.index()];
+        let index = values
             .binary_search_by_key(&value, |&(candidate, _)| candidate)
             .ok()?;
-        Some(self.value_nodes[index].1)
+        Some(values[index].1)
     }
 
     /// Return whether a published value has no Boolean care obligation.
-    pub(crate) fn is_dont_care(&self, value: word::ValueId) -> bool {
-        self.dont_care_values.binary_search(&value).is_ok()
+    pub(crate) fn is_dont_care(&self, scope: ChoiceScopeId, value: word::ValueId) -> bool {
+        self.dont_care_values[scope.index()]
+            .binary_search(&value)
+            .is_ok()
+    }
+}
+
+fn remap_literal(remap: &[LogicNodeId], node: LogicNodeId) -> LogicNodeId {
+    let mapped = remap[node.index()];
+    if node.is_inverted() {
+        mapped.inverted()
+    } else {
+        mapped
     }
 }
 
@@ -229,7 +367,9 @@ mod tests {
             },
         )
         .expect("choice graph construction succeeds");
-        let root = choices.node(value).expect("root binding is retained");
+        let root = choices
+            .node(ChoiceScopeId(0), value)
+            .expect("root binding is retained");
         let cuts = CutDatabase::build_choices_parallel(
             &choices,
             crate::boolean::logic::MAX_MATCH_INPUTS,
@@ -252,5 +392,51 @@ mod tests {
             retained.expect("compiled mapping retains a usable alternative cut");
         assert_eq!(truths.truth(node, cut).input_count, candidate.len());
         assert!(choices.live_nodes(&[root])[cuts.origin(node, cut).index()]);
+    }
+
+    #[test]
+    fn design_wide_scopes_keep_local_input_domains_disjoint() {
+        let value = word::ValueId::FIRST;
+        let build = |xor: bool| {
+            let mut network = LogicGraph::new();
+            let left = network.variable(0).unwrap();
+            let right = network.variable(1).unwrap();
+            let root = if xor {
+                network.xor(left, right)
+            } else {
+                network.and(left, right)
+            };
+            network.freeze();
+            ChoiceSubject {
+                canonical: CanonicalRegionLogic {
+                    network,
+                    value_nodes: Box::new([(value, root)]),
+                    dont_care_values: Box::new([]),
+                    inputs: Box::new([value, word::ValueId::from_index(1).unwrap()]),
+                },
+                roots: Box::new([value]),
+                requirements: Box::new([None]),
+            }
+        };
+        let runtime = ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 2 })
+            .expect("test runtime is valid");
+        let choices = ChoiceGraph::from_subjects(
+            vec![build(false), build(true)],
+            RegionLogicOptions {
+                optimize: false,
+                config: crate::SynthesisConfig::default(),
+                runtime: &runtime,
+                incremental: None,
+            },
+        )
+        .expect("design-wide choice construction succeeds");
+        let first = ChoiceScopeId(0);
+        let second = ChoiceScopeId(1);
+        assert_eq!(choices.input_range(first), 0..2);
+        assert_eq!(choices.input_range(second), 2..4);
+        let first = choices.node(first, value).unwrap();
+        let second = choices.node(second, value).unwrap();
+        assert_eq!(choices.network.truth_table(first, 4).bits, 0x8888);
+        assert_eq!(choices.network.truth_table(second, 4).bits, 0x0ff0);
     }
 }

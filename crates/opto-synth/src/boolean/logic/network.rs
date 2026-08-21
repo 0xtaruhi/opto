@@ -133,6 +133,47 @@ pub(crate) struct LogicGraph {
 }
 
 impl LogicGraph {
+    pub(crate) fn append(
+        &mut self,
+        source: &Self,
+        variable_offset: usize,
+    ) -> Result<Box<[LogicNodeId]>, crate::SynthError> {
+        let mut remap = Vec::with_capacity(source.node_count());
+        remap.push(Self::constant(false));
+        let map = |node: LogicNodeId, remap: &[LogicNodeId]| {
+            let mapped = remap[node.index()];
+            if node.is_inverted() {
+                mapped.inverted()
+            } else {
+                mapped
+            }
+        };
+        for index in 1..source.node_count() {
+            let node =
+                match source.node(LogicNodeId::from_index(index)) {
+                    LogicNode::Const(value) => Self::constant(value),
+                    LogicNode::Var(origin) => self
+                        .variable(variable_offset.checked_add(origin as usize).ok_or_else(
+                            || crate::SynthError::capacity("design-wide logic input ID"),
+                        )?)
+                        .ok_or_else(|| crate::SynthError::capacity("design-wide logic input ID"))?,
+                    LogicNode::And(left, right) => self.and(map(left, &remap), map(right, &remap)),
+                    LogicNode::Xor(left, right) => self.xor(map(left, &remap), map(right, &remap)),
+                    LogicNode::Mux {
+                        cond,
+                        then_value,
+                        else_value,
+                    } => self.mux(
+                        map(cond, &remap),
+                        map(then_value, &remap),
+                        map(else_value, &remap),
+                    ),
+                };
+            remap.push(node);
+        }
+        Ok(remap.into_boxed_slice())
+    }
+
     /// Counts how many times each node is referenced, treating every root as one
     /// external reference.
     ///

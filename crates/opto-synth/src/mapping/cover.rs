@@ -5,8 +5,8 @@ use self::search::{CoverTiming, LibraryCover};
 pub(crate) use self::search::{LibraryCoverBinding, LibraryCoverSource};
 use super::roots::MappingRoot;
 use super::{CombinationalCellCatalog, word};
-use crate::boolean::logic::ChoiceGraph;
 use crate::boolean::logic::network::LogicNodeId;
+use crate::boolean::logic::{ChoiceGraph, ChoiceScopeId};
 
 mod portable;
 mod response;
@@ -26,13 +26,23 @@ pub(crate) enum RegionCoverAnalysis {
     Covered(Box<AnalyzedRegionCover>),
 }
 
+pub(crate) struct CompiledChoiceMapping(search::CompiledMapping);
+
+pub(crate) fn compile_choice_mapping(
+    choices: &ChoiceGraph,
+    outputs: &[LogicNodeId],
+    catalog: &CombinationalCellCatalog,
+    runtime: &opto_runtime::ExecutionContext,
+) -> Result<CompiledChoiceMapping, crate::SynthError> {
+    search::CompiledMapping::for_choices(choices, outputs, catalog, runtime)
+        .map(CompiledChoiceMapping)
+}
+
 #[derive(Clone)]
 pub(crate) struct AnalyzedRegionOutput {
     node: LogicNodeId,
     values: Box<[word::ValueId]>,
 }
-
-type SelectedSubjectCover = (Box<[AnalyzedRegionOutput]>, LibraryCover);
 
 /// Borrowed closure domain used to evaluate and seal one regional cover.
 #[derive(Clone, Copy)]
@@ -235,101 +245,150 @@ impl AnalyzedRegionCover {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct RegionCoverRequest<'a> {
+pub(crate) struct DesignCoverScope<'a> {
+    pub(crate) module: &'a word::WordModule,
     pub(crate) roots: &'a [MappingRoot],
-    pub(crate) timing: &'a opto_timing::TimingContext,
-    pub(crate) port_bindings: &'a opto_timing::PortBindings,
-    pub(crate) catalog: &'a super::library::CombinationalCellCatalog,
-    pub(crate) options: crate::boolean::logic::RegionLogicOptions<'a>,
     pub(crate) regional_slice: &'a super::logic_partition::RegionLogicSlice,
+    pub(crate) scope: ChoiceScopeId,
 }
 
-pub(crate) fn analyze_region_cover(
-    module: &word::WordModule,
-    request: RegionCoverRequest<'_>,
-    canonical: crate::boolean::logic::CanonicalRegionLogic,
-) -> Result<RegionCoverAnalysis, crate::SynthError> {
-    if request.roots.is_empty() {
-        return Ok(RegionCoverAnalysis::NoCombinationalLogic);
-    }
-    let root_values = request
-        .roots
-        .iter()
-        .map(|root| root.value)
-        .collect::<Vec<_>>();
-    let root_requirements = request
-        .roots
-        .iter()
-        .map(|root| root.required_time)
-        .collect::<Vec<_>>();
-    let profiling = request.options.config.diagnostics.timing;
-    let subject = {
-        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-            "cover.subject_optimization".to_string()
-        });
-        ChoiceGraph::from_canonical(canonical, &root_values, &root_requirements, request.options)?
-    };
-    let inputs = subject.inputs().to_vec().into_boxed_slice();
-    let Some((outputs, cover)) = ({
-        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-            "cover.library_selection".to_string()
-        });
-        select_subject_cover(&subject, &inputs, module, &request)?
-    }) else {
-        return Ok(RegionCoverAnalysis::NoCombinationalLogic);
-    };
-    Ok(RegionCoverAnalysis::Covered(Box::new(
-        AnalyzedRegionCover {
-            inputs,
-            outputs,
-            cover,
-        },
-    )))
-}
-
-fn select_subject_cover(
+pub(crate) fn analyze_design_cover(
     subject: &ChoiceGraph,
-    inputs: &[word::ValueId],
-    module: &word::WordModule,
-    request: &RegionCoverRequest<'_>,
-) -> Result<Option<SelectedSubjectCover>, crate::SynthError> {
-    let selector = CoverSelector {
+    compiled: &CompiledChoiceMapping,
+    scopes: &[DesignCoverScope<'_>],
+    timing: &opto_timing::TimingContext,
+    port_bindings: &opto_timing::PortBindings,
+    mapping: &super::TargetMappingContext,
+    runtime: &opto_runtime::ExecutionContext,
+) -> Result<Vec<RegionCoverAnalysis>, crate::SynthError> {
+    let catalog = &mapping.combinational_catalog;
+    let mut outputs = Vec::new();
+    let mut output_ranges = Vec::with_capacity(scopes.len());
+    let mut required_times = Vec::new();
+    let mut output_loads = Vec::new();
+    let mut input_transitions = Vec::new();
+    let mut input_arrivals = Vec::new();
+    for scope in scopes {
+        let start = outputs.len();
+        let analyzed = analyzed_outputs(scope.roots, subject, scope.scope)?
+            .map_or_else(Vec::new, <[AnalyzedRegionOutput]>::into_vec);
+        let roots = merged_output_roots(scope.roots, &analyzed)?;
+        required_times.extend(roots.iter().map(|root| root.required_time));
+        output_loads.extend(roots.iter().map(|root| root.output_load));
+        outputs.extend(analyzed);
+        output_ranges.push(start..outputs.len());
+        for &value in subject.inputs(scope.scope) {
+            input_transitions.push(scope.regional_slice.search_input_transition(value).or_else(
+                || {
+                    let word::ValueKind::Signal(reference) = scope.module.value(value)?.kind else {
+                        return None;
+                    };
+                    let word::SignalKind::Port(port) = scope.module.signal(reference.signal)?.kind
+                    else {
+                        return None;
+                    };
+                    port_bindings
+                        .get(port.index())
+                        .and_then(|port| timing.input_transition_on(port))
+                },
+            ));
+            input_arrivals.push(scope.regional_slice.search_input_arrival(value));
+        }
+    }
+    if outputs.is_empty() {
+        return Ok(scopes
+            .iter()
+            .map(|_| RegionCoverAnalysis::NoCombinationalLogic)
+            .collect());
+    }
+    let nodes = outputs.iter().map(|output| output.node).collect::<Vec<_>>();
+    let _profile =
+        crate::api::diagnostics::ProfileSpan::new(mapping.config.diagnostics.timing, || {
+            "cover.design_wide_selection".to_string()
+        });
+    let cover = search::cover_choice_graph(
         subject,
-        inputs,
-        module,
-        request,
-    };
-    let Some(outputs) = analyzed_outputs(request.roots, subject)? else {
-        return Ok(None);
-    };
-    let cover = selector
-        .select(&outputs, request.options.runtime)?
-        .ok_or_else(|| crate::SynthError::mapping("regional Boolean network cannot be covered"))?;
-    crate::api::diagnostics::trace!(
-        crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
-        "cover.logic",
-        "area={:.3}",
-        cover.total_area
-    );
-    Ok(Some((outputs, cover)))
+        &compiled.0,
+        &nodes,
+        catalog,
+        CoverTiming {
+            required_times: &required_times,
+            output_loads: &output_loads,
+            input_transitions: &input_transitions,
+            input_arrivals: &input_arrivals,
+        },
+        runtime,
+    )?
+    .ok_or_else(|| crate::SynthError::mapping("design-wide Boolean graph cannot be covered"))?;
+    let covers = split_design_cover(cover, subject, scopes, &output_ranges, catalog)?;
+    Ok(covers
+        .into_iter()
+        .zip(output_ranges)
+        .enumerate()
+        .map(|(scope, (cover, range))| match cover {
+            Some(cover) => RegionCoverAnalysis::Covered(Box::new(AnalyzedRegionCover {
+                inputs: subject.inputs(scopes[scope].scope).into(),
+                outputs: outputs[range].to_vec().into_boxed_slice(),
+                cover,
+            })),
+            None => RegionCoverAnalysis::NoCombinationalLogic,
+        })
+        .collect())
+}
+
+fn merged_output_roots(
+    roots: &[MappingRoot],
+    outputs: &[AnalyzedRegionOutput],
+) -> Result<Vec<MappingRoot>, crate::SynthError> {
+    let mut by_value = std::collections::BTreeMap::new();
+    for &root in roots {
+        by_value
+            .entry(root.value)
+            .and_modify(|current| merge_root_constraints(current, root))
+            .or_insert(root);
+    }
+    outputs
+        .iter()
+        .map(|output| {
+            let mut values = output.values.iter();
+            let first = values.next().ok_or_else(|| {
+                crate::SynthError::invariant("retained design cover output has no Word values")
+            })?;
+            let mut merged = *by_value.get(first).ok_or_else(|| {
+                crate::SynthError::invariant("design cover output is absent from mapping roots")
+            })?;
+            for value in values {
+                merge_root_constraints(
+                    &mut merged,
+                    *by_value.get(value).ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "design cover output is absent from mapping roots",
+                        )
+                    })?,
+                );
+            }
+            Ok(merged)
+        })
+        .collect()
 }
 
 fn analyzed_outputs(
     roots: &[MappingRoot],
     subject: &ChoiceGraph,
+    scope: ChoiceScopeId,
 ) -> Result<Option<Box<[AnalyzedRegionOutput]>>, crate::SynthError> {
     let mut outputs = Vec::new();
     for &root in roots {
         if !root.requires_combinational_cover {
             continue;
         }
-        let Some(node) = subject.node(root.value) else {
+        let Some(node) = subject.node(scope, root.value) else {
             return Err(crate::SynthError::invariant(format!(
                 "combinational regional root {:?} has no Boolean subject node",
                 root.value
             )));
         };
-        if subject.is_dont_care(root.value)
+        if subject.is_dont_care(scope, root.value)
             && node != crate::boolean::logic::network::LogicGraph::constant(false)
         {
             return Err(crate::SynthError::invariant(
@@ -347,106 +406,116 @@ fn analyzed_outputs(
     Ok(Some(outputs.into_boxed_slice()))
 }
 
-struct CoverSelector<'a, 'request> {
-    subject: &'a ChoiceGraph,
-    inputs: &'a [word::ValueId],
-    module: &'a word::WordModule,
-    request: &'a RegionCoverRequest<'request>,
+fn split_design_cover(
+    cover: LibraryCover,
+    subject: &ChoiceGraph,
+    scopes: &[DesignCoverScope<'_>],
+    output_ranges: &[std::ops::Range<usize>],
+    catalog: &CombinationalCellCatalog,
+) -> Result<Vec<Option<LibraryCover>>, crate::SynthError> {
+    let mut cell_scopes = vec![None; cover.cells.len()];
+    for (scope, range) in output_ranges.iter().enumerate() {
+        let mut pending = cover.outputs[range.clone()].to_vec();
+        while let Some(source) = pending.pop() {
+            let cell = match source {
+                LibraryCoverSource::Cell(cell) | LibraryCoverSource::CellSecond(cell) => cell,
+                LibraryCoverSource::Constant(_) | LibraryCoverSource::Input(_) => continue,
+            };
+            let slot = cell_scopes.get_mut(cell).ok_or_else(|| {
+                crate::SynthError::invariant("design cover references an unknown selected cell")
+            })?;
+            match slot {
+                Some(current) if *current != scope => {
+                    return Err(crate::SynthError::invariant(
+                        "one selected cover cell spans distinct choice scopes",
+                    ));
+                }
+                Some(_) => continue,
+                None => *slot = Some(scope),
+            }
+            pending.extend(cover.cells[cell].sources.iter().copied());
+        }
+    }
+    let mut cells = (0..scopes.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+    let mut areas = vec![0.0; scopes.len()];
+    let mut remap = vec![None; cover.cells.len()];
+    for (old, mut cell) in cover.cells.into_vec().into_iter().enumerate() {
+        let Some(scope) = cell_scopes[old] else {
+            continue;
+        };
+        for source in &mut cell.sources {
+            rebase_cover_source(
+                source,
+                scope,
+                subject.input_range(scopes[scope].scope),
+                &remap,
+            )?;
+        }
+        let local = cells[scope].len();
+        areas[scope] += match cell.binding {
+            LibraryCoverBinding::Single(binding) => catalog.cost_for_binding(binding).area,
+            LibraryCoverBinding::Joint(binding) => catalog.joint_cost(binding).area,
+        };
+        remap[old] = Some((scope, local));
+        cells[scope].push(cell);
+    }
+    let mut results = Vec::with_capacity(scopes.len());
+    for (scope, range) in output_ranges.iter().enumerate() {
+        if range.is_empty() {
+            results.push(None);
+            continue;
+        }
+        let input_range = subject.input_range(scopes[scope].scope);
+        let mut outputs = cover.outputs[range.clone()].to_vec();
+        for source in &mut outputs {
+            rebase_cover_source(source, scope, input_range.clone(), &remap)?;
+        }
+        let mut local = LibraryCover {
+            cells: std::mem::take(&mut cells[scope]).into_boxed_slice(),
+            outputs: outputs.into_boxed_slice(),
+            total_area: areas[scope],
+            output_costs: cover.output_costs[range.clone()].into(),
+        };
+        local.isolate_outputs(catalog)?;
+        results.push(Some(local));
+    }
+    Ok(results)
 }
 
-impl CoverSelector<'_, '_> {
-    fn select(
-        &self,
-        outputs: &[AnalyzedRegionOutput],
-        runtime: &opto_runtime::ExecutionContext,
-    ) -> Result<Option<LibraryCover>, crate::SynthError> {
-        let Self {
-            subject,
-            inputs,
-            module,
-            request,
-        } = self;
-        let mut roots_by_value = std::collections::BTreeMap::new();
-        for &root in request.roots {
-            roots_by_value
-                .entry(root.value)
-                .and_modify(|current| merge_root_constraints(current, root))
-                .or_insert(root);
+fn rebase_cover_source(
+    source: &mut LibraryCoverSource,
+    scope: usize,
+    inputs: std::ops::Range<usize>,
+    cells: &[Option<(usize, usize)>],
+) -> Result<(), crate::SynthError> {
+    let (cell, second) = match *source {
+        LibraryCoverSource::Input(input) => {
+            if !inputs.contains(&input) {
+                return Err(crate::SynthError::invariant(
+                    "selected cover references an input from another choice scope",
+                ));
+            }
+            *source = LibraryCoverSource::Input(input - inputs.start);
+            return Ok(());
         }
-        let output_roots = outputs
-            .iter()
-            .map(|output| {
-                let mut values = output.values.iter();
-                let first = values.next().ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "retained regional cover output has no Word values",
-                    )
-                })?;
-                let mut merged = roots_by_value.get(first).copied().ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "retained regional cover output is absent from the active mapping roots",
-                    )
-                })?;
-                for value in values {
-                    let root = roots_by_value.get(value).copied().ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "retained regional cover output is absent from the active mapping roots",
-                    )
-                })?;
-                    merge_root_constraints(&mut merged, root);
-                }
-                Ok::<MappingRoot, crate::SynthError>(merged)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let required_times = output_roots
-            .iter()
-            .map(|root| root.required_time)
-            .collect::<Vec<_>>();
-        let output_loads = output_roots
-            .iter()
-            .map(|root| root.output_load)
-            .collect::<Vec<_>>();
-        let input_transitions = inputs
-            .iter()
-            .map(|&value| {
-                if let Some(transition) = request.regional_slice.search_input_transition(value) {
-                    return Some(transition);
-                }
-                let word::ValueKind::Signal(reference) = module.value(value)?.kind else {
-                    return None;
-                };
-                let word::SignalKind::Port(port) = module.signal(reference.signal)?.kind else {
-                    return None;
-                };
-                request
-                    .port_bindings
-                    .get(port.index())
-                    .and_then(|port| request.timing.input_transition_on(port))
-            })
-            .collect::<Vec<_>>();
-        let input_arrivals = inputs
-            .iter()
-            .map(|&value| request.regional_slice.search_input_arrival(value))
-            .collect::<Vec<_>>();
-        let nodes = outputs.iter().map(|output| output.node).collect::<Vec<_>>();
-        let timing = CoverTiming {
-            required_times: &required_times,
-            output_loads: &output_loads,
-            input_transitions: &input_transitions,
-            input_arrivals: &input_arrivals,
-        };
-        let mut cover =
-            search::cover_choice_graph(subject, &nodes, request.catalog, timing, runtime)?;
-        if let Some(cover) = &mut cover {
-            cover.isolate_outputs(request.catalog).map_err(|error| {
-                crate::SynthError::mapping(format!(
-                    "{error}; {} frozen regional output obligations",
-                    outputs.len()
-                ))
-            })?;
-        }
-        Ok(cover)
+        LibraryCoverSource::Cell(cell) => (cell, false),
+        LibraryCoverSource::CellSecond(cell) => (cell, true),
+        LibraryCoverSource::Constant(_) => return Ok(()),
+    };
+    let (cell_scope, local) = cells.get(cell).copied().flatten().ok_or_else(|| {
+        crate::SynthError::invariant("selected cover references an unavailable local cell")
+    })?;
+    if cell_scope != scope {
+        return Err(crate::SynthError::invariant(
+            "selected cover crosses a choice-scope boundary",
+        ));
     }
+    *source = if second {
+        LibraryCoverSource::CellSecond(local)
+    } else {
+        LibraryCoverSource::Cell(local)
+    };
+    Ok(())
 }
 
 fn merge_root_constraints(merged: &mut MappingRoot, root: MappingRoot) {

@@ -20,7 +20,9 @@ pub(crate) use rewrite::{
     CoverageCheck, RewriteIncremental, RewriteRecipeCache, projected_cuts, projected_leaves,
     window_cares,
 };
-pub(crate) use subject::{CanonicalRegionLogic, ChoiceGraph, RegionLogicOptions};
+pub(crate) use subject::{
+    CanonicalRegionLogic, ChoiceGraph, ChoiceScopeId, ChoiceSubject, RegionLogicOptions,
+};
 
 pub(crate) fn inverter_truth() -> TruthTable {
     TruthTable {

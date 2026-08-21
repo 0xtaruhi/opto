@@ -10,7 +10,7 @@ use super::{
 };
 
 impl CompiledMapping {
-    pub(super) fn for_choices(
+    pub(in crate::mapping::cover) fn for_choices(
         choices: &crate::boolean::logic::ChoiceGraph,
         outputs: &[LogicNodeId],
         catalog: &CombinationalCellCatalog,
