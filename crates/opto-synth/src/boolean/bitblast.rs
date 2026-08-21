@@ -320,8 +320,20 @@ pub(crate) fn lower_local_region_boolean(
     bindings.sort_unstable();
     bindings.dedup();
     let mut value_nodes = Vec::new();
+    let mut input_bindings = Vec::new();
     let mut dont_care_values = Vec::new();
     for original in bindings {
+        let binds_input = boundary_inputs.binary_search(&original).is_ok()
+            || blaster.module.value(original).is_some_and(|stored| {
+                matches!(
+                    stored.kind,
+                    word::ValueKind::Operation(operation)
+                        if blaster.module.operation(operation).is_some_and(|operation| matches!(
+                            operation.kind,
+                            word::OpKind::Register(_) | word::OpKind::Latch(_)
+                        ))
+                )
+            });
         let span = blaster
             .cache
             .get(original.index())
@@ -375,6 +387,9 @@ pub(crate) fn lower_local_region_boolean(
             lowered.push(handle);
             if let Some(node) = node {
                 value_nodes.push((handle, node));
+                if binds_input && node.index() != 0 {
+                    input_bindings.push((handle, node));
+                }
             }
         }
         if blaster.lowered_regions.lowered_values.len() <= original.index() {
@@ -389,6 +404,9 @@ pub(crate) fn lower_local_region_boolean(
     value_nodes.dedup_by_key(|(value, _)| *value);
     dont_care_values.sort_unstable();
     dont_care_values.dedup();
+    input_bindings.sort_unstable();
+    input_bindings.dedup();
+    blaster.backend.bind_input_identities(&input_bindings)?;
     let (network, inputs) = std::mem::take(&mut blaster.backend).finish();
     Ok(LocalRegionBooleanLowering {
         binding: blaster.lowered_regions,
