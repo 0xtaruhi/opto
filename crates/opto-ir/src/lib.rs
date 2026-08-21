@@ -6,6 +6,7 @@
 //! The representations form explicit phase boundaries:
 //!
 //! - [`proc`] models ordered procedural control and effects.
+//! - [`design`] stores immutable stable-identity cell/net revisions.
 //! - [`word`] stores typed word-level operations, signals, and memories.
 //! - [`logic`] stores Boolean networks with complemented edges.
 //! - [`mapped`] stores target-library cells, pins, and canonical nets.
@@ -16,6 +17,7 @@
 //! provenance is carried in dedicated tables instead of pointers between
 //! arenas, which keeps snapshots serializable and parallel reads lock-free.
 
+pub mod design;
 pub mod logic;
 pub mod mapped;
 pub mod proc;
