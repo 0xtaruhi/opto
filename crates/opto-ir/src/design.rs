@@ -301,6 +301,24 @@ impl<L> DesignRevision<L> {
         self.nets.get(slot)?.as_ref()
     }
 
+    /// Iterates live cells in immutable record order.
+    ///
+    /// Callers that publish semantic results must key or sort them by
+    /// [`Cell::id`]; record order is a storage detail and may differ between
+    /// revisions after copy-on-write publication.
+    pub fn cells(&self) -> impl Iterator<Item = &Cell<L>> {
+        (0..self.cells.len()).filter_map(|slot| self.cells.get(slot)?.as_ref())
+    }
+
+    /// Iterates live net bits in immutable record order.
+    ///
+    /// Callers that publish semantic results must key or sort them by
+    /// [`NetBit::id`]; record order is a storage detail and may differ between
+    /// revisions after copy-on-write publication.
+    pub fn nets(&self) -> impl Iterator<Item = &NetBit> {
+        (0..self.nets.len()).filter_map(|slot| self.nets.get(slot)?.as_ref())
+    }
+
     /// Returns the number of live canonical cells.
     #[must_use]
     pub const fn cell_count(&self) -> usize {
@@ -850,6 +868,45 @@ mod tests {
         assert_eq!(committed.revision(), base.revision());
         assert_eq!(committed.cell_count(), base.cell_count());
         assert_eq!(committed.net_count(), base.net_count());
+    }
+
+    #[test]
+    fn iteration_skips_tombstones_without_redefining_identity() {
+        let base = base_design();
+        let removed = base
+            .commit(
+                vec![RewriteDelta {
+                    id: RewriteDeltaId::from_bytes(digest(20)),
+                    base: base.revision(),
+                    reads: set(vec![
+                        EntityId::Cell(CellId::from_bytes(digest(1))),
+                        EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                    ]),
+                    replaces: set(vec![
+                        EntityId::Cell(CellId::from_bytes(digest(1))),
+                        EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                    ]),
+                    cells: Box::new([]),
+                    nets: Box::new([]),
+                    semantic: SemanticBinding {
+                        inputs: Box::new([]),
+                        outputs: Box::new([]),
+                    },
+                    proof: EquivalenceCertificate {
+                        regime: EquivalenceRegime::ByConstruction,
+                        digest: digest(21),
+                    },
+                }],
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(removed.cells().count(), removed.cell_count());
+        assert_eq!(removed.nets().count(), removed.net_count());
+        assert_eq!(
+            removed.nets().map(|net| net.id).collect::<Vec<_>>(),
+            vec![NetBitId::from_bytes(digest(10))]
+        );
     }
 
     #[test]
