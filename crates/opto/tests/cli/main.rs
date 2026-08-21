@@ -520,10 +520,27 @@ fn strip_volatile_report_fields(report: &str) -> String {
             !line.starts_with("Date:")
                 && !line.starts_with("Design:")
                 && !line.starts_with("Synthesis stage: elapsed=")
+                && !line.starts_with("Synthesis heartbeat: elapsed=")
                 && !line.starts_with("Optimization: elapsed=")
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn volatile_synthesis_progress_is_excluded_from_report_comparisons() {
+    let stable = "Beginning synthesis.\nCombinational cells: 60\n";
+    let with_progress = concat!(
+        "Beginning synthesis.\n",
+        "Synthesis heartbeat: elapsed=00:00:30 design=\"top\" ",
+        "stage=\"Logic Lowering\" stage_elapsed=00:00:29\n",
+        "Combinational cells: 60\n",
+    );
+
+    assert_eq!(
+        strip_volatile_report_fields(with_progress),
+        strip_volatile_report_fields(stable)
+    );
 }
 
 #[test]
