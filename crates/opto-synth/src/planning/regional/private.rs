@@ -20,8 +20,9 @@ pub(crate) fn optimize_private_structure(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
     )?;
-    let initial_design = crate::regional::WorkDesign::seal(&initial_regions)?;
-    let work = crate::regional::WorkGraph::build_structural(&initial_regions, &initial_design)?;
+    let initial_design = crate::regional::WorkDesign::seal(module, &initial_regions)?;
+    let work =
+        crate::regional::WorkGraph::build_structural(module, &initial_regions, &initial_design)?;
     if work.tasks().is_empty() {
         return Ok((initial_regions, initial_design));
     }
@@ -56,6 +57,6 @@ pub(crate) fn optimize_private_structure(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
     )?;
-    let design = initial_design.rewrite_all(&regions, proof)?;
+    let design = initial_design.rewrite_all(module, &regions, proof)?;
     Ok((regions, design))
 }

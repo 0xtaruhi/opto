@@ -222,8 +222,12 @@ pub(crate) fn prepare_regional_architectures(
         .iter()
         .map(|record| record.context().into())
         .collect::<Vec<_>>();
-    let (mut work, binding) =
-        crate::regional::WorkGraph::build(request.regions, request.design, &contexts)?;
+    let (mut work, binding) = crate::regional::WorkGraph::build(
+        request.source,
+        request.regions,
+        request.design,
+        &contexts,
+    )?;
     work.rebatch_for_workers(runtime.parallelism())?;
     let tasks = work.tasks();
     let profiling = request.mapping_context.config.diagnostics.timing;
