@@ -153,6 +153,7 @@ impl WorkGraph {
         regions: &crate::SynthesisRegionGraph,
         design: &WorkDesign,
         contexts: &[WorkContextKey],
+        runtime: &opto_runtime::ExecutionContext,
     ) -> Result<(Self, WorkBinding), crate::SynthError> {
         if contexts.len() != regions.regions().len() {
             return Err(crate::SynthError::invariant(
@@ -161,9 +162,8 @@ impl WorkGraph {
         }
         let design = &design.0;
         let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
-        let mut rows = Vec::new();
-        let mut item_by_region = vec![None; regions.regions().len()];
-        for region in regions.regions().iter().copied() {
+        let rows = runtime.analyze_indexed(regions.regions().len(), |index| {
+            let region = regions.regions()[index];
             let cells = region_cells(module, regions, region)?;
             let mut core = region_value_entities(
                 module,
@@ -218,26 +218,24 @@ impl WorkGraph {
                 estimated_work: region.estimated_work().max(1),
                 estimated_memory,
             };
-            item_by_region[region.row().index()] = Some(rows.len());
-            rows.push((id, region.row(), item));
-        }
+            Ok::<_, crate::SynthError>((id, region.row(), item))
+        })?;
         let binding = WorkBinding(rows.iter().map(|row| row.1).collect());
         let items = rows.into_iter().map(|row| row.2).collect::<Vec<_>>();
-        let dependency_rows = |predecessors: bool| {
-            binding
-                .0
-                .iter()
-                .map(|&row| {
-                    semantic_dependencies(regions, row, predecessors, &item_by_region)
-                        .into_iter()
-                        .map(|item| items[item].id)
-                        .collect()
-                })
-                .collect::<Vec<_>>()
+        let dependency_rows = |predecessors: bool| -> Result<Vec<Vec<_>>, crate::SynthError> {
+            runtime.analyze_indexed(items.len(), |index| {
+                let region = regions.regions()[index];
+                let adjacent = if predecessors {
+                    regions.predecessors(region)
+                } else {
+                    regions.successors(region)
+                };
+                Ok(adjacent.iter().map(|&row| items[row.index()].id).collect())
+            })
         };
-        let predecessors = opto_core::PackedRows::try_from_rows(dependency_rows(true))
+        let predecessors = opto_core::PackedRows::try_from_rows(dependency_rows(true)?)
             .map_err(|_| crate::SynthError::capacity("work-item predecessors"))?;
-        let successors = opto_core::PackedRows::try_from_rows(dependency_rows(false))
+        let successors = opto_core::PackedRows::try_from_rows(dependency_rows(false)?)
             .map_err(|_| crate::SynthError::capacity("work-item successors"))?;
         let mut graph = Self {
             design: design.revision(),
@@ -385,36 +383,6 @@ impl WorkBinding {
     pub(crate) fn region(&self, item: usize) -> Option<crate::RegionRowId> {
         self.0.get(item).copied()
     }
-}
-
-fn semantic_dependencies(
-    regions: &crate::SynthesisRegionGraph,
-    row: crate::RegionRowId,
-    predecessors: bool,
-    item_by_region: &[Option<usize>],
-) -> Vec<usize> {
-    let mut pending = vec![row];
-    let mut visited = std::collections::BTreeSet::new();
-    let mut items = std::collections::BTreeSet::new();
-    while let Some(row) = pending.pop() {
-        let region = regions.regions()[row.index()];
-        let adjacent = if predecessors {
-            regions.predecessors(region)
-        } else {
-            regions.successors(region)
-        };
-        for &next in adjacent {
-            if !visited.insert(next) {
-                continue;
-            }
-            if let Some(item) = item_by_region[next.index()] {
-                items.insert(item);
-            } else {
-                pending.push(next);
-            }
-        }
-    }
-    items.into_iter().collect()
 }
 
 fn seal_logical_design(
@@ -1348,7 +1316,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         let design = WorkDesign::seal(&module, &regions).unwrap();
-        let (mut work, binding) = WorkGraph::build(&module, &regions, &design, &contexts).unwrap();
+        let runtime =
+            opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 4 })
+                .unwrap();
+        let (mut work, binding) =
+            WorkGraph::build(&module, &regions, &design, &contexts, &runtime).unwrap();
 
         assert_eq!(work.design, design.0.revision());
         assert!(design.0.cell_count() >= regions.regions().len());
@@ -1367,6 +1339,26 @@ mod tests {
             }
         }
         let semantic_items = work.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let serial =
+            opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 })
+                .unwrap();
+        let (serial_work, serial_binding) =
+            WorkGraph::build(&module, &regions, &design, &contexts, &serial).unwrap();
+        assert_eq!(serial_binding.0, binding.0);
+        assert!(
+            serial_work
+                .items
+                .iter()
+                .zip(&work.items)
+                .all(|(left, right)| {
+                    left.id == right.id
+                        && left.core == right.core
+                        && left.halo == right.halo
+                        && left.context == right.context
+                        && left.estimated_work == right.estimated_work
+                        && left.estimated_memory == right.estimated_memory
+                })
+        );
         work.rebatch(2).unwrap();
         assert_eq!(work.tasks().len(), regions.regions().len().div_ceil(2));
         assert_eq!(

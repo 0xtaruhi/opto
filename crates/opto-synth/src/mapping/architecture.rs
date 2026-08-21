@@ -227,6 +227,7 @@ pub(crate) fn prepare_regional_architectures(
         request.regions,
         request.design,
         &contexts,
+        runtime,
     )?;
     work.rebatch_for_workers(runtime.parallelism())?;
     let tasks = work.tasks();
