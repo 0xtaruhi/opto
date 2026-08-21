@@ -1148,8 +1148,13 @@ One incremental region edit reuses the retained topological order, position
 index, and dependency plan whenever the edit adds no dependency edge and no
 net. Forward arrival propagation owns one sparse frontier ordered by the
 canonical position index. It journals and evaluates a seed first, then activates
-successors only when the published arrival row actually changes; it never
-materializes the seed's complete fanout cone or a second traversal order.
+successors only when the published arrival row actually changes. Local edits do
+not materialize the seed's complete fanout cone or a second traversal order. A
+fixed count bounds serial propagation; only after that many nets have actually
+been recomputed does a path-free optimization view materialize the remaining
+closure and hand it to the shared deterministic dependency runtime. The sparse
+prefix and parallel suffix both use the graph's canonical positions, and the
+runtime preserves exact change activation and the same row journal.
 Removing an arc cannot move a net earlier than a live predecessor, and a plan
 that still lists a removed edge is conservative rather than wrong. Appending a
 net does force a rebuild, because the position and dependency arenas no longer

@@ -17,29 +17,7 @@ pub(super) fn seed_net(
     net: usize,
     state: &mut PropagationState,
 ) -> Result<(), crate::TimingError> {
-    let PropagationState {
-        arrivals,
-        paths,
-        origins,
-        tags,
-        ..
-    } = state;
-    let mut seeded = ArrivalRow::new();
-    {
-        let mut row = SeedRow {
-            arrivals: &mut seeded,
-            paths: paths.as_mut(),
-            origins,
-            tags,
-            origin_journal: None,
-        };
-        seed_primary_inputs(inputs, net, &mut row)?;
-        seed_sequential_outputs(inputs, net, &mut row)?;
-    }
-    if arrivals.replace_row(net, seeded).is_none() {
-        return Err(crate::TimingAnalysisError::DirtyNetOutOfRange { index: net }.into());
-    }
-    Ok(())
+    seed_net_inner(inputs, net, state, None)
 }
 
 pub(super) fn seed_net_journaled(
@@ -47,6 +25,15 @@ pub(super) fn seed_net_journaled(
     net: usize,
     state: &mut PropagationState,
     journal: &mut OriginJournal<'_>,
+) -> Result<(), crate::TimingError> {
+    seed_net_inner(inputs, net, state, Some(journal))
+}
+
+fn seed_net_inner(
+    inputs: &PropagationInputs<'_, '_>,
+    net: usize,
+    state: &mut PropagationState,
+    journal: Option<&mut OriginJournal<'_>>,
 ) -> Result<(), crate::TimingError> {
     let PropagationState {
         arrivals,
@@ -62,7 +49,7 @@ pub(super) fn seed_net_journaled(
             paths: paths.as_mut(),
             origins,
             tags,
-            origin_journal: Some(journal),
+            origin_journal: journal,
         };
         seed_primary_inputs(inputs, net, &mut row)?;
         seed_sequential_outputs(inputs, net, &mut row)?;
@@ -71,6 +58,28 @@ pub(super) fn seed_net_journaled(
         return Err(crate::TimingAnalysisError::DirtyNetOutOfRange { index: net }.into());
     }
     Ok(())
+}
+
+pub(super) fn seed_summary_slots_journaled(
+    inputs: &PropagationInputs<'_, '_>,
+    net: usize,
+    origins: &mut OriginArena,
+    tags: &mut TagArena,
+    journal: &mut OriginJournal<'_>,
+) -> Result<ArrivalRow, crate::TimingError> {
+    let mut seeded = ArrivalRow::new();
+    {
+        let mut row = SeedRow {
+            arrivals: &mut seeded,
+            paths: None,
+            origins,
+            tags,
+            origin_journal: Some(journal),
+        };
+        seed_primary_inputs(inputs, net, &mut row)?;
+        seed_sequential_outputs(inputs, net, &mut row)?;
+    }
+    Ok(seeded)
 }
 
 pub(super) fn propagate_summary_slots(
@@ -130,6 +139,19 @@ impl ArrivalTask {
         origins: &OriginArena,
         net: usize,
     ) -> Result<Self, crate::TimingError> {
+        let slots = arrivals
+            .row(net)
+            .ok_or(crate::TimingAnalysisError::DirtyNetOutOfRange { index: net })?;
+        Self::prepare_with_slots(inputs, arrivals, origins, net, slots)
+    }
+
+    pub(super) fn prepare_with_slots(
+        inputs: &PropagationInputs<'_, '_>,
+        arrivals: &ArrivalSlotStore,
+        origins: &OriginArena,
+        net: usize,
+        slots: ArrivalRow,
+    ) -> Result<Self, crate::TimingError> {
         let mut sources = inputs.graph.incoming[net]
             .iter()
             .map(|&arc| inputs.graph.arc(arc).from.index())
@@ -166,9 +188,7 @@ impl ArrivalTask {
             .collect::<Result<_, _>>()?;
         Ok(Self {
             net,
-            slots: arrivals
-                .row(net)
-                .ok_or(crate::TimingAnalysisError::DirtyNetOutOfRange { index: net })?,
+            slots,
             sources,
             launches,
         })

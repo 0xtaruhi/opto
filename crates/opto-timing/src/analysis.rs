@@ -20,6 +20,10 @@ type ArrivalJournalEntry = (usize, ArrivalRow);
 type RequiredJournalEntry = (usize, RequiredRow);
 type RequiredWorklistUpdate = (usize, Vec<RequiredJournalEntry>);
 
+// Keep common local edits cheaper than constructing a dependency closure, but
+// bound serial work before handing a genuinely wide frontier to the runtime.
+pub(crate) const SPARSE_ARRIVAL_FRONTIER_LIMIT: usize = 256;
+
 mod arrival;
 mod checks;
 mod closure;
@@ -32,7 +36,7 @@ mod topology;
 
 use arrival::{
     ArrivalTask, arrival_slots_match, propagate_into_net, propagate_summary_slots, recompute_net,
-    seed_net, seed_net_journaled,
+    seed_net, seed_net_journaled, seed_summary_slots_journaled,
 };
 pub(super) use checks::check_timing;
 use checks::{
@@ -338,6 +342,83 @@ pub(super) fn update_propagation(
     Ok(dirty_count)
 }
 
+fn update_wide_arrival_frontier(
+    inputs: &PropagationInputs<'_, '_>,
+    propagation: &mut PropagationState,
+    seeds: &[usize],
+    runtime: &opto_runtime::ExecutionContext,
+    origin_journal: &mut OriginJournal<'_>,
+) -> Result<(usize, Vec<usize>, Vec<ArrivalJournalEntry>), crate::TimingError> {
+    let dependency_items = inputs.graph.propagation_closure(
+        opto_runtime::DependencyDirection::Forward,
+        seeds.iter().copied(),
+    )?;
+    let worklist = inputs.graph.propagation_worklist(
+        opto_runtime::DependencyDirection::Forward,
+        dependency_items.iter().copied(),
+    )?;
+    // Seed rows may intern launch identities, so prepare them transactionally
+    // before read-only worker tasks begin. Keep the overlay closure-sized.
+    let mut seeded = Vec::with_capacity(dependency_items.len());
+    for &net in &dependency_items {
+        seeded.push((
+            net,
+            seed_summary_slots_journaled(
+                inputs,
+                net,
+                &mut propagation.origins,
+                &mut propagation.tags,
+                origin_journal,
+            )?,
+        ));
+    }
+    seeded.sort_unstable_by_key(|(net, _)| *net);
+
+    let publication = opto_runtime::DependencyPublicationPlan::identity(inputs.graph.net_count());
+    let mut effects = opto_runtime::DependencyEffects::new();
+    let origins = &propagation.origins;
+    let tags = &propagation.tags;
+    let execution = runtime.publish_dependency_rows(
+        worklist,
+        &mut propagation.arrivals,
+        opto_runtime::DependencyRun::new(
+            &publication,
+            opto_runtime::DependencyActivation::on_change(
+                inputs.graph.net_count(),
+                seeds.iter().copied(),
+            )?,
+        )
+        .record_effects(&mut effects),
+        |arrivals, net| {
+            ArrivalTask::prepare_with_slots(
+                inputs,
+                arrivals,
+                origins,
+                net,
+                seeded
+                    .binary_search_by_key(&net, |(seeded_net, _)| *seeded_net)
+                    .ok()
+                    .map(|position| seeded[position].1.clone())
+                    .expect("scheduled timing net owns precomputed seed slots"),
+            )
+        },
+        |task| {
+            let net = task.net();
+            task.analyze(inputs, tags)
+                .map(|slots| opto_runtime::DependencyPublication::row(net, slots))
+        },
+    )?;
+    let journals = effects
+        .into_entries()
+        .map(|(_, net, previous)| (net, previous))
+        .collect();
+    Ok((
+        execution.published_items().len(),
+        execution.changed_items().to_vec(),
+        journals,
+    ))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "incremental propagation is one atomic row-journal transaction; splitting it would \
@@ -392,6 +473,26 @@ pub(super) fn update_propagation_from_nets(
         // sink even when that sink was activated by a different predecessor.
         let mut origin_journal = OriginJournal::new(edit.origins_len, &mut edit.origins);
         while let Some(Reverse((_, net))) = pending.pop() {
+            if dirty_count >= SPARSE_ARRIVAL_FRONTIER_LIMIT
+                && !propagation.tracks_paths()
+                && let Some(runtime) = runtime
+            {
+                let mut remaining_seeds = vec![net];
+                remaining_seeds.extend(pending.drain().map(|Reverse((_, net))| net));
+                remaining_seeds.sort_unstable();
+                remaining_seeds.dedup();
+                let (recomputed, parallel_changed, journals) = update_wide_arrival_frontier(
+                    &inputs,
+                    propagation,
+                    &remaining_seeds,
+                    runtime,
+                    &mut origin_journal,
+                )?;
+                dirty_count += recomputed;
+                changed.extend(parallel_changed);
+                edit.arrivals.extend(journals);
+                break;
+            }
             dirty_count += 1;
             edit.arrivals.push((
                 net,
