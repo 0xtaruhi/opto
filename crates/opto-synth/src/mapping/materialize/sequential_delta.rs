@@ -38,11 +38,26 @@ pub(crate) struct PendingMappedSequential {
     cells: Box<[(TempCellId, MappedCellSource)]>,
 }
 
-/// Stable region binding for one live state operation across bit lowering.
+/// Stable source state selected before scalar bit lowering.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SequentialRegionBinding {
+pub(crate) struct SourceSequentialBinding {
     operation: word::OpId,
     region: crate::RegionAnchorId,
+}
+
+/// One source-visible state bit implemented by a lowered state operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SequentialSourceBit {
+    pub(crate) operation: word::OpId,
+    pub(crate) bit: u32,
+}
+
+/// Exact semantic state relation for one live scalar state operation.
+#[derive(Debug, Clone)]
+pub(crate) struct SequentialRegionBinding {
+    pub(crate) operation: word::OpId,
+    pub(crate) region: crate::RegionAnchorId,
+    pub(crate) sources: Box<[SequentialSourceBit]>,
 }
 
 impl PendingMappedSequential {
@@ -71,7 +86,7 @@ impl PendingMappedSequential {
 pub(crate) fn sequential_region_bindings(
     module: &word::WordModule,
     regions: &crate::SynthesisRegionGraph,
-) -> Result<Box<[SequentialRegionBinding]>, crate::SynthError> {
+) -> Result<Box<[SourceSequentialBinding]>, crate::SynthError> {
     let mut operations = Vec::new();
     for &region in regions.regions() {
         for &operation in regions.operations(region) {
@@ -84,7 +99,7 @@ pub(crate) fn sequential_region_bindings(
                 stored.kind,
                 word::OpKind::Register(_) | word::OpKind::Latch(_)
             ) {
-                operations.push(SequentialRegionBinding {
+                operations.push(SourceSequentialBinding {
                     operation,
                     region: region.id(),
                 });
@@ -99,9 +114,12 @@ pub(crate) fn sequential_region_bindings(
 pub(crate) fn lowered_sequential_operations(
     module: &word::WordModule,
     binding: &crate::boolean::bitblast::LoweredRegionBinding,
-    source_operations: &[SequentialRegionBinding],
+    source_operations: &[SourceSequentialBinding],
 ) -> Result<Box<[SequentialRegionBinding]>, crate::SynthError> {
-    let mut lowered = std::collections::BTreeMap::new();
+    let mut lowered = std::collections::BTreeMap::<
+        word::OpId,
+        (crate::RegionAnchorId, Vec<SequentialSourceBit>),
+    >::new();
     for source_binding in source_operations {
         let source = module.operation(source_binding.operation).ok_or_else(|| {
             crate::SynthError::invariant("source sequential operation disappeared")
@@ -112,7 +130,9 @@ pub(crate) fn lowered_sequential_operations(
                 source_binding.operation
             ))
         })?;
-        for &value in values {
+        for (bit, &value) in values.iter().enumerate() {
+            let bit = u32::try_from(bit)
+                .map_err(|_| crate::SynthError::capacity("sequential source bit index"))?;
             let operation = module
                 .value(value)
                 .and_then(|value| match value.kind {
@@ -135,31 +155,58 @@ pub(crate) fn lowered_sequential_operations(
                     "lowered sequential state is produced by combinational logic",
                 ));
             }
-            if lowered
-                .insert(operation, source_binding.region)
-                .is_some_and(|region| region != source_binding.region)
-            {
+            let row = lowered
+                .entry(operation)
+                .or_insert_with(|| (source_binding.region, Vec::new()));
+            if row.0 != source_binding.region {
                 return Err(crate::SynthError::invariant(
                     "one lowered sequential operation has conflicting region bindings",
                 ));
             }
+            row.1.push(SequentialSourceBit {
+                operation: source_binding.operation,
+                bit,
+            });
         }
     }
     Ok(lowered
         .into_iter()
-        .map(|(operation, region)| SequentialRegionBinding { operation, region })
+        .map(|(operation, (region, mut sources))| {
+            sources.sort_unstable();
+            sources.dedup();
+            SequentialRegionBinding {
+                operation,
+                region,
+                sources: sources.into_boxed_slice(),
+            }
+        })
         .collect())
 }
 
 /// Returns every value needed to materialize a frozen sequential operation set.
 pub(crate) fn sequential_binding_values(
     module: &word::WordModule,
+    operations: &[SourceSequentialBinding],
+) -> Result<Box<[word::ValueId]>, crate::SynthError> {
+    collect_sequential_binding_values(module, operations.iter().map(|binding| binding.operation))
+}
+
+/// Returns every scalar value needed by the selected lowered state cells.
+pub(crate) fn lowered_sequential_binding_values(
+    module: &word::WordModule,
     operations: &[SequentialRegionBinding],
 ) -> Result<Box<[word::ValueId]>, crate::SynthError> {
+    collect_sequential_binding_values(module, operations.iter().map(|binding| binding.operation))
+}
+
+fn collect_sequential_binding_values(
+    module: &word::WordModule,
+    operations: impl IntoIterator<Item = word::OpId>,
+) -> Result<Box<[word::ValueId]>, crate::SynthError> {
     let mut values = BTreeSet::new();
-    for binding in operations {
+    for operation in operations {
         let operation = module
-            .operation(binding.operation)
+            .operation(operation)
             .ok_or_else(|| crate::SynthError::invariant("live sequential operation disappeared"))?;
         values.insert(operation.result);
         values.extend(crate::word::operation_inputs(&operation.kind));
@@ -680,6 +727,13 @@ mod tests {
         assert_eq!(lowered.len(), 1);
         assert_eq!(lowered[0].region, source_operations[0].region);
         assert_ne!(lowered[0].operation, source_operations[0].operation);
+        assert_eq!(
+            lowered[0].sources.as_ref(),
+            &[SequentialSourceBit {
+                operation: source_operations[0].operation,
+                bit: 0,
+            }]
+        );
         assert!(matches!(
             module.operation(lowered[0].operation).unwrap().kind,
             word::OpKind::Register(_)

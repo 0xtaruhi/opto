@@ -183,7 +183,7 @@ impl RegionalMapper<'_> {
             state.rows.iter().map(|row| &row.binding),
         )
         .into_vec();
-        observed_values.extend(materialize::sequential_binding_values(
+        observed_values.extend(materialize::lowered_sequential_binding_values(
             state.module,
             state.sequential_operations,
         )?);

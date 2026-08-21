@@ -25,8 +25,8 @@ const TRI_STATE_CELL_PREFIX: &str = "_tri_state_";
 use crate::artifact::MappedCellSource;
 pub(crate) use region_delta::REGION_CELL_PREFIX;
 pub(crate) use sequential_delta::{
-    MappedSequentialArtifact, SequentialRegionBinding, lowered_sequential_operations,
-    sequential_binding_values, sequential_region_bindings,
+    MappedSequentialArtifact, SequentialRegionBinding, lowered_sequential_binding_values,
+    lowered_sequential_operations, sequential_binding_values, sequential_region_bindings,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
