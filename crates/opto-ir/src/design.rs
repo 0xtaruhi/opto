@@ -337,6 +337,9 @@ where
         mut deltas: Vec<RewriteDelta<L>>,
         validate_proof: impl Fn(&RewriteDelta<L>) -> Result<(), DesignError>,
     ) -> Result<Self, DesignError> {
+        if deltas.is_empty() {
+            return Ok(self.clone());
+        }
         deltas.sort_unstable_by_key(|delta| delta.id);
         if let Some(id) = deltas
             .windows(2)
@@ -837,6 +840,16 @@ mod tests {
                 output: 0,
             })
         );
+    }
+
+    #[test]
+    fn empty_commit_preserves_the_exact_revision() {
+        let base = base_design();
+        let committed = base.commit(Vec::new(), |_| unreachable!()).unwrap();
+
+        assert_eq!(committed.revision(), base.revision());
+        assert_eq!(committed.cell_count(), base.cell_count());
+        assert_eq!(committed.net_count(), base.net_count());
     }
 
     #[test]
