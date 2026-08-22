@@ -44,6 +44,8 @@ pub use api::{
     SynthesisReport, SynthesisResult, SynthesisTimingProgress, TimingSummary,
     check_definition_with_references, check_design_with_references,
 };
+// `SynthesisMetrics::execution` is a public field of this type, so the type
+// must be nameable by consumers that never depend on opto-runtime directly.
 pub use artifact::{
     FragmentFootprint, ImplementationDb, ImplementationRegion, ImplementationRegionId,
     MappedFragmentId,
@@ -66,6 +68,7 @@ use opto_library::{
     BooleanFunctionRef, TargetCellRef, TargetNextStateType, TargetPinDirection, TargetPinRef,
     TargetSequentialKind, TargetSequentialRef, TargetTimingArcRef,
 };
+pub use opto_runtime::ExecutionMetrics;
 pub use planning::{
     DurableOperatorArena, DynamicExtractShape, ImplementationCandidate, ImplementationCandidateId,
     OperatorId, OperatorKind, OperatorManifest, OperatorManifestInstance, OperatorOccurrenceId,

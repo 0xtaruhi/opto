@@ -295,14 +295,36 @@ pub(crate) fn synthesis_event_text(event: &SynthesisEvent) -> String {
             )
         }
         SynthesisEvent::ArtifactCompleted { design, metrics } => {
+            let execution = &metrics.execution;
+            // RFC 0013 Phase 0 requires active and idle worker time, ready-queue
+            // depth, declared work, and peak admitted memory to be recorded per
+            // run. They are emitted here, beside the regional summary, so a
+            // scaling measurement can read them from an ordinary synthesis run
+            // without a separate observability surface.
             format!(
                 "Synthesis artifact for '{design}' is complete; preparing the mapped object \
-                 index.\nRegional synthesis: regions={} rebuilt={} reused={} plans={} epochs={}.\n",
+                 index.\nRegional synthesis: regions={} rebuilt={} reused={} plans={} \
+                 epochs={}.\nSealed design: normalized_operations={} normalized_values={} \
+                 lowered_operations={} mapped_cells={}.\nScheduler execution: batches={} \
+                 active_ns={} wall_ns={} worker_capacity_ns={} longest_task_ns={} \
+                 estimated_work={} peak_ready_tasks={} peak_admitted_memory={}.\n",
                 metrics.synthesis_regions,
                 metrics.regional_decision_misses,
                 metrics.regional_decision_hits,
                 metrics.regional_cover_plans,
                 metrics.regional_epochs,
+                metrics.normalized_operations,
+                metrics.normalized_values,
+                metrics.lowered_operations,
+                metrics.mapped_cells,
+                execution.composite_batches,
+                execution.composite_active_nanoseconds,
+                execution.composite_wall_nanoseconds,
+                execution.composite_worker_capacity_nanoseconds,
+                execution.composite_longest_task_nanoseconds,
+                execution.composite_estimated_work,
+                execution.composite_peak_ready_tasks,
+                execution.composite_peak_admitted_memory,
             )
         }
         SynthesisEvent::DesignInformationUpdateStarted { design, effort: _ } => {

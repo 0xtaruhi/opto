@@ -7,7 +7,8 @@ mod qualification_support;
 
 use crate::qualification_support::{
     RunMode, run_generated_differential, run_mapping_fixture_gate, run_named_suite,
-    run_real_medium_gate, run_semantic_matrix, run_sv_tests, run_yosys_tests, validate_inventory,
+    run_real_medium_gate, run_scale_scaling_gate, run_semantic_matrix, run_sv_tests,
+    run_yosys_tests, validate_inventory,
 };
 
 #[test]
@@ -103,4 +104,10 @@ fn extended_qor() {
 #[ignore = "requires two optimized Opto binaries, pinned real RTL and a public Liberty"]
 fn real_medium_qor_regression() {
     run_real_medium_gate("benchmarks/real/gate.toml");
+}
+
+#[test]
+#[ignore = "requires OPTO_LIBRARY_SCALE and synthesizes a million-operation design at several worker counts"]
+fn scale_phase_three_scaling() {
+    run_scale_scaling_gate("benchmarks/scale/scale.toml");
 }
