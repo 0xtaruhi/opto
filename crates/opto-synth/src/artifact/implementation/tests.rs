@@ -14,19 +14,16 @@ fn test_span() -> SourceSpan {
 }
 
 #[test]
-fn originless_static_cells_are_explicitly_global() {
+fn originless_static_cells_are_contained_by_the_global_fragment() {
     let implementations = ImplementationDb::empty(1);
     let cell = CellId::from_index(0).unwrap();
     let outside = CellId::from_index(1).unwrap();
 
     assert_eq!(
-        implementations.cell_ownership(cell).unwrap(),
-        MappedCellOwnership::Global
+        implementations.cell_fragment(cell).map(|row| row.1),
+        Some(FragmentFootprint::Global)
     );
-    assert_eq!(
-        implementations.cell_ownership(outside).unwrap(),
-        MappedCellOwnership::Unknown
-    );
+    assert_eq!(implementations.cell_fragment(outside), None);
 }
 
 #[test]
@@ -38,9 +35,10 @@ fn accepted_region_replacement_moves_operator_lineage_to_final_cell_ids() {
     let added = delta.add_cell(CellSpec::new("U1", "CELL", None)).unwrap();
     let applied = mapped.apply_region_delta(delta).unwrap();
     let replacement = applied.added_cell(added).unwrap();
+    let fragment = implementations.cell_fragment(original).unwrap().1;
     let mut implementation_delta = ImplementationDelta::default();
     implementation_delta
-        .record_added_cell(added, [original], [original])
+        .record_added_cell(added, [original], fragment)
         .unwrap();
 
     let prepared = implementations
@@ -49,10 +47,7 @@ fn accepted_region_replacement_moves_operator_lineage_to_final_cell_ids() {
     implementations.commit_region_edit(prepared).unwrap();
 
     assert_eq!(implementations.operators_for_cell(original), None);
-    assert_eq!(
-        implementations.cell_ownership(original).unwrap(),
-        MappedCellOwnership::Removed
-    );
+    assert_eq!(implementations.cell_fragment(original), None);
     assert_eq!(
         implementations.operators_for_cell(replacement),
         Some(std::slice::from_ref(&operator))
@@ -69,10 +64,10 @@ fn accepted_region_replacement_moves_operator_lineage_to_final_cell_ids() {
         .unwrap()
         .synthesis_region();
     assert_eq!(
-        implementations.cell_ownership(replacement).unwrap(),
-        MappedCellOwnership::Region(region)
+        implementations.cell_fragment(replacement).map(|row| row.1),
+        Some(FragmentFootprint::Region(region))
     );
-    let impact = implementations.take_committed_owner_impact();
+    let impact = implementations.take_committed_fragment_impact();
     assert_eq!(impact.regions(), &BTreeSet::from([region]));
     assert!(impact.unknown_cells().is_empty());
 }
@@ -139,7 +134,13 @@ fn fixture() -> (MappedNetlist, ImplementationDb, OperatorId, CellId) {
             &synthesis_regions,
             &module,
             &mapped,
-            &[(original, MappedCellSource::Region { origins, owner })],
+            &[(
+                original,
+                MappedCellSource::Region {
+                    origins,
+                    region: owner,
+                },
+            )],
         )
         .unwrap();
     (mapped, implementations, operator, original)

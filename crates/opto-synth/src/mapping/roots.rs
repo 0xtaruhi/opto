@@ -260,24 +260,45 @@ pub(crate) fn mapping_roots(
     port_bindings: &opto_timing::PortBindings,
     sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
 ) -> Result<Vec<MappingRoot>, crate::SynthError> {
+    mapping_roots_with_state(module, timing, port_bindings, sequential_timing, true)
+}
+
+pub(crate) fn combinational_mapping_roots(
+    module: &word::WordModule,
+    timing: &opto_timing::TimingContext,
+    port_bindings: &opto_timing::PortBindings,
+    sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
+) -> Result<Vec<MappingRoot>, crate::SynthError> {
+    mapping_roots_with_state(module, timing, port_bindings, sequential_timing, false)
+}
+
+fn mapping_roots_with_state(
+    module: &word::WordModule,
+    timing: &opto_timing::TimingContext,
+    port_bindings: &opto_timing::PortBindings,
+    sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
+    include_state: bool,
+) -> Result<Vec<MappingRoot>, crate::SynthError> {
     let mut roots = Vec::new();
     let global_required = timing.minimum_synthesis_delay();
     let observability = crate::word::uses::netlist_observability(module)?;
     // State shells are semantic roots even when their results reach a signal
     // through Concat, Extract, or Cast rather than as its direct driver.
-    for operation in module.operations() {
-        if !observability.observes_value(operation.result)? {
-            continue;
+    if include_state {
+        for operation in module.operations() {
+            if !observability.observes_value(operation.result)? {
+                continue;
+            }
+            publish_state_roots(
+                &mut roots,
+                module,
+                operation,
+                timing,
+                port_bindings,
+                sequential_timing,
+                global_required,
+            );
         }
-        publish_state_roots(
-            &mut roots,
-            module,
-            operation,
-            timing,
-            port_bindings,
-            sequential_timing,
-            global_required,
-        );
     }
     for (connect_index, connect) in module.connects().iter().enumerate() {
         let is_live = observability.observes_connect(connect_index)?;
@@ -341,6 +362,36 @@ pub(crate) fn mapping_roots(
                 .into_iter()
                 .map(unconstrained_root),
         );
+    }
+    Ok(merge_by_value(roots))
+}
+
+pub(crate) fn state_mapping_roots(
+    module: &word::WordModule,
+    operations: impl IntoIterator<Item = word::OpId>,
+    timing: &opto_timing::TimingContext,
+    port_bindings: &opto_timing::PortBindings,
+    sequential_timing: Option<&super::sequential::SequentialTimingProjection>,
+) -> Result<Vec<MappingRoot>, crate::SynthError> {
+    let global_required = timing.minimum_synthesis_delay();
+    let mut roots = Vec::new();
+    for operation in operations {
+        let operation = module.operation(operation).ok_or_else(|| {
+            crate::SynthError::invariant("explicit state mapping root is not live")
+        })?;
+        if !publish_state_roots(
+            &mut roots,
+            module,
+            operation,
+            timing,
+            port_bindings,
+            sequential_timing,
+            global_required,
+        ) {
+            return Err(crate::SynthError::invariant(
+                "explicit state mapping root is combinational",
+            ));
+        }
     }
     Ok(merge_by_value(roots))
 }

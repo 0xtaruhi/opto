@@ -177,7 +177,7 @@ impl<'a> RewriteIncremental<'a> {
 
 pub(crate) struct CutReuse {
     cuts: CutDatabase,
-    old_to_new: Box<[Option<LogicNodeId>]>,
+    old_to_new: super::pipeline::NodeRemap,
     new_to_old: Box<[Option<u32>]>,
     old_predecessors: Box<[[Option<u32>; 3]]>,
     references: Box<[u32]>,
@@ -239,7 +239,7 @@ pub(super) fn resynthesize(
         census_started.elapsed()
     );
     if !approved.is_empty() {
-        let next = rewrite_pass(
+        let (next, applied) = rewrite_pass(
             &state.network,
             &state.roots,
             RewritePass {
@@ -254,16 +254,18 @@ pub(super) fn resynthesize(
         )?;
         approved = approved.remapped(&next.remap);
         state.apply(next)?;
-        converge(
-            state,
-            &mut approved,
-            RewriteEnvironment {
-                requirements,
-                diagnostics,
-                runtime,
-                incremental,
-            },
-        )?;
+        if applied != 0 {
+            converge(
+                state,
+                &mut approved,
+                RewriteEnvironment {
+                    requirements,
+                    diagnostics,
+                    runtime,
+                    incremental,
+                },
+            )?;
+        }
     }
     Ok(())
 }
@@ -276,7 +278,7 @@ pub(super) fn normalize(
     incremental: RewriteIncremental<'_>,
 ) -> Result<(), crate::SynthError> {
     let mut empty = ApprovedDivisors::default();
-    let first = rewrite_pass(
+    let (first, applied) = rewrite_pass(
         &state.network,
         &state.roots,
         RewritePass {
@@ -290,16 +292,18 @@ pub(super) fn normalize(
         },
     )?;
     state.apply(first)?;
-    converge(
-        state,
-        &mut empty,
-        RewriteEnvironment {
-            requirements,
-            diagnostics,
-            runtime,
-            incremental,
-        },
-    )?;
+    if applied != 0 {
+        converge(
+            state,
+            &mut empty,
+            RewriteEnvironment {
+                requirements,
+                diagnostics,
+                runtime,
+                incremental,
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -316,7 +320,7 @@ fn converge(
     } = environment;
     let mut cost = network_score(&state.network, &state.roots, requirements);
     for _ in 1..MAX_PASSES {
-        let next = rewrite_pass(
+        let (next, applied) = rewrite_pass(
             &state.network,
             &state.roots,
             RewritePass {
@@ -329,6 +333,9 @@ fn converge(
                 incremental,
             },
         )?;
+        if applied == 0 {
+            break;
+        }
         let next_roots = super::pipeline::map_roots(&next.remap, &state.roots)?;
         let next_cost = network_score(&next.network, &next_roots, requirements);
         crate::api::diagnostics::trace!(
@@ -448,7 +455,7 @@ fn rewrite_pass(
     network: &LogicGraph,
     roots: &[LogicNodeId],
     pass: RewritePass<'_>,
-) -> Result<TransformProduct, crate::SynthError> {
+) -> Result<(TransformProduct, usize), crate::SynthError> {
     let RewritePass {
         virtuals,
         reuse,
@@ -552,21 +559,22 @@ fn rewrite_pass(
         || (MffcScratch::new(), Synthesizer::fresh()),
         |(mffc, synthesizer), index| decide_node(&analysis, mffc, synthesizer, index),
     )?;
+    let applied = decisions
+        .iter()
+        .filter(|decision| decision.is_some())
+        .count();
 
     crate::api::diagnostics::trace!(
         trace,
         "logic.rewrite.decide",
         "wall={:?} applied={} of {}",
         decide_started.elapsed(),
-        decisions
-            .iter()
-            .filter(|decision| decision.is_some())
-            .count(),
+        applied,
         node_count
     );
     let materialize_started = std::time::Instant::now();
     let mut outcome = materialize::materialize(network, &decisions, virtuals, roots);
-    let old_to_new = outcome.remap.clone();
+    let old_to_new = std::sync::Arc::clone(&outcome.remap);
     let mut owners = vec![None; outcome.network.node_count()];
     let mut collisions = vec![false; owners.len()];
     for (old, mapped) in old_to_new.iter().enumerate() {
@@ -621,7 +629,7 @@ fn rewrite_pass(
         "wall={:?}",
         materialize_started.elapsed()
     );
-    Ok(outcome)
+    Ok((outcome, applied))
 }
 
 fn incremental_decision_active(

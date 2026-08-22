@@ -20,30 +20,26 @@ struct Bank {
 }
 
 #[derive(Debug, Default)]
-struct MemoryOwnership {
+struct MemoryLoweringRow {
     operations: Vec<word::OpId>,
     state_values: Vec<word::ValueId>,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct MemoryLoweringOwnership {
-    memories: Vec<MemoryOwnership>,
+pub(crate) struct MemoryLoweringBinding {
+    memories: Vec<MemoryLoweringRow>,
 }
 
-impl MemoryLoweringOwnership {
+impl MemoryLoweringBinding {
     pub(crate) fn operations(&self) -> impl Iterator<Item = (word::OpId, word::MemoryId)> + '_ {
-        self.memories
-            .iter()
-            .enumerate()
-            .flat_map(|(index, ownership)| {
-                let memory = word::MemoryId::from_index(index)
-                    .expect("memory ownership rows use valid dense IDs");
-                ownership
-                    .operations
-                    .iter()
-                    .copied()
-                    .map(move |operation| (operation, memory))
-            })
+        self.memories.iter().enumerate().flat_map(|(index, row)| {
+            let memory = word::MemoryId::from_index(index)
+                .expect("memory lowering rows use valid dense IDs");
+            row.operations
+                .iter()
+                .copied()
+                .map(move |operation| (operation, memory))
+        })
     }
 
     pub(crate) fn operation(&self, memory: word::MemoryId, ordinal: u32) -> Option<word::OpId> {
@@ -57,18 +53,14 @@ impl MemoryLoweringOwnership {
     pub(crate) fn state_values(
         &self,
     ) -> impl Iterator<Item = (word::ValueId, word::MemoryId)> + '_ {
-        self.memories
-            .iter()
-            .enumerate()
-            .flat_map(|(index, ownership)| {
-                let memory = word::MemoryId::from_index(index)
-                    .expect("memory ownership rows use valid dense IDs");
-                ownership
-                    .state_values
-                    .iter()
-                    .copied()
-                    .map(move |value| (value, memory))
-            })
+        self.memories.iter().enumerate().flat_map(|(index, row)| {
+            let memory = word::MemoryId::from_index(index)
+                .expect("memory lowering rows use valid dense IDs");
+            row.state_values
+                .iter()
+                .copied()
+                .map(move |value| (value, memory))
+        })
     }
 
     pub(crate) fn state_value(
@@ -81,6 +73,39 @@ impl MemoryLoweringOwnership {
             .state_values
             .get(ordinal as usize)
             .copied()
+    }
+
+    pub(crate) fn appended_operation_regions(
+        &self,
+        module: &word::WordModule,
+        memory_regions: &[Option<crate::RegionRowId>],
+    ) -> Result<Vec<(word::OpId, crate::RegionRowId)>, crate::SynthError> {
+        let region = |memory: word::MemoryId| {
+            memory_regions
+                .get(memory.index())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("lowered memory has no synthesis work item")
+                })
+        };
+        let mut rows = self
+            .operations()
+            .map(|(operation, memory)| region(memory).map(|row| (operation, row)))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (value, memory) in self.state_values() {
+            let operation = module
+                .value(value)
+                .and_then(|stored| match stored.kind {
+                    word::ValueKind::Operation(operation) => Some(operation),
+                    word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+                })
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("lowered memory state has no generating operation")
+                })?;
+            rows.push((operation, region(memory)?));
+        }
+        Ok(rows)
     }
 }
 
@@ -109,7 +134,7 @@ pub(crate) fn lower_selected_memories(
     module: &mut word::WordModule,
     implementations: &[Option<crate::planning::regional::MemoryImplementationCandidate>],
     target_cells: &TargetCellSet,
-) -> Result<MemoryLoweringOwnership, crate::SynthError> {
+) -> Result<MemoryLoweringBinding, crate::SynthError> {
     module
         .validate_memories()
         .map_err(crate::SynthError::from)?;
@@ -121,7 +146,7 @@ pub(crate) fn lower_selected_memories(
     let register_bank_clocks = preflight(module, implementations, target_cells)?;
     let resources = module.take_memory_resources();
     if resources.is_empty() {
-        return Ok(MemoryLoweringOwnership::default());
+        return Ok(MemoryLoweringBinding::default());
     }
 
     let mut reads = vec![Vec::new(); resources.memories.len()];
@@ -136,9 +161,9 @@ pub(crate) fn lower_selected_memories(
         ports.sort_by_key(|port| port.priority);
     }
 
-    let mut ownership = MemoryLoweringOwnership {
+    let mut binding = MemoryLoweringBinding {
         memories: (0..resources.memories.len())
-            .map(|_| MemoryOwnership::default())
+            .map(|_| MemoryLoweringRow::default())
             .collect(),
     };
     for (index, memory) in resources.memories.iter().enumerate() {
@@ -176,9 +201,9 @@ pub(crate) fn lower_selected_memories(
                 stored.kind,
                 word::OpKind::Register(_) | word::OpKind::Latch(_)
             ) {
-                ownership.memories[index].state_values.push(stored.result);
+                binding.memories[index].state_values.push(stored.result);
             } else {
-                ownership.memories[index].operations.push(operation);
+                binding.memories[index].operations.push(operation);
             }
         }
     }
@@ -193,13 +218,13 @@ pub(crate) fn lower_selected_memories(
     module
         .validate_memories()
         .map_err(crate::SynthError::from)?;
-    Ok(ownership)
+    Ok(binding)
 }
 
 #[cfg(test)]
 pub(crate) fn lower_memories_to_register_banks(
     module: &mut word::WordModule,
-) -> Result<MemoryLoweringOwnership, crate::SynthError> {
+) -> Result<MemoryLoweringBinding, crate::SynthError> {
     let implementations =
         vec![
             Some(crate::planning::regional::MemoryImplementationCandidate::RegisterBank);

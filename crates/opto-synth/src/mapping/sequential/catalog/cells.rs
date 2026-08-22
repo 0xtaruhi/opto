@@ -10,7 +10,6 @@ use crate::planning::mapping_policy::compare_cell_cost;
 use smallvec::{SmallVec, smallvec};
 
 pub(crate) type AsyncControls = SmallVec<[AsyncControl; 1]>;
-pub(crate) type AsyncResetRequests = SmallVec<[AsyncResetRequest; 2]>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct SequentialTiming {

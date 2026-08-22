@@ -197,11 +197,13 @@ fn packed_crossings_freeze_each_bit_at_its_semantic_producer() {
     let graph =
         super::partition::build(&module, RegionPartitionPolicy::with_target_work(1)).unwrap();
     let consumer = graph
-        .operation_owner(operation(&module, result))
+        .operation_region(operation(&module, result))
         .unwrap()
         .row();
     for producer in [low, high] {
-        let owner = graph.operation_owner(operation(&module, producer)).unwrap();
+        let owner = graph
+            .operation_region(operation(&module, producer))
+            .unwrap();
         assert!(graph.bit_flows(owner).iter().any(|flow| {
             flow.value() == producer && flow.bit() == 0 && flow.consumer() == Some(consumer)
         }));
@@ -464,7 +466,7 @@ fn publication_order_does_not_change_region_revision() {
         let graph =
             super::partition::build(&module, RegionPartitionPolicy::with_target_work(1)).unwrap();
         graph
-            .operation_owner(operation(&module, source))
+            .operation_region(operation(&module, source))
             .unwrap()
             .revision()
     };
@@ -496,8 +498,10 @@ fn state_is_a_hard_region_boundary() {
     output(&mut module, "q", state);
 
     let graph = SynthesisRegionGraph::build(&module).unwrap();
-    let state_owner = graph.operation_owner(operation(&module, state)).unwrap();
-    let logic_owner = graph.operation_owner(operation(&module, inverted)).unwrap();
+    let state_owner = graph.operation_region(operation(&module, state)).unwrap();
+    let logic_owner = graph
+        .operation_region(operation(&module, inverted))
+        .unwrap();
     assert_eq!(state_owner, logic_owner);
     assert_eq!(
         graph
@@ -546,8 +550,8 @@ fn state_fanout_consumers_share_one_downstream_region() {
     output(&mut module, "next", next);
 
     let graph = SynthesisRegionGraph::build(&module).unwrap();
-    let decoded_owner = graph.operation_owner(operation(&module, decoded)).unwrap();
-    let next_owner = graph.operation_owner(operation(&module, next)).unwrap();
+    let decoded_owner = graph.operation_region(operation(&module, decoded)).unwrap();
+    let next_owner = graph.operation_region(operation(&module, next)).unwrap();
     assert_eq!(decoded_owner, next_owner);
 }
 
@@ -603,39 +607,6 @@ fn inconsistent_work_policy_is_rejected() {
 }
 
 #[test]
-fn final_partition_treats_structural_owners_as_indivisible_atoms() {
-    let mut module = WordModule::new("owner_atoms");
-    let source = input(&mut module, "a");
-    let first = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
-    let middle = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
-    let last = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
-    output(&mut module, "x", first);
-    output(&mut module, "y", middle);
-    output(&mut module, "z", last);
-    let first_owner = RegionRowId::from_index(0).unwrap();
-    let middle_owner = RegionRowId::from_index(1).unwrap();
-    let ownership = crate::regional::StructuralOwnershipProvenance::from_owners_for_test(
-        &module,
-        vec![Some(first_owner), Some(middle_owner), Some(first_owner)],
-    )
-    .unwrap();
-
-    let graph = super::partition::build_with_ownership(
-        &module,
-        RegionPartitionPolicy::with_target_work(1),
-        &ownership,
-    )
-    .unwrap();
-
-    let first_region = graph.operation_owner(operation(&module, first)).unwrap();
-    let middle_region = graph.operation_owner(operation(&module, middle)).unwrap();
-    let last_region = graph.operation_owner(operation(&module, last)).unwrap();
-    assert_eq!(first_region, last_region);
-    assert_ne!(first_region, middle_region);
-    assert_eq!(graph.regions().len(), 2);
-}
-
-#[test]
 fn stable_identity_resolves_a_deep_forward_reference_chain() {
     let mut module = WordModule::new("forward");
     let source = input(&mut module, "a");
@@ -686,11 +657,11 @@ fn unreachable_operations_have_no_region_owner() {
 
     let graph = SynthesisRegionGraph::build(&module).unwrap();
 
-    assert!(graph.operation_owner(operation(&module, live)).is_some());
-    assert!(graph.operation_owner(operation(&module, dead)).is_none());
+    assert!(graph.operation_region(operation(&module, live)).is_some());
+    assert!(graph.operation_region(operation(&module, dead)).is_none());
     assert!(
         graph
-            .operation_owner(operation(&module, dead_offset))
+            .operation_region(operation(&module, dead_offset))
             .is_none()
     );
     assert_eq!(
@@ -746,7 +717,7 @@ fn memory_read_address_operations_have_a_region_owner() {
 
     assert!(
         graph
-            .operation_owner(operation(&module, translated_address))
+            .operation_region(operation(&module, translated_address))
             .is_some()
     );
 }
@@ -784,10 +755,10 @@ fn unobserved_memory_and_its_address_cone_have_no_region() {
     let graph = SynthesisRegionGraph::build(&module).unwrap();
 
     assert!(graph.regions().is_empty());
-    assert_eq!(graph.memory_owner_rows(), &[None]);
+    assert_eq!(graph.memory_region_rows(), &[None]);
     assert!(
         graph
-            .operation_owner(operation(&module, translated_address))
+            .operation_region(operation(&module, translated_address))
             .is_none()
     );
 }
@@ -840,7 +811,7 @@ fn operation_anchor_ignores_unrelated_arena_insertions() {
         let graph = SynthesisRegionGraph::build(&module).unwrap();
         (
             graph.operation_anchor(operation).unwrap(),
-            graph.operation_owner(operation).unwrap().id(),
+            graph.operation_region(operation).unwrap().id(),
         )
     };
 

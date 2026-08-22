@@ -12,7 +12,7 @@ pub(super) fn lower_logic(
         normalized,
         mapping_context,
         target_model,
-        regions,
+        work,
         contracts,
     } = planned;
     let NormalizedState {
@@ -22,8 +22,8 @@ pub(super) fn lower_logic(
         source_instances,
         synthesized: mut source,
     } = normalized;
-    let memory_regions = regions.memory_owner_rows();
-    let operation_regions = regions.operation_owner_rows();
+    let regions = work.regions();
+    let operation_regions = regions.operation_region_rows();
     let profiling = execution.engine.config.diagnostics.timing;
     let preparation = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
@@ -34,9 +34,10 @@ pub(super) fn lower_logic(
                 source: &source,
                 operation_regions,
                 decisions: &ledger.regional_cache_records,
-                regions: &regions,
+                work: &work,
                 contracts: &contracts,
                 options: &environment.options,
+                clock_gating: environment.clock_gating,
                 timing: environment.primary_scenario().constraints(),
                 scenarios: &environment.scenarios,
                 target_model: &target_model,
@@ -50,9 +51,6 @@ pub(super) fn lower_logic(
     }?;
     let (prepared_regions, memory_implementations) = preparation;
     let mut prepared_regions = prepared_regions.into_vec();
-    for prepared in &mut prepared_regions {
-        prepared.binding.resolve_sequential_sources(&source)?;
-    }
     let regional_publication = aggregate_regional_publication(
         &source,
         operation_regions,
@@ -60,7 +58,7 @@ pub(super) fn lower_logic(
             .iter()
             .flat_map(|prepared| prepared.publication.iter().copied()),
     )?;
-    let memory_ownership = {
+    let memory_binding = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.selected_memory_lowering".to_string()
         });
@@ -70,16 +68,15 @@ pub(super) fn lower_logic(
             &environment.options.target_cells,
         )
     }?;
-    let operation_regions = crate::mapping::extend_operation_regions_for_memories(
-        &source,
+    let operation_regions = crate::boolean::bitblast::OperationRegions::with_appended(
+        source.operations().len(),
         operation_regions,
-        memory_regions,
-        &memory_ownership,
+        memory_binding.appended_operation_regions(&source, regions.memory_region_rows())?,
     )?;
     for prepared in &mut prepared_regions {
         prepared
             .binding
-            .resolve_memory_sources(&source, &memory_ownership)?;
+            .resolve_memory_sources(&source, &memory_binding)?;
     }
     let mut regional_binding_values = prepared_regions
         .iter()
@@ -106,7 +103,7 @@ pub(super) fn lower_logic(
     regional_binding_values.sort_unstable();
     regional_binding_values.dedup();
     let source_sequential_operations =
-        crate::mapping::materialize::frozen_sequential_operations(&source, &operation_regions)?;
+        crate::mapping::materialize::sequential_region_bindings(&source, regions)?;
     regional_binding_values.extend(crate::mapping::materialize::sequential_binding_values(
         &source,
         &source_sequential_operations,
@@ -116,7 +113,7 @@ pub(super) fn lower_logic(
     let operator_manifest = crate::OperatorManifest::capture(
         prepared_regions.iter().map(|prepared| &prepared.operators),
     )?;
-    let (provenance, region_ownership, mut regional_plans) = {
+    let (provenance, region_binding, mut regional_plans) = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.global_bitblast".to_string()
         });
@@ -130,11 +127,20 @@ pub(super) fn lower_logic(
                 architecture,
                 operators: _,
                 publication: _,
+                sequential,
+                substrate,
+                proof,
             } = prepared;
             provenance.import_private_architecture(architecture, &source)?;
-            regional_plans.push(super::regional_mapping::RegionalPlanRow { plan, binding });
+            regional_plans.push(super::regional_mapping::RegionalPlanRow {
+                plan,
+                binding,
+                sequential,
+                substrate,
+                proof,
+            });
         }
-        let ownership = crate::boolean::bitblast::bitblast_module_with_regions(
+        let binding = crate::boolean::bitblast::bitblast_module_with_regions(
             &mut source,
             &shell,
             &mut provenance,
@@ -143,20 +149,15 @@ pub(super) fn lower_logic(
             &regional_publication,
             crate::boolean::bitblast::GlobalBitblastScope::RegionalShell,
         )?;
-        Ok::<_, crate::SynthError>((provenance, ownership, regional_plans))
+        Ok::<_, crate::SynthError>((provenance, binding, regional_plans))
     }?;
-    let sequential_operations = crate::mapping::materialize::lowered_sequential_operations(
-        &source,
-        &region_ownership,
-        &source_sequential_operations,
-    )?;
     {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.binding_materialization".to_string()
         });
         for row in &mut regional_plans {
             row.binding
-                .materialize_source_bits(&source, &region_ownership, &memory_ownership)?;
+                .materialize_source_bits(&source, &region_binding, &memory_binding)?;
         }
     }
     ledger.lowered_values = source.values().len();
@@ -166,11 +167,10 @@ pub(super) fn lower_logic(
         ledger,
         source_instances,
         mapping_context,
-        regions,
-        region_ownership,
+        work,
+        region_binding,
         contracts,
         regional_plans: regional_plans.into_boxed_slice(),
-        sequential_operations,
         synthesized: source,
         provenance,
         operator_manifest,
@@ -206,7 +206,7 @@ fn aggregate_regional_publication(
             .flatten()
             .ok_or_else(|| {
                 crate::SynthError::invariant(format!(
-                    "regional publication {:?}[{}] has no authoritative operation owner",
+                    "regional publication {:?}[{}] has no source region",
                     entry.target, entry.bit,
                 ))
             })?;
@@ -219,7 +219,7 @@ fn aggregate_regional_publication(
         .find(|key| !publication_by_bit.contains_key(key))
     {
         return Err(crate::SynthError::invariant(format!(
-            "regional publication {target:?}[{bit}] was not claimed by its authoritative owner",
+            "regional publication {target:?}[{bit}] was not emitted by its source region",
         )));
     }
     Ok(publication_by_bit
@@ -239,7 +239,7 @@ mod publication_tests {
     use super::*;
 
     #[test]
-    fn publication_aggregation_selects_only_the_authoritative_owner() {
+    fn publication_aggregation_selects_only_the_source_region() {
         let mut source = opto_ir::word::WordModule::new("publication_test");
         let input = source
             .add_port(
@@ -264,7 +264,7 @@ mod publication_tests {
             .unwrap();
         let first = crate::RegionRowId::from_index(0).unwrap();
         let second = crate::RegionRowId::from_index(1).unwrap();
-        let owners = [Some(first)];
+        let operation_regions = [Some(first)];
         let claim = |producer| crate::boolean::bitblast::RegionalPublicationBit {
             target,
             bit: 0,
@@ -273,16 +273,17 @@ mod publication_tests {
 
         let duplicate = aggregate_regional_publication(
             &source,
-            &owners,
+            &operation_regions,
             [claim(second), claim(first), claim(second), claim(first)],
         )
         .unwrap();
         assert_eq!(duplicate, [claim(first)]);
-        let error = aggregate_regional_publication(&source, &owners, [claim(second)]).unwrap_err();
+        let error = aggregate_regional_publication(&source, &operation_regions, [claim(second)])
+            .unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("was not claimed by its authoritative owner")
+                .contains("was not emitted by its source region")
         );
     }
 }

@@ -32,17 +32,16 @@ type BoundaryValueObservation = ([u8; 32], Box<[word::ValueId]>);
 pub(crate) struct RegionalMappingRequest<'a> {
     pub(crate) module: &'a word::WordModule,
     pub(crate) provenance: &'a mut ProvenanceBuilder,
-    pub(crate) regions: &'a crate::SynthesisRegionGraph,
-    pub(crate) region_ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
+    pub(crate) work: &'a crate::regional::WorkGraph,
+    pub(crate) region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
     pub(crate) contracts: &'a crate::regional::RegionContractSet,
     pub(crate) regional_plans: &'a [RegionalPlanRow],
-    pub(crate) sequential_operations: &'a [materialize::FrozenSequentialOperation],
     pub(crate) config: MappingConfig<'a>,
 }
 
 /// Read-only context shared by every regional mapping epoch.
 struct RegionalMapper<'a> {
-    regions: &'a crate::SynthesisRegionGraph,
+    work: &'a crate::regional::WorkGraph,
     response_models: cover::CoverResponseModels<'a>,
     config: MappingConfig<'a>,
     runtime: &'a ExecutionContext,
@@ -51,14 +50,13 @@ struct RegionalMapper<'a> {
 
 /// The single mutable epoch state governed by one regional mapper.
 ///
-/// Frozen Word semantics and ownership define the generation in which the
+/// Frozen Word semantics and region bindings define the generation in which the
 /// rows are valid. The provenance ledger, contracts, rows, and exploration
 /// journal advance together under the mapper's serialized publication rules.
 struct RegionalMappingState<'a> {
     module: &'a word::WordModule,
     provenance: &'a mut ProvenanceBuilder,
-    region_ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
-    sequential_operations: &'a [materialize::FrozenSequentialOperation],
+    region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
     contracts: crate::regional::RegionContractSet,
     rows: Vec<RegionalPlanRow>,
     plan_journal:
@@ -70,6 +68,9 @@ struct RegionalMappingState<'a> {
 pub(super) struct RegionalPlanRow {
     pub(super) plan: crate::RegionCoverPlan,
     pub(super) binding: RegionPlanBinding,
+    pub(super) sequential: Box<[materialize::RegionalSequentialCellPlan]>,
+    pub(super) substrate: Box<[materialize::RegionalSubstrateCellPlan]>,
+    pub(super) proof: opto_ir::design::EquivalenceCertificate,
 }
 
 impl RegionalMappingState<'_> {
@@ -116,6 +117,7 @@ struct RegionalMappedState {
     cell_sources: Vec<Option<MappedCellSource>>,
     implementation_census: Option<ImplementationCensus>,
     signals: WordMappedSignals,
+    regional_pins: materialize::RegionalMappedPins,
     boundary_nets: Box<[crate::closure::BoundaryNetObservation]>,
     footprints: Vec<Option<MappedRegionFootprint>>,
     timing: Option<crate::closure::mmmc::MmmcTiming>,
@@ -143,13 +145,13 @@ pub(crate) fn map_mapping_library_cells(
     let RegionalMappingRequest {
         module,
         provenance,
-        regions,
-        region_ownership,
+        work,
+        region_binding,
         contracts,
         regional_plans,
-        sequential_operations,
         config,
     } = request;
+    let regions = work.regions();
     if regional_plans.len() != regions.regions().len()
         || regional_plans
             .iter()
@@ -163,8 +165,7 @@ pub(crate) fn map_mapping_library_cells(
     let mut state = RegionalMappingState {
         module,
         provenance,
-        region_ownership,
-        sequential_operations,
+        region_binding,
         contracts: contracts.clone(),
         rows: regional_plans.to_vec(),
         plan_journal: std::collections::BTreeMap::new(),
@@ -172,7 +173,7 @@ pub(crate) fn map_mapping_library_cells(
     let trace =
         crate::api::diagnostics::SynthTrace::timing(config.mapping_context.config.diagnostics);
     let mapper = RegionalMapper {
-        regions,
+        work,
         response_models: cover::CoverResponseModels::new(config.scenarios),
         config,
         runtime,
@@ -204,7 +205,7 @@ fn resolve_boundary_nets(
 
 fn boundary_observation_values(
     regions: &crate::SynthesisRegionGraph,
-    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+    binding: &crate::boolean::bitblast::LoweredRegionBinding,
 ) -> Result<Vec<BoundaryValueObservation>, crate::SynthError> {
     let mut values = std::collections::BTreeMap::new();
     for region in regions.regions() {
@@ -216,7 +217,7 @@ fn boundary_observation_values(
             let port = regions.port(port).ok_or_else(|| {
                 crate::SynthError::invariant("boundary observation references an unknown port")
             })?;
-            let Some(lowered) = ownership.lowered_bits(port.value()) else {
+            let Some(lowered) = binding.lowered_bits(port.value()) else {
                 // Lowering can remove a source-level boundary entirely. It has
                 // no mapped net to observe, so its retained local response
                 // remains authoritative for this epoch.

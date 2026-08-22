@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Provenance and ownership carried by a cell during mapped construction.
+//! Provenance and fragment containment carried during mapped construction.
 
 use super::implementation::OriginSetId;
 use opto_ir::word;
@@ -12,10 +12,15 @@ pub(crate) enum MappedCellSource {
     StructuralValue(word::ValueId),
     Value {
         value: word::ValueId,
-        owner: crate::RegionAnchorId,
+        region: crate::RegionAnchorId,
+    },
+    Memory {
+        memory: word::MemoryId,
+        ordinal: u32,
+        region: crate::RegionAnchorId,
     },
     Region {
         origins: OriginSetId,
-        owner: crate::RegionAnchorId,
+        region: crate::RegionAnchorId,
     },
 }

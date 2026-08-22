@@ -2,13 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{
-    Candidate, CandidateContext, CandidateIndex, CandidateRange, CellBinding, CellCost,
-    CombinationalCellCatalog, CoverTiming, CutDatabase, CutTruthDatabase, ExactChoice,
-    ExecutionContext, FlowChoice, HashMap, InverterCell, Joint, KCut, LibraryCover,
-    LibraryCoverBinding, LibraryCoverCell, LibraryCoverSource, LogicGraph, LogicNode, LogicNodeId,
-    MappingCost, SlotChoice, TruthTable, enumerate_joints, full_truth_mask, inverter_truth,
-    node_candidates, observability_cares, opposite, slot, slot_node, tighten_required_arrival,
-    window_cares,
+    Candidate, CandidateIndex, CellBinding, CellCost, CombinationalCellCatalog, CompiledMapping,
+    CoverTiming, CutDatabase, ExactChoice, ExecutionContext, FlowChoice, InverterCell, Joint, KCut,
+    LibraryCover, LibraryCoverBinding, LibraryCoverCell, LibraryCoverSource, LogicGraph, LogicNode,
+    LogicNodeId, MappingCost, SlotChoice, TruthTable, full_truth_mask, inverter_truth,
+    observability_cares, opposite, slot, slot_node, tighten_required_arrival, window_cares,
 };
 use smallvec::SmallVec;
 
@@ -34,12 +32,14 @@ pub(crate) struct CoverPlanner<'a> {
     cuts: &'a CutDatabase,
     catalog: &'a CombinationalCellCatalog,
     inverter: Option<InverterCell>,
-    candidates: CandidateIndex,
-    joints: Vec<Joint>,
-    slot_joints: opto_core::PackedRows<u32>,
-    joints_by_node: opto_core::PackedRows<u32>,
+    candidates: &'a CandidateIndex,
+    candidate_dependencies: &'a opto_core::PackedRows<u32>,
+    joints: &'a [Joint],
+    slot_joints: &'a opto_core::PackedRows<u32>,
+    joints_by_node: &'a opto_core::PackedRows<u32>,
     base_slots: usize,
     choices: Vec<Option<SlotChoice>>,
+    choice_areas: Vec<f64>,
     flows: Vec<MappingCost>,
     required_arrivals: Vec<f64>,
     endpoint_loads: Vec<f64>,
@@ -62,6 +62,8 @@ pub(crate) struct CoverPlanner<'a> {
 #[derive(Default)]
 struct ReferenceScratch {
     seeded_roots: Vec<usize>,
+    counts: Vec<u32>,
+    next_counts: Vec<u32>,
     next: Vec<usize>,
 }
 

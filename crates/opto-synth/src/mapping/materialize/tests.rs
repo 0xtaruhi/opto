@@ -3,6 +3,19 @@
 
 use super::*;
 
+#[test]
+fn regional_substrate_names_are_globally_scoped_by_region() {
+    let first = crate::RegionAnchorId::from_bytes_for_test([1; 32]);
+    let second = crate::RegionAnchorId::from_bytes_for_test([2; 32]);
+
+    let first_name = regional_substrate_instance_name(first, "U1");
+    let second_name = regional_substrate_instance_name(second, "U1");
+
+    assert_ne!(first_name, second_name);
+    assert!(first_name.starts_with(REGION_CELL_PREFIX));
+    assert!(first_name.ends_with("_cell_substrate_U1"));
+}
+
 fn cell(
     name: &str,
     dont_use: bool,

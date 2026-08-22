@@ -37,7 +37,9 @@ public inputs and retain enough metadata to be reproduced independently.
 ## Regional scale contract
 
 The accepted architecture adds a tiered public scale corpus at roughly one
-hundred thousand, one million and ten million mapped gates. It must cover
+hundred thousand, one million and ten million mapped gates. It is implemented in
+[`scale/`](scale/README.md), which also carries the RFC 0013 Phase 3 scheduling
+gates and the worker-count sweep that measures them. It must cover
 control-dense, arithmetic, high-fanout, deep-pipeline, memory and multi-clock
 designs. These are target qualification classes, not a claim that the current
 full-root mapper has passed them.

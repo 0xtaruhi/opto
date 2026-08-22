@@ -5,12 +5,10 @@
 
 use super::ArchitectureDecisions;
 use crate::planning::architecture::ArithmeticTerm;
-use crate::{OperationAnchorId, OperatorId, OperatorKind};
+use crate::{OperationAnchorId, OperatorKind};
 use opto_ir::word;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-const MISSING_OPERATOR: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 /// Stable identity of one semantic operator occurrence.
@@ -195,21 +193,12 @@ fn valid_dynamic_extract(shape: &DynamicExtractShape, signature: &OperatorSignat
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// One durable operator occurrence with separate semantics and provenance.
 pub struct PreservedOperatorInstance {
-    operator: OperatorId,
     occurrence: OperatorOccurrenceId,
     signature: OperatorSignatureId,
-    operands: Box<[word::ValueId]>,
-    result: word::ValueId,
-    source_operations: Box<[word::OpId]>,
+    source_operations: Box<[OperationAnchorId]>,
 }
 
 impl PreservedOperatorInstance {
-    /// Return the region-local dense operator ID used by architecture decisions.
-    #[must_use]
-    pub const fn operator(&self) -> OperatorId {
-        self.operator
-    }
-
     /// Return the stable semantic occurrence identity.
     #[must_use]
     pub const fn occurrence(&self) -> OperatorOccurrenceId {
@@ -222,21 +211,9 @@ impl PreservedOperatorInstance {
         self.signature
     }
 
-    /// Return region-local operands in the signature's binding order.
+    /// Return immutable stable source operations fused into this occurrence.
     #[must_use]
-    pub fn operands(&self) -> &[word::ValueId] {
-        &self.operands
-    }
-
-    /// Return the region-local result value.
-    #[must_use]
-    pub const fn result(&self) -> word::ValueId {
-        self.result
-    }
-
-    /// Return immutable source operations fused into this occurrence.
-    #[must_use]
-    pub fn source_operations(&self) -> &[word::OpId] {
+    pub fn source_operations(&self) -> &[OperationAnchorId] {
         &self.source_operations
     }
 }
@@ -246,7 +223,6 @@ impl PreservedOperatorInstance {
 pub struct DurableOperatorArena {
     signatures: Box<[OperatorSignature]>,
     instances: Box<[PreservedOperatorInstance]>,
-    operator_by_local_operation: Box<[u32]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,7 +237,7 @@ pub struct OperatorManifest {
 pub struct OperatorManifestInstance {
     occurrence: OperatorOccurrenceId,
     signature: OperatorSignatureId,
-    source_operations: Box<[word::OpId]>,
+    source_operations: Box<[OperationAnchorId]>,
 }
 
 impl OperatorManifest {
@@ -403,7 +379,7 @@ impl OperatorManifest {
                         instance
                             .source_operations
                             .len()
-                            .saturating_mul(size_of::<word::OpId>())
+                            .saturating_mul(size_of::<OperationAnchorId>())
                     })
                     .sum(),
             )
@@ -452,7 +428,7 @@ impl OperatorManifestInstance {
 
     /// Return source operations represented by this occurrence.
     #[must_use]
-    pub fn source_operations(&self) -> &[word::OpId] {
+    pub fn source_operations(&self) -> &[OperationAnchorId] {
         &self.source_operations
     }
 }
@@ -530,66 +506,31 @@ impl DurableOperatorArena {
                 )
             })?;
             instances.push(PreservedOperatorInstance {
-                operator: semantic.id(),
                 occurrence,
                 signature: signature.id,
-                operands: operands.into_boxed_slice(),
-                result: semantic.result(),
-                source_operations: source_operations.clone(),
+                source_operations: occurrence_key.1,
             });
         }
-        let operator_by_local_operation = (0..module.operations().len())
-            .map(|index| {
-                let operation = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
-                Ok(decisions
-                    .operator_for_source_operation(operation)
-                    .map_or(MISSING_OPERATOR, OperatorId::raw))
-            })
-            .collect::<Result<Vec<_>, crate::SynthError>>()?;
         Ok(Self {
             signatures: signatures.into_values().collect(),
             instances: instances.into_boxed_slice(),
-            operator_by_local_operation: operator_by_local_operation.into_boxed_slice(),
         })
     }
 
     pub(crate) fn validate_decisions(
         &self,
         decisions: &ArchitectureDecisions,
-        operation_count: usize,
     ) -> Result<(), crate::SynthError> {
         if self.instances.len() != decisions.operators().len() {
             return Err(crate::SynthError::invariant(
                 "durable operator arena does not align with architecture decisions",
             ));
         }
-        if self.operator_by_local_operation.len() != operation_count {
-            return Err(crate::SynthError::invariant(
-                "durable operator lookup does not cover its local module",
-            ));
-        }
-        for (index, &operator) in self.operator_by_local_operation.iter().enumerate() {
-            let operation = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
-            if decisions
-                .operator_for_source_operation(operation)
-                .map_or(MISSING_OPERATOR, OperatorId::raw)
-                != operator
-            {
-                return Err(crate::SynthError::invariant(
-                    "durable operator lookup disagrees with architecture decisions",
-                ));
-            }
-        }
         for (instance, semantic) in self.instances.iter().zip(decisions.operators()) {
             let signature = self.signature(instance.signature).ok_or_else(|| {
                 crate::SynthError::invariant("durable operator has no semantic signature")
             })?;
-            if instance.operator != semantic.id()
-                || instance.result != semantic.result()
-                || signature.kind != semantic.kind()
-                || instance.operands.as_ref()
-                    != decisions.operator_inputs(*semantic).collect::<Vec<_>>()
-            {
+            if signature.kind != semantic.kind() {
                 return Err(crate::SynthError::invariant(
                     "durable operator record disagrees with its selected architecture",
                 ));
@@ -617,14 +558,6 @@ impl DurableOperatorArena {
             .binary_search_by_key(&id, OperatorSignature::id)
             .ok()
             .map(|index| &self.signatures[index])
-    }
-
-    pub(crate) fn operator_for_local_operation(&self, operation: word::OpId) -> Option<OperatorId> {
-        self.operator_by_local_operation
-            .get(operation.index())
-            .copied()
-            .filter(|&operator| operator != MISSING_OPERATOR)
-            .map(OperatorId::from_raw)
     }
 }
 
@@ -746,21 +679,19 @@ mod tests {
         signature.id = signature_id(&signature).unwrap();
         let first_source = OperationAnchorId::from_bytes_for_test([1; 32]);
         let second_source = OperationAnchorId::from_bytes_for_test([2; 32]);
-        let first_operation = word::OpId::from_index(0).unwrap();
-        let second_operation = word::OpId::from_index(1).unwrap();
         let manifest = OperatorManifest {
             signatures: Box::new([signature.clone()]),
             instances: Box::new([
                 OperatorManifestInstance {
                     occurrence: occurrence_id(signature.id, &[first_source], 0).unwrap(),
                     signature: signature.id,
-                    source_operations: Box::new([first_operation]),
+                    source_operations: Box::new([first_source]),
                 },
                 OperatorManifestInstance {
                     occurrence: occurrence_id(signature.id, &[first_source, second_source], 0)
                         .unwrap(),
                     signature: signature.id,
-                    source_operations: Box::new([first_operation, second_operation]),
+                    source_operations: Box::new([first_source, second_source]),
                 },
             ]),
         };

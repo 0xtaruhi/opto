@@ -6,9 +6,9 @@
 pub(crate) mod boundary;
 mod contract;
 mod epoch;
-mod ownership;
 mod plan;
 pub(crate) mod region_graph;
+mod work;
 pub use boundary::{
     BoundaryCheckKind, BoundaryContract, BoundaryContractError, BoundaryContractRow,
     BoundaryInputContract, BoundaryOutputContract, ContractGeneration, EarlyLate, FiniteValue,
@@ -23,6 +23,9 @@ pub use region_graph::{
 
 pub(crate) use contract::RegionContractSet;
 pub(crate) use epoch::{EpochDecision, RegionalEpochCoordinator};
-pub(crate) use ownership::StructuralOwnershipProvenance;
 pub use plan::{BoundaryResponse, BoundaryResponseRow, RegionCoverPlan, RegionPlanCost};
 pub(crate) use plan::{RegionCoverPlanRecord, RegionImplementationCell, RegionalSharedAllocations};
+pub(crate) use work::{
+    SynthesisExecutor, WorkContext, WorkDesign, WorkGraph, WorkProduct, coalesce_revision_deltas,
+    logical_memory_cell_id, logical_operation_cell_id, validate_coalesce_proof,
+};

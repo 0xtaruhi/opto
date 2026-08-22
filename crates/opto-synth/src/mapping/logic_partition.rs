@@ -34,7 +34,7 @@ pub(crate) struct RegionLogicDomain<'a> {
     pub(crate) module: &'a word::WordModule,
     pub(crate) subject_inputs: &'a [word::ValueId],
     pub(crate) source_to_local: &'a BTreeMap<word::ValueId, word::ValueId>,
-    pub(crate) ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
+    pub(crate) region_binding: &'a crate::boolean::bitblast::LoweredRegionBinding,
     pub(crate) contracts: &'a [crate::BoundaryContract],
     pub(crate) roots: &'a [(MappingRoot, word::ValueId)],
 }
@@ -136,14 +136,14 @@ impl RegionLogicSlice {
             module,
             subject_inputs,
             source_to_local,
-            ownership,
+            region_binding,
             contracts,
             roots,
         } = domain;
         let mut inputs = subject_inputs.iter().copied().collect::<BTreeSet<_>>();
         let mut topology_roots = Vec::new();
         for &(root, local) in roots {
-            let bits = ownership
+            let bits = region_binding
                 .lowered_bits(local)
                 .map_or_else(|| vec![local], <[word::ValueId]>::to_vec);
             for value in bits {
@@ -160,7 +160,7 @@ impl RegionLogicSlice {
             .iter()
             .map(|contract| {
                 let bits = match source_to_local.get(&contract.port().value()).copied() {
-                    Some(local) => ownership
+                    Some(local) => region_binding
                         .lowered_bits(local)
                         .map_or_else(|| vec![local], <[word::ValueId]>::to_vec),
                     // A source boundary outside the task-local cone is explicitly

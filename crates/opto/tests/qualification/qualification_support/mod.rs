@@ -7,6 +7,7 @@ mod inventory;
 mod medium;
 mod process;
 mod qor;
+mod scale;
 mod schema;
 mod semantics;
 mod sv_tests;
@@ -39,6 +40,12 @@ pub(super) fn run_semantic_matrix(mode: RunMode) {
 
 pub(super) fn run_real_medium_gate(relative_path: &str) {
     medium::run(&workspace_root().join(relative_path));
+}
+
+/// Sweep worker counts over the generated scale corpus and enforce the RFC 0013
+/// Phase 3 scheduling gates recorded in the manifest.
+pub(super) fn run_scale_scaling_gate(relative_path: &str) {
+    scale::run(relative_path);
 }
 
 /// Prove that every mapping fixture reproduces its recorded area and cell

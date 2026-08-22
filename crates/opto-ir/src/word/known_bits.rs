@@ -212,7 +212,19 @@ pub struct KnownBitsAnalysis {
     values: Vec<FactState>,
     signals: Vec<FactState>,
     arena: Vec<FactWord>,
-    dependents: BTreeMap<FactNode, Vec<FactNode>>,
+    /// Reverse dependency edges, indexed by the dependency's dense index.
+    ///
+    /// `FactNode` wraps a dense `ValueId`/`SignalId`, so a map keyed by it pays
+    /// a B-tree search for what is already an array index. Invalidation walks
+    /// these edges for every appended connection, which made that search the
+    /// single hottest operation in RTL normalization.
+    value_dependents: Vec<Vec<FactNode>>,
+    signal_dependents: Vec<Vec<FactNode>>,
+    /// Epoch-stamped visit marks reused across `invalidate` calls, so a walk
+    /// costs no allocation and no ordered-set insert.
+    value_visited: Vec<u32>,
+    signal_visited: Vec<u32>,
+    visit_epoch: u32,
     drivers: SignalDrivers,
     external_signals: Vec<bool>,
     observed_ports: usize,
@@ -232,7 +244,11 @@ impl KnownBitsAnalysis {
             values: vec![FactState::Uncomputed; module.values().len()],
             signals: vec![FactState::Uncomputed; module.signals().len()],
             arena: Vec::new(),
-            dependents: BTreeMap::new(),
+            value_dependents: vec![Vec::new(); module.values().len()],
+            signal_dependents: vec![Vec::new(); module.signals().len()],
+            value_visited: vec![0; module.values().len()],
+            signal_visited: vec![0; module.signals().len()],
+            visit_epoch: 0,
             drivers: SignalDrivers::build(module),
             external_signals,
             observed_ports: module.ports().len(),
@@ -256,6 +272,12 @@ impl KnownBitsAnalysis {
             .resize(module.values().len(), FactState::Uncomputed);
         self.signals
             .resize(module.signals().len(), FactState::Uncomputed);
+        self.value_dependents
+            .resize(module.values().len(), Vec::new());
+        self.signal_dependents
+            .resize(module.signals().len(), Vec::new());
+        self.value_visited.resize(module.values().len(), 0);
+        self.signal_visited.resize(module.signals().len(), 0);
         self.external_signals.resize(module.signals().len(), false);
 
         let Some(mut changed_signals) = self.drivers.sync_append_only(module) else {
@@ -272,18 +294,59 @@ impl KnownBitsAnalysis {
         self.invalidate(changed_signals.into_iter().map(FactNode::Signal));
     }
 
+    fn dependents_mut(&mut self, node: FactNode) -> Option<&mut Vec<FactNode>> {
+        match node {
+            FactNode::Value(value) => self.value_dependents.get_mut(value.index()),
+            FactNode::Signal(signal) => self.signal_dependents.get_mut(signal.index()),
+        }
+    }
+
+    fn dependents_of(&self, node: FactNode) -> &[FactNode] {
+        let dependents = match node {
+            FactNode::Value(value) => self.value_dependents.get(value.index()),
+            FactNode::Signal(signal) => self.signal_dependents.get(signal.index()),
+        };
+        dependents.map_or(&[], Vec::as_slice)
+    }
+
     fn record_dependency(&mut self, dependency: FactNode, dependent: FactNode) {
-        let dependents = self.dependents.entry(dependency).or_default();
-        if !dependents.contains(&dependent) {
+        if let Some(dependents) = self.dependents_mut(dependency)
+            && !dependents.contains(&dependent)
+        {
             dependents.push(dependent);
+        }
+    }
+
+    /// Returns whether `node` had not yet been visited in this walk.
+    fn mark_visited(&mut self, node: FactNode) -> bool {
+        let epoch = self.visit_epoch;
+        let mark = match node {
+            FactNode::Value(value) => self.value_visited.get_mut(value.index()),
+            FactNode::Signal(signal) => self.signal_visited.get_mut(signal.index()),
+        };
+        match mark {
+            Some(mark) if *mark == epoch => false,
+            Some(mark) => {
+                *mark = epoch;
+                true
+            }
+            None => false,
         }
     }
 
     fn invalidate(&mut self, roots: impl IntoIterator<Item = FactNode>) {
         let mut pending = roots.into_iter().collect::<Vec<_>>();
-        let mut visited = BTreeSet::new();
+        // A fresh epoch retires every previous mark without clearing the
+        // arrays. On wraparound the marks are reset once instead.
+        self.visit_epoch = if let Some(epoch) = self.visit_epoch.checked_add(1) {
+            epoch
+        } else {
+            self.value_visited.fill(0);
+            self.signal_visited.fill(0);
+            1
+        };
         while let Some(node) = pending.pop() {
-            if !visited.insert(node) {
+            if !self.mark_visited(node) {
                 continue;
             }
             match node {
@@ -298,7 +361,7 @@ impl KnownBitsAnalysis {
                     }
                 }
             }
-            pending.extend(self.dependents.get(&node).into_iter().flatten().copied());
+            pending.extend_from_slice(self.dependents_of(node));
         }
     }
 
@@ -1640,5 +1703,46 @@ mod tests {
         let mut facts = KnownBitsAnalysis::new(&module);
 
         assert_eq!(facts.bit(&module, value, 0), KnownBit::Zero);
+    }
+    #[test]
+    fn append_query_cycles_track_newly_driven_bits() {
+        // Mirrors the RTL normalization pattern behind issue #111: append one
+        // slice driver, synchronize, then query known bits before the next
+        // append. Facts must track each newly driven bit without losing any
+        // previously proven bit.
+        let mut module = WordModule::new("append_query_loop");
+        let source = SourceSpan::default();
+        let width = 64;
+        let signal = module.add_wire("w", ty(width), source.clone()).unwrap();
+        let read = module.read_signal(signal, source.clone()).unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+        for step in 0..width {
+            let value = module
+                .constant(ConstBits::from_bin_str("1").unwrap(), ty(1), source.clone())
+                .unwrap();
+            module
+                .connect(
+                    LValue::signal(signal).with_range(BitRange {
+                        msb: step,
+                        lsb: step,
+                    }),
+                    value,
+                    source.clone(),
+                )
+                .unwrap();
+            facts.sync_append_only(&module);
+            for bit in 0..width {
+                let expected = if bit <= step {
+                    KnownBit::One
+                } else {
+                    KnownBit::Unknown
+                };
+                assert_eq!(
+                    facts.bit(&module, read, bit),
+                    expected,
+                    "bit {bit} after driving {step} slices"
+                );
+            }
+        }
     }
 }

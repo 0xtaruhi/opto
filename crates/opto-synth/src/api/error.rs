@@ -248,10 +248,10 @@ pub enum SynthError {
     /// A mapped-region edit conflicted with intervening mutations.
     #[error("{0}")]
     RegionConflict(#[from] opto_ir::mapped::RegionConflict),
-    /// A committed mapped edit touched cells whose explicit owner is unknown.
-    #[error("post-map edit touched mapped cells outside the ownership domain: {cells:?}")]
-    UnknownMappedOwners {
-        /// Mapped cell IDs outside the implementation ownership domain.
+    /// A committed mapped edit touched cells outside fragment containment.
+    #[error("post-map edit touched mapped cells outside fragment containment: {cells:?}")]
+    UnknownMappedFragments {
+        /// Mapped cell IDs outside the implementation fragment domain.
         cells: Box<[opto_ir::mapped::CellId]>,
     },
     /// A mutating operation failed and restoration of its prior state also
@@ -297,9 +297,9 @@ impl DiagnosticSource for SynthError {
             Self::Name(source) => Some(internal_diagnostic(source)),
             Self::HierarchyIr(source) => Some(internal_diagnostic(source)),
             Self::RegionConflict(source) => Some(internal_diagnostic(source)),
-            Self::UnknownMappedOwners { .. } => {
+            Self::UnknownMappedFragments { .. } => {
                 Some(Diagnostic::new("OPT-SYN-902", self.to_string()).with_help(
-                    "every post-map cell edit must carry explicit region or global ownership \
+                    "every post-map cell edit must declare one exact immutable fragment \
                      before regional plans can be invalidated safely",
                 ))
             }

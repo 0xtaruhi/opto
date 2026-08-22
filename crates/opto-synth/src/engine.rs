@@ -11,7 +11,7 @@ use crate::artifact::provenance::{ProvenanceBuilder, SourceInstanceProvenance};
 use crate::mapping::{MappingConfig, TargetMappingContext, TargetMappingContextKey};
 use crate::{
     ImplementationDb, IncrementalSnapshot, SourceChangeMetrics, SourceSnapshot, StageId,
-    SynthesisEffort, SynthesisOptions, SynthesisProgress, SynthesisRegionGraph, SynthesisResult,
+    SynthesisEffort, SynthesisOptions, SynthesisProgress, SynthesisResult,
 };
 use opto_ir::{rtl::RtlModule, word};
 use opto_runtime::ExecutionContext;
@@ -348,7 +348,9 @@ impl SynthesisEngine {
         let optimized = execution.run_stage(StageId::POSTMAP_OPTIMIZATION, |execution| {
             optimize_postmap(execution, mapped)
         })?;
-        execution.run_stage(StageId::FINALIZATION, |_| publication::finalize(optimized))
+        execution.run_stage(StageId::FINALIZATION, |execution| {
+            publication::finalize(optimized, execution.runtime.metrics())
+        })
     }
 }
 
@@ -543,7 +545,7 @@ struct PlannedState {
     normalized: NormalizedState,
     mapping_context: Arc<TargetMappingContext>,
     target_model: crate::planning::regional::StructuralTargetModel,
-    regions: SynthesisRegionGraph,
+    work: crate::regional::WorkGraph,
     contracts: crate::regional::RegionContractSet,
 }
 
@@ -552,11 +554,10 @@ struct LoweredState {
     ledger: SynthesisLedger,
     source_instances: SourceInstanceProvenance,
     mapping_context: Arc<TargetMappingContext>,
-    regions: SynthesisRegionGraph,
-    region_ownership: crate::boolean::bitblast::LoweredRegionOwnership,
+    work: crate::regional::WorkGraph,
+    region_binding: crate::boolean::bitblast::LoweredRegionBinding,
     contracts: crate::regional::RegionContractSet,
     regional_plans: Box<[regional_mapping::RegionalPlanRow]>,
-    sequential_operations: Box<[crate::mapping::materialize::FrozenSequentialOperation]>,
     synthesized: word::WordModule,
     provenance: ProvenanceBuilder,
     operator_manifest: crate::OperatorManifest,
@@ -626,15 +627,8 @@ fn plan_regions(
     let mapping_context = execution
         .engine
         .mapping_context(&normalized.environment.options);
-    let regions = crate::planning::regional::optimize_private_structure(
-        &mut normalized.synthesized,
-        &mapping_context,
-        normalized.environment.clock_gating,
-        true,
-        normalized.environment.primary_scenario().constraints(),
-        &normalized.environment.port_bindings,
-        execution.runtime,
-    )?;
+    let (regions, design) =
+        crate::planning::regional::seal_work_design(&mut normalized.synthesized)?;
     normalized.ledger.normalized_values = normalized.synthesized.values().len();
     normalized.ledger.normalized_operations = normalized.synthesized.operations().len();
     let trace = crate::api::diagnostics::SynthTrace::timing(execution.engine.config.diagnostics);
@@ -673,21 +667,51 @@ fn plan_regions(
         &normalized.environment.object_bindings,
         0,
     )?;
+    let scenarios = normalized.environment.scenarios.generation();
+    let target = normalized
+        .environment
+        .options
+        .target_cells
+        .content_fingerprint()
+        .bytes();
+    let context_keys = crate::planning::regional::context_keys(
+        &regions,
+        &contracts,
+        &normalized.environment.scenarios,
+        target,
+        normalized.environment.effort,
+    )?;
+    let regions = Arc::new(regions);
+    let design = Arc::new(design);
+    let contexts = context_keys
+        .iter()
+        .zip(regions.regions())
+        .map(|(&context, region)| {
+            crate::regional::WorkContext::logical(
+                context.into(),
+                design.revision(),
+                scenarios,
+                target,
+                contracts.contracts(region.row()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let mut work = crate::regional::WorkGraph::build(
+        &normalized.synthesized,
+        regions,
+        design,
+        contexts,
+        execution.runtime,
+    )?;
+    work.rebatch_for_workers(execution.runtime.parallelism())?;
     normalized.ledger.regional_cache_records = crate::planning::regional::select_architectures(
         crate::planning::regional::RegionalSearchRequest {
             module: &normalized.synthesized,
-            regions: &regions,
-            scenarios: &normalized.environment.scenarios,
+            work: &work,
+            contexts: &context_keys,
             target_cells: &normalized.environment.options.target_cells,
             target_model: &target_model,
-            contracts: &contracts,
-            effort: normalized.environment.effort,
-            target_fingerprint: normalized
-                .environment
-                .options
-                .target_cells
-                .content_fingerprint()
-                .bytes(),
             previous: &normalized.previous_regional_cache_records,
             metrics: &normalized.environment.incremental_metrics,
         },
@@ -698,7 +722,7 @@ fn plan_regions(
         normalized,
         mapping_context,
         target_model,
-        regions,
+        work,
         contracts,
     })
 }
@@ -717,11 +741,10 @@ fn map_initial_logic(
         regional_mapping::RegionalMappingRequest {
             module: &lowered.synthesized,
             provenance: &mut lowered.provenance,
-            regions: &lowered.regions,
-            region_ownership: &lowered.region_ownership,
+            work: &lowered.work,
+            region_binding: &lowered.region_binding,
             contracts: &lowered.contracts,
             regional_plans: &lowered.regional_plans,
-            sequential_operations: &lowered.sequential_operations,
             config: MappingConfig {
                 options: &lowered.environment.options,
                 port_bindings: &lowered.environment.port_bindings,
@@ -771,7 +794,7 @@ fn build_mapped_artifact(
         &lowered.environment.reference_ports,
     )?;
     let implementations = lowered.provenance.finish(
-        &lowered.regions,
+        lowered.work.regions(),
         &lowered.synthesized,
         &netlist,
         &cell_sources,
@@ -845,18 +868,18 @@ fn optimize_postmap(
         execution.engine.config,
         &mut *execution.observer,
     )?;
-    let owner_impact = mapped.implementations.take_committed_owner_impact();
-    if !outcome.changed && !owner_impact.is_empty() {
+    let fragment_impact = mapped.implementations.take_committed_fragment_impact();
+    if !outcome.changed && !fragment_impact.is_empty() {
         return Err(crate::SynthError::invariant(
-            "post-map provenance recorded owner changes without a committed replacement",
+            "post-map provenance recorded fragment changes without a committed replacement",
         ));
     }
-    if !owner_impact.unknown_cells().is_empty() {
-        return Err(crate::SynthError::UnknownMappedOwners {
-            cells: owner_impact.unknown_cells().iter().copied().collect(),
+    if !fragment_impact.unknown_cells().is_empty() {
+        return Err(crate::SynthError::UnknownMappedFragments {
+            cells: fragment_impact.unknown_cells().iter().copied().collect(),
         });
     }
-    let touched_regions = owner_impact.regions();
+    let touched_regions = fragment_impact.regions();
     for record in &mut mapped.ledger.regional_cache_records {
         if record
             .plan_region()

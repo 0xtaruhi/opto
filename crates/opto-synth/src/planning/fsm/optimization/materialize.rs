@@ -4,37 +4,26 @@
 use super::FsmPlan;
 use hashbrown::HashMap;
 use opto_ir::word;
-use std::ops::Range;
-
-pub(super) struct FsmMaterialization {
-    pub(super) operations: Range<usize>,
-    pub(super) source: word::OpId,
-}
 
 pub(super) fn materialize_plans(
     module: &mut word::WordModule,
     plans: &[FsmPlan],
-) -> Result<Vec<FsmMaterialization>, crate::SynthError> {
+) -> Result<Box<[(word::OpId, word::OpId)]>, crate::SynthError> {
     if plans.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Box::new([]));
     }
-    let mut materialized = Vec::with_capacity(plans.len());
-    for plan in plans {
-        let start = module.operations().len();
-        rewrite_candidate(module, plan)?;
-        materialized.push(FsmMaterialization {
-            operations: start..module.operations().len(),
-            source: plan.machine.register_operation,
-        });
-    }
+    let rewrites = plans
+        .iter()
+        .map(|plan| rewrite_candidate(module, plan))
+        .collect::<Result<_, _>>()?;
     module.validate().map_err(crate::SynthError::from)?;
-    Ok(materialized)
+    Ok(rewrites)
 }
 
 fn rewrite_candidate(
     module: &mut word::WordModule,
     plan: &FsmPlan,
-) -> Result<(), crate::SynthError> {
+) -> Result<(word::OpId, word::OpId), crate::SynthError> {
     let candidate = &plan.machine;
     let encoded_signal = module
         .add_generated_wire(plan.encoded_type, candidate.source.clone())
@@ -123,7 +112,19 @@ fn rewrite_candidate(
             candidate.source.clone(),
         )
         .map_err(crate::SynthError::from)?;
-    Ok(())
+    let operation = |value| {
+        module
+            .value(value)
+            .and_then(|value| match value.kind {
+                word::ValueKind::Operation(operation) => Some(operation),
+                word::ValueKind::Constant(_) | word::ValueKind::Signal(_) => None,
+            })
+            .ok_or_else(|| crate::SynthError::invariant("FSM state has no operation identity"))
+    };
+    Ok((
+        operation(candidate.register_result)?,
+        operation(encoded_register)?,
+    ))
 }
 
 fn decode_state(

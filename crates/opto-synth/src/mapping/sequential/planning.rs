@@ -2,158 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use opto_ir::word;
-use std::collections::BTreeMap;
-
-const MAX_FEEDBACK_MUX_NODES: usize = 256;
-
-pub(crate) fn recover_feedback_enables(
-    module: &mut word::WordModule,
-    sequential_catalog: &super::SequentialCellCatalog,
-    gating_edges: &dyn Fn(word::Edge) -> bool,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
-) -> Result<(), crate::SynthError> {
-    let connected = register_targets(module)?;
-    let mut candidates = Vec::new();
-    for (operation, target) in connected {
-        let model = module.operation(operation).ok_or_else(|| {
-            crate::SynthError::invariant(format!(
-                "feedback-enable candidate references unknown operation {operation:?}"
-            ))
-        })?;
-        let word::OpKind::Register(register) = &model.kind else {
-            return Err(crate::SynthError::invariant(format!(
-                "feedback-enable candidate {operation:?} is not a register"
-            )));
-        };
-        let Some(reset_requests) = uniform_async_reset_requests(module, &register.resets)? else {
-            continue;
-        };
-        if register.enable.is_some()
-            || !(sequential_catalog.has_enable_cell(register.edge, &reset_requests)
-                || gating_edges(register.edge))
-        {
-            continue;
-        }
-        // Target reads are not a sound hold-value proxy across reset branches.
-        if !register.resets.is_empty() {
-            continue;
-        }
-        candidates.push((operation, register.clone(), target, model.source.clone()));
-    }
-
-    for (operation_id, mut register, target, source) in candidates {
-        let start = ownership.start(module)?;
-        let checkpoint = module.speculation_checkpoint();
-        let Some(recovered) = recover_one_enable(module, &register, &target, &source)? else {
-            module
-                .rollback_speculation(checkpoint)
-                .map_err(crate::SynthError::from)?;
-            continue;
-        };
-        ownership.claim_since(module, start, &[operation_id])?;
-        register.d = recovered.data;
-        register.enable = Some(word::Enable {
-            value: recovered.enable,
-            active_high: true,
-        });
-        module
-            .operation_mut(operation_id)
-            .expect("candidate register remains present")
-            .kind = word::OpKind::Register(register);
-    }
-    Ok(())
-}
-
-/// The enable and data one recovery accepted.
-struct RecoveredEnable {
-    enable: word::ValueId,
-    data: word::ValueId,
-}
-
-/// Speculatively decomposes one next state; the caller rewinds on `None`.
-fn recover_one_enable(
-    module: &mut word::WordModule,
-    register: &word::RegisterOp,
-    target: &word::LValue,
-    source: &word::SourceSpan,
-) -> Result<Option<RecoveredEnable>, crate::SynthError> {
-    let q = read_target(module, target, source)?;
-    let mut budget = MAX_FEEDBACK_MUX_NODES;
-    let Some(plan) = feedback_update_plan(module, register.d, q, &mut budget)? else {
-        return Ok(None);
-    };
-    if !plan.saw_hold || matches!(plan.enable, FeedbackEnable::Always | FeedbackEnable::Never) {
-        return Ok(None);
-    }
-    if feedback_enable_type(module, &plan.enable).is_none() {
-        return Ok(None);
-    }
-    let enable = emit_feedback_enable(module, &plan.enable, source)?;
-    let data = emit_feedback_data(module, &plan.data, source)?;
-    let reconstructed = module
-        .mux(enable, data, q, source.clone())
-        .map_err(crate::SynthError::from)?;
-    if !enable_recovery_is_equivalent(module, register.d, reconstructed)? {
-        return Ok(None);
-    }
-    Ok(Some(RecoveredEnable { enable, data }))
-}
-
-/// Proves the recovered next state; a counterexample declines the optimization.
-fn enable_recovery_is_equivalent(
-    module: &word::WordModule,
-    next_state: word::ValueId,
-    reconstructed: word::ValueId,
-) -> Result<bool, crate::SynthError> {
-    let outcome = opto_formal::prove_value_equivalence_under_assumptions(
-        module,
-        next_state,
-        reconstructed,
-        &[],
-    )
-    .map_err(|error| {
-        crate::SynthError::invariant(format!("feedback-enable equivalence proof failed: {error}"))
-    })?;
-    Ok(outcome.require_proved().is_ok())
-}
-
-fn register_targets(
-    module: &word::WordModule,
-) -> Result<BTreeMap<word::OpId, word::LValue>, crate::SynthError> {
-    let mut connected = BTreeMap::<word::OpId, word::LValue>::new();
-    for connect in module.connects() {
-        let Some(value) = module.value(connect.value) else {
-            return Err(crate::SynthError::invariant(format!(
-                "unknown RTL value {:?}",
-                connect.value
-            )));
-        };
-        let word::ValueKind::Operation(operation) = value.kind else {
-            continue;
-        };
-        if !matches!(
-            module.operation(operation).map(|operation| &operation.kind),
-            Some(word::OpKind::Register(_))
-        ) {
-            continue;
-        }
-        if connected
-            .insert(operation, connect.target.clone())
-            .is_some()
-        {
-            return Err(crate::SynthError::invariant(format!(
-                "register operation {operation:?} drives multiple targets"
-            )));
-        }
-    }
-    Ok(connected)
-}
 
 /// Expands enables left after clock gating and enabled-cell selection.
 pub(crate) fn expand_unsupported_enables(
     module: &mut word::WordModule,
     sequential_catalog: &super::SequentialCellCatalog,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
+    state_feedback: &std::collections::BTreeMap<word::OpId, word::ValueId>,
 ) -> Result<(), crate::SynthError> {
     let mut candidates = Vec::new();
     for index in 0..module.operations().len() {
@@ -170,7 +24,7 @@ pub(crate) fn expand_unsupported_enables(
             continue;
         };
         let result = model.result;
-        let has_enable_cell = uniform_async_reset_requests(module, &register.resets)?
+        let has_enable_cell = super::uniform_async_reset_requests(module, &register.resets)?
             .is_some_and(|requests| sequential_catalog.has_enable_cell(register.edge, &requests));
         if has_enable_cell {
             continue;
@@ -183,16 +37,12 @@ pub(crate) fn expand_unsupported_enables(
             model.source.clone(),
         ));
     }
-    let mut generated_names = crate::mapping::word_util::GeneratedNames::new(module)?;
     for (operation, mut register, enable, result, source) in candidates {
-        let start = ownership.start(module)?;
-        // The held value must denote the register output, not its assigned target.
-        let held = crate::mapping::word_util::add_generated_boundary_value(
-            &mut generated_names,
-            module,
-            result,
-            &source,
-        )?;
+        let held = state_feedback.get(&operation).copied().ok_or_else(|| {
+            crate::SynthError::invariant(format!(
+                "private enabled state {result:?} has no exact feedback boundary"
+            ))
+        })?;
         let (then_value, else_value) = if enable.active_high {
             (register.d, held)
         } else {
@@ -201,7 +51,6 @@ pub(crate) fn expand_unsupported_enables(
         register.d = module
             .mux(enable.value, then_value, else_value, source.clone())
             .map_err(crate::SynthError::from)?;
-        ownership.claim_since(module, start, &[operation])?;
         register.enable = None;
         module
             .operation_mut(operation)
@@ -211,261 +60,88 @@ pub(crate) fn expand_unsupported_enables(
     Ok(())
 }
 
-fn feedback_enable_type(
-    module: &word::WordModule,
-    enable: &FeedbackEnable,
-) -> Option<word::WordType> {
-    match enable {
-        FeedbackEnable::Never | FeedbackEnable::Always => None,
-        FeedbackEnable::Value(value) => module.value(*value).map(|value| value.ty),
-        FeedbackEnable::Not(value) => feedback_enable_type(module, value),
-        FeedbackEnable::And(left, right) | FeedbackEnable::Or(left, right) => {
-            let left = feedback_enable_type(module, left)?;
-            (feedback_enable_type(module, right)? == left).then_some(left)
-        }
-        FeedbackEnable::Mux {
-            then_value,
-            else_value,
-            ..
-        } => {
-            let then_value = feedback_enable_type(module, then_value)?;
-            (feedback_enable_type(module, else_value)? == then_value).then_some(then_value)
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct FeedbackPlan {
-    enable: FeedbackEnable,
-    data: FeedbackData,
-    saw_hold: bool,
-}
-
-#[derive(Debug, Clone)]
-enum FeedbackEnable {
-    Never,
-    Always,
-    Value(word::ValueId),
-    Not(Box<Self>),
-    And(Box<Self>, Box<Self>),
-    Or(Box<Self>, Box<Self>),
-    Mux {
-        cond: word::ValueId,
-        then_value: Box<Self>,
-        else_value: Box<Self>,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum FeedbackData {
-    Value(word::ValueId),
-    Mux {
-        cond: word::ValueId,
-        then_value: Box<Self>,
-        else_value: Box<Self>,
-    },
-}
-
-fn feedback_update_plan(
-    module: &word::WordModule,
-    value: word::ValueId,
-    q: word::ValueId,
-    budget: &mut usize,
-) -> Result<Option<FeedbackPlan>, crate::SynthError> {
-    if same_scalar_value(module, value, q)? {
-        return Ok(Some(FeedbackPlan {
-            enable: FeedbackEnable::Never,
-            data: FeedbackData::Value(q),
-            saw_hold: true,
-        }));
-    }
-    let model = module
-        .value(value)
-        .ok_or_else(|| crate::SynthError::invariant(format!("unknown value {value:?}")))?;
-    let word::ValueKind::Operation(operation) = model.kind else {
-        return Ok(Some(FeedbackPlan {
-            enable: FeedbackEnable::Always,
-            data: FeedbackData::Value(value),
-            saw_hold: false,
-        }));
-    };
-    let operation = module.operation(operation).ok_or_else(|| {
-        crate::SynthError::invariant(format!("value {value:?} references an unknown operation"))
-    })?;
-    let word::OpKind::Mux {
-        cond,
-        then_value,
-        else_value,
-    } = operation.kind
-    else {
-        return Ok(Some(FeedbackPlan {
-            enable: FeedbackEnable::Always,
-            data: FeedbackData::Value(value),
-            saw_hold: false,
-        }));
-    };
-    let Some(remaining) = budget.checked_sub(1) else {
-        return Ok(None);
-    };
-    *budget = remaining;
-    let Some(then_plan) = feedback_update_plan(module, then_value, q, budget)? else {
-        return Ok(None);
-    };
-    let Some(else_plan) = feedback_update_plan(module, else_value, q, budget)? else {
-        return Ok(None);
-    };
-    Ok(Some(combine_feedback_plans(cond, then_plan, else_plan)))
-}
-
-fn combine_feedback_plans(
-    cond: word::ValueId,
-    then_plan: FeedbackPlan,
-    else_plan: FeedbackPlan,
-) -> FeedbackPlan {
-    let then_never = matches!(then_plan.enable, FeedbackEnable::Never);
-    let else_never = matches!(else_plan.enable, FeedbackEnable::Never);
-    let saw_hold = then_plan.saw_hold || else_plan.saw_hold;
-    let enable = mux_feedback_enable(cond, then_plan.enable, else_plan.enable);
-    let data = if matches!(enable, FeedbackEnable::Never) || else_never {
-        then_plan.data
-    } else if then_never {
-        else_plan.data
-    } else {
-        FeedbackData::Mux {
-            cond,
-            then_value: Box::new(then_plan.data),
-            else_value: Box::new(else_plan.data),
-        }
-    };
-    FeedbackPlan {
-        enable,
-        data,
-        saw_hold,
-    }
-}
-
-fn mux_feedback_enable(
-    cond: word::ValueId,
-    then_value: FeedbackEnable,
-    else_value: FeedbackEnable,
-) -> FeedbackEnable {
-    match (&then_value, &else_value) {
-        (FeedbackEnable::Never, FeedbackEnable::Never) => FeedbackEnable::Never,
-        (FeedbackEnable::Always, FeedbackEnable::Always) => FeedbackEnable::Always,
-        (FeedbackEnable::Always, FeedbackEnable::Never) => FeedbackEnable::Value(cond),
-        (FeedbackEnable::Never, FeedbackEnable::Always) => {
-            FeedbackEnable::Not(Box::new(FeedbackEnable::Value(cond)))
-        }
-        (_, FeedbackEnable::Never) => {
-            FeedbackEnable::And(Box::new(FeedbackEnable::Value(cond)), Box::new(then_value))
-        }
-        (_, FeedbackEnable::Always) => FeedbackEnable::Or(
-            Box::new(FeedbackEnable::Not(Box::new(FeedbackEnable::Value(cond)))),
-            Box::new(then_value),
-        ),
-        (FeedbackEnable::Never, _) => FeedbackEnable::And(
-            Box::new(FeedbackEnable::Not(Box::new(FeedbackEnable::Value(cond)))),
-            Box::new(else_value),
-        ),
-        (FeedbackEnable::Always, _) => {
-            FeedbackEnable::Or(Box::new(FeedbackEnable::Value(cond)), Box::new(else_value))
-        }
-        _ => FeedbackEnable::Mux {
-            cond,
-            then_value: Box::new(then_value),
-            else_value: Box::new(else_value),
-        },
-    }
-}
-
-fn emit_feedback_enable(
+/// Rewrites retained enable controls to the polarity of the selected target
+/// state cell so the ordinary Boolean mapper owns every required inverter.
+pub(crate) fn normalize_enable_polarities(
     module: &mut word::WordModule,
-    enable: &FeedbackEnable,
-    source: &word::SourceSpan,
-) -> Result<word::ValueId, crate::SynthError> {
-    match enable {
-        FeedbackEnable::Never | FeedbackEnable::Always => Err(crate::SynthError::invariant(
-            "constant feedback enable reached sequential lowering",
-        )),
-        FeedbackEnable::Value(value) => Ok(*value),
-        FeedbackEnable::Not(value) => {
-            let value = emit_feedback_enable(module, value, source)?;
-            module
-                .unary(word::UnaryOp::BitNot, value, source.clone())
-                .map_err(crate::SynthError::from)
-        }
-        FeedbackEnable::And(left, right) | FeedbackEnable::Or(left, right) => {
-            let op = if matches!(enable, FeedbackEnable::And(..)) {
-                word::BinaryOp::BitAnd
-            } else {
-                word::BinaryOp::BitOr
-            };
-            let left = emit_feedback_enable(module, left, source)?;
-            let right = emit_feedback_enable(module, right, source)?;
-            module
-                .binary(op, left, right, source.clone())
-                .map_err(crate::SynthError::from)
-        }
-        FeedbackEnable::Mux {
-            cond,
-            then_value,
-            else_value,
-        } => {
-            let then_value = emit_feedback_enable(module, then_value, source)?;
-            let else_value = emit_feedback_enable(module, else_value, source)?;
-            module
-                .mux(*cond, then_value, else_value, source.clone())
-                .map_err(crate::SynthError::from)
-        }
-    }
-}
-
-fn emit_feedback_data(
-    module: &mut word::WordModule,
-    data: &FeedbackData,
-    source: &word::SourceSpan,
-) -> Result<word::ValueId, crate::SynthError> {
-    match data {
-        FeedbackData::Value(value) => Ok(*value),
-        FeedbackData::Mux {
-            cond,
-            then_value,
-            else_value,
-        } => {
-            let then_value = emit_feedback_data(module, then_value, source)?;
-            let else_value = emit_feedback_data(module, else_value, source)?;
-            module
-                .mux(*cond, then_value, else_value, source.clone())
-                .map_err(crate::SynthError::from)
+    sequential_catalog: &super::SequentialCellCatalog,
+    combinational_catalog: &crate::mapping::library::CombinationalCellCatalog,
+) -> Result<(), crate::SynthError> {
+    let mut rewrites = Vec::new();
+    for (index, operation) in module.operations().iter().enumerate() {
+        let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+        let (enable, selected_active_high) = match &operation.kind {
+            word::OpKind::Register(register) => {
+                let Some(enable) = register.enable else {
+                    continue;
+                };
+                let resets = super::uniform_async_reset_requests(module, &register.resets)?
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "retained enabled register has non-uniform reset values",
+                        )
+                    })?;
+                let super::SelectedRegisterCell::Enabled(cell) = sequential_catalog
+                    .select_register_for_resets(module, register, &resets, combinational_catalog)?
+                else {
+                    return Err(crate::SynthError::invariant(
+                        "retained register enable selected a simple DFF",
+                    ));
+                };
+                (enable, cell.enable_active_high())
+            }
+            word::OpKind::Latch(latch) => {
+                let requests = super::async_reset_requests(module, &latch.resets)?;
+                let cell = sequential_catalog
+                    .best_latch(
+                        &requests,
+                        latch.enable.active_high,
+                        false,
+                        super::enable_inverter_cost(
+                            module,
+                            latch.enable.value,
+                            combinational_catalog,
+                        ),
+                    )
+                    .ok_or_else(|| {
+                        crate::SynthError::mapping("target library has no compatible latch")
+                    })?;
+                (latch.enable, cell.enable_active_high())
+            }
+            _ => continue,
+        };
+        if enable.active_high != selected_active_high {
+            rewrites.push((
+                operation_id,
+                enable,
+                selected_active_high,
+                operation.source.clone(),
+            ));
         }
     }
-}
-
-fn same_scalar_value(
-    module: &word::WordModule,
-    left: word::ValueId,
-    right: word::ValueId,
-) -> Result<bool, crate::SynthError> {
-    if left == right {
-        return Ok(true);
+    for (operation, enable, active_high, source) in rewrites {
+        let value = module
+            .unary(word::UnaryOp::BitNot, enable.value, source)
+            .map_err(crate::SynthError::from)?;
+        let stored = module.operation_mut(operation).ok_or_else(|| {
+            crate::SynthError::invariant("sequential enable-polarity target disappeared")
+        })?;
+        let normalized = word::Enable { value, active_high };
+        match &mut stored.kind {
+            word::OpKind::Register(register) => register.enable = Some(normalized),
+            word::OpKind::Latch(latch) => latch.enable = normalized,
+            _ => {
+                return Err(crate::SynthError::invariant(
+                    "sequential enable-polarity target changed operation kind",
+                ));
+            }
+        }
     }
-    let left = module
-        .value(left)
-        .ok_or_else(|| crate::SynthError::invariant(format!("unknown value {left:?}")))?;
-    let right = module
-        .value(right)
-        .ok_or_else(|| crate::SynthError::invariant(format!("unknown value {right:?}")))?;
-    Ok(matches!(
-        (&left.kind, &right.kind),
-        (word::ValueKind::Signal(left), word::ValueKind::Signal(right)) if left == right
-    ))
+    Ok(())
 }
 
 /// Normalizes resets while retaining enables for their owning passes.
-pub(crate) fn lower_controls(
-    module: &mut word::WordModule,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
-) -> Result<(), crate::SynthError> {
+pub(crate) fn lower_controls(module: &mut word::WordModule) -> Result<(), crate::SynthError> {
     let mut controlled = Vec::new();
     for (index, operation) in module.operations().iter().enumerate() {
         let word::OpKind::Register(register) = &operation.kind else {
@@ -485,7 +161,6 @@ pub(crate) fn lower_controls(
     }
 
     for (operation_id, controlled) in controlled {
-        let start = ownership.start(module)?;
         let mut data = controlled.register.d;
         let asynchronous_resets =
             normalize_async_resets(module, &controlled.register.resets, &controlled.source)?;
@@ -555,14 +230,12 @@ pub(crate) fn lower_controls(
             resets: asynchronous_resets,
             ..controlled.register
         });
-        ownership.claim_since(module, start, &[operation_id])?;
     }
     Ok(())
 }
 
 pub(crate) fn normalize_sequential_controls(
     module: &mut word::WordModule,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<(), crate::SynthError> {
     let controls = module
         .operations()
@@ -583,7 +256,6 @@ pub(crate) fn normalize_sequential_controls(
         .collect::<Vec<_>>();
     for (index, resets, source, latch) in controls {
         let operation = word::OpId::from_index(index).map_err(crate::SynthError::Word)?;
-        let start = ownership.start(module)?;
         let async_count = resets
             .iter()
             .take_while(|reset| reset.kind == word::ResetKind::Async)
@@ -665,7 +337,6 @@ pub(crate) fn normalize_sequential_controls(
                 ));
             }
         }
-        ownership.claim_since(module, start, &[operation])?;
     }
     Ok(())
 }
@@ -713,89 +384,6 @@ fn active_high_control(
     }
 }
 
-fn async_reset_requests(
-    module: &word::WordModule,
-    resets: &[word::Reset],
-) -> Result<super::AsyncResetRequests, crate::SynthError> {
-    resets
-        .iter()
-        .copied()
-        .map(|reset| async_reset_request_for(module, reset))
-        .collect()
-}
-
-fn async_reset_request_for(
-    module: &word::WordModule,
-    reset: word::Reset,
-) -> Result<super::AsyncResetRequest, crate::SynthError> {
-    let value = module.value(reset.reset_value).ok_or_else(|| {
-        crate::SynthError::invariant(format!(
-            "unknown asynchronous reset value {:?}",
-            reset.reset_value
-        ))
-    })?;
-    let word::ValueKind::Constant(bits) = &value.kind else {
-        return Err(crate::SynthError::invariant(
-            "asynchronous register reset value must be constant",
-        ));
-    };
-    let reset_value = crate::boolean::logic::logic_constant(bits).ok_or_else(|| {
-        crate::SynthError::invariant(format!(
-            "asynchronous register reset value must be a two-state scalar constant, got width {} and bits {bits:?}",
-            value.ty.width()
-        ))
-    })?;
-    Ok(super::AsyncResetRequest {
-        active_high: reset.active_high,
-        reset_value,
-    })
-}
-
-fn uniform_async_reset_requests(
-    module: &word::WordModule,
-    resets: &[word::Reset],
-) -> Result<Option<super::AsyncResetRequests>, crate::SynthError> {
-    resets
-        .iter()
-        .copied()
-        .map(|reset| uniform_async_reset_request_for(module, reset))
-        .collect()
-}
-
-fn uniform_async_reset_request_for(
-    module: &word::WordModule,
-    reset: word::Reset,
-) -> Result<Option<super::AsyncResetRequest>, crate::SynthError> {
-    let value = module.value(reset.reset_value).ok_or_else(|| {
-        crate::SynthError::invariant(format!(
-            "unknown asynchronous reset value {:?}",
-            reset.reset_value
-        ))
-    })?;
-    let word::ValueKind::Constant(bits) = &value.kind else {
-        return Err(crate::SynthError::invariant(
-            "asynchronous register reset value must be constant",
-        ));
-    };
-    let Some(first) = bits.as_slice().first().copied() else {
-        return Err(crate::SynthError::invariant(
-            "asynchronous register reset value is empty",
-        ));
-    };
-    let reset_value = match first {
-        opto_ir::BitVal::Zero => false,
-        opto_ir::BitVal::One => true,
-        opto_ir::BitVal::X | opto_ir::BitVal::Z => return Ok(None),
-    };
-    if !bits.as_slice().iter().all(|&bit| bit == first) {
-        return Ok(None);
-    }
-    Ok(Some(super::AsyncResetRequest {
-        active_high: reset.active_high,
-        reset_value,
-    }))
-}
-
 fn normalize_async_resets(
     module: &mut word::WordModule,
     resets: &[word::Reset],
@@ -810,7 +398,7 @@ fn normalize_async_resets(
         return Ok(asynchronous);
     }
 
-    let requests = async_reset_requests(module, &asynchronous)?;
+    let requests = super::async_reset_requests(module, &asynchronous)?;
     if requests
         .iter()
         .all(|request| request.reset_value == requests[0].reset_value)
@@ -907,26 +495,6 @@ fn combined_reset_condition(
     Ok(combined)
 }
 
-fn read_target(
-    module: &mut word::WordModule,
-    target: &word::LValue,
-    source: &word::SourceSpan,
-) -> Result<word::ValueId, crate::SynthError> {
-    match target.range {
-        None => module.read_signal(target.signal, source.clone()),
-        Some(range) if range.msb >= range.lsb => {
-            module.read_signal_slice(target.signal, range.lsb, range.width(), source.clone())
-        }
-        Some(range) => {
-            return Err(crate::SynthError::invariant(format!(
-                "ascending controlled register target [{}:{}] is not supported",
-                range.msb, range.lsb
-            )));
-        }
-    }
-    .map_err(crate::SynthError::from)
-}
-
 struct ControlledRegister {
     register: word::RegisterOp,
     source: word::SourceSpan,
@@ -985,9 +553,7 @@ mod tests {
                 word::SourceSpan::default(),
             )
             .unwrap();
-        let mut ownership = crate::regional::StructuralOwnershipProvenance::global(&module);
-
-        lower_controls(&mut module, &mut ownership).unwrap();
+        lower_controls(&mut module).unwrap();
 
         let word::ValueKind::Operation(operation) = module.value(result).unwrap().kind else {
             panic!("register result lost its operation identity");
@@ -1004,69 +570,6 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_a_bounded_feedback_mux_as_an_enable() {
-        let mut module = word::WordModule::new("feedback_enable");
-        let enable = input(&mut module, "enable");
-        let update = input(&mut module, "update");
-        let q = input(&mut module, "q");
-        let d = module
-            .mux(enable, update, q, word::SourceSpan::default())
-            .unwrap();
-
-        let mut budget = MAX_FEEDBACK_MUX_NODES;
-        let plan = feedback_update_plan(&module, d, q, &mut budget)
-            .unwrap()
-            .unwrap();
-
-        assert!(plan.saw_hold);
-        assert!(matches!(plan.enable, FeedbackEnable::Value(value) if value == enable));
-        assert!(matches!(plan.data, FeedbackData::Value(value) if value == update));
-        assert_eq!(budget, MAX_FEEDBACK_MUX_NODES - 1);
-    }
-
-    #[test]
-    fn does_not_turn_general_feedback_logic_into_an_enable_search() {
-        let mut module = word::WordModule::new("general_feedback");
-        let update = input(&mut module, "update");
-        let q = input(&mut module, "q");
-        let d = module
-            .binary(
-                word::BinaryOp::BitXor,
-                q,
-                update,
-                word::SourceSpan::default(),
-            )
-            .unwrap();
-
-        let mut budget = MAX_FEEDBACK_MUX_NODES;
-        let plan = feedback_update_plan(&module, d, q, &mut budget)
-            .unwrap()
-            .unwrap();
-
-        assert!(!plan.saw_hold);
-        assert!(matches!(plan.enable, FeedbackEnable::Always));
-        assert_eq!(budget, MAX_FEEDBACK_MUX_NODES);
-    }
-
-    #[test]
-    fn stops_feedback_mux_recursion_at_the_explicit_budget() {
-        let mut module = word::WordModule::new("bounded_feedback");
-        let enable = input(&mut module, "enable");
-        let update = input(&mut module, "update");
-        let q = input(&mut module, "q");
-        let d = module
-            .mux(enable, update, q, word::SourceSpan::default())
-            .unwrap();
-
-        let mut budget = 0;
-        assert!(
-            feedback_update_plan(&module, d, q, &mut budget)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
     fn uniform_vector_reset_has_one_catalog_request() {
         let mut module = word::WordModule::new("uniform_reset");
         let reset_value = module
@@ -1077,17 +580,18 @@ mod tests {
             )
             .unwrap();
         let reset = input(&mut module, "reset");
-        let request = uniform_async_reset_request_for(
+        let request = super::super::uniform_async_reset_requests(
             &module,
-            word::Reset {
+            &[word::Reset {
                 kind: word::ResetKind::Async,
                 value: reset,
                 active_high: true,
                 reset_value,
-            },
+            }],
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .remove(0);
 
         assert_eq!(
             request,
@@ -1112,14 +616,14 @@ mod tests {
         let reset = input(&mut module, "reset");
 
         assert_eq!(
-            uniform_async_reset_request_for(
+            super::super::uniform_async_reset_requests(
                 &module,
-                word::Reset {
+                &[word::Reset {
                     kind: word::ResetKind::Async,
                     value: reset,
                     active_high: false,
                     reset_value,
-                },
+                }],
             )
             .unwrap(),
             None

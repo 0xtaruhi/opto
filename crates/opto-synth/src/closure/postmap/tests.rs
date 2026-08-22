@@ -13,7 +13,7 @@ use super::objective::mapped_physical_objective;
 use super::session::{CandidateEvaluation, ClosureBaseline, evaluate_candidate};
 use super::sizing::SizingFrontier;
 use super::*;
-use crate::artifact::implementation::{InitialCellOwner, OriginSetId};
+use crate::artifact::implementation::{FragmentFootprint, OriginSetId};
 use crate::closure::mapped_timing::MappedTimingTransaction;
 use crate::{
     BooleanFunction, OptimizationPhase, SynthesisEffort, TargetCell, TargetPin, TargetPinDirection,
@@ -464,14 +464,14 @@ fn mapped_resynthesis_seeds_region_owned_cells_in_a_clean_netlist() {
         ..TimingLibrary::default()
     };
     let (mut mapped, _) = mapped_design(&fanout_module(), &options);
-    let owner = InitialCellOwner::Region(crate::RegionAnchorId::from_bytes_for_test([1; 32]));
+    let fragment = FragmentFootprint::Region(crate::RegionAnchorId::from_bytes_for_test([1; 32]));
     let mut implementations = ImplementationDb::new(
         mapped.generation_id(),
         Vec::new().into_boxed_slice(),
         vec![OriginSetId::EMPTY; mapped.cell_slot_count()],
         vec![0, 0],
         Vec::new(),
-        vec![Some(owner); mapped.cell_slot_count()],
+        vec![Some(fragment); mapped.cell_slot_count()],
     )
     .unwrap();
 
@@ -1447,7 +1447,13 @@ fn cloning_inherits_driver_operator_provenance() {
             &module,
             &mapped,
             &[
-                (driver, MappedCellSource::Region { origins, owner }),
+                (
+                    driver,
+                    MappedCellSource::Region {
+                        origins,
+                        region: owner,
+                    },
+                ),
                 (sinks[0], MappedCellSource::Instance(sink_instances[0])),
                 (sinks[1], MappedCellSource::Instance(sink_instances[1])),
             ],

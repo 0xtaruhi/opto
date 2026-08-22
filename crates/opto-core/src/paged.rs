@@ -30,6 +30,38 @@ impl<T> PagedCowVec<T> {
         }
     }
 
+    /// Build immutable pages from a complete dense value sequence.
+    ///
+    /// This is the seal-time counterpart of [`Self::try_set`]: callers that
+    /// already own every value avoid growing and reopening the same tail page
+    /// one slot at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapacityError`] when the compact length or a page allocation
+    /// cannot be represented.
+    pub fn try_from_values(values: Vec<T>, default: T) -> Result<Self, CapacityError> {
+        let len = u32::try_from(values.len()).map_err(|_| CapacityError)?;
+        let page_count = values.len().div_ceil(VALUES_PER_PAGE);
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(page_count)
+            .map_err(|_| CapacityError)?;
+        let mut values = values.into_iter();
+        for _ in 0..page_count {
+            let mut page = Vec::new();
+            page.try_reserve_exact(VALUES_PER_PAGE.min(values.len()))
+                .map_err(|_| CapacityError)?;
+            page.extend(values.by_ref().take(VALUES_PER_PAGE));
+            pages.push(Arc::new(page));
+        }
+        Ok(Self {
+            pages,
+            len,
+            default,
+        })
+    }
+
     /// Fork by sharing every immutable value page.
     #[must_use]
     pub fn fork_shared(&self) -> Self

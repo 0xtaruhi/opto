@@ -7,6 +7,9 @@ use super::network::{LogicGraph, LogicNode, LogicNodeId};
 use super::rewrite::{RewriteIncremental, remap_literal};
 use hashbrown::HashMap;
 use opto_runtime::ExecutionContext;
+use std::sync::Arc;
+
+pub(super) type NodeRemap = Arc<[Option<LogicNodeId>]>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CopyStyle {
@@ -16,7 +19,9 @@ enum CopyStyle {
 
 pub(super) struct LogicPipelineOutcome {
     pub(super) network: LogicGraph,
-    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) remap: NodeRemap,
+    /// Proven alternatives keyed by the selected positive node.
+    pub(super) alternatives: opto_core::PackedRows<LogicNodeId>,
 }
 
 /// MUX expansion rounds, including one retry after normalization.
@@ -24,7 +29,7 @@ const MUX_DECOMPOSITION_ROUNDS: usize = 2;
 
 pub(super) struct TransformProduct {
     pub(super) network: LogicGraph,
-    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) remap: NodeRemap,
     pub(super) analyses: TransformAnalyses,
 }
 
@@ -38,7 +43,7 @@ pub(super) struct TransformAnalyses {
 pub(super) struct TransformState {
     pub(super) network: LogicGraph,
     pub(super) roots: Box<[LogicNodeId]>,
-    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) remap: NodeRemap,
     pub(super) analyses: TransformAnalyses,
 }
 
@@ -113,11 +118,10 @@ pub(super) fn optimize(
             incremental,
         )?
     };
-    state.apply(canonical)?;
     let _profile = crate::api::diagnostics::ProfileSpan::new(diagnostics.timing, || {
         "logic.pipeline.finalization".to_string()
     });
-    finish(state.finish(), roots)
+    finish_with_choices(&state, &canonical, roots)
 }
 
 /// Runs one SAT sweep, returning `None` when it proves no substitution.
@@ -313,10 +317,93 @@ fn finish(
     source_roots: &[LogicNodeId],
 ) -> Result<LogicPipelineOutcome, crate::SynthError> {
     map_roots(&canonical.remap, source_roots)?;
+    let node_count = canonical.network.node_count();
     Ok(LogicPipelineOutcome {
         network: canonical.network,
         remap: canonical.remap,
+        alternatives: opto_core::PackedRows::try_from_rows(
+            (0..node_count).map(|_| Vec::new()).collect(),
+        )
+        .expect("logic node count fits the packed choice index"),
     })
+}
+
+/// Seals the reduced and canonical implementations into one arena. The
+/// canonical transform's remap is the equivalence certificate: a retained
+/// baseline literal and its mapped canonical literal implement the same
+/// function. Exact structural duplicates collapse in the shared builder.
+fn finish_with_choices(
+    baseline: &TransformState,
+    canonical: &TransformProduct,
+    source_roots: &[LogicNodeId],
+) -> Result<LogicPipelineOutcome, crate::SynthError> {
+    let canonical_roots = map_roots(&canonical.remap, &baseline.roots)?;
+    let baseline_live = baseline.network.live_nodes(&baseline.roots);
+    let canonical_live = canonical.network.live_nodes(&canonical_roots);
+    let mut network = LogicGraph::new();
+    let mut variables = HashMap::new();
+    let baseline_to_choice = copy_graph(
+        &baseline.network,
+        Some(&baseline_live),
+        &mut network,
+        &mut variables,
+        CopyStyle::Preserve,
+    )?;
+    let canonical_to_choice = copy_graph(
+        &canonical.network,
+        Some(&canonical_live),
+        &mut network,
+        &mut variables,
+        CopyStyle::Preserve,
+    )?;
+    network.freeze();
+
+    let mut alternatives = vec![Vec::new(); network.node_count()];
+    for index in 0..baseline.network.node_count() {
+        let Some(baseline_node) = baseline_to_choice[index] else {
+            continue;
+        };
+        if !baseline
+            .network
+            .node(LogicNodeId::from_index(index))
+            .is_gate()
+        {
+            continue;
+        }
+        let Some(canonical_node) =
+            canonical.remap[index].and_then(|node| remap_literal(&canonical_to_choice, node))
+        else {
+            continue;
+        };
+        let alternative = if canonical_node.is_inverted() {
+            baseline_node.inverted()
+        } else {
+            baseline_node
+        };
+        let representative = canonical_node.positive();
+        if alternative != representative
+            && !alternatives[representative.index()].contains(&alternative)
+        {
+            alternatives[representative.index()].push(alternative);
+        }
+    }
+    for row in &mut alternatives {
+        row.sort_unstable();
+    }
+    let alternatives = opto_core::PackedRows::try_from_rows(alternatives)
+        .map_err(|_| crate::SynthError::capacity("Boolean choice alternatives exceed capacity"))?;
+    let baseline_to_canonical = compose_remaps(&baseline.remap, &canonical.remap);
+    let remap = baseline_to_canonical
+        .iter()
+        .map(|&node| node.and_then(|node| remap_literal(&canonical_to_choice, node)))
+        .collect();
+    let outcome = LogicPipelineOutcome {
+        network,
+        remap,
+        alternatives,
+    };
+    map_roots(&outcome.remap, source_roots)?;
+    Ok(outcome)
 }
 
 fn identity(network: LogicGraph) -> TransformProduct {
@@ -368,11 +455,12 @@ pub(super) fn map_roots(
 pub(super) fn compose_remaps(
     first: &[Option<LogicNodeId>],
     second: &[Option<LogicNodeId>],
-) -> Box<[Option<LogicNodeId>]> {
+) -> NodeRemap {
     first
         .iter()
         .map(|&literal| literal.and_then(|literal| remap_literal(second, literal)))
-        .collect()
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn copy_graph(
@@ -381,7 +469,7 @@ fn copy_graph(
     target: &mut LogicGraph,
     variables: &mut HashMap<u32, LogicNodeId>,
     style: CopyStyle,
-) -> Result<Box<[Option<LogicNodeId>]>, crate::SynthError> {
+) -> Result<NodeRemap, crate::SynthError> {
     let mut remap = vec![None; source.node_count()];
     for index in 0..source.node_count() {
         if live.is_some_and(|live| !live[index]) {
@@ -422,7 +510,7 @@ fn copy_graph(
         };
         remap[index] = Some(mapped);
     }
-    Ok(remap.into_boxed_slice())
+    Ok(remap.into())
 }
 
 fn mapped_literal(
@@ -511,5 +599,48 @@ mod tests {
             let node = LogicNodeId::from_index(index);
             assert_eq!(serial.network.node(node), parallel.network.node(node));
         }
+    }
+
+    #[test]
+    fn retained_choices_are_formally_equivalent_to_their_representatives() {
+        let mut source = LogicGraph::new();
+        let inputs = (0..7)
+            .map(|origin| source.variable(origin).unwrap())
+            .collect::<Vec<_>>();
+        let mut root = inputs[0];
+        for index in 0..24 {
+            let then_value = source.xor(root, inputs[(index + 1) % inputs.len()]);
+            let else_value = source.and(root, inputs[(index + 2) % inputs.len()]);
+            root = source.mux(inputs[index % inputs.len()], then_value, else_value);
+        }
+        source.freeze();
+        let runtime = ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 2 })
+            .expect("test runtime is valid");
+        let choices = optimize(
+            source,
+            &[root],
+            &[None],
+            true,
+            crate::SynthesisDiagnostics::default(),
+            &runtime,
+            None,
+        )
+        .expect("choice construction succeeds");
+        let pair = (0..choices.network.node_count()).find_map(|index| {
+            choices.alternatives[index]
+                .first()
+                .copied()
+                .map(|alternative| (LogicNodeId::from_index(index), alternative))
+        });
+        let (representative, alternative) =
+            pair.expect("MUX decomposition retains a distinct proved implementation");
+        let proof = prove_logic_network_equivalence(
+            choices.network.storage_network(),
+            &[representative.lit()],
+            choices.network.storage_network(),
+            &[alternative.lit()],
+        )
+        .expect("formal engine accepts the choice miter");
+        assert!(proof.require_proved().is_ok());
     }
 }

@@ -20,7 +20,6 @@ use opto_ir::mapped::{
     AppliedRegionDelta, CellId, NetId, RegionDelta, RegionSnapshot, TempCellId, TempNetId,
 };
 use opto_ir::word;
-use std::fmt::Write as _;
 
 mod aliases;
 
@@ -103,9 +102,10 @@ impl PendingMappedRegion {
 impl MappedRegionArtifact {
     pub(crate) fn from_library_plan(
         plan: &crate::RegionCoverPlan,
-        binding: &RegionPlanBinding,
-        ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+        plan_binding: &RegionPlanBinding,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
         mapped_values: &WordMappedSignals,
+        regional_pins: &super::RegionalMappedPins,
         catalog: &CombinationalCellCatalog,
         target_cells: &opto_library::TargetCellSet,
     ) -> Result<Self, crate::SynthError> {
@@ -113,7 +113,7 @@ impl MappedRegionArtifact {
             if plan.local_cell_count() != 0
                 || plan.local_net_count() != 0
                 || plan.local_pin_count() != 0
-                || !binding.is_empty()
+                || !plan_binding.is_empty()
             {
                 return Err(crate::SynthError::invariant(
                     "non-empty regional plan has no portable topology",
@@ -130,7 +130,7 @@ impl MappedRegionArtifact {
 
         let cover = super::super::cover::decode_portable_cover(plan.payload())?;
         if cover.cells().len() != plan.local_cell_count() as usize
-            || cover.outputs().len() != binding.outputs.len()
+            || cover.outputs().len() != plan_binding.outputs.len()
         {
             return Err(crate::SynthError::invariant(
                 "portable regional plan does not match its revision binding",
@@ -148,20 +148,38 @@ impl MappedRegionArtifact {
         }
 
         let mut nets = ArtifactNetTable::default();
-        let input_values = binding.resolve_inputs(ownership)?;
+        let input_values = plan_binding.resolve_inputs(region_binding)?;
         let inputs = input_values
             .iter()
             .copied()
-            .map(|value| {
-                mapped_values
-                    .require(value)
-                    .map(|signal| nets.signal(signal))
+            .zip(plan_binding.inputs.iter().copied())
+            .map(|(value, binding)| {
+                let signal = match binding {
+                    crate::mapping::RegionPlanValueBinding::ArtifactPinBit { pin, .. } => {
+                        MappedValueSignal::Net(regional_pins.require(pin)?)
+                    }
+                    _ => mapped_values.require(value)?,
+                };
+                Ok::<_, crate::SynthError>(nets.signal(signal))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let output_values = binding.resolve_outputs(ownership)?;
         let mut output_targets = vec![[None::<ArtifactSignal>; 2]; cover.cells().len()];
-        for (&value, source) in output_values.iter().zip(cover.outputs()) {
-            let target = nets.signal(mapped_values.require(value)?);
+        for (&binding, source) in plan_binding.outputs.iter().zip(cover.outputs()) {
+            let target = match binding {
+                crate::mapping::RegionPlanValueBinding::Lowered(value) => {
+                    nets.signal(mapped_values.require(value)?)
+                }
+                crate::mapping::RegionPlanValueBinding::ArtifactPinBit { pin, .. } => {
+                    nets.signal(MappedValueSignal::Net(regional_pins.require(pin)?))
+                }
+                crate::mapping::RegionPlanValueBinding::SourceBit { .. }
+                | crate::mapping::RegionPlanValueBinding::MemoryLogicBit { .. }
+                | crate::mapping::RegionPlanValueBinding::MemoryStateBit { .. } => {
+                    return Err(crate::SynthError::invariant(
+                        "regional output binding was not materialized against global lowering",
+                    ));
+                }
+            };
             match *source {
                 LibraryCoverSource::Cell(index) => {
                     assign_output_target(&mut output_targets, index, 0, target)?;
@@ -195,7 +213,7 @@ impl MappedRegionArtifact {
                 Ok([Some(primary), secondary])
             })
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
-        let prefix = region_instance_prefix(plan.region());
+        let prefix = super::region_instance_prefix(plan.region());
         let mut cells = Vec::with_capacity(cover.cells().len());
         let mut pin_count = 0usize;
         for (index, cell) in cover.cells().iter().enumerate() {
@@ -298,8 +316,8 @@ impl MappedRegionArtifact {
             plan.region(),
             nets,
             cells.into_boxed_slice(),
-            binding,
-            ownership,
+            plan_binding,
+            region_binding,
         )
     }
 
@@ -659,13 +677,13 @@ fn finish_artifact(
     region: crate::RegionAnchorId,
     nets: ArtifactNetTable,
     cells: Box<[ArtifactCell<()>]>,
-    binding: &RegionPlanBinding,
-    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
+    plan_binding: &RegionPlanBinding,
+    region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
 ) -> Result<MappedRegionArtifact, crate::SynthError> {
-    let mut roots = binding.resolve_outputs(ownership)?;
+    let mut roots = plan_binding.resolve_outputs(region_binding)?;
     roots.sort_unstable();
     roots.dedup();
-    let mut leaves = binding.resolve_inputs(ownership)?;
+    let mut leaves = plan_binding.resolve_inputs(region_binding)?;
     leaves.sort_unstable();
     leaves.dedup();
     Ok(MappedRegionArtifact {
@@ -675,19 +693,6 @@ fn finish_artifact(
         roots: roots.into_boxed_slice(),
         leaves: leaves.into_boxed_slice(),
     })
-}
-
-/// The prefix every region-scoped synthetic cell name carries.
-pub(crate) const REGION_CELL_PREFIX: &str = "__opto_region_";
-
-fn region_instance_prefix(region: crate::RegionAnchorId) -> String {
-    let mut prefix = String::with_capacity(79);
-    prefix.push_str(REGION_CELL_PREFIX);
-    for byte in region.bytes() {
-        write!(&mut prefix, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    prefix.push_str("_cell_");
-    prefix
 }
 
 #[cfg(test)]

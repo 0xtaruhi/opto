@@ -198,6 +198,42 @@ impl Default for AxmBackend {
 }
 
 impl AxmBackend {
+    pub(crate) fn bind_input_identities(
+        &mut self,
+        bindings: &[(word::ValueId, crate::boolean::logic::network::LogicNodeId)],
+    ) -> Result<(), crate::SynthError> {
+        let slots = self
+            .inputs
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, value)| (value, slot))
+            .collect::<BTreeMap<_, _>>();
+        let mut replacements = vec![None::<word::ValueId>; self.inputs.len()];
+        for &(value, node) in bindings {
+            let representative = self
+                .representatives
+                .get(&node.positive())
+                .copied()
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "frozen AXM input binding does not name a graph variable",
+                    )
+                })?;
+            let slot = slots.get(&representative).copied().ok_or_else(|| {
+                crate::SynthError::invariant("frozen AXM input binding has no input-vector slot")
+            })?;
+            replacements[slot] =
+                Some(replacements[slot].map_or(value, |current| current.min(value)));
+        }
+        for (input, replacement) in self.inputs.iter_mut().zip(replacements) {
+            if let Some(replacement) = replacement {
+                *input = replacement;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn finish(
         mut self,
     ) -> (
@@ -393,5 +429,39 @@ impl BitBackend for AxmBackend {
             Self::literal(else_value)?,
         );
         Ok((ScalarBit::Logic(value), None))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frozen_binding_replaces_an_incidental_signal_input_identity() {
+        let mut module = word::WordModule::new("input_identity");
+        let port = module
+            .add_port(
+                "state",
+                word::PortDirection::Input,
+                word::WordType::bits(1).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let signal = module.port(port).unwrap().signal;
+        let incidental = module
+            .read_signal(signal, word::SourceSpan::stable("incidental"))
+            .unwrap();
+        let frozen = module
+            .read_signal(signal, word::SourceSpan::stable("frozen"))
+            .unwrap();
+        let mut backend = AxmBackend::default();
+        let ScalarBit::Logic(node) = backend.import_word(&module, incidental) else {
+            panic!("a signal input must lower to one AXM variable");
+        };
+        assert_eq!(backend.import_word(&module, frozen), ScalarBit::Logic(node));
+
+        backend.bind_input_identities(&[(frozen, node)]).unwrap();
+        let (_, inputs) = backend.finish();
+        assert_eq!(inputs.as_ref(), &[frozen]);
     }
 }

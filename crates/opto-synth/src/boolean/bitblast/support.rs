@@ -262,7 +262,7 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             self.provenance.set_value_operator(value, operator)?;
         }
         if let Some(region) = self.active_region {
-            self.lowered_owners.set(value, region)?;
+            self.lowered_regions.bind(value, region)?;
         }
         Ok(())
     }

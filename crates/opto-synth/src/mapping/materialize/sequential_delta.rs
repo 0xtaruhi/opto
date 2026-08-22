@@ -1,32 +1,29 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Direct materialization of live state elements into the mapped substrate.
+//! Direct materialization of fixed regional cells into the mapped substrate.
 //!
 //! Sequential cells are immutable state-region substrate objects: regional
 //! epochs replace only combinational covers. This module therefore prepares one
 //! deterministic delta from the lowered Word model without first emitting
-//! target instances back into that model.
+//! target instances back into that model. Enable polarity is normalized in
+//! the private Word model, so any inverter is covered by the ordinary Boolean
+//! mapper rather than introduced by this publication layer.
 
 use super::region_delta::{MappedValueSignal, WordMappedSignals};
-use super::{
-    ArtifactCell, ArtifactNetTable, ArtifactSignal, target_pin_id, validate_artifact_nets,
-};
+use super::{ArtifactCell, ArtifactNetTable, target_pin_id, validate_artifact_nets};
 use crate::artifact::MappedCellSource;
-use crate::mapping::MappedCell;
-use crate::mapping::library::CombinationalCellCatalog;
-use crate::mapping::sequential::{SelectedRegisterCell, SequentialCellCatalog};
+use crate::mapping::sequential::SelectedRegisterCell;
 use opto_ir::mapped::{AppliedRegionDelta, CellId, NetId, RegionDelta, TempCellId};
 use opto_ir::word;
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
-/// Immutable topology for every live register and latch in one lowered design.
+/// Immutable topology for state cells and generated target cells in one lowered design.
 ///
-/// Existing nets are explicit and sorted.  Nets introduced solely to adapt a
-/// library cell's enable polarity stay artifact-local until a caller appends
-/// the artifact to its transaction.
+/// Existing nets are explicit and sorted.
 #[derive(Debug, Clone)]
-pub(crate) struct MappedSequentialArtifact {
+pub(crate) struct MappedFixedSubstrateArtifact {
     nets: ArtifactNetTable,
     cells: Box<[ArtifactCell<MappedCellSource>]>,
     referenced_nets: Box<[NetId]>,
@@ -34,18 +31,144 @@ pub(crate) struct MappedSequentialArtifact {
 
 /// Delta-local sequential identities retained until mapped/timing commit.
 #[derive(Debug)]
-pub(crate) struct PendingMappedSequential {
+pub(crate) struct PendingMappedFixedSubstrate {
     cells: Box<[(TempCellId, MappedCellSource)]>,
 }
 
-/// One live state operation and its owner frozen before bit lowering.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FrozenSequentialOperation {
-    operation: word::OpId,
-    owner: crate::RegionRowId,
+/// Stable source state selected before scalar bit lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SequentialStateSource {
+    Operation {
+        cell: opto_ir::design::CellId,
+        value: word::ValueId,
+    },
+    Memory {
+        cell: opto_ir::design::CellId,
+        memory: word::MemoryId,
+        ordinal: u32,
+        width: u32,
+    },
 }
 
-impl PendingMappedSequential {
+impl SequentialStateSource {
+    const fn cell(self) -> opto_ir::design::CellId {
+        match self {
+            Self::Operation { cell, .. } | Self::Memory { cell, .. } => cell,
+        }
+    }
+
+    const fn source_value(self) -> Option<word::ValueId> {
+        match self {
+            Self::Operation { value, .. } => Some(value),
+            Self::Memory { .. } => None,
+        }
+    }
+
+    fn semantic_bit(self, bit: u32) -> Result<u32, crate::SynthError> {
+        match self {
+            Self::Operation { .. } => Ok(bit),
+            Self::Memory { ordinal, width, .. } => ordinal
+                .checked_mul(width)
+                .and_then(|base| base.checked_add(bit))
+                .ok_or_else(|| crate::SynthError::capacity("memory state bit index")),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SourceSequentialBinding {
+    operation: word::OpId,
+    states: Box<[SequentialStateSource]>,
+    region: crate::RegionAnchorId,
+    state_relation: Option<[u8; 32]>,
+}
+
+/// One source-visible state bit implemented by a lowered state operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SequentialSourceBit {
+    source: SequentialStateSource,
+    pub(crate) bit: u32,
+    pub(crate) state_relation: Option<[u8; 32]>,
+}
+
+impl SequentialSourceBit {
+    pub(crate) const fn cell(&self) -> opto_ir::design::CellId {
+        self.source.cell()
+    }
+
+    pub(crate) fn semantic_bit(&self) -> Result<u32, crate::SynthError> {
+        self.source.semantic_bit(self.bit)
+    }
+
+    pub(crate) const fn source_value(&self) -> Option<word::ValueId> {
+        self.source.source_value()
+    }
+
+    pub(crate) const fn semantic_binding(&self) -> crate::mapping::RegionPlanValueBinding {
+        match self.source {
+            SequentialStateSource::Operation { value, .. } => {
+                crate::mapping::RegionPlanValueBinding::SourceBit {
+                    value,
+                    bit: self.bit,
+                }
+            }
+            SequentialStateSource::Memory {
+                memory, ordinal, ..
+            } => crate::mapping::RegionPlanValueBinding::MemoryStateBit {
+                memory,
+                ordinal,
+                bit: self.bit,
+            },
+        }
+    }
+}
+
+/// Exact semantic state relation for one live scalar state operation.
+#[derive(Debug, Clone)]
+pub(crate) struct SequentialRegionBinding {
+    pub(crate) operation: word::OpId,
+    pub(crate) region: crate::RegionAnchorId,
+    pub(crate) sources: Box<[SequentialSourceBit]>,
+    pub(crate) lowering_sources: Box<[word::OpId]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegionalSequentialCellPlan {
+    pub(crate) sources: Box<[SequentialSourceBit]>,
+    pub(crate) region: crate::RegionAnchorId,
+    pub(crate) instance_name: Box<str>,
+    pub(crate) cell_name: Box<str>,
+    pub(crate) inputs: Box<[(Box<str>, crate::mapping::RegionalEndpoint)]>,
+    pub(crate) output: (Box<str>, crate::mapping::RegionalEndpoint),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegionalSubstrateConnection {
+    pub(crate) pin: Box<str>,
+    pub(crate) output: bool,
+    pub(crate) endpoint: crate::mapping::RegionalEndpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegionalSubstrateCellPlan {
+    pub(crate) source: word::ValueId,
+    pub(crate) region: crate::RegionAnchorId,
+    pub(crate) instance_name: Box<str>,
+    pub(crate) cell_name: Box<str>,
+    pub(crate) connections: Box<[RegionalSubstrateConnection]>,
+}
+
+pub(crate) struct SequentialPublicationPlan {
+    aliases: Box<[(word::ValueId, word::ValueId)]>,
+}
+
+impl SequentialPublicationPlan {
+    pub(crate) fn aliases(&self) -> &[(word::ValueId, word::ValueId)] {
+        &self.aliases
+    }
+}
+
+impl PendingMappedFixedSubstrate {
     pub(crate) fn resolve(
         self,
         applied: &AppliedRegionDelta,
@@ -68,50 +191,344 @@ impl PendingMappedSequential {
 
 /// Projects the frozen region-graph membership onto sequential operations
 /// before bit lowering changes the representation of state boundaries.
-pub(crate) fn frozen_sequential_operations(
+pub(crate) fn sequential_region_bindings(
     module: &word::WordModule,
-    operation_regions: &[Option<crate::RegionRowId>],
-) -> Result<Box<[FrozenSequentialOperation]>, crate::SynthError> {
-    if operation_regions.len() != module.operations().len() {
-        return Err(crate::SynthError::invariant(
-            "frozen sequential projection does not cover the Word operation arena",
-        ));
-    }
+    regions: &crate::SynthesisRegionGraph,
+) -> Result<Box<[SourceSequentialBinding]>, crate::SynthError> {
     let mut operations = Vec::new();
-    for (index, operation) in module.operations().iter().enumerate() {
-        if matches!(
-            operation.kind,
-            word::OpKind::Register(_) | word::OpKind::Latch(_)
-        ) && let Some(owner) = operation_regions[index]
-        {
-            operations.push(FrozenSequentialOperation {
-                operation: word::OpId::from_index(index).map_err(crate::SynthError::Word)?,
-                owner,
-            });
+    for &region in regions.regions() {
+        for &operation in regions.operations(region) {
+            let stored = module.operation(operation).ok_or_else(|| {
+                crate::SynthError::invariant(
+                    "sequential region binding references an unknown operation",
+                )
+            })?;
+            if matches!(
+                stored.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            ) {
+                operations.push(SourceSequentialBinding {
+                    operation,
+                    states: Box::new([SequentialStateSource::Operation {
+                        cell: crate::regional::logical_operation_cell_id(regions, operation)?,
+                        value: stored.result,
+                    }]),
+                    region: region.id(),
+                    state_relation: None,
+                });
+            }
         }
     }
     Ok(operations.into_boxed_slice())
 }
 
-/// Resolves frozen source state operations to the scalar state operations
-/// emitted by global bit lowering while preserving their frozen region owner.
+pub(crate) fn local_sequential_bindings(
+    module: &word::WordModule,
+    source_module: &word::WordModule,
+    region: crate::RegionAnchorId,
+    provenance: &crate::planning::regional::LocalOperationSemantics,
+    source_cells: &std::collections::BTreeMap<word::OpId, opto_ir::design::CellId>,
+    state_relations: &std::collections::BTreeMap<word::OpId, [u8; 32]>,
+) -> Result<Box<[SourceSequentialBinding]>, crate::SynthError> {
+    module
+        .operations()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            matches!(
+                operation.kind,
+                word::OpKind::Register(_) | word::OpKind::Latch(_)
+            )
+            .then_some(index)
+        })
+        .map(|index| {
+            let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+            let semantics = provenance.states(operation).ok_or_else(|| {
+                crate::SynthError::invariant("private state has no semantic binding")
+            })?;
+            let relations = semantics
+                .iter()
+                .filter_map(|source| match source {
+                    crate::planning::regional::LocalStateSource::Operation(source) => {
+                        Some(state_relations.get(source).copied())
+                    }
+                    crate::planning::regional::LocalStateSource::Memory { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            if relations.iter().any(Option::is_some) && relations.iter().any(Option::is_none) {
+                return Err(crate::SynthError::invariant(
+                    "encoded state was merged with a direct source state",
+                ));
+            }
+            let mut relation = None;
+            for proof in relations.into_iter().flatten() {
+                if relation.replace(proof).is_some_and(|old| old != proof) {
+                    return Err(crate::SynthError::invariant(
+                        "private state has conflicting sequential relations",
+                    ));
+                }
+            }
+            let mut states = semantics
+                .iter()
+                .map(|source| match *source {
+                    crate::planning::regional::LocalStateSource::Operation(source) => {
+                        let cell = source_cells.get(&source).copied().ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "private state has no stable logical cell binding",
+                            )
+                        })?;
+                        let value = source_module
+                            .operation(source)
+                            .ok_or_else(|| {
+                                crate::SynthError::invariant("private state source is not live")
+                            })?
+                            .result;
+                        Ok::<_, crate::SynthError>(SequentialStateSource::Operation { cell, value })
+                    }
+                    crate::planning::regional::LocalStateSource::Memory { memory, ordinal } => {
+                        let stored = source_module.memory(memory).ok_or_else(|| {
+                            crate::SynthError::invariant("private memory source is not live")
+                        })?;
+                        Ok(SequentialStateSource::Memory {
+                            cell: crate::regional::logical_memory_cell_id(source_module, memory)?,
+                            memory,
+                            ordinal,
+                            width: stored.element_type.width(),
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            states.sort_unstable();
+            states.dedup();
+            if states.is_empty() {
+                return Err(crate::SynthError::invariant(
+                    "private state has no stable source relation",
+                ));
+            }
+            Ok(SourceSequentialBinding {
+                operation,
+                states: states.into_boxed_slice(),
+                region,
+                state_relation: relation,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn plan_regional_sequential_cells(
+    module: &word::WordModule,
+    source_module: &word::WordModule,
+    operations: &[SequentialRegionBinding],
+    mapping: &crate::mapping::TargetMappingContext,
+    endpoints: &std::collections::BTreeMap<
+        crate::mapping::RegionalPinKey,
+        crate::mapping::RegionalEndpoint,
+    >,
+) -> Result<Box<[RegionalSequentialCellPlan]>, crate::SynthError> {
+    operations
+        .iter()
+        .map(|binding| {
+            let operation = module.operation(binding.operation).ok_or_else(|| {
+                crate::SynthError::invariant("private lowered state operation disappeared")
+            })?;
+            let (mapped, roles) = match &operation.kind {
+                word::OpKind::Register(register) => {
+                    let selected = mapping.sequential_catalog.select_scalar_register(
+                        module,
+                        register,
+                        &mapping.combinational_catalog,
+                    )?;
+                    let resets = register
+                        .resets
+                        .iter()
+                        .map(|reset| reset.value)
+                        .collect::<Vec<_>>();
+                    let reset_roles = reset_control_roles(resets.len())?;
+                    match selected {
+                        SelectedRegisterCell::Simple(cell) => (
+                            cell.mapped_cell(
+                                register.d,
+                                register.clock,
+                                &resets,
+                                operation.result,
+                                None,
+                            ),
+                            std::iter::once(crate::mapping::SequentialPinRole::Data)
+                                .chain(std::iter::once(crate::mapping::SequentialPinRole::Clock))
+                                .chain(reset_roles)
+                                .collect::<Vec<_>>(),
+                        ),
+                        SelectedRegisterCell::Enabled(cell) => {
+                            let enable = register.enable.ok_or_else(|| {
+                                crate::SynthError::invariant(
+                                    "enabled state-cell plan has no semantic enable",
+                                )
+                            })?;
+                            if enable.active_high != cell.enable_active_high() {
+                                return Err(crate::SynthError::invariant(
+                                    "private state-cell plan has unnormalized enable polarity",
+                                ));
+                            }
+                            (
+                                cell.mapped_cell(
+                                    register.d,
+                                    enable.value,
+                                    register.clock,
+                                    &resets,
+                                    operation.result,
+                                    None,
+                                ),
+                                std::iter::once(crate::mapping::SequentialPinRole::Data)
+                                    .chain(std::iter::once(
+                                        crate::mapping::SequentialPinRole::Enable,
+                                    ))
+                                    .chain(std::iter::once(
+                                        crate::mapping::SequentialPinRole::Clock,
+                                    ))
+                                    .chain(reset_roles)
+                                    .collect::<Vec<_>>(),
+                            )
+                        }
+                    }
+                }
+                word::OpKind::Latch(latch) => {
+                    let requests =
+                        crate::mapping::sequential::async_reset_requests(module, &latch.resets)?;
+                    let cell = mapping
+                        .sequential_catalog
+                        .best_latch(
+                            &requests,
+                            latch.enable.active_high,
+                            false,
+                            crate::mapping::sequential::enable_inverter_cost(
+                                module,
+                                latch.enable.value,
+                                &mapping.combinational_catalog,
+                            ),
+                        )
+                        .ok_or_else(|| {
+                            crate::SynthError::mapping("target library has no compatible latch")
+                        })?;
+                    if latch.enable.active_high != cell.enable_active_high() {
+                        return Err(crate::SynthError::invariant(
+                            "private latch plan has unnormalized enable polarity",
+                        ));
+                    }
+                    let resets = latch
+                        .resets
+                        .iter()
+                        .map(|reset| reset.value)
+                        .collect::<Vec<_>>();
+                    let reset_roles = reset_control_roles(resets.len())?;
+                    (
+                        cell.mapped_cell(
+                            latch.d,
+                            latch.enable.value,
+                            &resets,
+                            operation.result,
+                            None,
+                        ),
+                        std::iter::once(crate::mapping::SequentialPinRole::Data)
+                            .chain(std::iter::once(crate::mapping::SequentialPinRole::Enable))
+                            .chain(reset_roles)
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => {
+                    return Err(crate::SynthError::invariant(
+                        "regional state-cell plan contains combinational logic",
+                    ));
+                }
+            };
+            if mapped.input_connections.len() != roles.len() || mapped.output_connections.len() != 1
+            {
+                return Err(crate::SynthError::invariant(
+                    "selected regional state cell has an unsupported pin shape",
+                ));
+            }
+            let source = binding.sources.first().ok_or_else(|| {
+                crate::SynthError::invariant("selected state cell has no semantic source")
+            })?;
+            let endpoint = |role| {
+                let bit = source.semantic_bit()?;
+                endpoints
+                    .get(&crate::mapping::RegionalPinKey::Sequential(
+                        crate::mapping::SequentialPinKey {
+                            state: source.cell(),
+                            role,
+                            bit,
+                        },
+                    ))
+                    .copied()
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "selected state cell pin has no stable endpoint",
+                        )
+                    })
+            };
+            let instance_name = ArtifactBuilder::source_name(source_module, source)?;
+            Ok(RegionalSequentialCellPlan {
+                sources: binding.sources.clone(),
+                region: binding.region,
+                instance_name: instance_name.into_boxed_str(),
+                cell_name: mapped.cell_name.into_boxed_str(),
+                inputs: mapped
+                    .input_connections
+                    .into_iter()
+                    .zip(roles)
+                    .map(|(connection, role)| {
+                        endpoint(role).map(|endpoint| (connection.pin.into_boxed_str(), endpoint))
+                    })
+                    .collect::<Result<_, _>>()?,
+                output: (
+                    mapped.output_connections[0].pin.clone().into_boxed_str(),
+                    endpoint(crate::mapping::SequentialPinRole::StateOutput)?,
+                ),
+            })
+        })
+        .collect()
+}
+
+fn reset_control_roles(
+    count: usize,
+) -> Result<Vec<crate::mapping::SequentialPinRole>, crate::SynthError> {
+    (0..count)
+        .map(|index| {
+            u32::try_from(index)
+                .map(crate::mapping::SequentialPinRole::ResetControl)
+                .map_err(|_| crate::SynthError::capacity("regional sequential reset index"))
+        })
+        .collect()
+}
+
+/// Resolves source state operations to scalar state operations while retaining
+/// the stable region identity established by the sealed work graph.
 pub(crate) fn lowered_sequential_operations(
     module: &word::WordModule,
-    ownership: &crate::boolean::bitblast::LoweredRegionOwnership,
-    source_operations: &[FrozenSequentialOperation],
-) -> Result<Box<[FrozenSequentialOperation]>, crate::SynthError> {
-    let mut lowered = std::collections::BTreeMap::new();
-    for frozen in source_operations {
-        let source = module.operation(frozen.operation).ok_or_else(|| {
-            crate::SynthError::invariant("frozen source sequential operation disappeared")
+    binding: &crate::boolean::bitblast::LoweredRegionBinding,
+    source_operations: &[SourceSequentialBinding],
+) -> Result<Box<[SequentialRegionBinding]>, crate::SynthError> {
+    let mut lowered = std::collections::BTreeMap::<
+        word::OpId,
+        (
+            crate::RegionAnchorId,
+            Vec<SequentialSourceBit>,
+            Vec<word::OpId>,
+        ),
+    >::new();
+    for source_binding in source_operations {
+        let source = module.operation(source_binding.operation).ok_or_else(|| {
+            crate::SynthError::invariant("source sequential operation disappeared")
         })?;
-        let values = ownership.lowered_bits(source.result).ok_or_else(|| {
+        let values = binding.lowered_bits(source.result).ok_or_else(|| {
             crate::SynthError::invariant(format!(
                 "frozen sequential operation {:?} has no lowered state values",
-                frozen.operation
+                source_binding.operation
             ))
         })?;
-        for &value in values {
+        for (bit, &value) in values.iter().enumerate() {
+            let bit = u32::try_from(bit)
+                .map_err(|_| crate::SynthError::capacity("sequential source bit index"))?;
             let operation = module
                 .value(value)
                 .and_then(|value| match value.kind {
@@ -130,35 +547,162 @@ pub(crate) fn lowered_sequential_operations(
                 stored.kind,
                 word::OpKind::Register(_) | word::OpKind::Latch(_)
             ) {
+                return Err(crate::SynthError::invariant(format!(
+                    "lowered sequential state {value:?} is produced by combinational operation {operation:?}: {:?}",
+                    stored.kind
+                )));
+            }
+            let row = lowered
+                .entry(operation)
+                .or_insert_with(|| (source_binding.region, Vec::new(), Vec::new()));
+            if row.0 != source_binding.region {
                 return Err(crate::SynthError::invariant(
-                    "lowered sequential state is produced by combinational logic",
+                    "one lowered sequential operation has conflicting region bindings",
                 ));
             }
-            if lowered
-                .insert(operation, frozen.owner)
-                .is_some_and(|owner| owner != frozen.owner)
-            {
-                return Err(crate::SynthError::invariant(
-                    "one lowered sequential operation has conflicting frozen owners",
-                ));
-            }
+            row.1.extend(
+                source_binding
+                    .states
+                    .iter()
+                    .copied()
+                    .map(|source| SequentialSourceBit {
+                        source,
+                        bit,
+                        state_relation: source_binding.state_relation,
+                    }),
+            );
+            row.2.push(source_binding.operation);
         }
     }
     Ok(lowered
         .into_iter()
-        .map(|(operation, owner)| FrozenSequentialOperation { operation, owner })
+        .map(|(operation, (region, mut sources, mut lowering_sources))| {
+            sources.sort_unstable();
+            sources.dedup();
+            lowering_sources.sort_unstable();
+            lowering_sources.dedup();
+            SequentialRegionBinding {
+                operation,
+                region,
+                sources: sources.into_boxed_slice(),
+                lowering_sources: lowering_sources.into_boxed_slice(),
+            }
+        })
         .collect())
+}
+
+pub(crate) fn reconcile_sequential_publication<'a>(
+    module: &word::WordModule,
+    region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
+    plans: impl IntoIterator<Item = &'a RegionalSequentialCellPlan>,
+    expected_cells: impl IntoIterator<Item = opto_ir::design::CellId>,
+) -> Result<SequentialPublicationPlan, crate::SynthError> {
+    let mut aliases = Vec::new();
+    let mut sources = std::collections::BTreeSet::new();
+    for plan in plans {
+        for source in &plan.sources {
+            if !sources.insert((source.source, source.semantic_bit()?)) {
+                return Err(crate::SynthError::invariant(
+                    "source state bit has multiple regional cell plans",
+                ));
+            }
+        }
+        let mut members = plan
+            .sources
+            .iter()
+            .filter(|source| source.state_relation.is_none())
+            .filter_map(|source| source.source_value().map(|value| (source, value)))
+            .map(|(source, value)| {
+                let stored = module.value(value).ok_or_else(|| {
+                    crate::SynthError::invariant("regional state source is not live")
+                })?;
+                region_binding
+                    .lowered_bits(value)
+                    .and_then(|bits| bits.get(source.bit as usize))
+                    .copied()
+                    .or_else(|| (stored.ty.width() == 1 && source.bit == 0).then_some(value))
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant("regional state source bit was not lowered")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        members.sort_unstable();
+        members.dedup();
+        if let Some(&representative) = members.first() {
+            aliases.extend(
+                members[1..]
+                    .iter()
+                    .copied()
+                    .map(|value| (value, representative)),
+            );
+        }
+    }
+    let expected = expected_cells.into_iter().collect::<BTreeSet<_>>();
+    let published = sources
+        .iter()
+        .filter_map(|(source, _)| match *source {
+            SequentialStateSource::Operation { cell, .. } => Some(cell),
+            SequentialStateSource::Memory { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if published != expected {
+        return Err(crate::SynthError::invariant(
+            "canonical state cells do not have exact regional publication coverage",
+        ));
+    }
+    aliases.sort_unstable();
+    Ok(SequentialPublicationPlan {
+        aliases: aliases.into_boxed_slice(),
+    })
 }
 
 /// Returns every value needed to materialize a frozen sequential operation set.
 pub(crate) fn sequential_binding_values(
     module: &word::WordModule,
-    operations: &[FrozenSequentialOperation],
+    operations: &[SourceSequentialBinding],
+) -> Result<Box<[word::ValueId]>, crate::SynthError> {
+    collect_sequential_binding_values(module, operations.iter().map(|binding| binding.operation))
+}
+
+pub(crate) fn sequential_plan_values<'a>(
+    module: &word::WordModule,
+    binding: &crate::boolean::bitblast::LoweredRegionBinding,
+    plans: impl IntoIterator<Item = &'a RegionalSequentialCellPlan>,
 ) -> Result<Box<[word::ValueId]>, crate::SynthError> {
     let mut values = BTreeSet::new();
-    for frozen in operations {
+    for endpoint in plans.into_iter().flat_map(|plan| {
+        plan.inputs
+            .iter()
+            .map(|(_, endpoint)| endpoint)
+            .chain(std::iter::once(&plan.output.1))
+    }) {
+        let crate::mapping::RegionalEndpoint::SourceBit { value, bit } = *endpoint else {
+            continue;
+        };
+        let stored = module
+            .value(value)
+            .ok_or_else(|| crate::SynthError::invariant("state endpoint source is not live"))?;
+        let lowered = binding
+            .lowered_bits(value)
+            .and_then(|bits| bits.get(bit as usize))
+            .copied()
+            .or_else(|| (stored.ty.width() == 1 && bit == 0).then_some(value))
+            .ok_or_else(|| {
+                crate::SynthError::invariant("state endpoint source bit was not lowered")
+            })?;
+        values.insert(lowered);
+    }
+    Ok(values.into_iter().collect())
+}
+
+fn collect_sequential_binding_values(
+    module: &word::WordModule,
+    operations: impl IntoIterator<Item = word::OpId>,
+) -> Result<Box<[word::ValueId]>, crate::SynthError> {
+    let mut values = BTreeSet::new();
+    for operation in operations {
         let operation = module
-            .operation(frozen.operation)
+            .operation(operation)
             .ok_or_else(|| crate::SynthError::invariant("live sequential operation disappeared"))?;
         values.insert(operation.result);
         values.extend(crate::word::operation_inputs(&operation.kind));
@@ -166,69 +710,49 @@ pub(crate) fn sequential_binding_values(
     Ok(values.into_iter().collect())
 }
 
-impl MappedSequentialArtifact {
+impl MappedFixedSubstrateArtifact {
     #[allow(
         clippy::redundant_closure_for_method_calls,
         reason = "the method's defining module is private, so its method-item path is not nameable here"
     )]
-    pub(crate) fn from_module(
+    pub(crate) fn from_module<'a>(
         module: &word::WordModule,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
         mapped_values: &WordMappedSignals,
-        regions: &crate::SynthesisRegionGraph,
-        operations: &[FrozenSequentialOperation],
+        plans: impl IntoIterator<Item = &'a RegionalSequentialCellPlan>,
+        substrate: impl IntoIterator<Item = &'a RegionalSubstrateCellPlan>,
+        regional_pins: &super::RegionalMappedPins,
         config: &crate::mapping::MappingConfig<'_>,
     ) -> Result<Self, crate::SynthError> {
-        let mut artifact = ArtifactBuilder::new(module)?;
-        let library = LibraryContext {
-            module,
-            mapped_values,
-            sequential_catalog: &config.mapping_context.sequential_catalog,
-            combinational_catalog: &config.mapping_context.combinational_catalog,
-            target_cells: &config.options.target_cells,
-        };
-        for frozen in operations {
-            let operation_id = frozen.operation;
-            let operation = module.operation(operation_id).ok_or_else(|| {
-                crate::SynthError::invariant("live sequential operation disappeared")
-            })?;
-            require_scalar(module, operation.result, "sequential result")?;
-            let owner = regions
-                .region(frozen.owner)
-                .map(|region| region.id())
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(format!(
-                        "sequential artifact for {operation_id:?} at {:?} references unknown frozen region {:?}",
-                        operation.source, frozen.owner
-                    ))
-                })?;
-            match &operation.kind {
-                word::OpKind::Register(register) => {
-                    artifact.push_library_register(
-                        &library,
-                        operation_id,
-                        operation.result,
-                        owner,
-                        register,
-                    )?;
-                }
-                word::OpKind::Latch(latch) => {
-                    artifact.push_library_latch(
-                        &library,
-                        operation_id,
-                        operation.result,
-                        owner,
-                        latch,
-                    )?;
-                }
-                _ => {
-                    return Err(crate::SynthError::invariant(
-                        "live sequential set contains a combinational operation",
-                    ));
-                }
+        let mut artifact = ArtifactBuilder::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for plan in plans {
+            if !seen.insert((plan.region, plan.sources.clone())) {
+                return Err(crate::SynthError::invariant(
+                    "duplicate regional state-cell plan",
+                ));
             }
+            artifact.push_planned_cell(
+                module,
+                region_binding,
+                mapped_values,
+                regional_pins,
+                &config.options.target_cells,
+                plan,
+            )?;
+        }
+        for plan in substrate {
+            artifact.push_substrate_cell(
+                module,
+                region_binding,
+                mapped_values,
+                regional_pins,
+                &config.options.target_cells,
+                plan,
+            )?;
         }
         validate_artifact_nets(
-            "sequential artifact",
+            "fixed regional substrate",
             &artifact.nets,
             &artifact.cells,
             &config.options.target_cells,
@@ -243,306 +767,187 @@ impl MappedSequentialArtifact {
     pub(crate) fn append_to_delta(
         &self,
         delta: &mut RegionDelta,
-    ) -> Result<PendingMappedSequential, crate::SynthError> {
+    ) -> Result<PendingMappedFixedSubstrate, crate::SynthError> {
         if self
             .referenced_nets
             .iter()
             .any(|&net| !delta.snapshot().contains_net(net))
         {
             return Err(crate::SynthError::invariant(
-                "sequential substrate net is absent from its transaction snapshot",
+                "fixed regional substrate net is absent from its transaction snapshot",
             ));
         }
         let (_, cells) = super::append_artifact_cells(
             delta,
             &self.nets,
             &self.cells,
-            "sequential artifact references an unknown internal net",
+            "fixed regional substrate references an unknown internal net",
             |cell, &source| (cell, source),
         )?;
-        Ok(PendingMappedSequential { cells })
+        Ok(PendingMappedFixedSubstrate { cells })
     }
 }
 
-struct ArtifactBuilder<'a> {
-    module: &'a word::WordModule,
-    state_targets: Vec<Option<word::LValue>>,
+struct ArtifactBuilder {
     cells: Vec<ArtifactCell<MappedCellSource>>,
     nets: ArtifactNetTable,
 }
 
-struct LibraryContext<'a> {
-    module: &'a word::WordModule,
-    mapped_values: &'a WordMappedSignals,
-    sequential_catalog: &'a SequentialCellCatalog,
-    combinational_catalog: &'a CombinationalCellCatalog,
-    target_cells: &'a opto_library::TargetCellSet,
-}
-
-impl<'a> ArtifactBuilder<'a> {
-    fn new(module: &'a word::WordModule) -> Result<Self, crate::SynthError> {
-        let mut state_targets = vec![None; module.values().len()];
-        for connect in module.connects() {
-            let target = state_targets
-                .get_mut(connect.value.index())
-                .ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "sequential name index references a value outside the Word arena",
-                    )
-                })?;
-            if target.is_none() {
-                *target = Some(connect.target.clone());
-            }
-        }
-        Ok(Self {
-            module,
-            state_targets,
+impl ArtifactBuilder {
+    fn new() -> Self {
+        Self {
             cells: Vec::new(),
             nets: ArtifactNetTable::default(),
-        })
-    }
-
-    fn push_library_register(
-        &mut self,
-        context: &LibraryContext<'_>,
-        operation_id: word::OpId,
-        result: word::ValueId,
-        owner: crate::RegionAnchorId,
-        register: &word::RegisterOp,
-    ) -> Result<(), crate::SynthError> {
-        let output = require_output(&mut self.nets, context.mapped_values, result)?;
-        let source = MappedCellSource::Value {
-            value: result,
-            owner,
-        };
-        if let Some(enable) = register.enable {
-            let enable_signal = context.mapped_values.require(enable.value)?;
-            let SelectedRegisterCell::Enabled(cell) = context.sequential_catalog.select_register(
-                context.module,
-                register,
-                context.combinational_catalog,
-            )?
-            else {
-                return Err(crate::SynthError::invariant(
-                    "enabled register selected a simple DFF",
-                ));
-            };
-            let enable_signal = self.adapt_enable(
-                operation_id,
-                enable.value,
-                owner,
-                enable_signal,
-                enable.active_high != cell.enable_active_high(),
-                context,
-            )?;
-            let mapped = cell.mapped_cell(
-                register.d,
-                enable.value,
-                register.clock,
-                &register
-                    .resets
-                    .iter()
-                    .map(|reset| reset.value)
-                    .collect::<Vec<_>>(),
-                result,
-                None,
-            );
-            let name = self.name(operation_id, "");
-            return self.push_library_cell(
-                context,
-                name,
-                mapped,
-                &[(1, enable_signal)],
-                &[(0, output)],
-                source,
-            );
         }
-        let SelectedRegisterCell::Simple(cell) = context.sequential_catalog.select_register(
-            context.module,
-            register,
-            context.combinational_catalog,
-        )?
-        else {
-            return Err(crate::SynthError::invariant(
-                "simple register selected an enabled DFF",
-            ));
-        };
-        let mapped = cell.mapped_cell(
-            register.d,
-            register.clock,
-            &register
-                .resets
-                .iter()
-                .map(|reset| reset.value)
-                .collect::<Vec<_>>(),
-            result,
-            None,
-        );
-        let name = self.name(operation_id, "");
-        self.push_library_cell(context, name, mapped, &[], &[(0, output)], source)
     }
 
-    fn push_library_latch(
-        &mut self,
-        context: &LibraryContext<'_>,
-        operation_id: word::OpId,
-        result: word::ValueId,
-        owner: crate::RegionAnchorId,
-        latch: &word::LatchOp,
-    ) -> Result<(), crate::SynthError> {
-        let reset_requests =
-            crate::mapping::sequential::async_reset_requests(context.module, &latch.resets)?;
-        let enable_signal = context.mapped_values.require(latch.enable.value)?;
-        let cell = context
-            .sequential_catalog
-            .best_latch(
-                &reset_requests,
-                latch.enable.active_high,
-                false,
-                crate::mapping::sequential::enable_inverter_cost(
-                    context.module,
-                    latch.enable.value,
-                    context.combinational_catalog,
-                ),
-            )
-            .ok_or_else(|| crate::SynthError::mapping("target library has no compatible latch"))?;
-        let enable_signal = self.adapt_enable(
-            operation_id,
-            latch.enable.value,
-            owner,
-            enable_signal,
-            latch.enable.active_high != cell.enable_active_high(),
-            context,
-        )?;
-        let mapped = cell.mapped_cell(
-            latch.d,
-            latch.enable.value,
-            &latch
-                .resets
-                .iter()
-                .map(|reset| reset.value)
-                .collect::<Vec<_>>(),
-            result,
-            None,
-        );
-        let name = self.name(operation_id, "");
-        let output = require_output(&mut self.nets, context.mapped_values, result)?;
-        self.push_library_cell(
-            context,
-            name,
-            mapped,
-            &[(1, enable_signal)],
-            &[(0, output)],
-            MappedCellSource::Value {
-                value: result,
-                owner,
-            },
-        )
-    }
-
-    fn adapt_enable(
-        &mut self,
-        operation_id: word::OpId,
-        value: word::ValueId,
-        owner: crate::RegionAnchorId,
-        signal: MappedValueSignal,
-        invert: bool,
-        context: &LibraryContext<'_>,
-    ) -> Result<ArtifactSignal, crate::SynthError> {
-        if !invert {
-            return Ok(self.nets.signal(signal));
-        }
-        if let MappedValueSignal::Constant(value) = signal {
-            return Ok(ArtifactSignal::Constant(!value));
-        }
-        let binding = context
-            .combinational_catalog
-            .best_binding_for_truth(crate::boolean::logic::inverter_truth())
-            .ok_or_else(|| crate::SynthError::mapping("target library has no inverter"))?;
-        let signature = crate::boolean::logic::LogicSignature {
-            inputs: crate::boolean::logic::LogicInputs::from_slice(&[value])
-                .expect("one inverter input fits a logic signature"),
-            truth: crate::boolean::logic::inverter_truth(),
-        };
-        let mapped = context
-            .combinational_catalog
-            .cell_for_binding(binding, &signature, value);
-        let internal = self.allocate_internal_net()?;
-        let name = self.name(operation_id, "_enable_inv");
-        self.push_library_cell(
-            context,
-            name,
-            mapped,
-            &[],
-            &[(0, internal)],
-            MappedCellSource::Value { value, owner },
-        )?;
-        Ok(internal)
-    }
-
-    fn push_library_cell(
-        &mut self,
-        context: &LibraryContext<'_>,
-        name: String,
-        mapped: MappedCell,
-        input_overrides: &[(usize, ArtifactSignal)],
-        output_overrides: &[(usize, ArtifactSignal)],
-        source: MappedCellSource,
-    ) -> Result<(), crate::SynthError> {
-        let (library_cell, target) = context
-            .target_cells
-            .synthesis_cells()
-            .find(|(_, cell)| cell.name() == mapped.cell_name)
+    fn target_cell<'a>(
+        target_cells: &'a opto_library::TargetCellSet,
+        name: &str,
+    ) -> Result<(u32, opto_library::TargetCellRef<'a>), crate::SynthError> {
+        let (index, cell) = target_cells
+            .iter()
+            .enumerate()
+            .find(|(_, cell)| cell.name() == name)
             .ok_or_else(|| {
                 crate::SynthError::invariant(format!(
-                    "selected sequential cell '{}' disappeared from the target library",
-                    mapped.cell_name
+                    "fixed regional cell '{name}' disappeared from the target library"
                 ))
             })?;
-        let library_cell = u32::try_from(library_cell)
+        let index = u32::try_from(index)
             .map_err(|_| crate::SynthError::capacity("target cell index exceeds 32 bits"))?;
-        let mut connections = Vec::with_capacity(
-            mapped
-                .input_connections
-                .len()
-                .saturating_add(mapped.output_connections.len()),
-        );
-        for (index, connection) in mapped.input_connections.iter().enumerate() {
-            let signal = match override_at(input_overrides, index) {
-                Some(signal) => signal,
-                None => self
-                    .nets
-                    .signal(context.mapped_values.require(connection.value)?),
-            };
-            connections.push((
-                connection.pin.clone(),
-                Some(target_pin_id(target, &connection.pin)?),
-                signal,
-            ));
-        }
-        for (index, connection) in mapped.output_connections.iter().enumerate() {
-            let signal = match override_at(output_overrides, index) {
-                Some(signal) => signal,
-                None => require_output(&mut self.nets, context.mapped_values, connection.value)?,
-            };
-            connections.push((
-                connection.pin.clone(),
-                Some(target_pin_id(target, &connection.pin)?),
-                signal,
-            ));
-        }
+        Ok((index, cell))
+    }
+
+    fn push_cell(
+        &mut self,
+        instance_name: &str,
+        cell_name: &str,
+        library_cell: u32,
+        connections: Box<[(String, Option<u16>, super::ArtifactSignal)]>,
+        metadata: MappedCellSource,
+    ) {
         self.cells.push(ArtifactCell {
-            name,
-            cell_type: mapped.cell_name,
+            name: instance_name.to_owned(),
+            cell_type: cell_name.to_owned(),
             library_cell: Some(library_cell),
-            connections: connections.into_boxed_slice(),
-            metadata: source,
+            connections,
+            metadata,
         });
+    }
+
+    fn push_planned_cell(
+        &mut self,
+        module: &word::WordModule,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
+        mapped_values: &WordMappedSignals,
+        regional_pins: &super::RegionalMappedPins,
+        target_cells: &opto_library::TargetCellSet,
+        plan: &RegionalSequentialCellPlan,
+    ) -> Result<(), crate::SynthError> {
+        let (library_cell, target) = Self::target_cell(target_cells, &plan.cell_name)?;
+        let mut connections = Vec::with_capacity(plan.inputs.len().saturating_add(1));
+        for (pin, endpoint) in &plan.inputs {
+            let signal = resolve_endpoint(
+                module,
+                region_binding,
+                mapped_values,
+                regional_pins,
+                *endpoint,
+            )?;
+            connections.push((
+                pin.to_string(),
+                Some(target_pin_id(target, pin)?),
+                self.nets.signal(signal),
+            ));
+        }
+        let output = resolve_endpoint(
+            module,
+            region_binding,
+            mapped_values,
+            regional_pins,
+            plan.output.1,
+        )?;
+        let output = self.nets.signal(output);
+        let output = self.nets.claim_output(Some(output))?;
+        connections.push((
+            plan.output.0.to_string(),
+            Some(target_pin_id(target, &plan.output.0)?),
+            output,
+        ));
+        let source = plan.sources.first().ok_or_else(|| {
+            crate::SynthError::invariant("regional state-cell plan has no semantic source")
+        })?;
+        let metadata = match source.source {
+            SequentialStateSource::Operation { value, .. } => MappedCellSource::Value {
+                value,
+                region: plan.region,
+            },
+            SequentialStateSource::Memory {
+                memory, ordinal, ..
+            } => MappedCellSource::Memory {
+                memory,
+                ordinal,
+                region: plan.region,
+            },
+        };
+        self.push_cell(
+            &plan.instance_name,
+            &plan.cell_name,
+            library_cell,
+            connections.into_boxed_slice(),
+            metadata,
+        );
         Ok(())
     }
 
-    fn allocate_internal_net(&mut self) -> Result<ArtifactSignal, crate::SynthError> {
-        self.nets.allocate_local()
+    fn push_substrate_cell(
+        &mut self,
+        module: &word::WordModule,
+        region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
+        mapped_values: &WordMappedSignals,
+        regional_pins: &super::RegionalMappedPins,
+        target_cells: &opto_library::TargetCellSet,
+        plan: &RegionalSubstrateCellPlan,
+    ) -> Result<(), crate::SynthError> {
+        let (library_cell, target) = Self::target_cell(target_cells, &plan.cell_name)?;
+        let connections = plan
+            .connections
+            .iter()
+            .map(|connection| {
+                let signal = resolve_endpoint(
+                    module,
+                    region_binding,
+                    mapped_values,
+                    regional_pins,
+                    connection.endpoint,
+                )?;
+                let signal = self.nets.signal(signal);
+                let signal = if connection.output {
+                    self.nets.claim_output(Some(signal))?
+                } else {
+                    signal
+                };
+                Ok((
+                    connection.pin.to_string(),
+                    Some(target_pin_id(target, &connection.pin)?),
+                    signal,
+                ))
+            })
+            .collect::<Result<Box<[_]>, crate::SynthError>>()?;
+        let instance_name =
+            super::regional_substrate_instance_name(plan.region, &plan.instance_name);
+        self.push_cell(
+            &instance_name,
+            &plan.cell_name,
+            library_cell,
+            connections,
+            MappedCellSource::Value {
+                value: plan.source,
+                region: plan.region,
+            },
+        );
+        Ok(())
     }
 
     /// Names one sequential cell.
@@ -552,20 +957,79 @@ impl<'a> ArtifactBuilder<'a> {
     /// constraint that matches cells by name all refer to the same object a
     /// designer wrote. Only a state with no recoverable name falls back to a
     /// synthetic identifier.
-    fn name(&mut self, operation: word::OpId, suffix: &str) -> String {
-        let target = self
-            .module
-            .operation(operation)
-            .and_then(|operation| self.state_targets.get(operation.result.index()))
-            .and_then(Option::as_ref);
-        let base = sequential_state_stem(self.module, operation, target)
+    fn source_name(
+        module: &word::WordModule,
+        source: &SequentialSourceBit,
+    ) -> Result<String, crate::SynthError> {
+        let Some(source_value) = source.source_value() else {
+            let SequentialStateSource::Memory {
+                memory, ordinal, ..
+            } = source.source
+            else {
+                unreachable!("a source without a value is a memory state")
+            };
+            let memory = module.memory(memory).ok_or_else(|| {
+                crate::SynthError::invariant("state-cell memory source is not live")
+            })?;
+            let name = legalize_identifier(module.name_str(memory.name));
+            return Ok(unique_instance_name(
+                module,
+                format!("{name}_reg_{ordinal}_{}_", source.bit),
+            ));
+        };
+        let stored = module
+            .value(source_value)
+            .ok_or_else(|| crate::SynthError::invariant("state-cell source value is not live"))?;
+        let word::ValueKind::Operation(operation) = stored.kind else {
+            return Err(crate::SynthError::invariant(
+                "state-cell source value is not sequential",
+            ));
+        };
+        let target = module
+            .connects()
+            .iter()
+            .find(|connect| connect.value == source_value)
+            .map(|connect| &connect.target);
+        let projected = if target.is_none() {
+            let semantics = crate::mapping::roots::FullDomainRootSemantics::new(module)?;
+            module.connects().iter().find_map(|connect| {
+                let signal = module.signal(connect.target.signal)?;
+                signal.name?;
+                (0..signal.ty.width()).find_map(|target_bit| {
+                    matches!(
+                        semantics
+                            .canonical_publication_bit(connect.value, target_bit)
+                            .ok()?,
+                        crate::mapping::roots::CanonicalPublicationBit::Value { value, bit }
+                            if value == source_value && bit == 0
+                    )
+                    .then_some((connect.target.signal, target_bit))
+                })
+            })
+        } else {
+            None
+        };
+        let mut base = sequential_state_stem(module, operation, target)
+            .or_else(|| {
+                let (signal, bit) = projected?;
+                let signal = module.signal(signal)?;
+                let name = legalize_identifier(module.name_str(signal.name?));
+                Some(if signal.ty.width() == 1 {
+                    format!("{name}_reg")
+                } else {
+                    format!("{name}_reg_{bit}_")
+                })
+            })
             .unwrap_or_else(|| format!("__opto_seq_{}", operation.index()));
-        unique_instance_name(self.module, format!("{base}{suffix}"))
+        if stored.ty.width() > 1 && target.is_none_or(|target| target.range.is_none()) {
+            write!(&mut base, "_{}_", source.bit).expect("writing to a String cannot fail");
+        }
+        Ok(unique_instance_name(module, base))
     }
 
-    fn finish(self) -> MappedSequentialArtifact {
+    fn finish(self) -> MappedFixedSubstrateArtifact {
         let referenced_nets = self.nets.external_nets().collect::<Vec<_>>();
-        MappedSequentialArtifact {
+        MappedFixedSubstrateArtifact {
             nets: self.nets,
             cells: self.cells.into_boxed_slice(),
             referenced_nets: referenced_nets.into_boxed_slice(),
@@ -573,44 +1037,33 @@ impl<'a> ArtifactBuilder<'a> {
     }
 }
 
-fn require_scalar(
+fn resolve_endpoint(
     module: &word::WordModule,
-    value: word::ValueId,
-    description: &str,
-) -> Result<(), crate::SynthError> {
-    let width = module
-        .value(value)
-        .ok_or_else(|| crate::SynthError::invariant(format!("unknown {description} {value:?}")))?
-        .ty
-        .width();
-    if width != 1 {
-        return Err(crate::SynthError::invariant(format!(
-            "{description} must be scalar, got width {width}"
-        )));
-    }
-    Ok(())
-}
-
-fn require_output(
-    nets: &mut ArtifactNetTable,
+    region_binding: &crate::boolean::bitblast::LoweredRegionBinding,
     mapped_values: &WordMappedSignals,
-    value: word::ValueId,
-) -> Result<ArtifactSignal, crate::SynthError> {
-    match mapped_values.require(value)? {
-        signal @ MappedValueSignal::Net(_) => {
-            let target = nets.signal(signal);
-            nets.claim_output(Some(target))
+    regional_pins: &super::RegionalMappedPins,
+    endpoint: crate::mapping::RegionalEndpoint,
+) -> Result<MappedValueSignal, crate::SynthError> {
+    match endpoint {
+        crate::mapping::RegionalEndpoint::Pin(pin) => {
+            regional_pins.require(pin).map(MappedValueSignal::Net)
         }
-        MappedValueSignal::Constant(_) => Err(crate::SynthError::invariant(
-            "sequential output resolved to a constant substrate signal",
-        )),
+        crate::mapping::RegionalEndpoint::Constant(value) => Ok(MappedValueSignal::Constant(value)),
+        crate::mapping::RegionalEndpoint::SourceBit { value, bit } => {
+            let stored = module
+                .value(value)
+                .ok_or_else(|| crate::SynthError::invariant("state endpoint source is not live"))?;
+            let lowered = region_binding
+                .lowered_bits(value)
+                .and_then(|bits| bits.get(bit as usize))
+                .copied()
+                .or_else(|| (stored.ty.width() == 1 && bit == 0).then_some(value))
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("state endpoint source bit was not lowered")
+                })?;
+            mapped_values.require(lowered)
+        }
     }
-}
-
-fn override_at(overrides: &[(usize, ArtifactSignal)], index: usize) -> Option<ArtifactSignal> {
-    overrides
-        .iter()
-        .find_map(|&(candidate, signal)| (candidate == index).then_some(signal))
 }
 
 /// Recovers the source-visible state name one sequential operation implements.
@@ -682,23 +1135,93 @@ mod tests {
     use opto_ir::word::{Edge, LValue, PortDirection, RegisterOp, SourceSpan, WordType};
 
     #[test]
-    fn frozen_state_owner_follows_the_scalar_operation_emitted_by_bit_lowering() {
-        let mut module = word::WordModule::new("frozen_state_owner");
+    fn memory_register_bank_uses_memory_state_semantics() {
+        let source_span = SourceSpan::stable("memory state binding test");
+        let mut source = word::WordModule::new("source");
+        let memory = source
+            .add_memory(
+                "memory",
+                WordType::bits(8).unwrap(),
+                std::num::NonZeroU32::new(2).unwrap(),
+                source_span.clone(),
+            )
+            .unwrap();
+        let mut local = word::WordModule::new("local");
+        let data = local
+            .constant(
+                opto_ir::ConstBits::from_bin_str("00000000").unwrap(),
+                WordType::bits(8).unwrap(),
+                source_span.clone(),
+            )
+            .unwrap();
+        let clock = local
+            .constant(
+                opto_ir::ConstBits::from_bin_str("0").unwrap(),
+                WordType::bits(1).unwrap(),
+                source_span.clone(),
+            )
+            .unwrap();
+        let state = local
+            .register(
+                RegisterOp {
+                    name: None,
+                    d: data,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: vec![],
+                },
+                source_span,
+            )
+            .unwrap();
+        let word::ValueKind::Operation(operation) = local.value(state).unwrap().kind else {
+            unreachable!()
+        };
+        let mut semantics = crate::planning::regional::LocalOperationSemantics::default();
+        semantics.record_generated(operation, []).unwrap();
+        semantics.record_memory_state(operation, memory, 1).unwrap();
+
+        let bindings = local_sequential_bindings(
+            &local,
+            &source,
+            crate::RegionAnchorId::from_bytes_for_test([1; 32]),
+            &semantics,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert!(matches!(
+            bindings[0].states[0],
+            SequentialStateSource::Memory {
+                memory: bound,
+                ordinal: 1,
+                width: 8,
+                ..
+            } if bound == memory
+        ));
+    }
+
+    #[test]
+    fn stable_state_region_follows_the_scalar_operation_emitted_by_bit_lowering() {
+        let mut module = word::WordModule::new("stable_state_region");
         let bit = WordType::bits(1).unwrap();
+        let source = SourceSpan::stable("stable state region test");
         let clock = module
-            .add_port("clock", PortDirection::Input, bit, SourceSpan::default())
+            .add_port("clock", PortDirection::Input, bit, source.clone())
             .unwrap();
         let data = module
-            .add_port("data", PortDirection::Input, bit, SourceSpan::default())
+            .add_port("data", PortDirection::Input, bit, source.clone())
             .unwrap();
         let output = module
-            .add_port("q", PortDirection::Output, bit, SourceSpan::default())
+            .add_port("q", PortDirection::Output, bit, source.clone())
             .unwrap();
         let clock = module
-            .read_signal(module.port(clock).unwrap().signal, SourceSpan::default())
+            .read_signal(module.port(clock).unwrap().signal, source.clone())
             .unwrap();
         let data = module
-            .read_signal(module.port(data).unwrap().signal, SourceSpan::default())
+            .read_signal(module.port(data).unwrap().signal, source.clone())
             .unwrap();
         let state = module
             .register(
@@ -710,39 +1233,50 @@ mod tests {
                     enable: None,
                     resets: Vec::new(),
                 },
-                SourceSpan::default(),
+                source.clone(),
             )
             .unwrap();
         module
             .connect(
                 LValue::signal(module.port(output).unwrap().signal),
                 state,
-                SourceSpan::default(),
+                source,
             )
             .unwrap();
-        let owner = crate::RegionRowId::from_index(0).unwrap();
-        let source_operations = frozen_sequential_operations(&module, &[Some(owner)]).unwrap();
+        let regions = crate::regional::region_graph::partition::build(
+            &module,
+            crate::regional::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let source_operations = sequential_region_bindings(&module, &regions).unwrap();
         let required = sequential_binding_values(&module, &source_operations).unwrap();
         let shell = crate::planning::operator::ArchitectureDecisions::for_regional_shell(&module);
         let mut provenance =
             crate::artifact::provenance::ProvenanceBuilder::new(&module, &shell).unwrap();
 
-        let ownership = crate::boolean::bitblast::bitblast_module_with_regions(
+        let binding = crate::boolean::bitblast::bitblast_module_with_regions(
             &mut module,
             &shell,
             &mut provenance,
-            &[Some(owner)],
+            &regions.operation_region_rows(),
             &required,
             &[],
             crate::boolean::bitblast::GlobalBitblastScope::RegionalShell,
         )
         .unwrap();
-        let lowered =
-            lowered_sequential_operations(&module, &ownership, &source_operations).unwrap();
+        let lowered = lowered_sequential_operations(&module, &binding, &source_operations).unwrap();
 
         assert_eq!(lowered.len(), 1);
-        assert_eq!(lowered[0].owner, owner);
+        assert_eq!(lowered[0].region, source_operations[0].region);
         assert_ne!(lowered[0].operation, source_operations[0].operation);
+        assert_eq!(
+            lowered[0].sources.as_ref(),
+            &[SequentialSourceBit {
+                source: source_operations[0].states[0],
+                bit: 0,
+                state_relation: None,
+            }]
+        );
         assert!(matches!(
             module.operation(lowered[0].operation).unwrap().kind,
             word::OpKind::Register(_)

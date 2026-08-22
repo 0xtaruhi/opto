@@ -1,18 +1,17 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Deterministic root-closure partitioning and final owner-atom coarsening.
+//! Deterministic root-closure partitioning and bounded region coarsening.
 //!
-//! Initial partitioning may claim operation cones under bounded structural work
-//! policy. Final partitioning instead consumes already frozen structural owner
-//! atoms and may merge but never split them. Stable anchors derive from source
-//! identity and semantic connectivity, never worker count or arena position.
+//! Every graph is rebuilt from canonical Word IR. Stable anchors derive from
+//! source identity and semantic connectivity, never worker count, an external
+//! mutable provenance side table, or arena position.
 
 use super::graph::{
     BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBitFlow,
-    RegionBoundaryPort, RegionBoundaryPortId, RegionGraphOwnerId, RegionPortDirection,
+    RegionBoundaryPort, RegionBoundaryPortId, RegionGraphGenerationId, RegionPortDirection,
     RegionRevision, RegionRowId, SynthesisRegion, SynthesisRegionGraph, SynthesisRegionKind,
-    SynthesisRegionRevision, packed_rows, remap_optional_owner_rows,
+    SynthesisRegionRevision, packed_rows, remap_optional_region_rows,
 };
 use crate::word::signal_driver::SignalDriverIndex;
 use opto_ir::word;
@@ -202,23 +201,44 @@ pub(crate) fn build(
     module: &word::WordModule,
     policy: RegionPartitionPolicy,
 ) -> Result<SynthesisRegionGraph, crate::SynthError> {
-    build_inner(module, policy, None)
+    validate_policy(policy)?;
+    let drivers = SignalDriverIndex::new(module)?;
+    let value_keys = semantic::value_keys(module)?;
+    let anchors = operation_anchors(module)?;
+    let mut regions = partition_operations(module, &anchors, &drivers, policy)?;
+    append_memory_regions(module, &mut regions)?;
+    let mut operation_region = vec![None; module.operations().len()];
+    let mut memory_region = vec![None; module.memories().len()];
+    for (region, contents) in regions.iter().enumerate() {
+        for &operation in &contents.operations {
+            operation_region[operation.index()] = Some(region);
+        }
+        for &memory in &contents.memories {
+            memory_region[memory.index()] = Some(region);
+        }
+    }
+    let memory_signal_region = memory_signal_regions(module, &memory_region)?;
+    let (mut edges, bit_flows) = build_edges(
+        module,
+        &value_keys,
+        &operation_region,
+        &memory_region,
+        &memory_signal_region,
+    )?;
+    seal_edge_semantic_keys(module, &value_keys, &anchors, &regions, &mut edges)?;
+    seal_region_identities(module, &value_keys, &edges, &bit_flows, &mut regions)?;
+    canonicalize(
+        module,
+        regions,
+        edges,
+        operation_region,
+        memory_region,
+        anchors.into_vec(),
+        bit_flows,
+    )
 }
 
-/// Builds the final graph while preserving every structural owner atom whole.
-pub(crate) fn build_with_ownership(
-    module: &word::WordModule,
-    policy: RegionPartitionPolicy,
-    ownership: &crate::regional::StructuralOwnershipProvenance,
-) -> Result<SynthesisRegionGraph, crate::SynthError> {
-    build_inner(module, policy, Some(ownership))
-}
-
-fn build_inner(
-    module: &word::WordModule,
-    policy: RegionPartitionPolicy,
-    ownership: Option<&crate::regional::StructuralOwnershipProvenance>,
-) -> Result<SynthesisRegionGraph, crate::SynthError> {
+fn validate_policy(policy: RegionPartitionPolicy) -> Result<(), crate::SynthError> {
     if policy.partition_start == 0
         || policy.minimum == 0
         || policy.target == 0
@@ -229,117 +249,7 @@ fn build_inner(
             "region work policy is inconsistent",
         ));
     }
-    let drivers = SignalDriverIndex::new(module)?;
-    let value_keys = semantic::value_keys(module)?;
-    let anchors = operation_anchors(module)?;
-    let mut regions = if let Some(ownership) = ownership {
-        partition_owned_operations(module, &drivers, policy, ownership)?
-    } else {
-        partition_operations(module, &anchors, &drivers, policy)?
-    };
-    append_memory_regions(module, &mut regions)?;
-    let mut operation_owner = vec![None; module.operations().len()];
-    let mut memory_owner = vec![None; module.memories().len()];
-    for (region, contents) in regions.iter().enumerate() {
-        for &operation in &contents.operations {
-            operation_owner[operation.index()] = Some(region);
-        }
-        for &memory in &contents.memories {
-            memory_owner[memory.index()] = Some(region);
-        }
-    }
-    let memory_signal_owner = memory_signal_owners(module, &memory_owner)?;
-    let (mut edges, bit_flows) = build_edges(
-        module,
-        &value_keys,
-        &operation_owner,
-        &memory_owner,
-        &memory_signal_owner,
-    )?;
-    seal_edge_semantic_keys(module, &value_keys, &anchors, &regions, &mut edges)?;
-    seal_region_identities(module, &value_keys, &edges, &bit_flows, &mut regions)?;
-    canonicalize(
-        module,
-        regions,
-        edges,
-        operation_owner,
-        memory_owner,
-        anchors.into_vec(),
-        bit_flows,
-    )
-}
-
-fn partition_owned_operations(
-    module: &word::WordModule,
-    drivers: &SignalDriverIndex,
-    policy: RegionPartitionPolicy,
-    ownership: &crate::regional::StructuralOwnershipProvenance,
-) -> Result<Vec<TempRegion>, crate::SynthError> {
-    if ownership.len() != module.operations().len() {
-        return Err(crate::SynthError::invariant(
-            "final partition received incomplete structural ownership provenance",
-        ));
-    }
-    let mut input_operations = InputOperations::new(module, drivers);
-    let dependencies = operation_dependencies(module, &mut input_operations)?;
-    let reachable = synthesis_reachable_operations(module)?;
-    let estimates = StructuralEstimateIndex::build(module, &dependencies);
-    let criticality = estimates.criticality(&dependencies);
-    let mut owner_regions = BTreeMap::<RegionRowId, TempRegion>::new();
-    for (index, &reachable) in reachable.iter().enumerate() {
-        if !reachable {
-            continue;
-        }
-        let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
-        let owner = ownership.owner(operation).ok_or_else(|| {
-            crate::SynthError::invariant("live operation lost structural owner before final freeze")
-        })?;
-        let anchor = ownership.anchor(operation).ok_or_else(|| {
-            crate::SynthError::invariant("live operation lost structural owner anchor")
-        })?;
-        let stored = &module.operations()[index];
-        match owner_regions.entry(owner) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(TempRegion {
-                    anchor,
-                    kind: if is_state(&stored.kind) {
-                        SynthesisRegionKind::State
-                    } else {
-                        SynthesisRegionKind::Combinational
-                    },
-                    operations: vec![operation],
-                    memories: Vec::new(),
-                    work: operation_work(module, stored),
-                    delay: estimates.operations[index].delay,
-                    wiring: estimates.operations[index].wiring_units,
-                    id: RegionAnchorId::from_bytes([0; 32]),
-                    revision: RegionRevision::from_bytes([0; 32]),
-                });
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let target = entry.get_mut();
-                if target.anchor != anchor {
-                    return Err(crate::SynthError::invariant(
-                        "one structural owner has inconsistent stable anchors",
-                    ));
-                }
-                target.operations.push(operation);
-                target.work = target.work.saturating_add(operation_work(module, stored));
-                target.delay = target
-                    .delay
-                    .saturating_add(estimates.operations[index].delay);
-                target.wiring = target
-                    .wiring
-                    .saturating_add(estimates.operations[index].wiring_units);
-                if is_state(&stored.kind) {
-                    target.kind = SynthesisRegionKind::State;
-                }
-            }
-        }
-    }
-    let mut regions = owner_regions.into_values().collect::<Vec<_>>();
-    coarsen_regions(module, &dependencies, &criticality, policy, &mut regions)?;
-    Ok(regions)
+    Ok(())
 }
 
 fn partition_operations(
@@ -370,10 +280,10 @@ fn partition_operations(
         reachable: &reachable,
         seeds,
         size_limit: policy.target,
-        owners: vec![None; module.operations().len()],
+        membership: vec![None; module.operations().len()],
         regions: Vec::new(),
     }
-    .claim()?;
+    .form()?;
     coarsen_regions(module, &dependencies, &criticality, policy, &mut regions)?;
     Ok(regions)
 }
@@ -654,7 +564,7 @@ fn enqueue_seed(
         .insert(operation);
 }
 
-/// Mutable ownership state for one deterministic cone-claim pass.
+/// Generation-local membership state for deterministic cone formation.
 struct ConeClaimState<'a> {
     module: &'a word::WordModule,
     anchors: &'a [OperationAnchorId],
@@ -666,12 +576,12 @@ struct ConeClaimState<'a> {
     reachable: &'a [bool],
     seeds: BTreeMap<(std::cmp::Reverse<u64>, OperationAnchorId), BTreeSet<usize>>,
     size_limit: u64,
-    owners: Vec<Option<usize>>,
+    membership: Vec<Option<usize>>,
     regions: Vec<TempRegion>,
 }
 
 impl ConeClaimState<'_> {
-    fn claim(self) -> Result<Vec<TempRegion>, crate::SynthError> {
+    fn form(self) -> Result<Vec<TempRegion>, crate::SynthError> {
         let Self {
             module,
             anchors,
@@ -683,15 +593,15 @@ impl ConeClaimState<'_> {
             reachable,
             mut seeds,
             size_limit,
-            mut owners,
+            mut membership,
             mut regions,
         } = self;
         loop {
             if seeds.is_empty() {
-                let next = owners
+                let next = membership
                     .iter()
                     .enumerate()
-                    .filter(|&(operation, owner)| reachable[operation] && owner.is_none())
+                    .filter(|&(operation, region)| reachable[operation] && region.is_none())
                     .max_by_key(|&(operation, _)| {
                         (
                             criticality[operation],
@@ -716,7 +626,7 @@ impl ConeClaimState<'_> {
             let mut wiring = 0u64;
             let region_index = regions.len();
             while let Some(operation) = pending.pop() {
-                if owners[operation].is_some() {
+                if membership[operation].is_some() {
                     continue;
                 }
                 let component = &components[component_of[operation]];
@@ -729,9 +639,9 @@ impl ConeClaimState<'_> {
                 }
                 let mut inputs = Vec::new();
                 for &member in component {
-                    if owners[member].replace(region_index).is_some() {
+                    if membership[member].replace(region_index).is_some() {
                         return Err(crate::SynthError::invariant(
-                            "dependency component was split between cone owners",
+                            "dependency component was split between regions",
                         ));
                     }
                     operations
@@ -857,19 +767,19 @@ fn coarsen_regions(
     policy: RegionPartitionPolicy,
     regions: &mut Vec<TempRegion>,
 ) -> Result<(), crate::SynthError> {
-    let mut owners = vec![None; module.operations().len()];
+    let mut membership = vec![None; module.operations().len()];
     for (region, contents) in regions.iter().enumerate() {
         for operation in &contents.operations {
-            owners[operation.index()] = Some(region);
+            membership[operation.index()] = Some(region);
         }
     }
     for _ in 0..COARSENING_ROUNDS {
-        let edges = region_cut_gains(module, dependencies, criticality, &owners);
-        let absorbed = absorb_fragments(&edges, policy, regions, &mut owners)?;
+        let edges = region_cut_gains(module, dependencies, criticality, &membership);
+        let absorbed = absorb_fragments(&edges, policy, regions, &mut membership)?;
         if absorbed {
             continue;
         }
-        if !merge_maximal_pairs(&edges, policy, regions, &mut owners) {
+        if !merge_maximal_pairs(&edges, policy, regions, &mut membership) {
             break;
         }
     }
@@ -881,15 +791,15 @@ fn region_cut_gains(
     module: &word::WordModule,
     dependencies: &[Vec<usize>],
     criticality: &[u64],
-    owners: &[Option<usize>],
+    membership: &[Option<usize>],
 ) -> BTreeMap<(usize, usize), u64> {
     let mut edges = BTreeMap::<(usize, usize), u64>::new();
     for (sink, inputs) in dependencies.iter().enumerate() {
-        let Some(sink_region) = owners[sink] else {
+        let Some(sink_region) = membership[sink] else {
             continue;
         };
         for &source in inputs {
-            let Some(source_region) = owners[source] else {
+            let Some(source_region) = membership[source] else {
                 continue;
             };
             if source_region == sink_region {
@@ -920,7 +830,7 @@ fn absorb_fragments(
     edges: &BTreeMap<(usize, usize), u64>,
     policy: RegionPartitionPolicy,
     regions: &mut [TempRegion],
-    owners: &mut [Option<usize>],
+    membership: &mut [Option<usize>],
 ) -> Result<bool, crate::SynthError> {
     let incident = region_incident_edges(regions.len(), edges)?;
     let mut proposals = BTreeMap::<usize, Vec<(u64, usize)>>::new();
@@ -956,7 +866,7 @@ fn absorb_fragments(
             {
                 continue;
             }
-            merge_region_into(regions, owners, source, receiver);
+            merge_region_into(regions, membership, source, receiver);
             changed = true;
         }
     }
@@ -980,7 +890,7 @@ fn merge_maximal_pairs(
     edges: &BTreeMap<(usize, usize), u64>,
     policy: RegionPartitionPolicy,
     regions: &mut [TempRegion],
-    owners: &mut [Option<usize>],
+    membership: &mut [Option<usize>],
 ) -> bool {
     let mut candidates = edges
         .iter()
@@ -1017,14 +927,14 @@ fn merge_maximal_pairs(
         } else {
             (left, right)
         };
-        merge_region_into(regions, owners, source, receiver);
+        merge_region_into(regions, membership, source, receiver);
     }
     !pairs.is_empty()
 }
 
 fn merge_region_into(
     regions: &mut [TempRegion],
-    owners: &mut [Option<usize>],
+    membership: &mut [Option<usize>],
     source: usize,
     receiver: usize,
 ) {
@@ -1044,7 +954,7 @@ fn merge_region_into(
         revision: _,
     } = removed;
     for operation in &operations {
-        owners[operation.index()] = Some(receiver);
+        membership[operation.index()] = Some(receiver);
     }
     let receiver_operations = std::mem::take(&mut regions[receiver].operations);
     regions[receiver].operations = merge_sorted_operations(&receiver_operations, &operations);
@@ -1136,37 +1046,37 @@ fn append_memory_regions(
     Ok(())
 }
 
-fn memory_signal_owners(
+fn memory_signal_regions(
     module: &word::WordModule,
-    memory_owner: &[Option<usize>],
+    memory_region: &[Option<usize>],
 ) -> Result<BTreeMap<word::SignalId, usize>, crate::SynthError> {
-    let mut owners = BTreeMap::new();
+    let mut regions = BTreeMap::new();
     for port in module.memory_read_ports() {
-        let Some(owner) = memory_owner.get(port.memory.index()).copied().flatten() else {
+        let Some(region) = memory_region.get(port.memory.index()).copied().flatten() else {
             continue;
         };
-        if owners.insert(port.data, owner).is_some() {
+        if regions.insert(port.data, region).is_some() {
             return Err(crate::SynthError::invariant(
                 "memory read signal has more than one producer region",
             ));
         }
     }
-    Ok(owners)
+    Ok(regions)
 }
 
 fn build_edges(
     module: &word::WordModule,
     value_keys: &[[u8; 32]],
-    operation_owner: &[Option<usize>],
-    memory_owner: &[Option<usize>],
-    memory_signal_owner: &BTreeMap<word::SignalId, usize>,
+    operation_region: &[Option<usize>],
+    memory_region: &[Option<usize>],
+    memory_signal_region: &BTreeMap<word::SignalId, usize>,
 ) -> Result<(Vec<TempEdge>, Vec<TempBitFlow>), crate::SynthError> {
     let mut edges = BTreeSet::new();
     let mut bit_flows = BTreeSet::new();
     let connectivity =
-        ConnectivityIndex::new(module, value_keys, operation_owner, memory_signal_owner)?;
+        ConnectivityIndex::new(module, value_keys, operation_region, memory_signal_region)?;
     for (index, operation) in module.operations().iter().enumerate() {
-        let Some(sink) = operation_owner[index] else {
+        let Some(sink) = operation_region[index] else {
             continue;
         };
         for value in crate::word::operation_inputs(&operation.kind) {
@@ -1174,7 +1084,7 @@ fn build_edges(
         }
     }
     for read in module.memory_read_ports() {
-        let Some(sink) = memory_owner[read.memory.index()] else {
+        let Some(sink) = memory_region[read.memory.index()] else {
             continue;
         };
         for value in memory_read_inputs(read) {
@@ -1182,7 +1092,7 @@ fn build_edges(
         }
     }
     for write in module.memory_write_ports() {
-        let Some(sink) = memory_owner[write.memory.index()] else {
+        let Some(sink) = memory_region[write.memory.index()] else {
             continue;
         };
         for value in memory_write_inputs(write) {
@@ -1426,20 +1336,20 @@ fn canonicalize(
     module: &word::WordModule,
     mut regions: Vec<TempRegion>,
     edges: Vec<TempEdge>,
-    operation_owners: Vec<Option<usize>>,
-    memory_owners: Vec<Option<usize>>,
+    operation_regions: Vec<Option<usize>>,
+    memory_regions: Vec<Option<usize>>,
     operation_anchors: Vec<OperationAnchorId>,
     bit_flows: Vec<TempBitFlow>,
 ) -> Result<SynthesisRegionGraph, crate::SynthError> {
-    let graph_owner = RegionGraphOwnerId::fresh();
+    let graph_generation = RegionGraphGenerationId::fresh();
     let mut order = (0..regions.len()).collect::<Vec<_>>();
     order.sort_unstable_by_key(|&region| regions[region].id);
     let mut old_to_new = vec![RegionRowId::from_index(0)?; regions.len()];
     for (row, &old) in order.iter().enumerate() {
         old_to_new[old] = RegionRowId::from_index(row)?;
     }
-    let operation_owners = remap_optional_owner_rows(operation_owners, &old_to_new);
-    let memory_owners = remap_optional_owner_rows(memory_owners, &old_to_new);
+    let operation_regions = remap_optional_region_rows(operation_regions, &old_to_new);
+    let memory_regions = remap_optional_region_rows(memory_regions, &old_to_new);
     let mut publication_bits = vec![Vec::new(); regions.len()];
     for flow in bit_flows {
         let producer = old_to_new[flow.source];
@@ -1484,7 +1394,7 @@ fn canonicalize(
             let id = RegionBoundaryPortId::from_index(ports.len())?;
             ports.push(RegionBoundaryPort {
                 id,
-                owner: source,
+                region: source,
                 peer: edge.sink,
                 direction: RegionPortDirection::Output,
                 value: edge.value,
@@ -1499,7 +1409,7 @@ fn canonicalize(
             let id = RegionBoundaryPortId::from_index(ports.len())?;
             ports.push(RegionBoundaryPort {
                 id,
-                owner: sink,
+                region: sink,
                 peer: edge.source,
                 direction: RegionPortDirection::Input,
                 value: edge.value,
@@ -1534,7 +1444,7 @@ fn canonicalize(
             empty_unsealed_region(SynthesisRegionKind::Combinational, Vec::new(), 0),
         );
         rows.push(SynthesisRegion {
-            graph_owner,
+            graph_generation,
             row,
             partition_anchor: region.anchor,
             id: region.id,
@@ -1555,7 +1465,7 @@ fn canonicalize(
         revision.update(&region.revision().bytes());
     }
     for port in &ports {
-        revision.update(&port.owner().raw().to_le_bytes());
+        revision.update(&port.region().raw().to_le_bytes());
         revision.update(&port.peer().map_or(u32::MAX, RegionRowId::raw).to_le_bytes());
         revision.update(&[port.direction() as u8]);
         revision.update(&port.semantic_key());
@@ -1576,14 +1486,14 @@ fn canonicalize(
         }
     }
     let graph = SynthesisRegionGraph {
-        owner: graph_owner,
+        generation: graph_generation,
         revision: SynthesisRegionRevision::from_bytes(*revision.finalize().as_bytes()),
         regions: rows.into_boxed_slice(),
         operations: packed_rows(operations, "region operation membership")?,
         operation_anchors: operation_anchors.into_boxed_slice(),
-        operation_owners,
+        operation_regions,
         memories: packed_rows(memories, "region memory membership")?,
-        memory_owners,
+        memory_regions,
         ports: ports.into_boxed_slice(),
         input_ports: packed_rows(input_ports, "region input ports")?,
         output_ports: packed_rows(output_ports, "region output ports")?,

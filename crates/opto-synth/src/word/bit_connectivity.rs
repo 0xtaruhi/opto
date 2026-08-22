@@ -133,6 +133,18 @@ impl<'a> BitConnectivity<'a> {
         Ok(source)
     }
 
+    /// Resolves the unique structural driver of one physical signal bit.
+    pub(crate) fn signal_source(
+        &self,
+        signal: word::SignalId,
+        bit: u32,
+    ) -> Result<Option<BitSource>, crate::SynthError> {
+        self.drivers
+            .resolve_bit(signal, bit)
+            .map(|(value, bit)| self.source(value, bit))
+            .transpose()
+    }
+
     pub(crate) fn exact_reference_driver(
         &self,
         reference: word::SignalRef,

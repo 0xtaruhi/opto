@@ -5,7 +5,7 @@ use super::{
     CellFunction, DriverIndex, OptimizationContext, cell_functions, closed_dying_cone,
     optimization_boundary_nets, optimization_candidate, resynthesis_cells, sorted_candidate_nets,
 };
-use crate::artifact::implementation::{InitialCellOwner, OriginSetId};
+use crate::artifact::implementation::{FragmentFootprint, OriginSetId};
 use hashbrown::{HashMap, HashSet};
 use opto_ir::mapped::{
     CellSpec, ConnectionRef, ConnectionSignal, MappedBuilder, NetId, PortDirection, RegionDelta,
@@ -213,10 +213,10 @@ fn nets_between_exact_implementation_owners_are_optimization_boundaries() {
         vec![0, 0],
         Vec::new(),
         vec![
-            Some(InitialCellOwner::Region(
+            Some(FragmentFootprint::Region(
                 crate::RegionAnchorId::from_bytes_for_test([1; 32]),
             )),
-            Some(InitialCellOwner::Region(
+            Some(FragmentFootprint::Region(
                 crate::RegionAnchorId::from_bytes_for_test([2; 32]),
             )),
         ],

@@ -1,56 +1,55 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Owner-confined structural preparation followed by one final region freeze.
+//! Canonical sealing before immutable work-graph construction.
 
 use opto_ir::word;
 
-pub(crate) fn optimize_structure(
+pub(crate) fn seal_work_design(
     module: &mut word::WordModule,
-    mapping: &crate::mapping::TargetMappingContext,
-    clock_gating: Option<crate::ClockGatingStyle>,
-    target_mapping: bool,
-    timing: &opto_timing::TimingContext,
-    port_bindings: &opto_timing::PortBindings,
-    runtime: &opto_runtime::ExecutionContext,
-) -> Result<crate::SynthesisRegionGraph, crate::SynthError> {
-    crate::planning::dataflow::coalesce_static_wire_drivers(module)?;
+) -> Result<(crate::SynthesisRegionGraph, crate::regional::WorkDesign), crate::SynthError> {
+    // Alias canonicalization runs ahead of structural rewriting so the sealed
+    // generation observes the final connect topology.
     crate::planning::dataflow::resolve_static_connect_aliases(module)?;
-    let provisional = crate::regional::region_graph::partition::build(
+    let coalescing = crate::planning::dataflow::static_wire_driver_fragments(module)?;
+    module.validate().map_err(crate::SynthError::Word)?;
+    let regions = crate::regional::region_graph::partition::build(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
     )?;
-    let mut ownership = crate::regional::StructuralOwnershipProvenance::new(module, &provisional)?;
+    let design = crate::regional::WorkDesign::seal(module, &regions)?;
+    if coalescing.is_empty() {
+        return Ok((regions, design));
+    }
 
-    crate::planning::fsm::optimize_derived_fsms_in_regions(
-        module,
-        &mut ownership,
-        timing,
-        port_bindings,
-        runtime,
-    )?;
-    let canonical_values =
-        crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
-    crate::planning::dataflow::share_equivalent_sequential_values_by(
-        module,
-        runtime,
-        ownership.owners(),
-        |value| {
-            canonical_values
-                .representatives()
-                .get(value.index())
-                .copied()
-                .unwrap_or(value)
-        },
-    )?;
-    mapping.publish_owned_preparation(module, clock_gating, target_mapping, &mut ownership)?;
-    crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
-
-    let final_partition = crate::regional::region_graph::partition::build_with_ownership(
+    // RFC 0013 Amendment 1 publication: deterministic slot assignment and
+    // fragment splice into the semantic Word module, followed by an
+    // incremental revision update through the changed cone only. The base
+    // partition is discarded; rebuilding it over the spliced module keeps one
+    // region graph that names every published entity (accepted cutover cost).
+    let (wave, signals) = coalescing.into_parts();
+    let published = module
+        .publish_fragments(wave)
+        .map_err(crate::SynthError::Word)?;
+    let regions = crate::regional::region_graph::partition::build(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
-        &ownership,
     )?;
-    ownership.verify_frozen(module, &final_partition)?;
-    Ok(final_partition)
+    let deltas = crate::regional::coalesce_revision_deltas(
+        module,
+        &regions,
+        design.design(),
+        &published,
+        &signals,
+    )?;
+    let committed = design
+        .design()
+        .commit(deltas, crate::regional::validate_coalesce_proof)
+        .map_err(|error| {
+            crate::SynthError::invariant(format!("static-wire revision commit failed: {error}"))
+        })?;
+    Ok((
+        regions,
+        crate::regional::WorkDesign::from_revision(committed),
+    ))
 }

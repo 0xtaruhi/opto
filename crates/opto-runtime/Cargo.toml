@@ -16,3 +16,4 @@ workspace = true
 opto-core.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
+serde.workspace = true

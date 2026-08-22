@@ -25,6 +25,11 @@ use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod fragment;
+pub use fragment::{
+    FragmentKey, PublicationWave, PublishedFragment, PublishedWave, WordFragment,
+    WordFragmentBuilder,
+};
 mod instance;
 mod rewrite;
 mod validation;

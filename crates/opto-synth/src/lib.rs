@@ -19,7 +19,7 @@
 //! sparse timing scenarios drive immutable boundary contracts, bounded closure
 //! epochs, and transactional max/min MMMC post-map repair.
 //! [`ImplementationDb`] records which source operators each mapped cell
-//! implements and which stable source synthesis regions own that cell, so
+//! implements and which immutable artifact fragment contains that cell, so
 //! incremental compilation, repair, and reports do not reconstruct provenance
 //! from names.
 
@@ -44,9 +44,11 @@ pub use api::{
     SynthesisReport, SynthesisResult, SynthesisTimingProgress, TimingSummary,
     check_definition_with_references, check_design_with_references,
 };
+// `SynthesisMetrics::execution` is a public field of this type, so the type
+// must be nameable by consumers that never depend on opto-runtime directly.
 pub use artifact::{
-    BoundaryEdgeId, ImplementationDb, ImplementationRegion, ImplementationRegionId,
-    MappedCellOwnership,
+    FragmentFootprint, ImplementationDb, ImplementationRegion, ImplementationRegionId,
+    MappedFragmentId,
 };
 pub use closure::{NoPowerEvaluation, SynthesisPowerEvaluator};
 #[cfg(test)]
@@ -66,6 +68,7 @@ use opto_library::{
     BooleanFunctionRef, TargetCellRef, TargetNextStateType, TargetPinDirection, TargetPinRef,
     TargetSequentialKind, TargetSequentialRef, TargetTimingArcRef,
 };
+pub use opto_runtime::ExecutionMetrics;
 pub use planning::{
     DurableOperatorArena, DynamicExtractShape, ImplementationCandidate, ImplementationCandidateId,
     OperatorId, OperatorKind, OperatorManifest, OperatorManifestInstance, OperatorOccurrenceId,

@@ -40,10 +40,16 @@ impl SequentialTimingProjection {
             let word::OpKind::Register(register) = &operation.kind else {
                 continue;
             };
+            if module
+                .value(operation.result)
+                .is_some_and(|value| value.ty.width() != 1)
+            {
+                continue;
+            }
             if !observability.observes_value(operation.result)? {
                 continue;
             }
-            let selected = sequential.select_register(module, register, combinational)?;
+            let selected = sequential.select_scalar_register(module, register, combinational)?;
             rows.push((operation.result, selected.timing()));
         }
         rows.sort_unstable_by_key(|&(value, _)| value);
@@ -246,18 +252,28 @@ impl SequentialCellCatalog {
         })
     }
 
-    pub(crate) fn select_register<'a>(
+    pub(crate) fn select_scalar_register<'a>(
         &'a self,
         module: &word::WordModule,
         register: &word::RegisterOp,
         combinational: &crate::mapping::library::CombinationalCellCatalog,
     ) -> Result<SelectedRegisterCell<'a>, crate::SynthError> {
         let resets = super::async_reset_requests(module, &register.resets)?;
+        self.select_register_for_resets(module, register, &resets, combinational)
+    }
+
+    pub(crate) fn select_register_for_resets<'a>(
+        &'a self,
+        module: &word::WordModule,
+        register: &word::RegisterOp,
+        resets: &[AsyncResetRequest],
+        combinational: &crate::mapping::library::CombinationalCellCatalog,
+    ) -> Result<SelectedRegisterCell<'a>, crate::SynthError> {
         if let Some(enable) = register.enable {
             return self
                 .best_enable(
                     register.edge,
-                    &resets,
+                    resets,
                     enable.active_high,
                     false,
                     super::enable_inverter_cost(module, enable.value, combinational),
@@ -267,7 +283,7 @@ impl SequentialCellCatalog {
                     crate::SynthError::mapping("target library has no compatible enabled DFF")
                 });
         }
-        self.best(register.edge, &resets, false, None)
+        self.best(register.edge, resets, false, None)
             .map(SelectedRegisterCell::Simple)
             .ok_or_else(|| crate::SynthError::mapping("target library has no compatible DFF"))
     }

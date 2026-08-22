@@ -5,13 +5,12 @@
 //!
 //! Mapping and post-map optimization may replace all cells that originally
 //! implemented an operator. [`ImplementationDb`] therefore stores both
-//! operator origins and explicit synthesis-region ownership for current mapped
-//! cells; post-map rewrites propagate both relations independently.
+//! operator origins and immutable fragment containment for current mapped
+//! cells; post-map rewrites publish both relations in one transaction.
 
-use crate::{ImplementationCandidateId, OperatorId, RegionAnchorId};
+use crate::{ImplementationCandidateId, OperationAnchorId, OperatorId, RegionAnchorId};
 use opto_core::resident;
 use opto_ir::mapped::{CellId, MappedGenerationId, MappedNetlist};
-use opto_ir::word;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
@@ -19,13 +18,13 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod edit;
-mod ownership;
+mod fragment;
 mod publication;
 
 pub(crate) use edit::ImplementationDelta;
-use ownership::{BoundaryEdge, MappedOwnerId, RegionOwnerId, seal_owners};
-pub use ownership::{BoundaryEdgeId, MappedCellOwnership};
-pub(crate) use ownership::{InitialCellOwner, MappedOwnerImpact};
+pub(crate) use fragment::FragmentImpact;
+use fragment::seal_fragments;
+pub use fragment::{FragmentFootprint, MappedFragmentId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
@@ -47,10 +46,8 @@ pub struct ImplementationRegion {
     operator: OperatorId,
     candidate: ImplementationCandidateId,
     synthesis_region: RegionAnchorId,
-    source_operations: Box<[word::OpId]>,
+    source_operations: Box<[OperationAnchorId]>,
     source_lines: Box<[Option<u32>]>,
-    source_inputs: Box<[word::ValueId]>,
-    source_results: Box<[word::ValueId]>,
     width: u32,
     recipe: Box<str>,
     implementation: Box<str>,
@@ -80,9 +77,7 @@ pub(crate) struct ImplementationRegionIdentity {
 }
 
 pub(crate) struct ImplementationRegionSource<'a> {
-    pub(crate) operations: &'a [word::OpId],
-    pub(crate) inputs: Vec<word::ValueId>,
-    pub(crate) results: Vec<word::ValueId>,
+    pub(crate) operations: &'a [OperationAnchorId],
     pub(crate) lines: Vec<Option<u32>>,
 }
 
@@ -101,8 +96,6 @@ impl ImplementationRegion {
             synthesis_region: identity.synthesis_region,
             source_operations: source.operations.into(),
             source_lines: source.lines.into_boxed_slice(),
-            source_inputs: source.inputs.into_boxed_slice(),
-            source_results: source.results.into_boxed_slice(),
             width: identity.width,
             recipe: metadata.recipe.into(),
             implementation: metadata.implementation.into(),
@@ -139,14 +132,14 @@ impl ImplementationRegion {
     }
 
     #[must_use]
-    /// Return the representative source operation for diagnostics.
-    pub fn source_operation(&self) -> word::OpId {
+    /// Return the representative stable source operation for diagnostics.
+    pub fn source_operation(&self) -> OperationAnchorId {
         self.source_operations[0]
     }
 
     /// Return all source operations absorbed by the implementation.
     #[must_use]
-    pub fn source_operations(&self) -> &[word::OpId] {
+    pub fn source_operations(&self) -> &[OperationAnchorId] {
         &self.source_operations
     }
 
@@ -154,18 +147,6 @@ impl ImplementationRegion {
     #[must_use]
     pub fn source_lines(&self) -> &[Option<u32>] {
         &self.source_lines
-    }
-
-    /// Return every source value entering the implementation region.
-    #[must_use]
-    pub fn source_inputs(&self) -> &[word::ValueId] {
-        &self.source_inputs
-    }
-
-    /// Return every source value produced by the implementation region.
-    #[must_use]
-    pub fn source_results(&self) -> &[word::ValueId] {
-        &self.source_results
     }
 
     /// Return mapped cells currently carrying this operator's provenance.
@@ -221,15 +202,9 @@ impl ImplementationRegion {
     }
 
     fn owned_memory_bytes(&self) -> usize {
-        resident::slice_bytes::<word::OpId>(self.source_operations.len())
+        resident::slice_bytes::<OperationAnchorId>(self.source_operations.len())
             .saturating_add(resident::slice_bytes::<Option<u32>>(
                 self.source_lines.len(),
-            ))
-            .saturating_add(resident::slice_bytes::<word::ValueId>(
-                self.source_inputs.len(),
-            ))
-            .saturating_add(resident::slice_bytes::<word::ValueId>(
-                self.source_results.len(),
             ))
             .saturating_add(resident::allocation_bytes(self.recipe.len()))
             .saturating_add(resident::allocation_bytes(self.implementation.len()))
@@ -258,8 +233,8 @@ type OriginHashIndex = BTreeMap<u64, SmallVec<[OriginSetId; 1]>>;
 /// Bidirectional provenance index for a mapped synthesis artifact.
 ///
 /// Origin sets are interned so cells produced by the same rewrite share one
-/// compact operator list. Region and boundary owners use separate interned
-/// arenas, so ownership stays explicit without semantic operator provenance.
+/// compact operator list. Fragment footprints are interned independently from
+/// semantic operator provenance.
 /// Cell identifiers are interpreted in the mapped netlist stored beside this
 /// database in [`crate::SynthesisResult`].
 pub struct ImplementationDb {
@@ -272,14 +247,12 @@ pub struct ImplementationDb {
     origin_offsets: Vec<u32>,
     origin_operators: Vec<OperatorId>,
     origin_ids: OriginHashIndex,
-    cell_owners: Vec<Option<MappedOwnerId>>,
-    region_owners: Vec<RegionAnchorId>,
-    region_owner_ids: BTreeMap<RegionAnchorId, RegionOwnerId>,
-    boundary_edges: Vec<BoundaryEdge>,
-    boundary_edge_cells: Vec<Vec<CellId>>,
-    boundary_edge_ids: BTreeMap<BoundaryEdge, BoundaryEdgeId>,
+    cell_fragments: Vec<Option<MappedFragmentId>>,
+    fragments: Vec<FragmentFootprint>,
+    fragment_ids: BTreeMap<FragmentFootprint, MappedFragmentId>,
+    fragment_cells: Vec<Vec<CellId>>,
     #[serde(skip)]
-    committed_owner_impact: MappedOwnerImpact,
+    committed_fragment_impact: FragmentImpact,
 }
 
 impl ImplementationDb {
@@ -290,9 +263,9 @@ impl ImplementationDb {
             vec![OriginSetId::EMPTY; cell_slots],
             vec![0, 0],
             Vec::new(),
-            std::iter::repeat_n(Some(InitialCellOwner::Global), cell_slots).collect(),
+            std::iter::repeat_n(Some(FragmentFootprint::Global), cell_slots).collect(),
         )
-        .expect("empty implementation ownership is valid")
+        .expect("empty implementation containment is valid")
     }
 
     pub(crate) fn new(
@@ -301,14 +274,14 @@ impl ImplementationDb {
         cell_origins: Vec<OriginSetId>,
         origin_offsets: Vec<u32>,
         origin_operators: Vec<OperatorId>,
-        cell_owners: Vec<Option<InitialCellOwner>>,
+        cell_fragments: Vec<Option<FragmentFootprint>>,
     ) -> Result<Self, crate::SynthError> {
         let database = Self::new_unbound(
             regions,
             cell_origins,
             origin_offsets,
             origin_operators,
-            cell_owners,
+            cell_fragments,
         )?;
         database
             .mapped_generation
@@ -321,19 +294,13 @@ impl ImplementationDb {
         cell_origins: Vec<OriginSetId>,
         origin_offsets: Vec<u32>,
         origin_operators: Vec<OperatorId>,
-        cell_owners: Vec<Option<InitialCellOwner>>,
+        cell_fragments: Vec<Option<FragmentFootprint>>,
     ) -> Result<Self, crate::SynthError> {
         // Rebuild the operator reverse map from its serialized CSR form. Cell
-        // ownership is sealed independently; a missing owner is a removed slot.
+        // Containment is sealed independently; a missing row is a removed slot.
         let origin_ids = build_origin_index(&origin_offsets, &origin_operators)?;
-        let (
-            cell_owners,
-            region_owners,
-            region_owner_ids,
-            boundary_edges,
-            boundary_edge_cells,
-            boundary_edge_ids,
-        ) = seal_owners(cell_owners)?;
+        let (cell_fragments, fragments, fragment_ids, fragment_cells) =
+            seal_fragments(cell_fragments)?;
         Ok(Self {
             mapped_generation: AtomicU64::new(0),
             regions,
@@ -341,13 +308,11 @@ impl ImplementationDb {
             origin_offsets,
             origin_operators,
             origin_ids,
-            cell_owners,
-            region_owners,
-            region_owner_ids,
-            boundary_edges,
-            boundary_edge_cells,
-            boundary_edge_ids,
-            committed_owner_impact: MappedOwnerImpact::default(),
+            cell_fragments,
+            fragments,
+            fragment_ids,
+            fragment_cells,
+            committed_fragment_impact: FragmentImpact::default(),
         })
     }
 
@@ -408,72 +373,35 @@ impl ImplementationDb {
     /// Returns `None` when `cell` is outside the mapped netlist's slot domain or
     /// names a removed stable slot. A live global cell returns an empty slice.
     pub fn operators_for_cell(&self, cell: CellId) -> Option<&[OperatorId]> {
-        self.cell_owners.get(cell.index())?.as_ref()?;
+        self.cell_fragments.get(cell.index())?.as_ref()?;
         let origin = *self.cell_origins.get(cell.index())?;
         self.operators_for_origin(origin)
     }
 
-    /// Return the explicit source-region ownership of a mapped cell slot.
-    ///
-    /// Region ownership is independent of semantic-operator provenance: a pure
-    /// Boolean regional cell is still regional, while a static live cell is
-    /// [`MappedCellOwnership::Global`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an invariant error if a live regional owner ID has no matching
-    /// finalized implementation region.
-    pub fn cell_ownership(&self, cell: CellId) -> Result<MappedCellOwnership, crate::SynthError> {
-        let Some(owner) = self.cell_owners.get(cell.index()) else {
-            return Ok(MappedCellOwnership::Unknown);
-        };
-        let Some(owner) = owner else {
-            return Ok(MappedCellOwnership::Removed);
-        };
-        if let Some(region_owner) = owner.region_id() {
-            return if region_owner == RegionOwnerId::GLOBAL {
-                Ok(MappedCellOwnership::Global)
-            } else {
-                self.region_for_owner(region_owner)
-                    .map(MappedCellOwnership::Region)
-                    .ok_or_else(|| {
-                        crate::SynthError::invariant(
-                            "mapped cell references an unknown synthesis-region owner",
-                        )
-                    })
-            };
-        }
-        let edge = owner
-            .boundary_id()
-            .and_then(|id| {
-                self.boundary_edges
-                    .get(id.0 as usize)
-                    .copied()
-                    .map(|edge| (id, edge))
-            })
-            .ok_or_else(|| {
-                crate::SynthError::invariant("mapped cell references an unknown boundary edge")
-            })?;
-        Ok(MappedCellOwnership::Boundary {
-            edge: edge.0,
-            driver: edge.1.driver,
-            sink: edge.1.sink,
-        })
+    /// Returns the immutable fragment containing a live mapped cell.
+    #[must_use]
+    pub fn cell_fragment(&self, cell: CellId) -> Option<(MappedFragmentId, FragmentFootprint)> {
+        let id = self.cell_fragments.get(cell.index()).copied().flatten()?;
+        self.fragments
+            .get(id.raw() as usize)
+            .copied()
+            .map(|fragment| (id, fragment))
     }
 
-    /// Return the stable mapped footprint currently owned by a boundary edge.
-    pub fn boundary_edge_cells(&self, id: BoundaryEdgeId) -> Option<&[CellId]> {
-        self.boundary_edge_cells
-            .get(id.0 as usize)
+    /// Returns the live mapped cells contained by one fragment.
+    #[must_use]
+    pub fn fragment_cells(&self, id: MappedFragmentId) -> Option<&[CellId]> {
+        self.fragment_cells
+            .get(id.raw() as usize)
             .map(Vec::as_slice)
     }
 
-    /// Drains source-region ownership touched by committed mapped edits.
-    pub(crate) fn take_committed_owner_impact(&mut self) -> MappedOwnerImpact {
-        std::mem::take(&mut self.committed_owner_impact)
+    /// Drains fragment containment touched by committed mapped edits.
+    pub(crate) fn take_committed_fragment_impact(&mut self) -> FragmentImpact {
+        std::mem::take(&mut self.committed_fragment_impact)
     }
 
-    /// Releases spare capacity without changing any stable owner or origin ID.
+    /// Releases spare capacity without changing any fragment or origin ID.
     pub(crate) fn compact(&mut self) {
         for region in &mut self.regions {
             region.compact();
@@ -484,13 +412,12 @@ impl ImplementationDb {
         for origins in self.origin_ids.values_mut() {
             origins.shrink_to_fit();
         }
-        self.cell_owners.shrink_to_fit();
-        self.region_owners.shrink_to_fit();
-        self.boundary_edges.shrink_to_fit();
-        for cells in &mut self.boundary_edge_cells {
+        self.cell_fragments.shrink_to_fit();
+        self.fragments.shrink_to_fit();
+        for cells in &mut self.fragment_cells {
             cells.shrink_to_fit();
         }
-        self.boundary_edge_cells.shrink_to_fit();
+        self.fragment_cells.shrink_to_fit();
     }
 
     pub(crate) fn owned_memory_bytes(&self) -> usize {
@@ -512,18 +439,12 @@ impl ImplementationDb {
                     0
                 })
         });
-        let owner_index = self
-            .region_owner_ids
+        let fragment_index = self
+            .fragment_ids
             .len()
             .saturating_mul(resident::allocation_bytes(
-                size_of::<(RegionAnchorId, RegionOwnerId)>() + size_of::<usize>() * 4,
+                size_of::<(FragmentFootprint, MappedFragmentId)>() + size_of::<usize>() * 4,
             ));
-        let boundary_index =
-            self.boundary_edge_ids
-                .len()
-                .saturating_mul(resident::allocation_bytes(
-                    size_of::<(BoundaryEdge, BoundaryEdgeId)>() + size_of::<usize>() * 4,
-                ));
         regions
             .saturating_add(resident::slice_bytes::<OriginSetId>(
                 self.cell_origins.len(),
@@ -533,58 +454,58 @@ impl ImplementationDb {
                 self.origin_operators.len(),
             ))
             .saturating_add(origin_index)
-            .saturating_add(resident::slice_bytes::<Option<MappedOwnerId>>(
-                self.cell_owners.len(),
+            .saturating_add(resident::slice_bytes::<Option<MappedFragmentId>>(
+                self.cell_fragments.len(),
             ))
-            .saturating_add(resident::slice_bytes::<RegionAnchorId>(
-                self.region_owners.len(),
+            .saturating_add(resident::slice_bytes::<FragmentFootprint>(
+                self.fragments.len(),
             ))
-            .saturating_add(owner_index)
-            .saturating_add(resident::slice_bytes::<BoundaryEdge>(
-                self.boundary_edges.len(),
-            ))
-            .saturating_add(boundary_index)
+            .saturating_add(fragment_index)
             .saturating_add(resident::slice_bytes::<Vec<CellId>>(
-                self.boundary_edge_cells.len(),
+                self.fragment_cells.len(),
             ))
             .saturating_add(
-                self.boundary_edge_cells
+                self.fragment_cells
                     .iter()
                     .map(|cells| resident::slice_bytes::<CellId>(cells.len()))
                     .fold(0usize, usize::saturating_add),
             )
     }
 
-    /// Validates the complete implementation owner before persistence.
+    /// Validates complete provenance and fragment containment before persistence.
     ///
     /// Checkpoints may not retain unconsumed edit impact, generation-mismatched
-    /// cell rows, non-canonical origin sets, or reverse boundary footprints that
-    /// disagree with the primary ownership column.
+    /// cell rows, non-canonical origin sets, or reverse fragment footprints that
+    /// disagree with the primary containment column.
     pub(crate) fn validate_checkpoint(
         &self,
         mapped: &MappedNetlist,
     ) -> Result<(), crate::SynthError> {
         self.bind_or_validate_generation(mapped.generation_id())?;
-        if !self.committed_owner_impact.is_empty() {
+        if !self.committed_fragment_impact.is_empty() {
             return Err(crate::SynthError::invariant(
-                "checkpoint retains unconsumed mapped owner changes",
+                "checkpoint retains unconsumed mapped fragment changes",
             ));
         }
         if self.cell_origins.len() != mapped.cell_slot_count()
-            || self.cell_owners.len() != mapped.cell_slot_count()
+            || self.cell_fragments.len() != mapped.cell_slot_count()
         {
             return Err(crate::SynthError::invariant(
                 "checkpoint implementation indexes do not match mapped cell slots",
             ));
         }
-        for (index, (&origin, owner)) in self.cell_origins.iter().zip(&self.cell_owners).enumerate()
+        for (index, (&origin, fragment)) in self
+            .cell_origins
+            .iter()
+            .zip(&self.cell_fragments)
+            .enumerate()
         {
             let cell = CellId::from_index(index).map_err(crate::SynthError::Mapped)?;
-            if mapped.is_live_cell(cell) != owner.is_some()
-                || owner.is_none() && origin != OriginSetId::EMPTY
+            if mapped.is_live_cell(cell) != fragment.is_some()
+                || fragment.is_none() && origin != OriginSetId::EMPTY
             {
                 return Err(crate::SynthError::invariant(
-                    "checkpoint mapped cell liveness and ownership disagree",
+                    "checkpoint mapped cell liveness and fragment containment disagree",
                 ));
             }
         }
@@ -615,16 +536,14 @@ impl ImplementationDb {
                 "checkpoint mapped cell references an unknown implementation origin",
             ));
         }
-        if self.cell_owners.iter().flatten().any(|owner| {
-            owner
-                .region_id()
-                .is_some_and(|owner| owner.0 as usize > self.region_owners.len())
-                || owner
-                    .boundary_id()
-                    .is_some_and(|edge| edge.0 as usize >= self.boundary_edges.len())
-        }) {
+        if self
+            .cell_fragments
+            .iter()
+            .flatten()
+            .any(|fragment| fragment.raw() as usize >= self.fragments.len())
+        {
             return Err(crate::SynthError::invariant(
-                "checkpoint mapped cell references an unknown owner atom",
+                "checkpoint mapped cell references an unknown fragment",
             ));
         }
         for (index, region) in self.regions.iter().enumerate() {
@@ -632,7 +551,6 @@ impl ImplementationDb {
                 || region.operator.raw() as usize != index
                 || region.source_operations.is_empty()
                 || region.source_operations.len() != region.source_lines.len()
-                || region.source_results.is_empty()
                 || region
                     .mapped_cells
                     .windows(2)
@@ -699,7 +617,7 @@ impl ImplementationDb {
             for &cell in &region.mapped_cells {
                 let operators = self.operators_for_cell(cell).ok_or_else(|| {
                     crate::SynthError::invariant(
-                        "checkpoint implementation region references an unowned mapped cell",
+                        "checkpoint implementation region references an uncontained mapped cell",
                     )
                 })?;
                 if operators.binary_search(&region.operator).is_err() {
@@ -710,8 +628,8 @@ impl ImplementationDb {
             }
         }
         let mut origin_operator_cell_incidence = 0_u128;
-        for (&origin, owner) in self.cell_origins.iter().zip(&self.cell_owners) {
-            if owner.is_none() {
+        for (&origin, fragment) in self.cell_origins.iter().zip(&self.cell_fragments) {
+            if fragment.is_none() {
                 continue;
             }
             let operators = self.operators_for_origin(origin).ok_or_else(|| {
@@ -726,64 +644,42 @@ impl ImplementationDb {
                 "checkpoint operator origin omits its mapped cell reverse index",
             ));
         }
-        if self.region_owner_ids.len() != self.region_owners.len()
+        if self.fragment_ids.len() != self.fragments.len()
+            || self.fragment_cells.len() != self.fragments.len()
             || self
-                .region_owner_ids
+                .fragments
                 .iter()
-                .any(|(region, owner)| self.region_for_owner(*owner) != Some(*region))
+                .any(|fragment| matches!(fragment, FragmentFootprint::Boundary { driver, sink } if driver == sink))
+            || self
+                .fragment_ids
+                .iter()
+                .any(|(fragment, id)| self.fragments.get(id.raw() as usize) != Some(fragment))
+            || !self.fragment_ids.contains_key(&FragmentFootprint::Global)
         {
             return Err(crate::SynthError::invariant(
-                "checkpoint mapped region-owner index is inconsistent",
+                "checkpoint mapped fragment arena is inconsistent",
             ));
         }
-        if self.boundary_edge_ids.len() != self.boundary_edges.len()
-            || self.boundary_edge_cells.len() != self.boundary_edges.len()
-            || self
-                .boundary_edges
-                .iter()
-                .any(|edge| edge.driver == edge.sink)
-            || self
-                .boundary_edge_ids
-                .iter()
-                .any(|(edge, id)| self.boundary_edges.get(id.0 as usize) != Some(edge))
-        {
-            return Err(crate::SynthError::invariant(
-                "checkpoint mapped boundary-edge arena is inconsistent",
-            ));
-        }
-        // A strictly ordered footprint is a set. Owner equality below proves
-        // every indexed cell belongs to the corresponding edge; matching the
-        // total number of boundary-owned cells then proves the reverse relation.
-        let mut indexed_boundary_cell_incidence = 0_u128;
-        for (index, cells) in self.boundary_edge_cells.iter().enumerate() {
-            let id = BoundaryEdgeId(
-                u32::try_from(index)
-                    .map_err(|_| crate::SynthError::capacity("mapped boundary-edge count"))?,
-            );
-            indexed_boundary_cell_incidence += cells.len() as u128;
+        let mut indexed_fragment_cell_incidence = 0_usize;
+        for (index, cells) in self.fragment_cells.iter().enumerate() {
+            let id = MappedFragmentId::from_index(index)?;
+            indexed_fragment_cell_incidence = indexed_fragment_cell_incidence
+                .checked_add(cells.len())
+                .ok_or_else(|| crate::SynthError::capacity("mapped fragment incidence"))?;
             if cells.windows(2).any(|pair| pair[0] >= pair[1])
                 || cells.iter().any(|&cell| {
                     !mapped.is_live_cell(cell)
-                        || self
-                            .owner_for_cell(cell)
-                            .and_then(MappedOwnerId::boundary_id)
-                            != Some(id)
+                        || self.cell_fragments.get(cell.index()).copied().flatten() != Some(id)
                 })
             {
                 return Err(crate::SynthError::invariant(
-                    "checkpoint mapped boundary-edge footprint is inconsistent",
+                    "checkpoint mapped fragment footprint is inconsistent",
                 ));
             }
         }
-        let boundary_owned_cells = self
-            .cell_owners
-            .iter()
-            .flatten()
-            .filter(|owner| owner.boundary_id().is_some())
-            .count() as u128;
-        if indexed_boundary_cell_incidence != boundary_owned_cells {
+        if indexed_fragment_cell_incidence != self.cell_fragments.iter().flatten().count() {
             return Err(crate::SynthError::invariant(
-                "checkpoint boundary-owned cell is absent from its edge footprint",
+                "checkpoint contained cell is absent from its fragment footprint",
             ));
         }
         Ok(())
@@ -830,50 +726,80 @@ impl ImplementationDb {
             .insert(position, origin);
     }
 
-    fn region_for_owner(&self, owner: RegionOwnerId) -> Option<RegionAnchorId> {
-        owner
-            .0
-            .checked_sub(1)
-            .and_then(|index| self.region_owners.get(index as usize))
-            .copied()
-    }
-
-    fn owner_for_cell(&self, cell: CellId) -> Option<MappedOwnerId> {
-        self.cell_owners.get(cell.index()).copied().flatten()
-    }
-
-    pub(crate) fn ownership_endpoint(
+    pub(crate) fn fragment_endpoint(
         &self,
         cell: CellId,
     ) -> Result<Option<RegionAnchorId>, crate::SynthError> {
-        match self.cell_ownership(cell)? {
-            MappedCellOwnership::Region(region) => Ok(Some(region)),
-            MappedCellOwnership::Boundary { sink, .. } => Ok(Some(sink)),
-            MappedCellOwnership::Global => Ok(None),
-            MappedCellOwnership::Removed | MappedCellOwnership::Unknown => {
-                Err(crate::SynthError::invariant(format!(
-                    "mapped cell {cell:?} has no live ownership endpoint"
-                )))
-            }
-        }
+        self.cell_fragment(cell)
+            .map(|(_, fragment)| fragment.endpoint())
+            .ok_or_else(|| {
+                crate::SynthError::invariant(format!(
+                    "mapped cell {cell:?} has no live fragment endpoint"
+                ))
+            })
     }
 
-    pub(crate) fn cells_share_owner(
+    pub(crate) fn common_fragment(
+        &self,
+        cells: &[CellId],
+    ) -> Result<FragmentFootprint, crate::SynthError> {
+        let (&first, rest) = cells.split_first().ok_or_else(|| {
+            crate::SynthError::invariant("mapped fragment requires at least one source cell")
+        })?;
+        let (_, fragment) = self.cell_fragment(first).ok_or_else(|| {
+            crate::SynthError::invariant(format!(
+                "mapped source cell {first:?} has no live fragment"
+            ))
+        })?;
+        for &cell in rest {
+            if self.cell_fragment(cell).map(|row| row.1) != Some(fragment) {
+                return Err(crate::SynthError::invariant(
+                    "one mapped artifact cannot span multiple fragments",
+                ));
+            }
+        }
+        Ok(fragment)
+    }
+
+    pub(crate) fn repair_fragment(
+        &self,
+        drivers: &[CellId],
+        sink: CellId,
+    ) -> Result<FragmentFootprint, crate::SynthError> {
+        let driver_fragment = (!drivers.is_empty())
+            .then(|| self.common_fragment(drivers))
+            .transpose()?;
+        let sink_fragment = self.cell_fragment(sink).map(|row| row.1).ok_or_else(|| {
+            crate::SynthError::invariant(format!("mapped sink cell {sink:?} has no live fragment"))
+        })?;
+        let driver_endpoint = driver_fragment.and_then(FragmentFootprint::endpoint);
+        let sink_endpoint = sink_fragment.endpoint();
+        if let (Some(driver), Some(sink)) = (driver_endpoint, sink_endpoint)
+            && driver != sink
+        {
+            return Ok(FragmentFootprint::Boundary { driver, sink });
+        }
+        Ok(driver_fragment
+            .filter(|fragment| fragment.endpoint().is_some())
+            .unwrap_or(sink_fragment))
+    }
+
+    pub(crate) fn cells_share_fragment(
         &self,
         left: CellId,
         right: CellId,
     ) -> Result<bool, crate::SynthError> {
-        let left = self.owner_for_cell(left).ok_or_else(|| {
+        let left = self.cell_fragment(left).ok_or_else(|| {
             crate::SynthError::invariant(format!(
-                "mapped cell {left:?} has no live implementation owner"
+                "mapped cell {left:?} has no live implementation fragment"
             ))
         })?;
-        let right = self.owner_for_cell(right).ok_or_else(|| {
+        let right = self.cell_fragment(right).ok_or_else(|| {
             crate::SynthError::invariant(format!(
-                "mapped cell {right:?} has no live implementation owner"
+                "mapped cell {right:?} has no live implementation fragment"
             ))
         })?;
-        Ok(left == right)
+        Ok(left.0 == right.0)
     }
 }
 

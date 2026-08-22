@@ -8,10 +8,10 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ValueSlice {
-    value: word::ValueId,
-    lsb: u32,
-    width: u32,
+pub(crate) struct ValueSlice {
+    pub(crate) value: word::ValueId,
+    pub(crate) lsb: u32,
+    pub(crate) width: u32,
 }
 
 impl ValueSlice {
@@ -236,7 +236,7 @@ fn signal_dependencies(
     Ok(dependencies)
 }
 
-fn operation_dependencies(
+pub(crate) fn operation_dependencies(
     module: &word::WordModule,
     known_bits: &mut word::KnownBitsAnalysis,
     unsigned_values: &mut word::UnsignedValueAnalysis,

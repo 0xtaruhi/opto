@@ -16,6 +16,16 @@ pub enum RuntimeError {
     /// Two ordered tasks use the same deterministic key.
     #[error("duplicate execution task key {0}")]
     DuplicateTaskKey(TaskKey),
+    /// One task cannot fit the configured private-memory admission limit.
+    #[error("execution task {task} estimates {estimated} memory units, above the limit {limit}")]
+    TaskMemoryExceedsLimit {
+        /// Rejected stable task key.
+        task: TaskKey,
+        /// Declared peak private-memory units.
+        estimated: u64,
+        /// Configured in-flight limit in the same units.
+        limit: u64,
+    },
     /// A dense dependency plan violates a structural invariant.
     #[error("invalid execution dependency plan: {detail}")]
     InvalidDependencyPlan {

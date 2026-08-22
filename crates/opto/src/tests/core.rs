@@ -93,13 +93,32 @@ fn synthesize_events_render_structured_progress() {
                 synthesis_regions: 3,
                 regional_cover_plans: 3,
                 regional_epochs: 4,
+                normalized_operations: 11,
+                normalized_values: 12,
+                lowered_operations: 13,
+                execution: opto_session::ExecutionMetrics {
+                    composite_batches: 5,
+                    composite_active_nanoseconds: 600,
+                    composite_wall_nanoseconds: 200,
+                    composite_worker_capacity_nanoseconds: 800,
+                    composite_longest_task_nanoseconds: 90,
+                    composite_estimated_work: 70,
+                    composite_peak_ready_tasks: 8,
+                    composite_peak_admitted_memory: 4096,
+                    ..opto_session::ExecutionMetrics::default()
+                },
                 ..opto_session::SynthesisMetrics::default()
             }),
         }),
         concat!(
             "Synthesis artifact for 'top' is complete; preparing the mapped object ",
             "index.\n",
-            "Regional synthesis: regions=3 rebuilt=2 reused=1 plans=3 epochs=4.\n"
+            "Regional synthesis: regions=3 rebuilt=2 reused=1 plans=3 epochs=4.\n",
+            "Sealed design: normalized_operations=11 normalized_values=12 ",
+            "lowered_operations=13 mapped_cells=2.\n",
+            "Scheduler execution: batches=5 active_ns=600 wall_ns=200 ",
+            "worker_capacity_ns=800 longest_task_ns=90 estimated_work=70 ",
+            "peak_ready_tasks=8 peak_admitted_memory=4096.\n"
         )
     );
     assert_eq!(

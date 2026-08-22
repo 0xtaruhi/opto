@@ -29,6 +29,7 @@ smallvec.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 opto-formats.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "synthesis"

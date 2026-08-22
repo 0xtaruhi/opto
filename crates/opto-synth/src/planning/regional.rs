@@ -5,7 +5,7 @@
 
 mod envelope;
 mod lowering;
-mod operation_provenance;
+mod operation_semantics;
 mod private;
 mod search;
 
@@ -14,9 +14,9 @@ pub(crate) use lowering::{
     RegionalMemoryLogicBinding, RegionalMemoryStateBinding, RegionalWordCone,
     RegionalWordConeRequest,
 };
-pub(crate) use operation_provenance::LocalOperationProvenance;
-pub(crate) use private::optimize_structure as optimize_private_structure;
-pub(crate) use search::{RegionalSearchRequest, select_architectures};
+pub(crate) use operation_semantics::{LocalOperationSemantics, LocalStateSource};
+pub(crate) use private::seal_work_design;
+pub(crate) use search::{RegionalSearchRequest, context_keys, select_architectures};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryImplementationCandidate {

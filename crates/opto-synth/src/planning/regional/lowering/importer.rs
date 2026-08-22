@@ -197,7 +197,7 @@ impl RegionalWordImporter<'_> {
                     == Some(self.region) =>
             {
                 if self.operation_is_state(operation) {
-                    self.import_boundary(source, value.ty, &value.source)?
+                    self.import_state_feedback(source, value.ty, &value.source)?
                 } else {
                     self.import_operation(operation)?
                 }
@@ -807,7 +807,7 @@ impl RegionalWordImporter<'_> {
             }
         };
         let sources = self.current_operation_sources();
-        self.operation_sources.set(operation, sources)
+        self.operation_sources.record_generated(operation, sources)
     }
 
     fn current_operation_sources(&self) -> Vec<word::OpId> {
@@ -845,7 +845,8 @@ impl RegionalWordImporter<'_> {
             return Ok(());
         };
         let additional = self.current_operation_sources();
-        self.operation_sources.merge(operation, additional)
+        self.operation_sources
+            .extend_generated(operation, additional)
     }
 
     fn operation_is_state(&self, operation: word::OpId) -> bool {
@@ -961,6 +962,24 @@ impl RegionalWordImporter<'_> {
         Ok(local)
     }
 
+    fn import_state_feedback(
+        &mut self,
+        source: word::ValueId,
+        ty: word::WordType,
+        span: &word::SourceSpan,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let signal = self
+            .module
+            .add_generated_wire(ty, span.clone())
+            .map_err(crate::SynthError::from)?;
+        let local = self
+            .module
+            .read_signal(signal, span.clone())
+            .map_err(crate::SynthError::from)?;
+        self.state_feedback_signals.insert(source, signal);
+        Ok(local)
+    }
+
     fn import_recursive_boundary(
         &mut self,
         source: word::ValueId,
@@ -975,7 +994,10 @@ impl RegionalWordImporter<'_> {
         Ok(local)
     }
 
-    fn import_operation(&mut self, source: word::OpId) -> Result<word::ValueId, crate::SynthError> {
+    pub(super) fn import_operation(
+        &mut self,
+        source: word::OpId,
+    ) -> Result<word::ValueId, crate::SynthError> {
         let operation = self.source.operation(source).cloned().ok_or_else(|| {
             crate::SynthError::invariant("region-local Word import reached an unknown operation")
         })?;
@@ -995,7 +1017,11 @@ impl RegionalWordImporter<'_> {
                 "region-local operation builder returned a non-operation value",
             ));
         };
-        self.operation_sources.set(local_operation, [source])?;
+        self.operation_sources.record_source(
+            local_operation,
+            source,
+            self.operation_is_state(source),
+        )?;
         Ok(local)
     }
 

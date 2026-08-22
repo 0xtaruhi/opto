@@ -530,7 +530,7 @@ fn boundary_clock_contexts(
     scenario: &Scenario,
     timing_port: Option<opto_timing::PortId>,
 ) -> Vec<TagClockContext> {
-    let owner = &domains[port.owner().index()];
+    let owner = &domains[port.region().index()];
     let peer = port.peer().map(|peer| &domains[peer.index()]);
     let io = timing_port.map_or(&[] as &[_], |timing_port| match port.direction() {
         crate::RegionPortDirection::Input => scenario.constraints().input_delays(timing_port),

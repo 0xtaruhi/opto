@@ -36,27 +36,14 @@ impl PostmapCandidate {
         mut self,
         added: TempCellId,
         semantic_sources: impl IntoIterator<Item = CellId>,
-        ownership_sources: impl IntoIterator<Item = CellId>,
+        fragment: crate::FragmentFootprint,
     ) -> Result<Self, crate::SynthError> {
         self.implementation
-            .record_added_cell(added, semantic_sources, ownership_sources)?;
+            .record_added_cell(added, semantic_sources, fragment)?;
         Ok(self)
     }
 
-    pub(super) fn record_boundary_cell(
-        mut self,
-        added: TempCellId,
-        semantic_sources: impl IntoIterator<Item = CellId>,
-        driver_sources: impl IntoIterator<Item = CellId>,
-        sink: CellId,
-    ) -> Result<Self, crate::SynthError> {
-        self.implementation
-            .record_boundary_cell(added, semantic_sources, driver_sources, sink)?;
-        Ok(self)
-    }
-
-    /// Records one fanout/cloning segment without allowing the boundary path
-    /// to degrade into an implicit global or multi-owner bucket.
+    /// Records one fanout/cloning segment in its exact immutable fragment.
     pub(super) fn record_repair_segment(
         self,
         implementations: &crate::ImplementationDb,
@@ -64,35 +51,7 @@ impl PostmapCandidate {
         drivers: &[CellId],
         sink: CellId,
     ) -> Result<Self, crate::SynthError> {
-        let mut driver_endpoint = None;
-        for &driver in drivers {
-            let endpoint = implementations.ownership_endpoint(driver)?;
-            if driver_endpoint
-                .replace(endpoint)
-                .is_some_and(|previous| previous != endpoint)
-            {
-                return Err(crate::SynthError::invariant(
-                    "repair segment has multiple driver ownership endpoints",
-                ));
-            }
-        }
-        let driver_endpoint = driver_endpoint.flatten();
-        let sink_endpoint = implementations.ownership_endpoint(sink)?;
-        if let (Some(driver), Some(sink_endpoint)) = (driver_endpoint, sink_endpoint)
-            && driver != sink_endpoint
-        {
-            return self.record_boundary_cell(
-                added,
-                drivers.iter().copied(),
-                drivers.iter().copied(),
-                sink,
-            );
-        }
-        let ownership = if driver_endpoint.is_some() && !drivers.is_empty() {
-            drivers.to_vec()
-        } else {
-            vec![sink]
-        };
-        self.record_added_cell(added, drivers.iter().copied(), ownership)
+        let fragment = implementations.repair_fragment(drivers, sink)?;
+        self.record_added_cell(added, drivers.iter().copied(), fragment)
     }
 }

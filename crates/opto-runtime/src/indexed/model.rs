@@ -60,6 +60,7 @@ pub struct Task<T> {
     pub(crate) key: TaskKey,
     pub(crate) input: T,
     pub(crate) estimated_work: u64,
+    pub(crate) estimated_memory: u64,
 }
 
 impl<T> Task<T> {
@@ -70,6 +71,7 @@ impl<T> Task<T> {
             key,
             input,
             estimated_work: 1,
+            estimated_memory: 1,
         }
     }
 
@@ -77,6 +79,13 @@ impl<T> Task<T> {
     /// Attaches a relative work estimate for hierarchical scheduling.
     pub const fn with_estimated_work(mut self, estimated_work: u64) -> Self {
         self.estimated_work = estimated_work;
+        self
+    }
+
+    #[must_use]
+    /// Attaches the peak private-memory estimate used for task admission.
+    pub const fn with_estimated_memory(mut self, estimated_memory: u64) -> Self {
+        self.estimated_memory = estimated_memory;
         self
     }
 }

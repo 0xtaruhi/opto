@@ -387,6 +387,90 @@ pub fn prove_value_equivalence_under_assumptions(
     }))
 }
 
+/// Proves equality of two private Word fragments at an explicit shared cut.
+///
+/// Every pair in `shared_inputs` is bound to the same fresh SAT bits in both
+/// modules. The output vectors are then flattened in order and compared in one
+/// miter. Dense value IDs remain local to their module and are never treated as
+/// cross-module identity.
+///
+/// # Errors
+///
+/// Returns an error for a cut or output width mismatch, malformed or
+/// unsupported Word IR, representation overflow, or SAT solver failure.
+pub fn prove_module_values_equivalent_at_cut(
+    reference: &word::WordModule,
+    reference_outputs: &[word::ValueId],
+    implementation: &word::WordModule,
+    implementation_outputs: &[word::ValueId],
+    shared_inputs: &[(word::ValueId, word::ValueId)],
+) -> Result<ProofOutcome, FormalError> {
+    let mut reference_encoder = CnfEncoder::new(reference);
+    let mut implementation_cuts = Vec::with_capacity(shared_inputs.len());
+    for &(reference_input, implementation_input) in shared_inputs {
+        let reference_width = reference_encoder.value_width(reference_input)?;
+        let implementation_width = implementation
+            .value(implementation_input)
+            .ok_or_else(|| {
+                FormalError::invalid(format!(
+                    "module equivalence references unknown implementation value {implementation_input:?}"
+                ))
+            })?
+            .ty
+            .width() as usize;
+        if reference_width != implementation_width {
+            return Err(FormalError::invalid(format!(
+                "module equivalence cut width mismatch: reference={reference_width}, implementation={implementation_width}"
+            )));
+        }
+        let literals = (0..reference_width)
+            .map(|_| reference_encoder.solver.new_lit())
+            .collect::<Vec<_>>();
+        reference_encoder.bind_value(reference_input, &literals)?;
+        implementation_cuts.push((implementation_input, literals));
+    }
+    let reference_bits = reference_outputs
+        .iter()
+        .map(|&value| reference_encoder.value(value))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let (solver, reference_values, clauses) = reference_encoder.into_solver();
+    let mut implementation_encoder = CnfEncoder::with_solver(implementation, solver, clauses);
+    for (value, literals) in implementation_cuts {
+        implementation_encoder.bind_value(value, &literals)?;
+    }
+    let implementation_bits = implementation_outputs
+        .iter()
+        .map(|&value| implementation_encoder.value(value))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if reference_bits.len() != implementation_bits.len() {
+        return Err(FormalError::invalid(format!(
+            "module equivalence output width mismatch: reference={}, implementation={}",
+            reference_bits.len(),
+            implementation_bits.len()
+        )));
+    }
+    let differences = reference_bits
+        .into_iter()
+        .zip(implementation_bits)
+        .map(|(reference, implementation)| implementation_encoder.xor(reference, implementation))
+        .collect::<Vec<_>>();
+    implementation_encoder.clause(&differences);
+    let outcome = finish_proof(implementation_encoder, "module boundary equivalence")?;
+    Ok(match outcome {
+        ProofOutcome::Proved(report) => ProofOutcome::Proved(ProofReport {
+            encoded_values: report.encoded_values + reference_values,
+            clauses: report.clauses,
+        }),
+        ProofOutcome::Disproved(counterexample) => ProofOutcome::Disproved(counterexample),
+    })
+}
+
 /// Proves relational equality of two complete register updates.
 ///
 /// Unassigned signals are shared between the two evaluations.
@@ -710,6 +794,62 @@ impl<'model> CnfEncoder<'model> {
             signals: BTreeMap::new(),
             encoded_values: 0,
             clauses: 0,
+        }
+    }
+
+    fn with_solver(
+        module: &'model word::WordModule,
+        solver: Solver<'static>,
+        clauses: usize,
+    ) -> Self {
+        Self {
+            module,
+            solver,
+            values: vec![None; module.values().len()],
+            signals: BTreeMap::new(),
+            encoded_values: 0,
+            clauses,
+        }
+    }
+
+    fn into_solver(self) -> (Solver<'static>, usize, usize) {
+        (self.solver, self.encoded_values, self.clauses)
+    }
+
+    fn value_width(&self, value: word::ValueId) -> Result<usize, FormalError> {
+        self.module
+            .value(value)
+            .map(|value| value.ty.width() as usize)
+            .ok_or_else(|| {
+                FormalError::invalid(format!(
+                    "module equivalence references unknown reference value {value:?}"
+                ))
+            })
+    }
+
+    fn bind_value(&mut self, value: word::ValueId, literals: &[Lit]) -> Result<(), FormalError> {
+        let width = self.value_width(value)?;
+        if width != literals.len() {
+            return Err(FormalError::invalid(format!(
+                "module equivalence binding width mismatch: value={width}, binding={}",
+                literals.len()
+            )));
+        }
+        let slot = self.values.get_mut(value.index()).ok_or_else(|| {
+            FormalError::invalid(format!(
+                "module equivalence has no cache slot for value {value:?}"
+            ))
+        })?;
+        match slot {
+            Some(existing) if existing == literals => Ok(()),
+            Some(_) => Err(FormalError::invalid(format!(
+                "module equivalence value {value:?} was bound more than once"
+            ))),
+            None => {
+                *slot = Some(literals.to_vec());
+                self.encoded_values += 1;
+                Ok(())
+            }
         }
     }
 

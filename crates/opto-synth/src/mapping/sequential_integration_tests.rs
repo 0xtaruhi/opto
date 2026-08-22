@@ -18,6 +18,103 @@ fn mux_target_cell(area: f64) -> TargetCell {
     )
 }
 
+fn sparse_encoded_fsm() -> WordModule {
+    let mut module = WordModule::new("encoded_fsm");
+    let state_type = WordType::bits(8).unwrap();
+    let [clock, reset, select] = ["clock", "reset", "select"].map(|name| {
+        module
+            .add_port(name, PortDirection::Input, bit(), test_span())
+            .unwrap()
+    });
+    let active = module
+        .add_port("active", PortDirection::Output, bit(), test_span())
+        .unwrap();
+    let state = module.add_wire("state", state_type, test_span()).unwrap();
+    let [clock, reset, select] = [clock, reset, select].map(|port| read_port(&mut module, port));
+    let state_read = module.read_signal(state, test_span()).unwrap();
+    let mut constant = |text: &str| {
+        module
+            .constant(
+                ConstBits::from_bin_str(text).unwrap(),
+                state_type,
+                test_span(),
+            )
+            .unwrap()
+    };
+    let idle = constant("00000000");
+    let first = constant("00010000");
+    let second = constant("00100000");
+    let is_active = module
+        .binary(BinaryOp::Eq, state_read, second, test_span())
+        .unwrap();
+    connect_port(&mut module, active, is_active);
+    let first_or_hold = module.mux(select, first, state_read, test_span()).unwrap();
+    let next = module
+        .mux(select, second, first_or_hold, test_span())
+        .unwrap();
+    let state_value = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: next,
+                clock,
+                edge: Edge::Pos,
+                enable: None,
+                resets: vec![word::Reset {
+                    kind: word::ResetKind::Sync,
+                    value: reset,
+                    active_high: true,
+                    reset_value: idle,
+                }],
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(LValue::signal(state), state_value, test_span())
+        .unwrap();
+    module
+}
+
+#[test]
+fn synthesize_publishes_encoded_fsm_state_through_its_proved_relation() {
+    let mut module = sparse_encoded_fsm();
+    let cells = vec![
+        simple_dff_target_cell(),
+        mux_target_cell(1.0),
+        target_cell(
+            "AND2",
+            1.0,
+            &[
+                ("A", TargetPinDirection::Input, None),
+                ("B", TargetPinDirection::Input, None),
+                ("Z", TargetPinDirection::Output, Some("A*B")),
+            ],
+        ),
+        target_cell(
+            "INV",
+            1.0,
+            &[
+                ("A", TargetPinDirection::Input, None),
+                ("Z", TargetPinDirection::Output, Some("!A")),
+            ],
+        ),
+    ];
+
+    let synthesized = synthesize_test_module(
+        &mut module,
+        SynthesisOptions {
+            target_cells: cells.into(),
+        },
+    )
+    .unwrap();
+    let text = synthesized.mapped_verilog();
+
+    assert_eq!(text.matches("DFD1 ").count(), 1, "{text}");
+    assert!(!text.contains(".Q(\\state["), "{text}");
+    assert!(text.contains("active"), "{text}");
+}
+
 #[test]
 fn regional_target_mapping_is_deterministic_across_worker_counts() {
     fn synthesize_with_threads(max_threads: usize) -> String {
@@ -236,20 +333,151 @@ fn synthesize_maps_semantic_clock_enable_to_an_enable_dff_pin() {
 }
 
 #[test]
-fn synthesize_recovers_a_lowered_feedback_mux_without_general_feedback_search() {
-    let mut module = module_with_lowered_feedback_mux_flop();
+fn synthesize_selects_enabled_dffs_for_uniform_vector_resets() {
+    let mut module = WordModule::new("top");
+    let vector = WordType::bits(4).unwrap();
+    let clock = module
+        .add_port("clk", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let reset = module
+        .add_port("reset", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let enable = module
+        .add_port("enable", PortDirection::Input, bit(), test_span())
+        .unwrap();
+    let data = module
+        .add_port("d", PortDirection::Input, vector, test_span())
+        .unwrap();
+    let output = module
+        .add_port("q", PortDirection::Output, vector, test_span())
+        .unwrap();
+    let [clock, reset, enable, data] =
+        [clock, reset, enable, data].map(|port| read_port(&mut module, port));
+    let zero = module
+        .constant(
+            ConstBits::from_bits(vec![opto_ir::BitVal::Zero; 4]).unwrap(),
+            vector,
+            test_span(),
+        )
+        .unwrap();
+    let result = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: data,
+                clock,
+                edge: Edge::Pos,
+                enable: Some(word::Enable {
+                    value: enable,
+                    active_high: true,
+                }),
+                resets: vec![word::Reset {
+                    kind: word::ResetKind::Async,
+                    value: reset,
+                    active_high: true,
+                    reset_value: zero,
+                }],
+            },
+            test_span(),
+        )
+        .unwrap();
+    connect_port(&mut module, output, result);
+
+    let mut enabled = enable_dff_target_cell();
+    enabled.name = "EDFD1R".to_string();
+    enabled.pins.push(TargetPin {
+        name: "R".to_string(),
+        direction: TargetPinDirection::Input,
+        function: None,
+        three_state: None,
+        capacitance: None,
+        rise_capacitance: None,
+        fall_capacitance: None,
+        receiver_capacitance: None,
+        fanout_load: None,
+        next_state_type: Some(TargetNextStateType::Clear),
+        timing_arcs: Vec::new(),
+        clock_gate_role: None,
+    });
+    enabled.sequential[0].clear = Some(BooleanFunction::parse("R").unwrap());
     let options = SynthesisOptions {
-        target_cells: vec![simple_dff_target_cell(), enable_dff_target_cell()].into(),
+        target_cells: vec![enabled].into(),
+    };
+    crate::mapping::TargetMappingContext::new(&options, crate::SynthesisConfig::default())
+        .prepare_private_structure(
+            &mut module,
+            &std::collections::BTreeMap::default(),
+            None,
+            true,
+        )
+        .unwrap();
+
+    let word::ValueKind::Operation(operation) = module.value(result).unwrap().kind else {
+        panic!("vector register result lost its operation");
+    };
+    let word::OpKind::Register(register) = &module.operation(operation).unwrap().kind else {
+        panic!("vector register changed operation kind");
+    };
+    assert!(register.enable.is_some());
+    assert_eq!(module.value(register.d).unwrap().ty.width(), 4);
+}
+
+#[test]
+fn synthesize_covers_enable_polarity_in_the_boolean_network() {
+    let mut module = module_with_enable_flop_process();
+    let mut enabled = enable_dff_target_cell();
+    enabled.name = "EDFND1".to_string();
+    enabled.sequential[0].next_state = Some(BooleanFunction::parse("(D*!DE)+(IQ*DE)").unwrap());
+    let options = SynthesisOptions {
+        target_cells: vec![
+            simple_dff_target_cell(),
+            enabled,
+            target_cell(
+                "INV",
+                0.1,
+                &[
+                    ("A", TargetPinDirection::Input, None),
+                    ("Z", TargetPinDirection::Output, Some("!A")),
+                ],
+            ),
+        ]
+        .into(),
     };
 
     let report = synthesize_test_module(&mut module, options).unwrap();
     let text = report.mapped_verilog();
 
-    assert_eq!(report.report.cells, 1, "{text}");
+    assert_eq!(report.report.cells, 2, "{text}");
+    assert!(text.contains("INV"), "{text}");
+    assert!(text.contains("EDFND1"), "{text}");
+    assert!(text.contains(".DE(n1)"), "{text}");
+}
+
+#[test]
+fn synthesize_keeps_a_lowered_feedback_mux_as_ordinary_logic() {
+    let mut module = module_with_lowered_feedback_mux_flop();
+    let options = SynthesisOptions {
+        target_cells: vec![
+            simple_dff_target_cell(),
+            enable_dff_target_cell(),
+            mux_target_cell(1.0),
+        ]
+        .into(),
+    };
+
+    let report = synthesize_test_module(&mut module, options).unwrap();
+    let text = report.mapped_verilog();
+
+    assert_eq!(report.report.cells, 2, "{text}");
     assert!(
-        text.contains("EDFD1 q_reg(.D(d), .DE(en), .CP(clk), .Q(q));"),
+        text.contains("MUX2 U1(.I0(q), .I1(d), .S(en), .Z(n1));"),
         "{text}"
     );
+    assert!(
+        text.contains("DFD1 q_reg(.D(n1), .CP(clk), .Q(q));"),
+        "{text}"
+    );
+    assert!(!text.contains("EDFD1"), "{text}");
 }
 
 #[test]
