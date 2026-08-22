@@ -114,7 +114,10 @@ mod known_bits;
 pub use known_bits::{KnownBit, KnownBits128, KnownBitsAnalysis};
 
 mod module;
-pub use module::{SpeculationCheckpoint, WordModule};
+pub use module::{
+    FragmentKey, PublicationWave, PublishedFragment, PublishedWave, SpeculationCheckpoint,
+    WordFragment, WordFragmentBuilder, WordModule,
+};
 
 #[cfg(test)]
 mod tests;
