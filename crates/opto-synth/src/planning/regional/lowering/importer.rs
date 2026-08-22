@@ -196,7 +196,16 @@ impl RegionalWordImporter<'_> {
                     .flatten()
                     == Some(self.region) =>
             {
-                if self.operation_is_state(operation) {
+                // A fully proven constant carries no real dependency edges.
+                // Importing its operands would resurrect edges the fact engine
+                // already prunes, and dead parameter logic (an enable term
+                // folded to zero at elaboration, for example) then shows up as
+                // a false feedback cycle in the region-local graph.
+                if let Some(bits) = self.known_bits.constant(self.source, source) {
+                    self.module
+                        .constant(bits, value.ty, value.source.clone())
+                        .map_err(crate::SynthError::from)?
+                } else if self.operation_is_state(operation) {
                     self.import_state_feedback(source, value.ty, &value.source)?
                 } else {
                     self.import_operation(operation)?
