@@ -10,11 +10,96 @@ use opto_ir::design::{
 use opto_ir::word;
 use opto_runtime::{Task, TaskKey};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 const WORK_TASK_DOMAIN: u32 = 0x574f_524b;
 const COARSE_GROUP_SHARDS: usize = 16;
+
+#[derive(Default)]
+struct NetTable {
+    nets: Vec<NetBit>,
+    rows: HashMap<NetBitId, usize>,
+}
+
+impl NetTable {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            nets: Vec::with_capacity(capacity),
+            rows: HashMap::with_capacity(capacity),
+        }
+    }
+
+    fn into_nets(self) -> Vec<NetBit> {
+        self.nets
+    }
+}
+
+struct LogicalAnchors {
+    operations: Box<[CellId]>,
+    signals: Box<[[u8; 32]]>,
+}
+
+impl LogicalAnchors {
+    fn new(
+        module: &word::WordModule,
+        regions: &crate::SynthesisRegionGraph,
+    ) -> Result<Self, crate::SynthError> {
+        let operations = (0..module.operations().len())
+            .map(|index| {
+                let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+                operation_cell_id(regions, operation)
+            })
+            .collect::<Result<_, _>>()?;
+        let signals = (0..module.signals().len())
+            .map(|index| {
+                let signal = word::SignalId::from_index(index).map_err(crate::SynthError::from)?;
+                signal_anchor(module, signal)
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            operations,
+            signals,
+        })
+    }
+
+    fn operation(&self, operation: word::OpId) -> Result<CellId, crate::SynthError> {
+        self.operations
+            .get(operation.index())
+            .copied()
+            .ok_or_else(|| crate::SynthError::invariant("logical operation anchor is out of range"))
+    }
+
+    fn signal(&self, signal: word::SignalId) -> Result<[u8; 32], crate::SynthError> {
+        self.signals
+            .get(signal.index())
+            .copied()
+            .ok_or_else(|| crate::SynthError::invariant("logical signal anchor is out of range"))
+    }
+}
+
+struct MemoryPortIndex {
+    reads: Vec<Vec<usize>>,
+    writes: Vec<Vec<usize>>,
+}
+
+impl MemoryPortIndex {
+    fn new(module: &word::WordModule) -> Self {
+        let mut index = Self {
+            reads: vec![Vec::new(); module.memories().len()],
+            writes: vec![Vec::new(); module.memories().len()],
+        };
+        for (row, port) in module.memory_read_ports().iter().enumerate() {
+            index.reads[port.memory.index()].push(row);
+        }
+        for (row, port) in module.memory_write_ports().iter().enumerate() {
+            index.writes[port.memory.index()].push(row);
+        }
+        index
+    }
+}
 
 macro_rules! digest_id {
     ($name:ident, $doc:literal) => {
@@ -62,6 +147,26 @@ pub(crate) struct LogicalOperation {
     kind: LogicalOperationKind,
     operands: Box<[word::WordType]>,
     result: word::WordType,
+    dependencies: Option<Box<LogicalDependencyRefinement>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LogicalDependencyRefinement {
+    known_outputs: Box<[u64]>,
+    mux_branch: Option<bool>,
+    exact: Option<LogicalDependencyRows>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LogicalDependencyRows {
+    offsets: Box<[u32]>,
+    ranges: Box<[LogicalDependencyRange]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct LogicalDependencyRange {
+    start: u32,
+    width: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +222,133 @@ impl opto_ir::design::DesignPayload for LogicalCell {
         hash_logical_cell(&mut digest, self);
         *digest.finalize().as_bytes()
     }
+
+    fn visit_comb_dependencies(
+        &self,
+        output: usize,
+        input_count: usize,
+        visit: &mut dyn FnMut(usize),
+    ) {
+        match self {
+            Self::Operation(operation) => operation.visit_dependencies(output, visit),
+            Self::Connection => visit(0),
+            Self::Memory { .. } => {
+                let _ = (output, input_count, visit);
+            }
+        }
+    }
+}
+
+impl LogicalOperation {
+    fn visit_dependencies(&self, output: usize, visit: &mut dyn FnMut(usize)) {
+        let refinement = self.dependencies.as_deref();
+        if refinement
+            .and_then(|dependencies| dependencies.known_outputs.get(output / u64::BITS as usize))
+            .is_some_and(|word| word & (1 << (output % u64::BITS as usize)) != 0)
+        {
+            return;
+        }
+        if let Some(rows) = refinement.and_then(|dependencies| dependencies.exact.as_ref()) {
+            let start = rows.offsets[output] as usize;
+            let end = rows.offsets[output + 1] as usize;
+            for range in &rows.ranges[start..end] {
+                for input in range.start..range.start + range.width {
+                    visit(input as usize);
+                }
+            }
+            return;
+        }
+        let all = |visit: &mut dyn FnMut(usize)| {
+            for input in 0..self.operands.iter().map(|ty| ty.width() as usize).sum() {
+                visit(input);
+            }
+        };
+        match self.kind {
+            LogicalOperationKind::Unary(word::UnaryOp::BitNot) => {
+                self.visit_operand_bit(0, output, false, visit);
+            }
+            LogicalOperationKind::Binary(
+                word::BinaryOp::BitAnd | word::BinaryOp::BitOr | word::BinaryOp::BitXor,
+            ) => {
+                self.visit_operand_bit(0, output, true, visit);
+                self.visit_operand_bit(1, output, true, visit);
+            }
+            LogicalOperationKind::Mux => {
+                if let Some(branch) = refinement.and_then(|dependencies| dependencies.mux_branch) {
+                    self.visit_operand_bit(if branch { 1 } else { 2 }, output, false, visit);
+                } else {
+                    self.visit_operand(0, visit);
+                    self.visit_operand_bit(1, output, false, visit);
+                    self.visit_operand_bit(2, output, false, visit);
+                }
+            }
+            LogicalOperationKind::TriState { .. } => {
+                self.visit_operand_bit(0, output, false, visit);
+                self.visit_operand(1, visit);
+            }
+            LogicalOperationKind::Concat => {
+                let mut result_lsb = 0usize;
+                for operand in (0..self.operands.len()).rev() {
+                    let width = self.operands[operand].width() as usize;
+                    if (result_lsb..result_lsb + width).contains(&output) {
+                        self.visit_operand_bit(operand, output - result_lsb, false, visit);
+                        break;
+                    }
+                    result_lsb += width;
+                }
+            }
+            LogicalOperationKind::Extract { lsb, .. } => {
+                self.visit_operand_bit(0, lsb as usize + output, false, visit);
+            }
+            LogicalOperationKind::Cast(kind) => {
+                let width = self.operands[0].width() as usize;
+                if output < width {
+                    self.visit_operand_bit(0, output, false, visit);
+                } else if kind == word::CastKind::SignExtend {
+                    self.visit_operand_bit(0, width - 1, false, visit);
+                }
+            }
+            LogicalOperationKind::Register { .. } | LogicalOperationKind::Latch { .. } => {}
+            LogicalOperationKind::Unary(_)
+            | LogicalOperationKind::Binary(_)
+            | LogicalOperationKind::DynamicExtract { .. }
+            | LogicalOperationKind::DynamicInsert => all(visit),
+        }
+    }
+
+    fn visit_operand(&self, operand: usize, visit: &mut dyn FnMut(usize)) {
+        let start = self.operands[..operand]
+            .iter()
+            .map(|ty| ty.width() as usize)
+            .sum::<usize>();
+        for input in start..start + self.operands[operand].width() as usize {
+            visit(input);
+        }
+    }
+
+    fn visit_operand_bit(
+        &self,
+        operand: usize,
+        bit: usize,
+        extend: bool,
+        visit: &mut dyn FnMut(usize),
+    ) {
+        let width = self.operands[operand].width() as usize;
+        let bit = if bit < width {
+            Some(bit)
+        } else if extend && self.operands[operand].is_signed() {
+            Some(width - 1)
+        } else {
+            None
+        };
+        if let Some(bit) = bit {
+            let start = self.operands[..operand]
+                .iter()
+                .map(|ty| ty.width() as usize)
+                .sum::<usize>();
+            visit(start + bit);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +389,7 @@ struct WorkBoundaryContext {
     rows: Box<[crate::BoundaryContractRow]>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkPacketItem {
     id: WorkItemId,
@@ -166,6 +399,7 @@ pub(crate) struct WorkPacketItem {
     context: WorkContext,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkPacketDesign {
     revision: DesignRevisionId,
@@ -173,6 +407,7 @@ pub(crate) struct WorkPacketDesign {
     nets: Box<[NetBit]>,
 }
 
+#[cfg(test)]
 impl WorkPacketDesign {
     fn validate(&self, items: &[WorkPacketItem]) -> Result<(), crate::SynthError> {
         if self.cells.windows(2).any(|pair| pair[0].id >= pair[1].id)
@@ -252,6 +487,7 @@ impl WorkPacketDesign {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkPacket {
     schema: u32,
@@ -295,14 +531,13 @@ pub(crate) struct WorkResult<T> {
 pub(crate) trait SynthesisExecutor {
     fn execute<T, F>(
         &self,
-        packets: Vec<Task<WorkPacket>>,
+        work: &WorkGraph,
         operation: F,
     ) -> Result<Vec<WorkResult<T>>, crate::SynthError>
     where
         T: Send,
         F: Fn(
-                &WorkPacketItem,
-                &WorkPacketDesign,
+                &WorkItem,
                 &opto_runtime::ExecutionContext,
             ) -> Result<WorkProduct<T>, crate::SynthError>
             + Send
@@ -336,7 +571,7 @@ impl WorkContext {
     }
 }
 
-impl WorkPacketItem {
+impl WorkItem {
     pub(crate) const fn fixed_logic(&self) -> crate::RegionAnchorId {
         match self.kind {
             WorkItemKind::FixedLogic(region) => region,
@@ -379,12 +614,14 @@ impl WorkGraph {
             ));
         }
         let revision = &design.0;
+        let anchors = LogicalAnchors::new(module, regions.as_ref())?;
         let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
         let rows = runtime.analyze_indexed(regions.regions().len(), |index| {
             let region = regions.regions()[index];
-            let cells = region_cells(module, regions.as_ref(), region)?;
+            let cells = region_cells(module, regions.as_ref(), &anchors, region)?;
             let mut core = region_value_entities(
                 module,
+                &anchors,
                 regions.as_ref(),
                 &connectivity,
                 region,
@@ -393,6 +630,7 @@ impl WorkGraph {
             )?;
             let mut halo = region_value_entities(
                 module,
+                &anchors,
                 regions.as_ref(),
                 &connectivity,
                 region,
@@ -514,11 +752,23 @@ impl WorkGraph {
         self.rebatch(self.items.len().div_ceil(target_shards).max(1))
     }
 
-    pub(crate) fn packet_tasks(&self) -> Vec<Task<WorkPacket>> {
+    fn local_tasks(&self) -> Vec<Task<usize>> {
         self.shards
             .iter()
             .enumerate()
             .map(|(ordinal, shard)| {
+                Task::new(TaskKey::new(WORK_TASK_DOMAIN, ordinal as u64), ordinal)
+                    .with_estimated_work(shard.estimated_work)
+                    .with_estimated_memory(shard.estimated_memory)
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn portable_packets(&self) -> Vec<WorkPacket> {
+        self.shards
+            .iter()
+            .map(|shard| {
                 let items: Box<[WorkPacketItem]> = shard
                     .items
                     .iter()
@@ -533,24 +783,20 @@ impl WorkGraph {
                 let fragment = self
                     .packet_design(shard, &items)
                     .expect("validated work shard resolves its exact design fragment");
-                Task::new(
-                    TaskKey::new(WORK_TASK_DOMAIN, ordinal as u64),
-                    WorkPacket {
-                        schema: 1,
-                        design: self.design.0.revision(),
-                        shard: shard.id,
-                        fragment,
-                        items,
-                        estimated_work: shard.estimated_work,
-                        estimated_memory: shard.estimated_memory,
-                    },
-                )
-                .with_estimated_work(shard.estimated_work)
-                .with_estimated_memory(shard.estimated_memory)
+                WorkPacket {
+                    schema: 1,
+                    design: self.design.0.revision(),
+                    shard: shard.id,
+                    fragment,
+                    items,
+                    estimated_work: shard.estimated_work,
+                    estimated_memory: shard.estimated_memory,
+                }
             })
             .collect()
     }
 
+    #[cfg(test)]
     fn packet_design(
         &self,
         shard: &CompilationShard,
@@ -779,44 +1025,29 @@ impl WorkGraph {
 impl SynthesisExecutor for opto_runtime::ExecutionContext {
     fn execute<T, F>(
         &self,
-        packets: Vec<Task<WorkPacket>>,
+        work: &WorkGraph,
         operation: F,
     ) -> Result<Vec<WorkResult<T>>, crate::SynthError>
     where
         T: Send,
         F: Fn(
-                &WorkPacketItem,
-                &WorkPacketDesign,
+                &WorkItem,
                 &opto_runtime::ExecutionContext,
             ) -> Result<WorkProduct<T>, crate::SynthError>
             + Send
             + Sync,
     {
-        self.map_ordered_composite(packets, |packet, runtime| {
-            if packet.schema != 1 {
-                return Err(crate::SynthError::invariant(
-                    "work packet has an unsupported schema",
-                ));
-            }
-            if packet.design != packet.fragment.revision {
-                return Err(crate::SynthError::invariant(
-                    "work packet fragment belongs to another design revision",
-                ));
-            }
-            packet.fragment.validate(&packet.items)?;
-            if packet.estimated_work == 0 || packet.estimated_memory == 0 {
-                return Err(crate::SynthError::invariant(
-                    "work packet has an invalid work or memory estimate",
-                ));
-            }
-            packet
+        self.map_ordered_composite(work.local_tasks(), |shard, runtime| {
+            let shard = &work.shards[shard];
+            shard
                 .items
                 .iter()
-                .map(|item| {
-                    let product = operation(item, &packet.fragment, runtime)?;
+                .map(|&row| {
+                    let item = &work.items[row];
+                    let product = operation(item, runtime)?;
                     let artifact = CompiledWorkArtifact {
                         footprint: RevisionFootprint {
-                            base: packet.design,
+                            base: work.design.0.revision(),
                             reads: entity_union(&item.core, &item.halo)?,
                             replaces: item.core.clone(),
                         },
@@ -825,8 +1056,8 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                     };
                     Ok(WorkResult {
                         item: item.id,
-                        shard: packet.shard,
-                        context: item.context.key,
+                        shard: shard.id,
+                        context: item.context,
                         artifact,
                     })
                 })
@@ -868,12 +1099,32 @@ fn seal_logical_design(
     module: &word::WordModule,
     regions: &crate::SynthesisRegionGraph,
 ) -> Result<DesignRevision<LogicalCell>, crate::SynthError> {
-    let mut nets = BTreeMap::<NetBitId, NetBit>::new();
-    let mut cells = Vec::new();
+    let signal_bits = module.signals().iter().fold(0usize, |total, signal| {
+        total.saturating_add(signal.ty.width() as usize)
+    });
+    let operation_bits = module.operations().iter().fold(0usize, |total, operation| {
+        total.saturating_add(
+            module
+                .value(operation.result)
+                .map_or(0, |value| value.ty.width() as usize),
+        )
+    });
+    let mut nets = NetTable::with_capacity(signal_bits.saturating_add(operation_bits));
+    let mut cells = Vec::with_capacity(
+        module
+            .operations()
+            .len()
+            .saturating_add(module.memories().len())
+            .saturating_add(signal_bits),
+    );
+    let anchors = LogicalAnchors::new(module, regions)?;
+    let memory_ports = MemoryPortIndex::new(module);
     let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
+    let mut known_bits = word::KnownBitsAnalysis::new(module);
+    let mut unsigned_values = word::UnsignedValueAnalysis::new(module);
     for (index, signal) in module.signals().iter().enumerate() {
         let signal_id = word::SignalId::from_index(index).map_err(crate::SynthError::from)?;
-        let anchor = signal_anchor(module, signal_id)?;
+        let anchor = anchors.signal(signal_id)?;
         for bit in 0..signal.ty.width() {
             install_net(
                 &mut nets,
@@ -885,19 +1136,19 @@ fn seal_logical_design(
     }
     for &region in regions.regions() {
         for &operation in regions.operations(region) {
-            let kind = logical_operation(module, operation)?;
+            let kind = logical_operation(module, operation, &mut known_bits, &mut unsigned_values)?;
             let stored = module.operation(operation).ok_or_else(|| {
                 crate::SynthError::invariant("logical revision references an unknown operation")
             })?;
-            let cell = operation_cell_id(regions, operation)?;
+            let cell = anchors.operation(operation)?;
             let inputs = crate::word::operation_inputs(&stored.kind)
                 .into_iter()
-                .map(|value| value_nets(module, regions, &connectivity, value, &mut nets))
+                .map(|value| value_nets(module, &anchors, &connectivity, value, &mut nets))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .flatten()
                 .collect::<Box<[_]>>();
-            let outputs = operation_outputs(module, regions, operation, &mut nets)?;
+            let outputs = operation_outputs(module, &anchors, operation, &mut nets)?;
             for (output, &net) in outputs.iter().enumerate() {
                 let output = u32::try_from(output)
                     .map_err(|_| crate::SynthError::capacity("logical output bit ordinal"))?;
@@ -923,8 +1174,15 @@ fn seal_logical_design(
             let stored = module.memory(memory).ok_or_else(|| {
                 crate::SynthError::invariant("logical revision references an unknown memory")
             })?;
-            let cell = memory_cell_id(module, memory)?;
-            let (inputs, outputs) = memory_nets(module, regions, &connectivity, memory, &mut nets)?;
+            let cell = logical_memory_cell_id(module, memory)?;
+            let (inputs, outputs) = memory_nets(
+                module,
+                &anchors,
+                &connectivity,
+                &memory_ports,
+                memory,
+                &mut nets,
+            )?;
             for (output, &net) in outputs.iter().enumerate() {
                 install_driver(
                     &mut nets,
@@ -959,20 +1217,20 @@ fn seal_logical_design(
                 .port(port)
                 .ok_or_else(|| crate::SynthError::invariant("logical boundary port is unknown"))?
                 .value();
-            value_nets(module, regions, &connectivity, value, &mut nets)?;
+            value_nets(module, &anchors, &connectivity, value, &mut nets)?;
         }
         for flow in regions.bit_flows(region) {
-            value_nets(module, regions, &connectivity, flow.value(), &mut nets)?;
+            value_nets(module, &anchors, &connectivity, flow.value(), &mut nets)?;
         }
     }
     for (index, signal) in module.signals().iter().enumerate() {
         let signal_id = word::SignalId::from_index(index).map_err(crate::SynthError::from)?;
-        let anchor = signal_anchor(module, signal_id)?;
+        let anchor = anchors.signal(signal_id)?;
         for bit in 0..signal.ty.width() {
             let Some(source) = connectivity.signal_source(signal_id, bit)? else {
                 continue;
             };
-            let input = source_net(module, regions, source, signal.ty.state(), &mut nets)?;
+            let input = source_net(module, &anchors, source, signal.ty.state(), &mut nets)?;
             let output = signal_net_id(anchor, bit);
             if input == output {
                 continue;
@@ -989,9 +1247,11 @@ fn seal_logical_design(
             });
         }
     }
+    let mut nets = nets.into_nets();
+    nets.sort_unstable_by_key(|net| net.id);
     let revision = logical_revision_id(&cells, &nets);
     let mut builder = DesignBuilder::new(revision);
-    for net in nets.into_values() {
+    for net in nets {
         builder.add_net(net);
     }
     for cell in cells {
@@ -1002,9 +1262,9 @@ fn seal_logical_design(
 
 fn operation_outputs(
     module: &word::WordModule,
-    regions: &crate::SynthesisRegionGraph,
+    anchors: &LogicalAnchors,
     operation: word::OpId,
-    nets: &mut BTreeMap<NetBitId, NetBit>,
+    nets: &mut NetTable,
 ) -> Result<Box<[NetBitId]>, crate::SynthError> {
     let operation = module
         .operation(operation)
@@ -1022,7 +1282,7 @@ fn operation_outputs(
     };
     (0..result.ty.width())
         .map(|bit| {
-            let id = operation_net_id(regions, cell, bit)?;
+            let id = operation_net_id(anchors.operation(cell)?, bit);
             install_net(nets, id, result.ty.state(), None)?;
             Ok(id)
         })
@@ -1031,6 +1291,7 @@ fn operation_outputs(
 
 fn region_value_entities(
     module: &word::WordModule,
+    anchors: &LogicalAnchors,
     regions: &crate::SynthesisRegionGraph,
     connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
     region: crate::SynthesisRegion,
@@ -1041,14 +1302,14 @@ fn region_value_entities(
         crate::RegionPortDirection::Input => regions.input_ports(region),
         crate::RegionPortDirection::Output => regions.output_ports(region),
     };
-    let mut scratch = BTreeMap::new();
+    let mut scratch = NetTable::default();
     let mut entities = std::collections::BTreeSet::new();
     for &port in ports {
         let value = regions
             .port(port)
             .ok_or_else(|| crate::SynthError::invariant("work item boundary port is unknown"))?
             .value();
-        for net in value_nets(module, regions, connectivity, value, &mut scratch)? {
+        for net in value_nets(module, anchors, connectivity, value, &mut scratch)? {
             if design.net(net).is_none() {
                 return Err(crate::SynthError::invariant(
                     "work item boundary net is absent from the logical revision",
@@ -1059,7 +1320,7 @@ fn region_value_entities(
     }
     if direction == crate::RegionPortDirection::Output {
         for flow in regions.bit_flows(region) {
-            let value = value_nets(module, regions, connectivity, flow.value(), &mut scratch)?;
+            let value = value_nets(module, anchors, connectivity, flow.value(), &mut scratch)?;
             let net = value.get(flow.bit() as usize).ok_or_else(|| {
                 crate::SynthError::invariant("work item bit flow is outside its Word value")
             })?;
@@ -1078,27 +1339,25 @@ type MemoryNetBinding = (Box<[NetBitId]>, Box<[NetBitId]>);
 
 fn memory_nets(
     module: &word::WordModule,
-    regions: &crate::SynthesisRegionGraph,
+    anchors: &LogicalAnchors,
     connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
+    ports: &MemoryPortIndex,
     memory: word::MemoryId,
-    nets: &mut BTreeMap<NetBitId, NetBit>,
+    nets: &mut NetTable,
 ) -> Result<MemoryNetBinding, crate::SynthError> {
-    let reads = module
-        .memory_read_ports()
-        .iter()
-        .filter(|read| read.memory == memory)
-        .collect::<Vec<_>>();
-    let writes = module
-        .memory_write_ports()
-        .iter()
-        .filter(|write| write.memory == memory)
-        .collect::<Vec<_>>();
+    let reads = ports.reads.get(memory.index()).ok_or_else(|| {
+        crate::SynthError::invariant("logical memory read-port row is out of range")
+    })?;
+    let writes = ports.writes.get(memory.index()).ok_or_else(|| {
+        crate::SynthError::invariant("logical memory write-port row is out of range")
+    })?;
     let mut inputs = Vec::new();
-    for read in &reads {
+    for &row in reads {
+        let read = &module.memory_read_ports()[row];
         append_value_nets(
             &mut inputs,
             module,
-            regions,
+            anchors,
             connectivity,
             read.address,
             nets,
@@ -1107,7 +1366,7 @@ fn memory_nets(
             append_value_nets(
                 &mut inputs,
                 module,
-                regions,
+                anchors,
                 connectivity,
                 clock.value,
                 nets,
@@ -1116,7 +1375,7 @@ fn memory_nets(
                 append_value_nets(
                     &mut inputs,
                     module,
-                    regions,
+                    anchors,
                     connectivity,
                     enable.value,
                     nets,
@@ -1124,7 +1383,8 @@ fn memory_nets(
             }
         }
     }
-    for write in writes {
+    for &row in writes {
+        let write = &module.memory_write_ports()[row];
         for value in [
             Some(write.address),
             Some(write.data),
@@ -1135,12 +1395,12 @@ fn memory_nets(
         .into_iter()
         .flatten()
         {
-            append_value_nets(&mut inputs, module, regions, connectivity, value, nets)?;
+            append_value_nets(&mut inputs, module, anchors, connectivity, value, nets)?;
         }
     }
     let outputs = reads
-        .into_iter()
-        .map(|read| signal_nets(module, read.data, nets))
+        .iter()
+        .map(|&row| signal_nets(module, anchors, module.memory_read_ports()[row].data, nets))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -1151,21 +1411,22 @@ fn memory_nets(
 fn append_value_nets(
     output: &mut Vec<NetBitId>,
     module: &word::WordModule,
-    regions: &crate::SynthesisRegionGraph,
+    anchors: &LogicalAnchors,
     connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
     value: word::ValueId,
-    nets: &mut BTreeMap<NetBitId, NetBit>,
+    nets: &mut NetTable,
 ) -> Result<(), crate::SynthError> {
-    output.extend(value_nets(module, regions, connectivity, value, nets)?);
+    output.extend(value_nets(module, anchors, connectivity, value, nets)?);
     Ok(())
 }
 
 fn signal_nets(
     module: &word::WordModule,
+    anchors: &LogicalAnchors,
     signal: word::SignalId,
-    nets: &mut BTreeMap<NetBitId, NetBit>,
+    nets: &mut NetTable,
 ) -> Result<Box<[NetBitId]>, crate::SynthError> {
-    let anchor = signal_anchor(module, signal)?;
+    let anchor = anchors.signal(signal)?;
     let stored = module
         .signal(signal)
         .ok_or_else(|| crate::SynthError::invariant("logical memory output signal is unknown"))?;
@@ -1189,6 +1450,8 @@ fn same_design(left: &DesignRevision<LogicalCell>, right: &DesignRevision<Logica
 fn logical_operation(
     module: &word::WordModule,
     operation: word::OpId,
+    known_bits: &mut word::KnownBitsAnalysis,
+    unsigned_values: &mut word::UnsignedValueAnalysis,
 ) -> Result<LogicalOperation, crate::SynthError> {
     let stored = module.operation(operation).ok_or_else(|| {
         crate::SynthError::invariant("logical operation recipe references an unknown operation")
@@ -1234,9 +1497,10 @@ fn logical_operation(
         },
         word::OpKind::Cast { kind, .. } => LogicalOperationKind::Cast(*kind),
     };
-    let operands = crate::word::operation_inputs(&stored.kind)
-        .into_iter()
-        .map(|value| {
+    let operand_values = crate::word::operation_inputs(&stored.kind);
+    let operands: Box<[word::WordType]> = operand_values
+        .iter()
+        .map(|&value| {
             module.value(value).map(|value| value.ty).ok_or_else(|| {
                 crate::SynthError::invariant("logical operation has an unknown operand")
             })
@@ -1246,24 +1510,104 @@ fn logical_operation(
         .value(stored.result)
         .map(|value| value.ty)
         .ok_or_else(|| crate::SynthError::invariant("logical operation has an unknown result"))?;
+    let mut known_outputs = vec![0u64; (result.width() as usize).div_ceil(u64::BITS as usize)];
+    for bit in 0..result.width() {
+        if known_bits.bit(module, stored.result, bit) != word::KnownBit::Unknown {
+            known_outputs[bit as usize / u64::BITS as usize] |= 1 << (bit % u64::BITS);
+        }
+    }
+    while known_outputs.last() == Some(&0) {
+        known_outputs.pop();
+    }
+    let mux_branch = match stored.kind {
+        word::OpKind::Mux { cond, .. } => match known_bits.bit(module, cond, 0) {
+            word::KnownBit::Zero => Some(false),
+            word::KnownBit::One => Some(true),
+            word::KnownBit::Unknown => None,
+        },
+        _ => None,
+    };
+    let exact =
+        if matches!(stored.kind, word::OpKind::DynamicExtract { .. }) {
+            let mut offsets = Vec::with_capacity(result.width() as usize + 1);
+            let mut ranges = Vec::new();
+            offsets.push(0);
+            for output in 0..result.width() {
+                if known_bits.bit(module, stored.result, output) == word::KnownBit::Unknown {
+                    for dependency in crate::word::cycle::operation_dependencies(
+                        module,
+                        known_bits,
+                        unsigned_values,
+                        &stored.kind,
+                        crate::word::cycle::ValueSlice {
+                            value: stored.result,
+                            lsb: output,
+                            width: 1,
+                        },
+                    )? {
+                        let operand = operand_values
+                            .iter()
+                            .position(|&value| value == dependency.value)
+                            .ok_or_else(|| {
+                                crate::SynthError::invariant(
+                                    "logical dependency is not a direct operation input",
+                                )
+                            })?;
+                        let start = operands[..operand]
+                            .iter()
+                            .try_fold(0u32, |total, ty| total.checked_add(ty.width()))
+                            .ok_or_else(|| {
+                                crate::SynthError::capacity("logical dependency operand width")
+                            })?
+                            .checked_add(dependency.lsb)
+                            .ok_or_else(|| {
+                                crate::SynthError::capacity("logical dependency input offset")
+                            })?;
+                        ranges.push(LogicalDependencyRange {
+                            start,
+                            width: dependency.width,
+                        });
+                    }
+                }
+                offsets.push(u32::try_from(ranges.len()).map_err(|_| {
+                    crate::SynthError::capacity("logical dependency range directory")
+                })?);
+            }
+            Some(LogicalDependencyRows {
+                offsets: offsets.into_boxed_slice(),
+                ranges: ranges.into_boxed_slice(),
+            })
+        } else {
+            None
+        };
+    let dependencies =
+        (!known_outputs.is_empty() || mux_branch.is_some() || exact.is_some()).then(|| {
+            Box::new(LogicalDependencyRefinement {
+                known_outputs: known_outputs.into_boxed_slice(),
+                mux_branch,
+                exact,
+            })
+        });
     Ok(LogicalOperation {
         kind,
         operands,
         result,
+        dependencies,
     })
 }
 
 fn region_cells(
     module: &word::WordModule,
     regions: &crate::SynthesisRegionGraph,
+    anchors: &LogicalAnchors,
     region: crate::SynthesisRegion,
 ) -> Result<Box<[CellId]>, crate::SynthError> {
     let mut cells = Vec::new();
     for &operation in regions.operations(region) {
-        cells.push(operation_cell_id(regions, operation)?);
+        cells.push(anchors.operation(operation)?);
     }
     for &memory in regions.memories(region) {
-        cells.push(memory_cell_id(module, memory)?);
+        cells.push(logical_memory_cell_id(module, memory)?);
     }
     cells.sort_unstable();
     cells.dedup();
@@ -1272,10 +1616,10 @@ fn region_cells(
 
 fn value_nets(
     module: &word::WordModule,
-    regions: &crate::SynthesisRegionGraph,
+    anchors: &LogicalAnchors,
     connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
     value: word::ValueId,
-    nets: &mut BTreeMap<NetBitId, NetBit>,
+    nets: &mut NetTable,
 ) -> Result<Box<[NetBitId]>, crate::SynthError> {
     let stored = module
         .value(value)
@@ -1284,7 +1628,7 @@ fn value_nets(
         .map(|bit| {
             source_net(
                 module,
-                regions,
+                anchors,
                 connectivity.source(value, bit)?,
                 stored.ty.state(),
                 nets,
@@ -1295,10 +1639,10 @@ fn value_nets(
 
 fn source_net(
     module: &word::WordModule,
-    regions: &crate::SynthesisRegionGraph,
+    anchors: &LogicalAnchors,
     source: crate::word::bit_connectivity::BitSource,
     state: word::LogicStateKind,
-    nets: &mut BTreeMap<NetBitId, NetBit>,
+    nets: &mut NetTable,
 ) -> Result<NetBitId, crate::SynthError> {
     let (id, state, driver) = match source {
         crate::word::bit_connectivity::BitSource::Constant(constant) => (
@@ -1312,7 +1656,7 @@ fn source_net(
                 .ok_or_else(|| crate::SynthError::invariant("logical bit source is unknown"))?;
             match source.kind {
                 word::ValueKind::Operation(operation) => (
-                    operation_net_id(regions, operation, bit)?,
+                    operation_net_id(anchors.operation(operation)?, bit),
                     source.ty.state(),
                     None,
                 ),
@@ -1322,7 +1666,7 @@ fn source_net(
                         .checked_add(bit)
                         .ok_or_else(|| crate::SynthError::capacity("logical signal bit offset"))?;
                     (
-                        signal_net_id(signal_anchor(module, reference.signal)?, physical),
+                        signal_net_id(anchors.signal(reference.signal)?, physical),
                         source.ty.state(),
                         None,
                     )
@@ -1340,39 +1684,38 @@ fn source_net(
 }
 
 fn install_net(
-    nets: &mut BTreeMap<NetBitId, NetBit>,
+    nets: &mut NetTable,
     id: NetBitId,
     state: word::LogicStateKind,
     driver: Option<NetDriver>,
 ) -> Result<(), crate::SynthError> {
-    match nets.entry(id) {
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            entry.insert(NetBit { id, state, driver });
+    if let Some(&row) = nets.rows.get(&id) {
+        let net = &mut nets.nets[row];
+        if net.state != state || (net.driver.is_some() && driver.is_some() && net.driver != driver)
+        {
+            return Err(crate::SynthError::invariant(
+                "stable logical net has conflicting definitions",
+            ));
         }
-        std::collections::btree_map::Entry::Occupied(mut entry) => {
-            let net = entry.get_mut();
-            if net.state != state
-                || (net.driver.is_some() && driver.is_some() && net.driver != driver)
-            {
-                return Err(crate::SynthError::invariant(
-                    "stable logical net has conflicting definitions",
-                ));
-            }
-            if net.driver.is_none() {
-                net.driver = driver;
-            }
+        if net.driver.is_none() {
+            net.driver = driver;
         }
+    } else {
+        nets.rows.insert(id, nets.nets.len());
+        nets.nets.push(NetBit { id, state, driver });
     }
     Ok(())
 }
 
 fn install_driver(
-    nets: &mut BTreeMap<NetBitId, NetBit>,
+    nets: &mut NetTable,
     id: NetBitId,
     driver: NetDriver,
 ) -> Result<(), crate::SynthError> {
     let net = nets
-        .get_mut(&id)
+        .rows
+        .get(&id)
+        .and_then(|&row| nets.nets.get_mut(row))
         .ok_or_else(|| crate::SynthError::invariant("logical driver net is absent"))?;
     if net
         .driver
@@ -1386,10 +1729,7 @@ fn install_driver(
     Ok(())
 }
 
-fn logical_revision_id(
-    cells: &[Cell<LogicalCell>],
-    nets: &BTreeMap<NetBitId, NetBit>,
-) -> DesignRevisionId {
+fn logical_revision_id(cells: &[Cell<LogicalCell>], nets: &[NetBit]) -> DesignRevisionId {
     let mut digest = blake3::Hasher::new();
     digest.update(b"opto/logical-design-revision/v1\0");
     let mut cells = cells.iter().collect::<Vec<_>>();
@@ -1409,7 +1749,7 @@ fn logical_revision_id(
             digest.update(&output.bytes());
         }
     }
-    for net in nets.values() {
+    for net in nets {
         digest.update(&net.id.bytes());
         digest.update(&[match net.state {
             word::LogicStateKind::TwoState => 0,
@@ -1569,7 +1909,7 @@ pub(crate) fn logical_operation_cell_id(
     operation_cell_id(regions, operation)
 }
 
-fn memory_cell_id(
+pub(crate) fn logical_memory_cell_id(
     module: &word::WordModule,
     memory: word::MemoryId,
 ) -> Result<CellId, crate::SynthError> {
@@ -1670,17 +2010,8 @@ fn memory_interface_id(
     Ok(*digest.finalize().as_bytes())
 }
 
-fn operation_net_id(
-    regions: &crate::SynthesisRegionGraph,
-    operation: word::OpId,
-    bit: u32,
-) -> Result<NetBitId, crate::SynthError> {
-    let cell = operation_cell_id(regions, operation)?;
-    Ok(net_id(
-        b"opto/logical-operation-net/v1\0",
-        cell.bytes(),
-        bit,
-    ))
+fn operation_net_id(cell: CellId, bit: u32) -> NetBitId {
+    net_id(b"opto/logical-operation-net/v1\0", cell.bytes(), bit)
 }
 
 fn signal_anchor(
@@ -1833,14 +2164,18 @@ mod tests {
         assert_eq!(work.design.0.revision(), design.0.revision());
         assert!(design.0.cell_count() >= regions.regions().len());
         assert_eq!(work.items.len(), regions.regions().len());
-        assert_eq!(work.packet_tasks().len(), regions.regions().len());
+        assert_eq!(work.shards.len(), regions.regions().len());
+        let mut known_bits = word::KnownBitsAnalysis::new(&module);
+        let mut unsigned_values = word::UnsignedValueAnalysis::new(&module);
         for (index, &region) in regions.regions().iter().enumerate() {
             assert_eq!(
                 work.items[index].kind,
                 WorkItemKind::FixedLogic(region.id())
             );
             for &operation in regions.operations(region) {
-                let _ = logical_operation(&module, operation).unwrap();
+                let _ =
+                    logical_operation(&module, operation, &mut known_bits, &mut unsigned_values)
+                        .unwrap();
                 assert!(
                     design
                         .0
@@ -1849,32 +2184,16 @@ mod tests {
                 );
             }
         }
+        for packet in work.portable_packets() {
+            let bytes = opto_archive::to_bytes(&packet).unwrap();
+            let restored: WorkPacket = opto_archive::from_bytes(&bytes).unwrap();
+            assert_eq!(restored.design, packet.design);
+            assert_eq!(restored.fragment, packet.fragment);
+            restored.fragment.validate(&restored.items).unwrap();
+        }
         let semantic_items = work.items.iter().map(|item| item.id).collect::<Vec<_>>();
         let execute = |work: &WorkGraph| {
-            let results =
-                SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, fragment, _| {
-                    let bytes = opto_archive::to_bytes(fragment).unwrap();
-                    let restored: WorkPacketDesign = opto_archive::from_bytes(&bytes).unwrap();
-                    assert_eq!(&restored, fragment);
-                    Ok(WorkProduct::compiled_artifact(
-                        opto_ir::design::EquivalenceCertificate {
-                            regime: opto_ir::design::EquivalenceRegime::ByConstruction,
-                            digest: item.id.0,
-                        },
-                        item.id,
-                    ))
-                })
-                .unwrap();
-            work.accept_results(results)
-                .unwrap()
-                .into_vec()
-                .into_iter()
-                .map(|result| result.output)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(execute(&work), semantic_items);
-        let mut invalid =
-            SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, _, _| {
+            let results = SynthesisExecutor::execute(&runtime, work, |item, _| {
                 Ok(WorkProduct::compiled_artifact(
                     opto_ir::design::EquivalenceCertificate {
                         regime: opto_ir::design::EquivalenceRegime::ByConstruction,
@@ -1884,6 +2203,24 @@ mod tests {
                 ))
             })
             .unwrap();
+            work.accept_results(results)
+                .unwrap()
+                .into_vec()
+                .into_iter()
+                .map(|result| result.output)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(execute(&work), semantic_items);
+        let mut invalid = SynthesisExecutor::execute(&runtime, &work, |item, _| {
+            Ok(WorkProduct::compiled_artifact(
+                opto_ir::design::EquivalenceCertificate {
+                    regime: opto_ir::design::EquivalenceRegime::ByConstruction,
+                    digest: item.id.0,
+                },
+                item.id,
+            ))
+        })
+        .unwrap();
         let bytes = opto_archive::to_bytes(&invalid).unwrap();
         let restored: Vec<WorkResult<WorkItemId>> = opto_archive::from_bytes(&bytes).unwrap();
         assert_eq!(restored, invalid);
@@ -1916,10 +2253,7 @@ mod tests {
                 })
         );
         work.rebatch(2).unwrap();
-        assert_eq!(
-            work.packet_tasks().len(),
-            regions.regions().len().div_ceil(2)
-        );
+        assert_eq!(work.shards.len(), regions.regions().len().div_ceil(2));
         assert_eq!(
             work.shards
                 .iter()
@@ -2024,5 +2358,81 @@ mod tests {
 
         assert_eq!(fine.0.revision(), coarse.0.revision());
         assert!(same_design(&fine.0, &coarse.0));
+    }
+
+    #[test]
+    fn logical_revision_ignores_constant_gated_feedback() {
+        let mut module = word::WordModule::new("constant_feedback_revision");
+        let bit = word::WordType::bits(1).unwrap();
+        let source = word::SourceSpan::stable("constant feedback revision");
+        let signal = module.add_wire("feedback", bit, source.clone()).unwrap();
+        let feedback = module.read_signal(signal, source.clone()).unwrap();
+        let disabled = module
+            .constant(
+                opto_ir::ConstBits::from_bin_str("0").unwrap(),
+                bit,
+                source.clone(),
+            )
+            .unwrap();
+        let value = module
+            .binary(word::BinaryOp::BitAnd, disabled, feedback, source.clone())
+            .unwrap();
+        module
+            .connect(word::LValue::signal(signal), value, source)
+            .unwrap();
+        let regions = super::super::region_graph::partition::build(
+            &module,
+            super::super::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+
+        WorkDesign::seal(&module, &regions).unwrap();
+    }
+
+    #[test]
+    fn logical_revision_tracks_dynamic_selection_per_bit() {
+        let mut module = word::WordModule::new("dynamic_feedback_revision");
+        let source = word::SourceSpan::stable("dynamic feedback revision");
+        let pair = word::WordType::bits(2).unwrap();
+        let records = module.add_wire("records", pair, source.clone()).unwrap();
+        let records_value = module.read_signal(records, source.clone()).unwrap();
+        let offset = module
+            .constant(
+                opto_ir::ConstBits::from_bin_str("1").unwrap(),
+                word::WordType::bits(1).unwrap(),
+                source.clone(),
+            )
+            .unwrap();
+        let selected = module
+            .dynamic_extract(records_value, offset, 1, source.clone())
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(records).with_range(word::BitRange { msb: 0, lsb: 0 }),
+                selected,
+                source.clone(),
+            )
+            .unwrap();
+        let high = module
+            .constant(
+                opto_ir::ConstBits::from_bin_str("1").unwrap(),
+                word::WordType::bits(1).unwrap(),
+                source.clone(),
+            )
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(records).with_range(word::BitRange { msb: 1, lsb: 1 }),
+                high,
+                source,
+            )
+            .unwrap();
+        let regions = super::super::region_graph::partition::build(
+            &module,
+            super::super::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+
+        WorkDesign::seal(&module, &regions).unwrap();
     }
 }

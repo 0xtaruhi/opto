@@ -103,7 +103,7 @@ pub(crate) fn resolve_private_operator_sources(
     local: &word::WordModule,
     decisions: &ArchitectureDecisions,
     region_operations: &[word::OpId],
-    operation_sources: &crate::planning::regional::LocalOperationProvenance,
+    operation_sources: &crate::planning::regional::LocalOperationSemantics,
 ) -> Result<Box<[Box<[word::OpId]>]>, crate::SynthError> {
     let region_operations = region_operations
         .iter()
@@ -490,6 +490,11 @@ impl ProvenanceBuilder {
                         })?,
                     FragmentFootprint::Region(region),
                 ),
+                MappedCellSource::Memory {
+                    memory: _,
+                    ordinal: _,
+                    region,
+                } => (OriginSetId::EMPTY, FragmentFootprint::Region(region)),
                 MappedCellSource::Region { origins, region } => {
                     (origins, FragmentFootprint::Region(region))
                 }
@@ -795,12 +800,12 @@ mod tests {
             .unwrap();
 
         let decisions = ArchitectureDecisions::for_module(&local).unwrap();
-        let mut operation_sources = crate::planning::regional::LocalOperationProvenance::default();
+        let mut operation_sources = crate::planning::regional::LocalOperationSemantics::default();
         operation_sources
-            .set(operation(&local, copied), [represented])
+            .record_generated(operation(&local, copied), [represented])
             .unwrap();
         operation_sources
-            .set(operation(&local, generated), [represented, unrelated])
+            .record_generated(operation(&local, generated), [represented, unrelated])
             .unwrap();
         let sources = resolve_private_operator_sources(
             &source,

@@ -12,7 +12,7 @@ pub(crate) struct RegionalWordCone {
     pub(crate) module: word::WordModule,
     pub(crate) source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     pub(crate) boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
-    pub(crate) operation_sources: super::LocalOperationProvenance,
+    pub(crate) operation_sources: super::LocalOperationSemantics,
     pub(crate) owned_memory_logic: Box<[RegionalMemoryLogicBinding]>,
     pub(crate) memory_states: Box<[RegionalMemoryStateBinding]>,
     pub(crate) root_bindings: Box<[(word::ValueId, word::SignalId)]>,
@@ -74,7 +74,7 @@ impl RegionalWordCone {
             module: word::WordModule::new(format!("{}$region{}", source.name(), region.raw())),
             source_to_local: BTreeMap::new(),
             boundary_bindings: Vec::new(),
-            operation_sources: super::LocalOperationProvenance::default(),
+            operation_sources: super::LocalOperationSemantics::default(),
             visiting: BTreeSet::new(),
             import_path: Vec::new(),
             source_acyclic: false,
@@ -193,12 +193,30 @@ impl RegionalWordCone {
                 .filter_map(|(local, owner)| (owner == local_memory).then_some(local))
                 .collect::<Vec<_>>();
             for (ordinal, local) in local_states.into_iter().enumerate() {
+                let ordinal = u32::try_from(ordinal).map_err(|_| {
+                    crate::SynthError::capacity("region-local memory state ordinal")
+                })?;
+                let operation = importer
+                    .module
+                    .value(local)
+                    .and_then(|value| match value.kind {
+                        word::ValueKind::Operation(operation) => Some(operation),
+                        word::ValueKind::Constant(_) | word::ValueKind::Signal(_) => None,
+                    })
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "region-local memory state is not produced by an operation",
+                        )
+                    })?;
+                importer.operation_sources.record_memory_state(
+                    operation,
+                    source_memory,
+                    ordinal,
+                )?;
                 memory_states.push(RegionalMemoryStateBinding {
                     local,
                     source_memory,
-                    ordinal: u32::try_from(ordinal).map_err(|_| {
-                        crate::SynthError::capacity("region-local memory state ordinal")
-                    })?,
+                    ordinal,
                 });
             }
             for (ordinal, (operation, _)) in memory_binding
@@ -240,7 +258,7 @@ struct RegionalWordImporter<'a> {
     module: word::WordModule,
     source_to_local: BTreeMap<word::ValueId, word::ValueId>,
     boundary_bindings: Vec<(word::ValueId, word::ValueId)>,
-    operation_sources: super::LocalOperationProvenance,
+    operation_sources: super::LocalOperationSemantics,
     visiting: BTreeSet<word::ValueId>,
     import_path: Vec<word::ValueId>,
     source_acyclic: bool,
@@ -260,6 +278,99 @@ struct RegionalWordImporter<'a> {
 mod tests {
     use super::*;
     use opto_core::DiagnosticSource;
+
+    #[test]
+    fn register_bank_states_keep_explicit_memory_semantics() {
+        let mut source = word::WordModule::new("memory_state");
+        let span = word::SourceSpan::stable("memory state regression");
+        let input = |module: &mut word::WordModule, name, width| {
+            let port = module
+                .add_port(
+                    name,
+                    word::PortDirection::Input,
+                    word::WordType::bits(width).unwrap(),
+                    span.clone(),
+                )
+                .unwrap();
+            module
+                .read_signal(module.port(port).unwrap().signal, span.clone())
+                .unwrap()
+        };
+        let clock = input(&mut source, "clock", 1);
+        let address = input(&mut source, "address", 1);
+        let data = input(&mut source, "data", 8);
+        let memory = source
+            .add_memory(
+                "memory",
+                word::WordType::bits(8).unwrap(),
+                std::num::NonZeroU32::new(2).unwrap(),
+                span.clone(),
+            )
+            .unwrap();
+        let read_data = source
+            .add_wire("read_data", word::WordType::bits(8).unwrap(), span.clone())
+            .unwrap();
+        source
+            .add_memory_read_port(word::MemoryReadPort {
+                memory,
+                address,
+                data: read_data,
+                timing: word::MemoryReadTiming::Asynchronous,
+                read_during_write: word::ReadDuringWrite::OldData,
+                source: span.clone(),
+            })
+            .unwrap();
+        source
+            .add_memory_write_port(word::MemoryWritePort {
+                memory,
+                address,
+                data,
+                clock: word::MemoryClock {
+                    value: clock,
+                    edge: word::Edge::Pos,
+                },
+                enable: None,
+                mask: None,
+                priority: 0,
+                source: span.clone(),
+            })
+            .unwrap();
+        let root = source.read_signal(read_data, span).unwrap();
+        let row = crate::RegionRowId::from_index(0).unwrap();
+
+        let cone = RegionalWordCone::build(RegionalWordConeRequest {
+            source: &source,
+            operation_regions: &[],
+            region: row,
+            memories: &[memory],
+            memory_implementations: &[
+                crate::planning::regional::MemoryImplementationCandidate::RegisterBank,
+            ],
+            target_cells: &opto_library::TargetCellSet::default(),
+            observations: vec![],
+            roots: vec![root],
+        })
+        .unwrap();
+
+        assert_eq!(cone.memory_states.len(), 2);
+        for state in &cone.memory_states {
+            let operation = cone
+                .module
+                .value(state.local)
+                .and_then(|value| match value.kind {
+                    word::ValueKind::Operation(operation) => Some(operation),
+                    word::ValueKind::Constant(_) | word::ValueKind::Signal(_) => None,
+                })
+                .unwrap();
+            assert_eq!(
+                cone.operation_sources.states(operation).unwrap(),
+                [crate::planning::regional::LocalStateSource::Memory {
+                    memory,
+                    ordinal: state.ordinal,
+                }]
+            );
+        }
+    }
 
     #[test]
     fn reports_combinational_feedback_with_hdl_locations() {

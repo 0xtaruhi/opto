@@ -807,7 +807,7 @@ impl RegionalWordImporter<'_> {
             }
         };
         let sources = self.current_operation_sources();
-        self.operation_sources.set(operation, sources)
+        self.operation_sources.record_generated(operation, sources)
     }
 
     fn current_operation_sources(&self) -> Vec<word::OpId> {
@@ -845,7 +845,8 @@ impl RegionalWordImporter<'_> {
             return Ok(());
         };
         let additional = self.current_operation_sources();
-        self.operation_sources.merge(operation, additional)
+        self.operation_sources
+            .extend_generated(operation, additional)
     }
 
     fn operation_is_state(&self, operation: word::OpId) -> bool {
@@ -1016,7 +1017,11 @@ impl RegionalWordImporter<'_> {
                 "region-local operation builder returned a non-operation value",
             ));
         };
-        self.operation_sources.set(local_operation, [source])?;
+        self.operation_sources.record_source(
+            local_operation,
+            source,
+            self.operation_is_state(source),
+        )?;
         Ok(local)
     }
 

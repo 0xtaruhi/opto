@@ -213,7 +213,7 @@ impl CoverPlanner<'_> {
                 let exact = ExactChoice {
                     choice,
                     area: added + candidate.nominal_cost(self.catalog).area,
-                    arrival: self.candidate_arrival_estimate(slot_id, candidate),
+                    arrival: self.candidate_arrival_estimate(slot_id, candidate_index, candidate),
                     truth: candidate.truth(),
                     order: (candidate.cut, candidate.inversions, 0),
                 };
@@ -276,7 +276,7 @@ impl CoverPlanner<'_> {
             let restored = best.map_or(current, |best| best.choice);
             activated.clear();
             // Dependencies activated below must observe the committed choice.
-            self.choices[slot_id] = Some(restored);
+            self.set_choice(slot_id, Some(restored));
             self.change_choice_references_tracked(
                 slot_id,
                 restored,
@@ -318,15 +318,16 @@ impl CoverPlanner<'_> {
         }
         let candidates = self.candidates[slot_id]
             .iter()
-            .map(|&candidate| {
-                for leaf_slot in self.candidate_dependencies(slot_id, candidate) {
+            .enumerate()
+            .map(|(candidate_index, &candidate)| {
+                for leaf_slot in self.candidate_dependencies(slot_id, candidate_index) {
                     if self.choices[leaf_slot].is_none() {
                         return false;
                     }
                 }
                 self.recovery_meets_required(
                     slot_id,
-                    self.candidate_arrival_estimate(slot_id, candidate),
+                    self.candidate_arrival_estimate(slot_id, candidate_index, candidate),
                 )
             })
             .collect();
@@ -352,10 +353,14 @@ impl CoverPlanner<'_> {
         }
     }
 
-    fn candidate_arrival_estimate(&self, slot_id: usize, candidate: Candidate) -> f64 {
+    fn candidate_arrival_estimate(
+        &self,
+        slot_id: usize,
+        candidate_index: usize,
+        candidate: Candidate,
+    ) -> f64 {
         let leaf_arrival = self
-            .candidate_dependencies(slot_id, candidate)
-            .into_iter()
+            .candidate_dependencies(slot_id, candidate_index)
             .map(|leaf_slot| self.flows[leaf_slot].electrical_delay)
             .fold(0.0f64, f64::max);
         leaf_arrival + self.candidate_electrical_cost(slot_id, candidate).delay
@@ -447,8 +452,8 @@ impl CoverPlanner<'_> {
                         ))
                     })?;
             // Activated dependencies must observe both trial choices.
-            self.choices[first] = Some(joint_choice);
-            self.choices[second] = Some(joint_choice);
+            self.set_choice(first, Some(joint_choice));
+            self.set_choice(second, Some(joint_choice));
             let added = self.change_choices_references(
                 &[(first, joint_choice), (second, joint_choice)],
                 1,
@@ -478,8 +483,8 @@ impl CoverPlanner<'_> {
                     &mut stack,
                     None,
                 )?;
-                self.choices[first] = Some(first_current);
-                self.choices[second] = Some(second_current);
+                self.set_choice(first, Some(first_current));
+                self.set_choice(second, Some(second_current));
                 self.change_choices_references(
                     &[(first, first_current), (second, second_current)],
                     1,
@@ -538,8 +543,8 @@ impl CoverPlanner<'_> {
                 stack,
                 None,
             )?;
-        self.choices[first] = Some(joint_choice);
-        self.choices[second] = Some(joint_choice);
+        self.set_choice(first, Some(joint_choice));
+        self.set_choice(second, Some(joint_choice));
         let added = self.change_choices_references(
             &[(first, joint_choice), (second, joint_choice)],
             1,
@@ -552,8 +557,8 @@ impl CoverPlanner<'_> {
             stack,
             None,
         )?;
-        self.choices[first] = Some(first_current);
-        self.choices[second] = Some(second_current);
+        self.set_choice(first, Some(first_current));
+        self.set_choice(second, Some(second_current));
         self.change_choices_references(
             &[(first, first_current), (second, second_current)],
             1,
@@ -592,16 +597,16 @@ impl CoverPlanner<'_> {
         choice: SlotChoice,
     ) -> Result<f64, crate::SynthError> {
         match choice {
-            SlotChoice::Cell(candidate) => {
+            SlotChoice::Cell(candidate_index) => {
                 let candidate = self.candidates[slot_id]
-                    .get(candidate as usize)
+                    .get(candidate_index as usize)
                     .copied()
                     .ok_or_else(|| {
                         crate::SynthError::invariant(
                             "selected recovery candidate is outside its slot",
                         )
                     })?;
-                Ok(self.candidate_arrival_estimate(slot_id, candidate))
+                Ok(self.candidate_arrival_estimate(slot_id, candidate_index as usize, candidate))
             }
             SlotChoice::Inverter => {
                 let inverter = self.inverter.ok_or_else(|| {
@@ -628,7 +633,18 @@ impl CoverPlanner<'_> {
         arrival + self.joint_electrical_cost(joint_id).delay
     }
 
+    pub(super) fn set_choice(&mut self, slot_id: usize, choice: Option<SlotChoice>) {
+        let area = choice.map_or(0.0, |choice| self.uncached_choice_area(slot_id, choice));
+        self.choice_areas[slot_id] = area;
+        self.choices[slot_id] = choice;
+    }
+
     fn choice_cell_area(&self, slot_id: usize, choice: SlotChoice) -> f64 {
+        debug_assert_eq!(self.choices[slot_id], Some(choice));
+        self.choice_areas[slot_id]
+    }
+
+    fn uncached_choice_area(&self, slot_id: usize, choice: SlotChoice) -> f64 {
         match choice {
             SlotChoice::Constant(_) | SlotChoice::Boundary(_) | SlotChoice::JointOutput(_) => 0.0,
             SlotChoice::Inverter => {
@@ -661,14 +677,19 @@ impl CoverPlanner<'_> {
         scratch.begin(self.choices.len());
         let mut frontier = std::mem::take(&mut scratch.frontier);
         let mut next = std::mem::take(&mut scratch.next);
-        frontier.extend(self.choice_dependencies(slot_id, choice));
+        self.visit_choice_dependencies(slot_id, choice, |dependency| {
+            if scratch.mark(dependency) {
+                frontier.push(dependency);
+            }
+            Ok(())
+        })?;
         let mut area = 0.0;
         let mut error = None;
         while !frontier.is_empty() && error.is_none() {
             frontier.sort_unstable();
             next.clear();
             for &current in &frontier {
-                if !scratch.mark(current) || self.demand.reference_count(current) != 0 {
+                if self.demand.reference_count(current) != 0 {
                     continue;
                 }
                 let Some(selected) = self.choices[current] else {
@@ -678,7 +699,12 @@ impl CoverPlanner<'_> {
                     break;
                 };
                 area += self.choice_cell_area(current, selected);
-                next.extend(self.choice_dependencies(current, selected));
+                self.visit_choice_dependencies(current, selected, |dependency| {
+                    if scratch.mark(dependency) {
+                        next.push(dependency);
+                    }
+                    Ok(())
+                })?;
             }
             std::mem::swap(&mut frontier, &mut next);
         }
@@ -716,12 +742,21 @@ impl CoverPlanner<'_> {
         }
         debug_assert!(pending.is_empty());
         let mut scratch = std::mem::take(&mut self.reference_scratch);
-        let ReferenceScratch { seeded_roots, next } = &mut scratch;
+        let ReferenceScratch {
+            seeded_roots,
+            counts,
+            next_counts,
+            next,
+        } = &mut scratch;
+        counts.resize(self.choices.len(), 0);
+        next_counts.resize(self.choices.len(), 0);
         seeded_roots.clear();
         next.clear();
         for &(slot_id, choice) in roots {
             if self.demand.reference_count(slot_id) != 0 {
-                pending.extend(self.choice_dependencies(slot_id, choice));
+                self.visit_choice_dependencies(slot_id, choice, |dependency| {
+                    enqueue_reference(counts, pending, dependency)
+                })?;
                 seeded_roots.push(slot_id);
             }
         }
@@ -730,18 +765,8 @@ impl CoverPlanner<'_> {
         let mut area = 0.0;
         while !pending.is_empty() {
             pending.sort_unstable();
-            let mut start = 0;
-            while start < pending.len() {
-                let current = pending[start];
-                let end = pending[start..]
-                    .iter()
-                    .position(|&slot| slot != current)
-                    .map_or(pending.len(), |offset| start + offset);
-                let count = u32::try_from(end - start).map_err(|_| {
-                    crate::SynthError::capacity(
-                        "batched cover reference change exceeds 32-bit capacity",
-                    )
-                })?;
+            for &current in pending.iter() {
+                let count = std::mem::take(&mut counts[current]);
                 let crossed = self.demand.change_by(current, delta, count)?;
                 if crossed {
                     if let Some(crossed_slots) = crossed_slots.as_mut() {
@@ -755,13 +780,15 @@ impl CoverPlanner<'_> {
                             )
                         })?;
                         area += self.choice_cell_area(current, selected);
-                        next.extend(self.choice_dependencies(current, selected));
+                        self.visit_choice_dependencies(current, selected, |dependency| {
+                            enqueue_reference(next_counts, next, dependency)
+                        })?;
                     }
                 }
-                start = end;
             }
             pending.clear();
             pending.append(next);
+            std::mem::swap(counts, next_counts);
         }
         self.reference_scratch = scratch;
         Ok(area)
@@ -881,4 +908,21 @@ impl CoverPlanner<'_> {
         }
         .normalize(true)
     }
+}
+
+fn enqueue_reference(
+    counts: &mut [u32],
+    pending: &mut Vec<usize>,
+    slot: usize,
+) -> Result<(), crate::SynthError> {
+    let count = counts.get_mut(slot).ok_or_else(|| {
+        crate::SynthError::invariant("cover reference dependency is outside the planner arena")
+    })?;
+    if *count == 0 {
+        pending.push(slot);
+    }
+    *count = count.checked_add(1).ok_or_else(|| {
+        crate::SynthError::capacity("batched cover reference change exceeds 32-bit capacity")
+    })?;
+    Ok(())
 }

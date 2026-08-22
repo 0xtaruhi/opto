@@ -14,6 +14,11 @@ pub(crate) enum MappedCellSource {
         value: word::ValueId,
         region: crate::RegionAnchorId,
     },
+    Memory {
+        memory: word::MemoryId,
+        ordinal: u32,
+        region: crate::RegionAnchorId,
+    },
     Region {
         origins: OriginSetId,
         region: crate::RegionAnchorId,

@@ -107,7 +107,7 @@ pub(super) fn materialize(
     }
     TransformProduct {
         network: rebuilt,
-        remap: remap.into_boxed_slice(),
+        remap: remap.into(),
         analyses: TransformAnalyses::default(),
     }
 }

@@ -9,7 +9,7 @@ use crate::boolean::bitblast::{
     LocalRegionBooleanLowering, LocalRegionBooleanRequest, LoweredRegionBinding,
     implementation_providers, lower_local_region_boolean,
 };
-use crate::boolean::logic::{ChoiceGraph, ChoiceScopeId, ChoiceSubject, RegionLogicOptions};
+use crate::boolean::logic::{ChoiceDesign, ChoiceScopeId, ChoiceSubject, RegionLogicOptions};
 use crate::mapping::{CandidateBindingDomain, RegionPlanBinding, TargetMappingContext};
 use crate::planning::operator::ArchitectureDecisions;
 use crate::planning::regional::{
@@ -97,7 +97,7 @@ struct RegionalMaterialization {
 struct OptimizedPrivateRegion {
     module: word::WordModule,
     values: PrivateValueBindings,
-    operation_sources: crate::planning::regional::LocalOperationProvenance,
+    operation_sources: crate::planning::regional::LocalOperationSemantics,
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
     root_pairs: Vec<(MappingRoot, word::ValueId)>,
     state_relations: BTreeMap<word::OpId, [u8; 32]>,
@@ -168,7 +168,7 @@ fn remap_private_values(
 fn commit_operation_rewrites(
     module: &mut word::WordModule,
     rewrites: &[crate::planning::operator::OperationRewrite],
-    operation_sources: &mut crate::planning::regional::LocalOperationProvenance,
+    operation_sources: &mut crate::planning::regional::LocalOperationSemantics,
     values: &mut PrivateValueBindings,
 ) -> Result<(), SynthError> {
     if rewrites.is_empty() && module.validate().is_ok() {
@@ -226,7 +226,7 @@ fn commit_operation_rewrites(
 
 fn compact_private_module(
     module: &mut word::WordModule,
-    operation_sources: &mut crate::planning::regional::LocalOperationProvenance,
+    operation_sources: &mut crate::planning::regional::LocalOperationSemantics,
     values: &mut PrivateValueBindings,
     extra_roots: &[word::ValueId],
 ) -> Result<(), SynthError> {
@@ -316,10 +316,8 @@ pub(crate) fn prepare_regional_architectures(
         .map(|region| (region.id(), region.row()))
         .collect::<BTreeMap<_, _>>();
     let profiling = request.mapping_context.config.diagnostics.timing;
-    let results = crate::regional::SynthesisExecutor::execute(
-        runtime,
-        work.packet_tasks(),
-        |item, _, regional_runtime| {
+    let results =
+        crate::regional::SynthesisExecutor::execute(runtime, work, |item, regional_runtime| {
             let region_row = region_rows
                 .get(&item.fixed_logic())
                 .copied()
@@ -351,8 +349,7 @@ pub(crate) fn prepare_regional_architectures(
                     private,
                 },
             ))
-        },
-    )?;
+        })?;
     let mut characterized = work
         .accept_results(results)?
         .into_vec()
@@ -431,7 +428,7 @@ pub(crate) fn prepare_regional_architectures(
         .into_iter()
         .map(|(selection, prepared, subject)| ((selection, prepared), subject))
         .unzip();
-    let (choices, compiled) = compile_design_choices(subjects, &prepared, request, runtime)?;
+    let choices = build_design_choices(subjects, request, runtime)?;
     let cover_scopes = prepared
         .iter()
         .enumerate()
@@ -446,7 +443,6 @@ pub(crate) fn prepare_regional_architectures(
         .collect::<Result<Vec<_>, SynthError>>()?;
     let cover_results = super::cover::analyze_design_cover(
         &choices,
-        &compiled,
         &cover_scopes,
         request.timing,
         &opto_timing::PortBindings::new([]),
@@ -530,13 +526,12 @@ pub(crate) fn prepare_regional_architectures(
     ))
 }
 
-fn compile_design_choices(
+fn build_design_choices(
     subjects: Vec<ChoiceSubject>,
-    prepared: &[(SelectedRegionalContext, PreparedRegionalChoice)],
     request: &RegionalArchitectureRequest<'_>,
     runtime: &ExecutionContext,
-) -> Result<(ChoiceGraph, super::cover::CompiledChoiceMapping), SynthError> {
-    let choices = ChoiceGraph::from_subjects(
+) -> Result<ChoiceDesign, SynthError> {
+    ChoiceDesign::from_subjects(
         subjects,
         RegionLogicOptions {
             optimize: request.mapping_context.combinational_catalog.can_invert(),
@@ -547,31 +542,7 @@ fn compile_design_choices(
                 request.incremental_metrics,
             )),
         },
-    )?;
-    let mut outputs = Vec::new();
-    for (row, (_, prepared)) in prepared.iter().enumerate() {
-        let scope = ChoiceScopeId::from_index(row)?;
-        for root in prepared
-            .cover
-            .slice
-            .roots()
-            .iter()
-            .filter(|root| root.requires_combinational_cover)
-        {
-            outputs.push(choices.node(scope, root.value).ok_or_else(|| {
-                SynthError::invariant("design-wide choice graph omitted an active regional root")
-            })?);
-        }
-    }
-    outputs.sort_unstable();
-    outputs.dedup();
-    let compiled = super::cover::compile_choice_mapping(
-        &choices,
-        &outputs,
-        &request.mapping_context.combinational_catalog,
-        runtime,
-    )?;
-    Ok((choices, compiled))
+    )
 }
 
 fn characterization_proof(
@@ -603,7 +574,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         region: SynthesisRegion,
         module: &word::WordModule,
         decisions: &ArchitectureDecisions,
-        operation_sources: &crate::planning::regional::LocalOperationProvenance,
+        operation_sources: &crate::planning::regional::LocalOperationSemantics,
     ) -> Result<(PrivateArchitecturePublication, DurableOperatorArena), SynthError> {
         let sources = crate::artifact::provenance::resolve_private_operator_sources(
             self.request.source,
@@ -693,7 +664,6 @@ impl RegionArchitectureMaterializer<'_, '_> {
             boundary_bindings: &values.boundary,
             owned_memory_logic: &values.memory_logic,
             memory_states: &values.memory_states,
-            source_cells: self.source_cells,
             sequential_operations: &state_operations,
             root_bindings: &root_bindings,
             region_binding: &lowered_binding,
@@ -993,7 +963,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                     ));
                 }
             }
-            operation_sources.set(rewrite.replacement, sources)?;
+            operation_sources.replace_from(rewrite.replacement, rewrite.replaced)?;
         }
         let canonical = crate::planning::dataflow::optimize_combinational_dataflow(&mut module)?;
         remap_private_values(&canonical, &mut values);
@@ -1049,11 +1019,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                     word::ValueKind::Constant(_) | word::ValueKind::Signal(_) => None,
                 })
                 .ok_or_else(|| SynthError::invariant("shared state has no representative"))?;
-            let sources = operation_sources
-                .sources(operation)
-                .ok_or_else(|| SynthError::invariant("shared state has no source relation"))?
-                .to_vec();
-            operation_sources.merge(representative, sources)?;
+            operation_sources.merge_from(representative, operation)?;
         }
         remap_private_values(&sharing, &mut values);
         let observability = crate::word::uses::netlist_observability(&module)?;
@@ -1104,24 +1070,39 @@ impl RegionArchitectureMaterializer<'_, '_> {
             })
             .map(|index| {
                 let local = word::OpId::from_index(index).map_err(SynthError::from)?;
-                let source = operation_sources
-                    .sources(local)
-                    .and_then(|sources| sources.first())
-                    .copied()
-                    .ok_or_else(|| SynthError::invariant("private state has no source relation"))?;
-                let result = self
-                    .request
-                    .source
-                    .operation(source)
-                    .ok_or_else(|| SynthError::invariant("private state source is not live"))?
-                    .result;
-                let feedback = values
-                    .source_to_local
-                    .get(&result)
-                    .copied()
-                    .ok_or_else(|| {
-                        SynthError::invariant("private state has no feedback boundary")
-                    })?;
+                let states = operation_sources.states(local).ok_or_else(|| {
+                    SynthError::invariant("private state has no semantic binding")
+                })?;
+                let feedback = match states.first().copied() {
+                    Some(crate::planning::regional::LocalStateSource::Operation(source)) => {
+                        let result = self
+                            .request
+                            .source
+                            .operation(source)
+                            .ok_or_else(|| {
+                                SynthError::invariant("private state source is not live")
+                            })?
+                            .result;
+                        values
+                            .source_to_local
+                            .get(&result)
+                            .copied()
+                            .ok_or_else(|| {
+                                SynthError::invariant("private state has no feedback boundary")
+                            })?
+                    }
+                    Some(crate::planning::regional::LocalStateSource::Memory { .. }) => {
+                        module
+                            .operation(local)
+                            .ok_or_else(|| SynthError::invariant("private state is not live"))?
+                            .result
+                    }
+                    None => {
+                        return Err(SynthError::invariant(
+                            "private state has no semantic binding",
+                        ));
+                    }
+                };
                 Ok::<_, SynthError>((local, feedback))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;

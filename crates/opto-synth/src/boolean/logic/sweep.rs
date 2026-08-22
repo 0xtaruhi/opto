@@ -541,7 +541,7 @@ fn rebuild(
     reduced.freeze();
     TransformProduct {
         network: reduced,
-        remap: remap.into_boxed_slice(),
+        remap: remap.into(),
         analyses: TransformAnalyses::default(),
     }
 }

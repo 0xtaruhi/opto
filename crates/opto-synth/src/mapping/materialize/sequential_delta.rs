@@ -36,10 +36,49 @@ pub(crate) struct PendingMappedFixedSubstrate {
 }
 
 /// Stable source state selected before scalar bit lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SequentialStateSource {
+    Operation {
+        cell: opto_ir::design::CellId,
+        value: word::ValueId,
+    },
+    Memory {
+        cell: opto_ir::design::CellId,
+        memory: word::MemoryId,
+        ordinal: u32,
+        width: u32,
+    },
+}
+
+impl SequentialStateSource {
+    const fn cell(self) -> opto_ir::design::CellId {
+        match self {
+            Self::Operation { cell, .. } | Self::Memory { cell, .. } => cell,
+        }
+    }
+
+    const fn source_value(self) -> Option<word::ValueId> {
+        match self {
+            Self::Operation { value, .. } => Some(value),
+            Self::Memory { .. } => None,
+        }
+    }
+
+    fn semantic_bit(self, bit: u32) -> Result<u32, crate::SynthError> {
+        match self {
+            Self::Operation { .. } => Ok(bit),
+            Self::Memory { ordinal, width, .. } => ordinal
+                .checked_mul(width)
+                .and_then(|base| base.checked_add(bit))
+                .ok_or_else(|| crate::SynthError::capacity("memory state bit index")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SourceSequentialBinding {
     operation: word::OpId,
-    states: Box<[(opto_ir::design::CellId, word::ValueId)]>,
+    states: Box<[SequentialStateSource]>,
     region: crate::RegionAnchorId,
     state_relation: Option<[u8; 32]>,
 }
@@ -47,10 +86,41 @@ pub(crate) struct SourceSequentialBinding {
 /// One source-visible state bit implemented by a lowered state operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SequentialSourceBit {
-    pub(crate) cell: opto_ir::design::CellId,
-    pub(crate) value: word::ValueId,
+    source: SequentialStateSource,
     pub(crate) bit: u32,
     pub(crate) state_relation: Option<[u8; 32]>,
+}
+
+impl SequentialSourceBit {
+    pub(crate) const fn cell(&self) -> opto_ir::design::CellId {
+        self.source.cell()
+    }
+
+    pub(crate) fn semantic_bit(&self) -> Result<u32, crate::SynthError> {
+        self.source.semantic_bit(self.bit)
+    }
+
+    pub(crate) const fn source_value(&self) -> Option<word::ValueId> {
+        self.source.source_value()
+    }
+
+    pub(crate) const fn semantic_binding(&self) -> crate::mapping::RegionPlanValueBinding {
+        match self.source {
+            SequentialStateSource::Operation { value, .. } => {
+                crate::mapping::RegionPlanValueBinding::SourceBit {
+                    value,
+                    bit: self.bit,
+                }
+            }
+            SequentialStateSource::Memory {
+                memory, ordinal, ..
+            } => crate::mapping::RegionPlanValueBinding::MemoryStateBit {
+                memory,
+                ordinal,
+                bit: self.bit,
+            },
+        }
+    }
 }
 
 /// Exact semantic state relation for one live scalar state operation.
@@ -139,10 +209,10 @@ pub(crate) fn sequential_region_bindings(
             ) {
                 operations.push(SourceSequentialBinding {
                     operation,
-                    states: Box::new([(
-                        crate::regional::logical_operation_cell_id(regions, operation)?,
-                        stored.result,
-                    )]),
+                    states: Box::new([SequentialStateSource::Operation {
+                        cell: crate::regional::logical_operation_cell_id(regions, operation)?,
+                        value: stored.result,
+                    }]),
                     region: region.id(),
                     state_relation: None,
                 });
@@ -156,7 +226,7 @@ pub(crate) fn local_sequential_bindings(
     module: &word::WordModule,
     source_module: &word::WordModule,
     region: crate::RegionAnchorId,
-    provenance: &crate::planning::regional::LocalOperationProvenance,
+    provenance: &crate::planning::regional::LocalOperationSemantics,
     source_cells: &std::collections::BTreeMap<word::OpId, opto_ir::design::CellId>,
     state_relations: &std::collections::BTreeMap<word::OpId, [u8; 32]>,
 ) -> Result<Box<[SourceSequentialBinding]>, crate::SynthError> {
@@ -173,12 +243,17 @@ pub(crate) fn local_sequential_bindings(
         })
         .map(|index| {
             let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
-            let sources = provenance.sources(operation).ok_or_else(|| {
-                crate::SynthError::invariant("private state has no source provenance")
+            let semantics = provenance.states(operation).ok_or_else(|| {
+                crate::SynthError::invariant("private state has no semantic binding")
             })?;
-            let relations = sources
+            let relations = semantics
                 .iter()
-                .map(|source| state_relations.get(source).copied())
+                .filter_map(|source| match source {
+                    crate::planning::regional::LocalStateSource::Operation(source) => {
+                        Some(state_relations.get(source).copied())
+                    }
+                    crate::planning::regional::LocalStateSource::Memory { .. } => None,
+                })
                 .collect::<Vec<_>>();
             if relations.iter().any(Option::is_some) && relations.iter().any(Option::is_none) {
                 return Err(crate::SynthError::invariant(
@@ -193,21 +268,34 @@ pub(crate) fn local_sequential_bindings(
                     ));
                 }
             }
-            let mut states = sources
+            let mut states = semantics
                 .iter()
-                .map(|source| {
-                    let cell = source_cells.get(source).copied().ok_or_else(|| {
-                        crate::SynthError::invariant(
-                            "private state has no stable logical cell binding",
-                        )
-                    })?;
-                    let value = source_module
-                        .operation(*source)
-                        .ok_or_else(|| {
-                            crate::SynthError::invariant("private state source is not live")
-                        })?
-                        .result;
-                    Ok::<_, crate::SynthError>((cell, value))
+                .map(|source| match *source {
+                    crate::planning::regional::LocalStateSource::Operation(source) => {
+                        let cell = source_cells.get(&source).copied().ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "private state has no stable logical cell binding",
+                            )
+                        })?;
+                        let value = source_module
+                            .operation(source)
+                            .ok_or_else(|| {
+                                crate::SynthError::invariant("private state source is not live")
+                            })?
+                            .result;
+                        Ok::<_, crate::SynthError>(SequentialStateSource::Operation { cell, value })
+                    }
+                    crate::planning::regional::LocalStateSource::Memory { memory, ordinal } => {
+                        let stored = source_module.memory(memory).ok_or_else(|| {
+                            crate::SynthError::invariant("private memory source is not live")
+                        })?;
+                        Ok(SequentialStateSource::Memory {
+                            cell: crate::regional::logical_memory_cell_id(source_module, memory)?,
+                            memory,
+                            ordinal,
+                            width: stored.element_type.width(),
+                        })
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             states.sort_unstable();
@@ -362,12 +450,13 @@ pub(crate) fn plan_regional_sequential_cells(
                 crate::SynthError::invariant("selected state cell has no semantic source")
             })?;
             let endpoint = |role| {
+                let bit = source.semantic_bit()?;
                 endpoints
                     .get(&crate::mapping::RegionalPinKey::Sequential(
                         crate::mapping::SequentialPinKey {
-                            state: source.cell,
+                            state: source.cell(),
                             role,
-                            bit: source.bit,
+                            bit,
                         },
                     ))
                     .copied()
@@ -471,15 +560,17 @@ pub(crate) fn lowered_sequential_operations(
                     "one lowered sequential operation has conflicting region bindings",
                 ));
             }
-            row.1
-                .extend(source_binding.states.iter().copied().map(|(cell, value)| {
-                    SequentialSourceBit {
-                        cell,
-                        value,
+            row.1.extend(
+                source_binding
+                    .states
+                    .iter()
+                    .copied()
+                    .map(|source| SequentialSourceBit {
+                        source,
                         bit,
                         state_relation: source_binding.state_relation,
-                    }
-                }));
+                    }),
+            );
             row.2.push(source_binding.operation);
         }
     }
@@ -509,28 +600,27 @@ pub(crate) fn reconcile_sequential_publication<'a>(
     let mut aliases = Vec::new();
     let mut sources = std::collections::BTreeSet::new();
     for plan in plans {
-        if plan
-            .sources
-            .iter()
-            .any(|source| !sources.insert((source.cell, source.value, source.bit)))
-        {
-            return Err(crate::SynthError::invariant(
-                "source state bit has multiple regional cell plans",
-            ));
+        for source in &plan.sources {
+            if !sources.insert((source.source, source.semantic_bit()?)) {
+                return Err(crate::SynthError::invariant(
+                    "source state bit has multiple regional cell plans",
+                ));
+            }
         }
         let mut members = plan
             .sources
             .iter()
             .filter(|source| source.state_relation.is_none())
-            .map(|source| {
-                let stored = module.value(source.value).ok_or_else(|| {
+            .filter_map(|source| source.source_value().map(|value| (source, value)))
+            .map(|(source, value)| {
+                let stored = module.value(value).ok_or_else(|| {
                     crate::SynthError::invariant("regional state source is not live")
                 })?;
                 region_binding
-                    .lowered_bits(source.value)
+                    .lowered_bits(value)
                     .and_then(|bits| bits.get(source.bit as usize))
                     .copied()
-                    .or_else(|| (stored.ty.width() == 1 && source.bit == 0).then_some(source.value))
+                    .or_else(|| (stored.ty.width() == 1 && source.bit == 0).then_some(value))
                     .ok_or_else(|| {
                         crate::SynthError::invariant("regional state source bit was not lowered")
                     })
@@ -550,7 +640,10 @@ pub(crate) fn reconcile_sequential_publication<'a>(
     let expected = expected_cells.into_iter().collect::<BTreeSet<_>>();
     let published = sources
         .iter()
-        .map(|source| source.0)
+        .filter_map(|(source, _)| match *source {
+            SequentialStateSource::Operation { cell, .. } => Some(cell),
+            SequentialStateSource::Memory { .. } => None,
+        })
         .collect::<BTreeSet<_>>();
     if published != expected {
         return Err(crate::SynthError::invariant(
@@ -732,15 +825,14 @@ impl ArtifactBuilder {
         cell_name: &str,
         library_cell: u32,
         connections: Box<[(String, Option<u16>, super::ArtifactSignal)]>,
-        value: word::ValueId,
-        region: crate::RegionAnchorId,
+        metadata: MappedCellSource,
     ) {
         self.cells.push(ArtifactCell {
             name: instance_name.to_owned(),
             cell_type: cell_name.to_owned(),
             library_cell: Some(library_cell),
             connections,
-            metadata: MappedCellSource::Value { value, region },
+            metadata,
         });
     }
 
@@ -786,13 +878,25 @@ impl ArtifactBuilder {
         let source = plan.sources.first().ok_or_else(|| {
             crate::SynthError::invariant("regional state-cell plan has no semantic source")
         })?;
+        let metadata = match source.source {
+            SequentialStateSource::Operation { value, .. } => MappedCellSource::Value {
+                value,
+                region: plan.region,
+            },
+            SequentialStateSource::Memory {
+                memory, ordinal, ..
+            } => MappedCellSource::Memory {
+                memory,
+                ordinal,
+                region: plan.region,
+            },
+        };
         self.push_cell(
             &plan.instance_name,
             &plan.cell_name,
             library_cell,
             connections.into_boxed_slice(),
-            source.value,
-            plan.region,
+            metadata,
         );
         Ok(())
     }
@@ -838,8 +942,10 @@ impl ArtifactBuilder {
             &plan.cell_name,
             library_cell,
             connections,
-            plan.source,
-            plan.region,
+            MappedCellSource::Value {
+                value: plan.source,
+                region: plan.region,
+            },
         );
         Ok(())
     }
@@ -855,8 +961,24 @@ impl ArtifactBuilder {
         module: &word::WordModule,
         source: &SequentialSourceBit,
     ) -> Result<String, crate::SynthError> {
+        let Some(source_value) = source.source_value() else {
+            let SequentialStateSource::Memory {
+                memory, ordinal, ..
+            } = source.source
+            else {
+                unreachable!("a source without a value is a memory state")
+            };
+            let memory = module.memory(memory).ok_or_else(|| {
+                crate::SynthError::invariant("state-cell memory source is not live")
+            })?;
+            let name = legalize_identifier(module.name_str(memory.name));
+            return Ok(unique_instance_name(
+                module,
+                format!("{name}_reg_{ordinal}_{}_", source.bit),
+            ));
+        };
         let stored = module
-            .value(source.value)
+            .value(source_value)
             .ok_or_else(|| crate::SynthError::invariant("state-cell source value is not live"))?;
         let word::ValueKind::Operation(operation) = stored.kind else {
             return Err(crate::SynthError::invariant(
@@ -866,7 +988,7 @@ impl ArtifactBuilder {
         let target = module
             .connects()
             .iter()
-            .find(|connect| connect.value == source.value)
+            .find(|connect| connect.value == source_value)
             .map(|connect| &connect.target);
         let projected = if target.is_none() {
             let semantics = crate::mapping::roots::FullDomainRootSemantics::new(module)?;
@@ -879,7 +1001,7 @@ impl ArtifactBuilder {
                             .canonical_publication_bit(connect.value, target_bit)
                             .ok()?,
                         crate::mapping::roots::CanonicalPublicationBit::Value { value, bit }
-                            if value == source.value && bit == 0
+                            if value == source_value && bit == 0
                     )
                     .then_some((connect.target.signal, target_bit))
                 })
@@ -1013,6 +1135,75 @@ mod tests {
     use opto_ir::word::{Edge, LValue, PortDirection, RegisterOp, SourceSpan, WordType};
 
     #[test]
+    fn memory_register_bank_uses_memory_state_semantics() {
+        let source_span = SourceSpan::stable("memory state binding test");
+        let mut source = word::WordModule::new("source");
+        let memory = source
+            .add_memory(
+                "memory",
+                WordType::bits(8).unwrap(),
+                std::num::NonZeroU32::new(2).unwrap(),
+                source_span.clone(),
+            )
+            .unwrap();
+        let mut local = word::WordModule::new("local");
+        let data = local
+            .constant(
+                opto_ir::ConstBits::from_bin_str("00000000").unwrap(),
+                WordType::bits(8).unwrap(),
+                source_span.clone(),
+            )
+            .unwrap();
+        let clock = local
+            .constant(
+                opto_ir::ConstBits::from_bin_str("0").unwrap(),
+                WordType::bits(1).unwrap(),
+                source_span.clone(),
+            )
+            .unwrap();
+        let state = local
+            .register(
+                RegisterOp {
+                    name: None,
+                    d: data,
+                    clock,
+                    edge: Edge::Pos,
+                    enable: None,
+                    resets: vec![],
+                },
+                source_span,
+            )
+            .unwrap();
+        let word::ValueKind::Operation(operation) = local.value(state).unwrap().kind else {
+            unreachable!()
+        };
+        let mut semantics = crate::planning::regional::LocalOperationSemantics::default();
+        semantics.record_generated(operation, []).unwrap();
+        semantics.record_memory_state(operation, memory, 1).unwrap();
+
+        let bindings = local_sequential_bindings(
+            &local,
+            &source,
+            crate::RegionAnchorId::from_bytes_for_test([1; 32]),
+            &semantics,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert!(matches!(
+            bindings[0].states[0],
+            SequentialStateSource::Memory {
+                memory: bound,
+                ordinal: 1,
+                width: 8,
+                ..
+            } if bound == memory
+        ));
+    }
+
+    #[test]
     fn stable_state_region_follows_the_scalar_operation_emitted_by_bit_lowering() {
         let mut module = word::WordModule::new("stable_state_region");
         let bit = WordType::bits(1).unwrap();
@@ -1081,8 +1272,7 @@ mod tests {
         assert_eq!(
             lowered[0].sources.as_ref(),
             &[SequentialSourceBit {
-                cell: source_operations[0].states[0].0,
-                value: source_operations[0].states[0].1,
+                source: source_operations[0].states[0],
                 bit: 0,
                 state_relation: None,
             }]

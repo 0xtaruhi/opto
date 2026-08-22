@@ -21,7 +21,8 @@ pub(crate) use rewrite::{
     window_cares,
 };
 pub(crate) use subject::{
-    CanonicalRegionLogic, ChoiceGraph, ChoiceScopeId, ChoiceSubject, RegionLogicOptions,
+    CanonicalRegionLogic, ChoiceDesign, ChoiceGraph, ChoiceScopeId, ChoiceSubject,
+    RegionLogicOptions,
 };
 
 pub(crate) fn inverter_truth() -> TruthTable {

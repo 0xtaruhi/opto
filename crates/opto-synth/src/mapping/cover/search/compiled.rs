@@ -165,6 +165,7 @@ impl CompiledMapping {
             .sum::<usize>();
         let mut arenas = Vec::with_capacity(shards.len());
         let mut ranges = Vec::with_capacity(node_count * 2);
+        let mut dependency_start = 0usize;
         for (arena_index, (candidates, lengths, _)) in shards.into_iter().enumerate() {
             let arena = u32::try_from(arena_index).map_err(|_| {
                 crate::SynthError::capacity("cover candidate shard count exceeds 32-bit capacity")
@@ -184,8 +185,16 @@ impl CompiledMapping {
                                 "cover candidate range exceeds 32-bit capacity",
                             )
                         })?,
+                        dependency_start: dependency_start.try_into().map_err(|_| {
+                            crate::SynthError::capacity(
+                                "cover candidate dependency rows exceed 32-bit capacity",
+                            )
+                        })?,
                     });
                     start += len;
+                    dependency_start = dependency_start.checked_add(len).ok_or_else(|| {
+                        crate::SynthError::capacity("cover candidate dependency rows")
+                    })?;
                 }
             }
             if start != candidates.len() {
@@ -204,6 +213,38 @@ impl CompiledMapping {
             arenas: arenas.into_boxed_slice(),
             ranges: ranges.into_boxed_slice(),
         };
+        let dependency_capacity = candidate_count
+            .checked_mul(crate::boolean::logic::MAX_MATCH_INPUTS + 1)
+            .ok_or_else(|| crate::SynthError::capacity("cover candidate dependencies"))?;
+        let mut candidate_dependencies =
+            opto_core::PackedRowsBuilder::try_with_capacity(candidate_count, dependency_capacity)
+                .map_err(|_| crate::SynthError::capacity("cover candidate dependencies"))?;
+        for slot in 0..node_count * 2 {
+            let node = LogicNodeId::from_index(slot / 2);
+            for candidate in &candidates[slot] {
+                let cut = cuts.cuts(node)[candidate.cut as usize];
+                let mut dependencies = smallvec::SmallVec::<[u32; 8]>::new();
+                for (input, &leaf) in cut.leaves().iter().enumerate() {
+                    dependencies.push(
+                        candidate
+                            .leaf_slot(input, leaf)
+                            .try_into()
+                            .map_err(|_| crate::SynthError::capacity("cover dependency slot"))?,
+                    );
+                }
+                if let Some(extra) = candidate.extra_slot(cut) {
+                    dependencies.push(
+                        extra
+                            .try_into()
+                            .map_err(|_| crate::SynthError::capacity("cover dependency slot"))?,
+                    );
+                }
+                candidate_dependencies
+                    .try_push_row(dependencies)
+                    .map_err(|_| crate::SynthError::capacity("cover candidate dependencies"))?;
+            }
+        }
+        let candidate_dependencies = candidate_dependencies.finish();
         crate::api::diagnostics::trace!(
             trace,
             "cover.candidates",
@@ -243,6 +284,7 @@ impl CompiledMapping {
             truths,
             live_nodes,
             candidates,
+            candidate_dependencies,
             joints: joints.into_boxed_slice(),
             slot_joints,
             joints_by_node,

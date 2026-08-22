@@ -111,7 +111,7 @@ pub(crate) fn balance(network: &LogicGraph, roots: &[LogicNodeId]) -> TransformP
 
     let mut outcome = TransformProduct {
         network: builder.graph,
-        remap: remap.into_boxed_slice(),
+        remap: remap.into(),
         analyses: TransformAnalyses::default(),
     };
     outcome.network.freeze();

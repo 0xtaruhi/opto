@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-use super::{Candidate, CoverPlanner, LiteralDependencies, MappingCost, SlotChoice, opposite};
+use super::{CoverPlanner, LiteralDependencies, MappingCost, SlotChoice, opposite};
 
 #[derive(Debug)]
 pub(crate) struct CoverDemand {
@@ -142,19 +142,12 @@ impl CoverPlanner<'_> {
     pub(crate) fn candidate_dependencies(
         &self,
         slot: usize,
-        candidate: Candidate,
-    ) -> LiteralDependencies {
-        let cut = self.candidate_cut(slot, &candidate);
-        let mut dependencies = LiteralDependencies::new();
-        dependencies.extend(
-            cut.leaves()
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(input, leaf)| candidate.leaf_slot(input, leaf)),
-        );
-        dependencies.extend(candidate.extra_slot(cut));
-        dependencies
+        candidate: usize,
+    ) -> impl Iterator<Item = usize> + '_ {
+        self.candidate_dependencies
+            .row(self.candidates.dependency_row(slot, candidate))
+            .iter()
+            .map(|&dependency| dependency as usize)
     }
 
     pub(crate) fn choice_dependencies(
@@ -165,14 +158,38 @@ impl CoverPlanner<'_> {
         match choice {
             SlotChoice::Constant(_) | SlotChoice::Boundary(_) => LiteralDependencies::new(),
             SlotChoice::Inverter => LiteralDependencies::from_slice(&[opposite(slot)]),
-            SlotChoice::Cell(candidate) => {
-                self.candidate_dependencies(slot, self.candidates[slot][candidate as usize])
-            }
+            SlotChoice::Cell(candidate) => self
+                .candidate_dependencies(slot, candidate as usize)
+                .collect(),
             SlotChoice::JointOutput(joint) => {
                 LiteralDependencies::from_slice(&[self.base_slots + joint as usize])
             }
             SlotChoice::JointCell(joint) => self.joints[joint as usize].leaf_slots().collect(),
         }
+    }
+
+    pub(crate) fn visit_choice_dependencies(
+        &self,
+        slot: usize,
+        choice: SlotChoice,
+        mut visit: impl FnMut(usize) -> Result<(), crate::SynthError>,
+    ) -> Result<(), crate::SynthError> {
+        match choice {
+            SlotChoice::Constant(_) | SlotChoice::Boundary(_) => {}
+            SlotChoice::Inverter => visit(opposite(slot))?,
+            SlotChoice::Cell(candidate) => {
+                for dependency in self.candidate_dependencies(slot, candidate as usize) {
+                    visit(dependency)?;
+                }
+            }
+            SlotChoice::JointOutput(joint) => visit(self.base_slots + joint as usize)?,
+            SlotChoice::JointCell(joint) => {
+                for dependency in self.joints[joint as usize].leaf_slots() {
+                    visit(dependency)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn literal_access_cost(&self, slot: usize) -> MappingCost {

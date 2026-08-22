@@ -315,6 +315,7 @@ pub(super) struct CompiledMapping {
     truths: CutTruthDatabase,
     live_nodes: Box<[bool]>,
     candidates: CandidateIndex,
+    candidate_dependencies: opto_core::PackedRows<u32>,
     joints: Box<[Joint]>,
     slot_joints: opto_core::PackedRows<u32>,
     joints_by_node: opto_core::PackedRows<u32>,
@@ -325,6 +326,7 @@ struct CandidateRange {
     arena: u32,
     start: u32,
     len: u32,
+    dependency_start: u32,
 }
 
 impl std::ops::Index<usize> for CandidateIndex {
@@ -335,6 +337,12 @@ impl std::ops::Index<usize> for CandidateIndex {
         let arena = &self.arenas[range.arena as usize];
         let start = range.start as usize;
         &arena[start..start + range.len as usize]
+    }
+}
+
+impl CandidateIndex {
+    fn dependency_row(&self, slot: usize, candidate: usize) -> usize {
+        self.ranges[slot].dependency_start as usize + candidate
     }
 }
 

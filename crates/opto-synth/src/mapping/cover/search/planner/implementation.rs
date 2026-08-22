@@ -40,6 +40,7 @@ impl<'a> CoverPlanner<'a> {
             truths,
             live_nodes,
             candidates,
+            candidate_dependencies,
             joints,
             slot_joints,
             joints_by_node,
@@ -86,11 +87,13 @@ impl<'a> CoverPlanner<'a> {
             catalog,
             inverter,
             candidates,
+            candidate_dependencies,
             joints,
             slot_joints,
             joints_by_node,
             base_slots: slots,
             choices: vec![None; total],
+            choice_areas: vec![0.0; total],
             flows: vec![MappingCost::zero(); total],
             required_arrivals: vec![f64::INFINITY; total],
             load_estimates: endpoint_loads.clone(),
@@ -138,7 +141,7 @@ impl<'a> CoverPlanner<'a> {
                 let virtual_slot = self.base_slots + joint_id as usize;
                 match cost {
                     Some(cost) => self.set(virtual_slot, SlotChoice::JointCell(joint_id), cost),
-                    None => self.choices[virtual_slot] = None,
+                    None => self.set_choice(virtual_slot, None),
                 }
             }
 
@@ -151,7 +154,7 @@ impl<'a> CoverPlanner<'a> {
                     let slot_id = index * 2 + phase;
                     match choice {
                         Some(choice) => self.set(slot_id, choice.choice, choice.cost),
-                        None => self.choices[slot_id] = None,
+                        None => self.set_choice(slot_id, None),
                     }
                 }
             }
@@ -426,7 +429,7 @@ impl<'a> CoverPlanner<'a> {
     }
 
     fn set(&mut self, slot: usize, choice: SlotChoice, cost: MappingCost) {
-        self.choices[slot] = Some(choice);
+        self.set_choice(slot, Some(choice));
         self.flows[slot] = cost;
     }
 

@@ -106,6 +106,7 @@ impl RegionalMapper<'_> {
                     .is_source_instance(state.module, *instance)?,
                 MappedCellSource::StructuralValue(_)
                 | MappedCellSource::Value { .. }
+                | MappedCellSource::Memory { .. }
                 | MappedCellSource::Region { .. } => true,
             };
             if managed {

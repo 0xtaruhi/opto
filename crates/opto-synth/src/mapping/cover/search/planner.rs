@@ -33,11 +33,13 @@ pub(crate) struct CoverPlanner<'a> {
     catalog: &'a CombinationalCellCatalog,
     inverter: Option<InverterCell>,
     candidates: &'a CandidateIndex,
+    candidate_dependencies: &'a opto_core::PackedRows<u32>,
     joints: &'a [Joint],
     slot_joints: &'a opto_core::PackedRows<u32>,
     joints_by_node: &'a opto_core::PackedRows<u32>,
     base_slots: usize,
     choices: Vec<Option<SlotChoice>>,
+    choice_areas: Vec<f64>,
     flows: Vec<MappingCost>,
     required_arrivals: Vec<f64>,
     endpoint_loads: Vec<f64>,
@@ -60,6 +62,8 @@ pub(crate) struct CoverPlanner<'a> {
 #[derive(Default)]
 struct ReferenceScratch {
     seeded_roots: Vec<usize>,
+    counts: Vec<u32>,
+    next_counts: Vec<u32>,
     next: Vec<usize>,
 }
 

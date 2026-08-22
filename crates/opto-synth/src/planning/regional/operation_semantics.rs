@@ -1,54 +1,143 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Compile-time-typed source provenance for region-local operations.
+//! Semantic bindings for region-local operations.
 
 use opto_ir::word;
 use smallvec::SmallVec;
 
-/// The sole mutable owner of local-operation to source-operation provenance.
-///
-/// Rows are dense in the local Word operation arena. Every mutation sorts and
-/// deduplicates its source set, so import, generated-node sharing, optimization,
-/// binding, and durable publication cannot maintain competing representations.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct LocalOperationProvenance {
-    rows: Vec<SmallVec<[word::OpId; 1]>>,
+/// Stable semantic source of one private sequential operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum LocalStateSource {
+    Operation(word::OpId),
+    Memory {
+        memory: word::MemoryId,
+        ordinal: u32,
+    },
 }
 
-impl LocalOperationProvenance {
-    /// Sets one dense provenance row, appending it when the operation is new.
-    pub(crate) fn set(
+#[derive(Debug, Clone, Default)]
+struct LocalOperationBinding {
+    operations: SmallVec<[word::OpId; 1]>,
+    states: SmallVec<[LocalStateSource; 1]>,
+}
+
+/// Dense semantic bindings for the private Word operation arena.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LocalOperationSemantics {
+    rows: Vec<LocalOperationBinding>,
+}
+
+impl LocalOperationSemantics {
+    fn set_row(
         &mut self,
         local: word::OpId,
         sources: impl IntoIterator<Item = word::OpId>,
+        states: impl IntoIterator<Item = LocalStateSource>,
     ) -> Result<(), crate::SynthError> {
-        let sources = normalize(sources);
+        let binding = LocalOperationBinding {
+            operations: normalize(sources),
+            states: normalize(states),
+        };
         if local.index() == self.rows.len() {
-            self.rows.push(sources);
+            self.rows.push(binding);
             return Ok(());
         }
         let row = self.rows.get_mut(local.index()).ok_or_else(|| {
-            crate::SynthError::invariant("local operation provenance rows are not dense")
+            crate::SynthError::invariant("local operation semantic rows are not dense")
         })?;
-        *row = sources;
+        *row = binding;
         Ok(())
     }
 
-    /// Merges additional source operations into an existing local operation.
-    pub(crate) fn merge(
+    /// Records one imported source operation and its state identity, if any.
+    pub(crate) fn record_source(
+        &mut self,
+        local: word::OpId,
+        source: word::OpId,
+        state: bool,
+    ) -> Result<(), crate::SynthError> {
+        self.set_row(
+            local,
+            [source],
+            state.then_some(LocalStateSource::Operation(source)),
+        )
+    }
+
+    /// Records a generated combinational operation and its source operations.
+    pub(crate) fn record_generated(
         &mut self,
         local: word::OpId,
         sources: impl IntoIterator<Item = word::OpId>,
     ) -> Result<(), crate::SynthError> {
-        let mut merged = self
+        self.set_row(local, sources, [])
+    }
+
+    /// Binds a generated register-bank word directly to its source memory.
+    pub(crate) fn record_memory_state(
+        &mut self,
+        local: word::OpId,
+        memory: word::MemoryId,
+        ordinal: u32,
+    ) -> Result<(), crate::SynthError> {
+        let operations = self
             .sources(local)
-            .ok_or_else(|| {
-                crate::SynthError::invariant("local operation provenance row is absent")
-            })?
+            .ok_or_else(|| crate::SynthError::invariant("local operation semantic row is absent"))?
             .to_vec();
-        merged.extend(sources);
-        self.set(local, merged)
+        self.set_row(
+            local,
+            operations,
+            [LocalStateSource::Memory { memory, ordinal }],
+        )
+    }
+
+    /// Transfers the complete semantic row through a state replacement.
+    pub(crate) fn replace_from(
+        &mut self,
+        local: word::OpId,
+        replaced: word::OpId,
+    ) -> Result<(), crate::SynthError> {
+        let binding = self.rows.get(replaced.index()).cloned().ok_or_else(|| {
+            crate::SynthError::invariant("replaced operation semantic row is absent")
+        })?;
+        let row = self.rows.get_mut(local.index()).ok_or_else(|| {
+            crate::SynthError::invariant("replacement operation semantic row is absent")
+        })?;
+        *row = binding;
+        Ok(())
+    }
+
+    /// Merges the complete semantic row after an equivalence-backed sharing rewrite.
+    pub(crate) fn merge_from(
+        &mut self,
+        local: word::OpId,
+        merged: word::OpId,
+    ) -> Result<(), crate::SynthError> {
+        let binding = self.rows.get(merged.index()).cloned().ok_or_else(|| {
+            crate::SynthError::invariant("merged operation semantic row is absent")
+        })?;
+        let row = self.rows.get(local.index()).cloned().ok_or_else(|| {
+            crate::SynthError::invariant("local operation semantic row is absent")
+        })?;
+        let mut operations = row.operations;
+        operations.extend(binding.operations);
+        let mut states = row.states;
+        states.extend(binding.states);
+        self.set_row(local, operations, states)
+    }
+
+    /// Extends a reused generated operation with newly discovered sources.
+    pub(crate) fn extend_generated(
+        &mut self,
+        local: word::OpId,
+        sources: impl IntoIterator<Item = word::OpId>,
+    ) -> Result<(), crate::SynthError> {
+        let row = self.rows.get(local.index()).cloned().ok_or_else(|| {
+            crate::SynthError::invariant("local operation semantic row is absent")
+        })?;
+        let mut operations = row.operations;
+        operations.extend(sources);
+        self.set_row(local, operations, row.states)
     }
 
     /// Verifies that every operation constructed by the importer was recorded.
@@ -98,7 +187,7 @@ impl LocalOperationProvenance {
                     )
                 })?);
             }
-            self.set(local, sources)?;
+            self.record_generated(local, sources)?;
         }
         Ok(())
     }
@@ -120,16 +209,22 @@ impl LocalOperationProvenance {
                 ));
             }
             let mut sources = Vec::new();
+            let mut states = Vec::new();
             for &operation in &rewrite.replaced {
                 sources.extend(self.sources(operation).ok_or_else(|| {
                     crate::SynthError::invariant(
                         "an SSA replacement references missing operation provenance",
                     )
                 })?);
+                states.extend(self.states(operation).ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "an SSA replacement references missing state semantics",
+                    )
+                })?);
             }
             for index in rewrite.created.clone() {
                 let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
-                self.set(operation, sources.iter().copied())?;
+                self.set_row(operation, sources.iter().copied(), states.iter().copied())?;
             }
             next = rewrite.created.end;
         }
@@ -173,17 +268,26 @@ impl LocalOperationProvenance {
 
     /// Returns the normalized source-operation set for one local operation.
     pub(crate) fn sources(&self, local: word::OpId) -> Option<&[word::OpId]> {
-        self.rows.get(local.index()).map(SmallVec::as_slice)
+        self.rows
+            .get(local.index())
+            .map(|row| row.operations.as_slice())
+    }
+
+    /// Returns the exact source states represented by one local operation.
+    pub(crate) fn states(&self, local: word::OpId) -> Option<&[LocalStateSource]> {
+        self.rows
+            .get(local.index())
+            .map(|row| row.states.as_slice())
     }
 
     /// Iterates over source sets in dense local operation order.
     #[cfg(test)]
     pub(crate) fn source_sets(&self) -> impl Iterator<Item = &[word::OpId]> {
-        self.rows.iter().map(SmallVec::as_slice)
+        self.rows.iter().map(|row| row.operations.as_slice())
     }
 }
 
-fn normalize(sources: impl IntoIterator<Item = word::OpId>) -> SmallVec<[word::OpId; 1]> {
+fn normalize<T: Ord>(sources: impl IntoIterator<Item = T>) -> SmallVec<[T; 1]> {
     let mut sources = sources.into_iter().collect::<SmallVec<_>>();
     sources.sort_unstable();
     sources.dedup();
@@ -199,12 +303,14 @@ mod tests {
         let first = word::OpId::from_index(0).unwrap();
         let second = word::OpId::from_index(1).unwrap();
         let local = word::OpId::from_index(0).unwrap();
-        let mut provenance = LocalOperationProvenance::default();
+        let mut provenance = LocalOperationSemantics::default();
 
-        provenance.set(local, [second, first, second]).unwrap();
+        provenance
+            .record_generated(local, [second, first, second])
+            .unwrap();
         assert_eq!(provenance.sources(local).unwrap(), [first, second]);
-        provenance.set(local, [second]).unwrap();
-        provenance.merge(local, [first, second]).unwrap();
+        provenance.record_generated(local, [second]).unwrap();
+        provenance.extend_generated(local, [first, second]).unwrap();
         assert_eq!(provenance.sources(local).unwrap(), [first, second]);
     }
 
@@ -238,8 +344,10 @@ mod tests {
             panic!("unary builder did not create an operation");
         };
         let source = word::OpId::from_index(7).unwrap();
-        let mut provenance = LocalOperationProvenance::default();
-        provenance.set(original_operation, [source]).unwrap();
+        let mut provenance = LocalOperationSemantics::default();
+        provenance
+            .record_generated(original_operation, [source])
+            .unwrap();
 
         let generated = module
             .unary(

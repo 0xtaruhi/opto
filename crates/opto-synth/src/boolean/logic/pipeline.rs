@@ -7,6 +7,9 @@ use super::network::{LogicGraph, LogicNode, LogicNodeId};
 use super::rewrite::{RewriteIncremental, remap_literal};
 use hashbrown::HashMap;
 use opto_runtime::ExecutionContext;
+use std::sync::Arc;
+
+pub(super) type NodeRemap = Arc<[Option<LogicNodeId>]>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CopyStyle {
@@ -16,7 +19,7 @@ enum CopyStyle {
 
 pub(super) struct LogicPipelineOutcome {
     pub(super) network: LogicGraph,
-    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) remap: NodeRemap,
     /// Proven alternatives keyed by the selected positive node.
     pub(super) alternatives: opto_core::PackedRows<LogicNodeId>,
 }
@@ -26,7 +29,7 @@ const MUX_DECOMPOSITION_ROUNDS: usize = 2;
 
 pub(super) struct TransformProduct {
     pub(super) network: LogicGraph,
-    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) remap: NodeRemap,
     pub(super) analyses: TransformAnalyses,
 }
 
@@ -40,7 +43,7 @@ pub(super) struct TransformAnalyses {
 pub(super) struct TransformState {
     pub(super) network: LogicGraph,
     pub(super) roots: Box<[LogicNodeId]>,
-    pub(super) remap: Box<[Option<LogicNodeId>]>,
+    pub(super) remap: NodeRemap,
     pub(super) analyses: TransformAnalyses,
 }
 
@@ -452,11 +455,12 @@ pub(super) fn map_roots(
 pub(super) fn compose_remaps(
     first: &[Option<LogicNodeId>],
     second: &[Option<LogicNodeId>],
-) -> Box<[Option<LogicNodeId>]> {
+) -> NodeRemap {
     first
         .iter()
         .map(|&literal| literal.and_then(|literal| remap_literal(second, literal)))
-        .collect()
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn copy_graph(
@@ -465,7 +469,7 @@ fn copy_graph(
     target: &mut LogicGraph,
     variables: &mut HashMap<u32, LogicNodeId>,
     style: CopyStyle,
-) -> Result<Box<[Option<LogicNodeId>]>, crate::SynthError> {
+) -> Result<NodeRemap, crate::SynthError> {
     let mut remap = vec![None; source.node_count()];
     for index in 0..source.node_count() {
         if live.is_some_and(|live| !live[index]) {
@@ -506,7 +510,7 @@ fn copy_graph(
         };
         remap[index] = Some(mapped);
     }
-    Ok(remap.into_boxed_slice())
+    Ok(remap.into())
 }
 
 fn mapped_literal(

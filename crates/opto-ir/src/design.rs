@@ -189,6 +189,24 @@ pub struct Cell<L> {
 pub trait DesignPayload {
     /// Returns the payload's canonical semantic fingerprint.
     fn semantic_fingerprint(&self) -> [u8; 32];
+
+    /// Visits input ordinals that may combinationally affect one output bit.
+    ///
+    /// The default conservatively connects every input to every output. A
+    /// multi-bit payload must override this when its lanes are independent;
+    /// otherwise a cell-level approximation can invent feedback between
+    /// unrelated bits. `output` is an ordinal in [`Cell::outputs`].
+    fn visit_comb_dependencies(
+        &self,
+        output: usize,
+        input_count: usize,
+        visit: &mut dyn FnMut(usize),
+    ) {
+        let _ = output;
+        for input in 0..input_count {
+            visit(input);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -715,55 +733,163 @@ where
     }
 
     fn validate_combinational_acyclic(&self) -> Result<(), DesignError> {
-        let combinational = self
+        let outputs = self
             .cells()
             .filter(|cell| cell.class == CellClass::Combinational)
-            .map(|cell| cell.id)
-            .collect::<BTreeSet<_>>();
-        let mut indegree = combinational
+            .flat_map(|cell| cell.outputs.iter().copied())
+            .collect::<Vec<_>>();
+        let output_rows = outputs
             .iter()
-            .copied()
-            .map(|cell| (cell, 0usize))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let mut successors = std::collections::BTreeMap::<CellId, BTreeSet<CellId>>::new();
+            .enumerate()
+            .map(|(row, &net)| (net, row))
+            .collect::<std::collections::HashMap<_, _>>();
+        let dependency_source = |input: NetBitId| {
+            let NetDriver::Cell {
+                cell: source,
+                output,
+            } = self.net(input)?.driver?
+            else {
+                return None;
+            };
+            self.cell(source)
+                .filter(|cell| cell.class == CellClass::Combinational)
+                .and_then(|cell| cell.outputs.get(output as usize))
+                .and_then(|net| output_rows.get(net))
+                .copied()
+        };
+        let mut successor_counts = vec![0usize; outputs.len()];
         for cell in self
             .cells()
             .filter(|cell| cell.class == CellClass::Combinational)
         {
-            for &input in &cell.inputs {
-                let Some(NetDriver::Cell { cell: source, .. }) =
-                    self.net(input).and_then(|net| net.driver)
-                else {
-                    continue;
-                };
-                if combinational.contains(&source)
-                    && successors.entry(source).or_default().insert(cell.id)
-                {
-                    *indegree
-                        .get_mut(&cell.id)
-                        .expect("combinational cell was indexed") += 1;
+            for (output, _) in cell.outputs.iter().enumerate() {
+                let mut invalid = None;
+                cell.kind
+                    .visit_comb_dependencies(output, cell.inputs.len(), &mut |input| {
+                        let Some(&input_net) = cell.inputs.get(input) else {
+                            invalid = Some(input);
+                            return;
+                        };
+                        if let Some(source) = dependency_source(input_net) {
+                            successor_counts[source] += 1;
+                        }
+                    });
+                if let Some(input) = invalid {
+                    return Err(DesignError::InvalidDependencyOrdinal {
+                        cell: cell.id,
+                        input,
+                    });
                 }
+            }
+        }
+        let mut successor_offsets = Vec::with_capacity(outputs.len() + 1);
+        successor_offsets.push(0usize);
+        for count in successor_counts {
+            successor_offsets.push(
+                successor_offsets
+                    .last()
+                    .copied()
+                    .expect("successor offsets contain their initial row")
+                    .checked_add(count)
+                    .ok_or(DesignError::Capacity(opto_core::CapacityError))?,
+            );
+        }
+        let mut successors = vec![0usize; *successor_offsets.last().unwrap_or(&0)];
+        let mut cursors = successor_offsets[..outputs.len()].to_vec();
+        for cell in self
+            .cells()
+            .filter(|cell| cell.class == CellClass::Combinational)
+        {
+            for (output, &target) in cell.outputs.iter().enumerate() {
+                let target = output_rows[&target];
+                cell.kind
+                    .visit_comb_dependencies(output, cell.inputs.len(), &mut |input| {
+                        let Some(source) = cell
+                            .inputs
+                            .get(input)
+                            .and_then(|&input| dependency_source(input))
+                        else {
+                            return;
+                        };
+                        successors[cursors[source]] = target;
+                        cursors[source] += 1;
+                    });
+            }
+        }
+        let mut indegree = vec![0usize; outputs.len()];
+        for row in 0..outputs.len() {
+            for &successor in &successors[successor_offsets[row]..successor_offsets[row + 1]] {
+                indegree[successor] += 1;
             }
         }
         let mut ready = indegree
             .iter()
-            .filter_map(|(&cell, &degree)| (degree == 0).then_some(cell))
-            .collect::<BTreeSet<_>>();
+            .enumerate()
+            .filter_map(|(row, &degree)| (degree == 0).then_some(row))
+            .collect::<Vec<_>>();
         let mut visited = 0usize;
-        while let Some(cell) = ready.pop_first() {
+        while let Some(net) = ready.pop() {
             visited += 1;
-            for &successor in successors.get(&cell).into_iter().flatten() {
-                let degree = indegree
-                    .get_mut(&successor)
-                    .expect("combinational successor was indexed");
+            for &successor in &successors[successor_offsets[net]..successor_offsets[net + 1]] {
+                let degree = &mut indegree[successor];
                 *degree -= 1;
                 if *degree == 0 {
-                    ready.insert(successor);
+                    ready.push(successor);
                 }
             }
         }
-        if visited != combinational.len() {
-            return Err(DesignError::CombinationalCycle);
+        if visited != outputs.len() {
+            let mut state = vec![0u8; outputs.len()];
+            let mut stack = Vec::<(usize, usize)>::new();
+            let mut cycle = None;
+            for root in 0..outputs.len() {
+                if indegree[root] == 0 || state[root] != 0 {
+                    continue;
+                }
+                state[root] = 1;
+                stack.push((root, 0));
+                while let Some((row, next)) = stack.last_mut() {
+                    let successors =
+                        &successors[successor_offsets[*row]..successor_offsets[*row + 1]];
+                    let Some(&successor) = successors.get(*next) else {
+                        state[*row] = 2;
+                        stack.pop();
+                        continue;
+                    };
+                    *next += 1;
+                    if indegree[successor] == 0 || state[successor] == 2 {
+                        continue;
+                    }
+                    if state[successor] == 0 {
+                        state[successor] = 1;
+                        stack.push((successor, 0));
+                        continue;
+                    }
+                    let start = stack
+                        .iter()
+                        .position(|&(row, _)| row == successor)
+                        .expect("active combinational output is on the DFS stack");
+                    cycle = Some(
+                        stack[start..]
+                            .iter()
+                            .filter_map(|&(row, _)| {
+                                match self.net(outputs[row]).and_then(|net| net.driver) {
+                                    Some(NetDriver::Cell { cell, .. }) => {
+                                        self.cell(cell).map(|cell| cell.source.clone())
+                                    }
+                                    Some(NetDriver::Constant(_)) | None => None,
+                                }
+                            })
+                            .collect(),
+                    );
+                    break;
+                }
+                if cycle.is_some() {
+                    break;
+                }
+            }
+            let cycle = cycle.expect("an unvisited combinational graph contains a cycle");
+            return Err(DesignError::CombinationalCycle(cycle));
         }
         Ok(())
     }
@@ -1120,8 +1246,16 @@ pub enum DesignError {
     #[error("design revision live counts do not match its record pages")]
     LiveCountMismatch,
     /// The scalar cell/net graph contains a combinational cycle.
-    #[error("design revision contains a combinational cycle")]
-    CombinationalCycle,
+    #[error("design revision contains a combinational cycle through cells {0:?}")]
+    CombinationalCycle(Box<[SourceSpan]>),
+    /// A payload reported an input ordinal outside its cell interface.
+    #[error("design cell {cell:?} reports invalid combinational input ordinal {input}")]
+    InvalidDependencyOrdinal {
+        /// Cell whose dependency relation is invalid.
+        cell: CellId,
+        /// Out-of-range input ordinal.
+        input: usize,
+    },
     /// The owning proof engine rejected a transaction certificate.
     #[error("rewrite equivalence certificate was rejected: {0}")]
     ProofRejected(String),
@@ -1137,6 +1271,26 @@ mod tests {
     impl DesignPayload for &'_ str {
         fn semantic_fingerprint(&self) -> [u8; 32] {
             *blake3::hash(self.as_bytes()).as_bytes()
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ParallelBits;
+
+    impl DesignPayload for ParallelBits {
+        fn semantic_fingerprint(&self) -> [u8; 32] {
+            [0x42; 32]
+        }
+
+        fn visit_comb_dependencies(
+            &self,
+            output: usize,
+            input_count: usize,
+            visit: &mut dyn FnMut(usize),
+        ) {
+            if output < input_count {
+                visit(output);
+            }
         }
     }
 
@@ -1263,12 +1417,17 @@ mod tests {
     #[test]
     fn sealing_rejects_a_bit_level_combinational_cycle() {
         let mut builder = DesignBuilder::new(DesignRevisionId::from_bytes(digest(90)));
+        builder.add_net(net(5, Some((0, 0))));
         builder.add_net(net(10, Some((2, 0))));
         builder.add_net(net(11, Some((1, 0))));
+        builder.add_cell(cell(0, "cycle sink", &[11], &[5]));
         builder.add_cell(cell(1, "left", &[10], &[11]));
         builder.add_cell(cell(2, "right", &[11], &[10]));
 
-        assert_eq!(builder.seal().unwrap_err(), DesignError::CombinationalCycle);
+        assert!(matches!(
+            builder.seal().unwrap_err(),
+            DesignError::CombinationalCycle(_)
+        ));
     }
 
     #[test]
@@ -1280,6 +1439,38 @@ mod tests {
         let mut state = cell(2, "register", &[11], &[10]);
         state.class = CellClass::StateBoundary;
         builder.add_cell(state);
+
+        builder.seal().unwrap();
+    }
+
+    #[test]
+    fn independent_bit_lanes_do_not_form_a_cell_level_cycle() {
+        let mut builder = DesignBuilder::new(DesignRevisionId::from_bytes(digest(90)));
+        for net in [
+            net(10, Some((1, 0))),
+            net(11, Some((1, 1))),
+            net(12, Some((2, 0))),
+            net(13, Some((2, 1))),
+            net(14, None),
+        ] {
+            builder.add_net(net);
+        }
+        builder.add_cell(Cell {
+            id: CellId::from_bytes(digest(1)),
+            kind: ParallelBits,
+            class: CellClass::Combinational,
+            inputs: [12, 14].map(|id| NetBitId::from_bytes(digest(id))).into(),
+            outputs: [10, 11].map(|id| NetBitId::from_bytes(digest(id))).into(),
+            source: SourceSpan::stable("parallel lanes left"),
+        });
+        builder.add_cell(Cell {
+            id: CellId::from_bytes(digest(2)),
+            kind: ParallelBits,
+            class: CellClass::Combinational,
+            inputs: [14, 11].map(|id| NetBitId::from_bytes(digest(id))).into(),
+            outputs: [12, 13].map(|id| NetBitId::from_bytes(digest(id))).into(),
+            source: SourceSpan::stable("parallel lanes right"),
+        });
 
         builder.seal().unwrap();
     }
