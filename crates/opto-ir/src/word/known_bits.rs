@@ -1704,4 +1704,45 @@ mod tests {
 
         assert_eq!(facts.bit(&module, value, 0), KnownBit::Zero);
     }
+    #[test]
+    fn append_query_cycles_track_newly_driven_bits() {
+        // Mirrors the RTL normalization pattern behind issue #111: append one
+        // slice driver, synchronize, then query known bits before the next
+        // append. Facts must track each newly driven bit without losing any
+        // previously proven bit.
+        let mut module = WordModule::new("append_query_loop");
+        let source = SourceSpan::default();
+        let width = 64;
+        let signal = module.add_wire("w", ty(width), source.clone()).unwrap();
+        let read = module.read_signal(signal, source.clone()).unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+        for step in 0..width {
+            let value = module
+                .constant(ConstBits::from_bin_str("1").unwrap(), ty(1), source.clone())
+                .unwrap();
+            module
+                .connect(
+                    LValue::signal(signal).with_range(BitRange {
+                        msb: step,
+                        lsb: step,
+                    }),
+                    value,
+                    source.clone(),
+                )
+                .unwrap();
+            facts.sync_append_only(&module);
+            for bit in 0..width {
+                let expected = if bit <= step {
+                    KnownBit::One
+                } else {
+                    KnownBit::Unknown
+                };
+                assert_eq!(
+                    facts.bit(&module, read, bit),
+                    expected,
+                    "bit {bit} after driving {step} slices"
+                );
+            }
+        }
+    }
 }
