@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::Index;
 use std::{error::Error, fmt};
 
@@ -39,7 +40,7 @@ impl Error for PackedRowsError {}
 
 /// Immutable compressed-row storage backed by one offsets allocation and one
 /// values allocation.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PackedRows<T> {
     offsets: Box<[u32]>,
     values: Box<[T]>,
@@ -357,6 +358,34 @@ impl<T> Index<usize> for PackedRows<T> {
 
     fn index(&self, row: usize) -> &Self::Output {
         self.row(row)
+    }
+}
+
+impl<T: Serialize> Serialize for PackedRows<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (self.offsets.as_ref(), self.values.as_ref()).serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PackedRows<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (offsets, values) = <(Box<[u32]>, Box<[T]>)>::deserialize(deserializer)?;
+        if offsets.is_empty() || offsets[0] != 0 {
+            return Err(serde::de::Error::custom(
+                "packed rows require a zero leading offset",
+            ));
+        }
+        if *offsets.last().unwrap_or(&0) as usize != values.len() {
+            return Err(serde::de::Error::custom(
+                "packed rows trailing offset must equal the value count",
+            ));
+        }
+        if offsets.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err(serde::de::Error::custom(
+                "packed row offsets must be non-decreasing",
+            ));
+        }
+        Ok(Self { offsets, values })
     }
 }
 
