@@ -366,6 +366,43 @@ where
     }
 }
 
+/// Consumer-index edits accumulated across one commit wave.
+///
+/// A wave's deltas are proven disjoint before anything is applied, but two
+/// disjoint deltas may still consume the same boundary net, so the consumer
+/// index is the one structure they genuinely share. Recording the edits and
+/// merging them per net keeps that sharing out of the per-delta path.
+#[derive(Default)]
+struct ConsumerLedger {
+    nets: std::collections::BTreeMap<usize, NetConsumerEdits>,
+}
+
+#[derive(Default)]
+struct NetConsumerEdits {
+    removed: Vec<CellId>,
+    added: Vec<CellId>,
+    /// The net itself was removed, so its list is empty whatever else is
+    /// recorded for the slot.
+    cleared: bool,
+}
+
+impl ConsumerLedger {
+    fn record_attach(&mut self, slot: usize, cell: CellId) {
+        self.nets.entry(slot).or_default().added.push(cell);
+    }
+
+    fn record_detach(&mut self, slot: usize, cell: CellId) {
+        self.nets.entry(slot).or_default().removed.push(cell);
+    }
+
+    fn record_net_removed(&mut self, slot: usize) {
+        let edits = self.nets.entry(slot).or_default();
+        edits.removed.clear();
+        edits.added.clear();
+        edits.cleared = true;
+    }
+}
+
 #[derive(Debug, Clone)]
 /// Immutable canonical design generation.
 ///
@@ -490,9 +527,12 @@ where
         }
 
         let mut provisional = self.clone();
+        let mut ledger = ConsumerLedger::default();
         for delta in &deltas {
-            provisional.apply_delta(delta)?;
+            provisional.apply_delta(delta, &mut ledger)?;
         }
+        // One rebuild per touched net, after every delta has been recorded.
+        provisional.flush_consumer_edits(&ledger)?;
         provisional.revision = derive_revision_id(self.revision, &deltas);
         provisional.validate()?;
         Ok(provisional)
@@ -626,14 +666,18 @@ where
         Ok(())
     }
 
-    fn apply_delta(&mut self, delta: &RewriteDelta<L>) -> Result<(), DesignError> {
+    fn apply_delta(
+        &mut self,
+        delta: &RewriteDelta<L>,
+        ledger: &mut ConsumerLedger,
+    ) -> Result<(), DesignError> {
         for &entity in delta.footprint.replaces.as_slice() {
             match entity {
                 EntityId::Cell(id) if !delta.cells.iter().any(|cell| cell.id == id) => {
-                    self.remove_cell(id)?;
+                    self.remove_cell(id, ledger)?;
                 }
                 EntityId::NetBit(id) if !delta.nets.iter().any(|net| net.id == id) => {
-                    self.remove_net(id)?;
+                    self.remove_net(id, ledger)?;
                 }
                 EntityId::Cell(_) | EntityId::NetBit(_) => {}
             }
@@ -646,7 +690,7 @@ where
         let mut cells = delta.cells.to_vec();
         cells.sort_unstable_by_key(|cell| cell.id);
         for cell in cells {
-            self.upsert_cell(cell)?;
+            self.upsert_cell(cell, ledger)?;
         }
         Ok(())
     }
@@ -901,7 +945,11 @@ where
         }
     }
 
-    fn insert_new_cell(&mut self, cell: Cell<L>) -> Result<(), DesignError> {
+    fn insert_new_cell(
+        &mut self,
+        cell: Cell<L>,
+        ledger: &mut ConsumerLedger,
+    ) -> Result<(), DesignError> {
         let id = cell.id;
         if self.cell_directory.get(id).is_some() {
             return Err(DesignError::StableIdCollision(EntityId::Cell(id)));
@@ -909,7 +957,7 @@ where
         let slot = self.cells.len();
         let encoded =
             u32::try_from(slot).map_err(|_| DesignError::Capacity(opto_core::CapacityError))?;
-        self.attach_inputs(cell.id, &cell.inputs)?;
+        self.attach_inputs(cell.id, &cell.inputs, ledger)?;
         self.cells.try_set(slot, Some(cell))?;
         let (directory, previous) = self.cell_directory.insert(id, encoded);
         debug_assert!(previous.is_none());
@@ -935,20 +983,24 @@ where
         Ok(())
     }
 
-    fn upsert_cell(&mut self, cell: Cell<L>) -> Result<(), DesignError> {
+    fn upsert_cell(
+        &mut self,
+        cell: Cell<L>,
+        ledger: &mut ConsumerLedger,
+    ) -> Result<(), DesignError> {
         if let Some(slot) = self.cell_directory.get(cell.id) {
             let previous = self.cells.get(slot as usize).and_then(Option::as_ref);
             let was_live = previous.is_some();
             if let Some(previous) = previous {
                 let inputs = previous.inputs.clone();
-                self.detach_inputs(cell.id, &inputs)?;
+                self.detach_inputs(cell.id, &inputs, ledger)?;
             }
-            self.attach_inputs(cell.id, &cell.inputs)?;
+            self.attach_inputs(cell.id, &cell.inputs, ledger)?;
             self.cells.try_set(slot as usize, Some(cell))?;
             self.live_cells += usize::from(!was_live);
             Ok(())
         } else {
-            self.insert_new_cell(cell)
+            self.insert_new_cell(cell, ledger)
         }
     }
 
@@ -963,19 +1015,19 @@ where
         }
     }
 
-    fn remove_cell(&mut self, id: CellId) -> Result<(), DesignError> {
+    fn remove_cell(&mut self, id: CellId, ledger: &mut ConsumerLedger) -> Result<(), DesignError> {
         let slot =
             self.cell_directory
                 .get(id)
                 .ok_or(DesignError::UnknownReplacement(EntityId::Cell(id)))? as usize;
         if let Some(cell) = self.cells.try_set(slot, None)?.flatten() {
-            self.detach_inputs(id, &cell.inputs)?;
+            self.detach_inputs(id, &cell.inputs, ledger)?;
             self.live_cells -= 1;
         }
         Ok(())
     }
 
-    fn remove_net(&mut self, id: NetBitId) -> Result<(), DesignError> {
+    fn remove_net(&mut self, id: NetBitId, ledger: &mut ConsumerLedger) -> Result<(), DesignError> {
         let slot =
             self.net_directory
                 .get(id)
@@ -985,7 +1037,7 @@ where
             .try_set(slot, None)?
             .is_some_and(|net| net.is_some())
         {
-            self.consumers.try_set(slot, Box::new([]))?;
+            ledger.record_net_removed(slot);
             self.live_nets -= 1;
         }
         Ok(())
@@ -996,45 +1048,68 @@ where
         self.consumers.get(slot).map(AsRef::as_ref)
     }
 
-    fn attach_inputs(&mut self, cell: CellId, inputs: &[NetBitId]) -> Result<(), DesignError> {
+    fn attach_inputs(
+        &self,
+        cell: CellId,
+        inputs: &[NetBitId],
+        ledger: &mut ConsumerLedger,
+    ) -> Result<(), DesignError> {
         for &net in inputs {
             let slot = self
                 .net_directory
                 .get(net)
                 .ok_or(DesignError::UnknownCellNet { cell, net })? as usize;
-            let mut consumers = self
-                .consumers
-                .get(slot)
-                .cloned()
-                .unwrap_or_default()
-                .into_vec();
-            match consumers.binary_search(&cell) {
-                Ok(_) => {}
-                Err(index) => {
-                    consumers.insert(index, cell);
-                    self.consumers.try_set(slot, consumers.into_boxed_slice())?;
-                }
-            }
+            ledger.record_attach(slot, cell);
         }
         Ok(())
     }
 
-    fn detach_inputs(&mut self, cell: CellId, inputs: &[NetBitId]) -> Result<(), DesignError> {
+    fn detach_inputs(
+        &self,
+        cell: CellId,
+        inputs: &[NetBitId],
+        ledger: &mut ConsumerLedger,
+    ) -> Result<(), DesignError> {
         for &net in inputs {
             let slot = self
                 .net_directory
                 .get(net)
                 .ok_or(DesignError::UnknownCellNet { cell, net })? as usize;
+            ledger.record_detach(slot, cell);
+        }
+        Ok(())
+    }
+
+    /// Applies every accumulated consumer edit, one write per affected net.
+    ///
+    /// This is the merge step. Each net's edits combine associatively, so the
+    /// whole wave costs one rebuild per touched net instead of one rebuild per
+    /// (cell, input) pair. Removals are applied before insertions because
+    /// replacing a cell records a detach and then an attach for any input it
+    /// keeps, and the cell must survive that pair.
+    fn flush_consumer_edits(&mut self, ledger: &ConsumerLedger) -> Result<(), DesignError> {
+        for (&slot, edits) in &ledger.nets {
+            if edits.cleared {
+                self.consumers.try_set(slot, Box::new([]))?;
+                continue;
+            }
+            if edits.removed.is_empty() && edits.added.is_empty() {
+                continue;
+            }
             let mut consumers = self
                 .consumers
                 .get(slot)
                 .cloned()
                 .unwrap_or_default()
                 .into_vec();
-            if let Ok(index) = consumers.binary_search(&cell) {
-                consumers.remove(index);
-                self.consumers.try_set(slot, consumers.into_boxed_slice())?;
+            if !edits.removed.is_empty() {
+                let removed = edits.removed.iter().copied().collect::<BTreeSet<_>>();
+                consumers.retain(|consumer| !removed.contains(consumer));
             }
+            consumers.extend(edits.added.iter().copied());
+            consumers.sort_unstable();
+            consumers.dedup();
+            self.consumers.try_set(slot, consumers.into_boxed_slice())?;
         }
         Ok(())
     }
@@ -1748,6 +1823,105 @@ mod tests {
             error,
             DesignError::StableIdCollision(EntityId::Cell(_))
         ));
+    }
+
+    #[test]
+    fn merged_consumer_edits_keep_a_replaced_cell_that_retains_its_input() {
+        // Replacing a cell in place records a detach and then an attach for
+        // every input it keeps. The merge applies removals before insertions,
+        // so the cell must survive that pair rather than cancel out.
+        let base = base_design();
+        let net_10 = NetBitId::from_bytes(digest(10));
+        let cell_1 = CellId::from_bytes(digest(1));
+        assert_eq!(base.net_consumers(net_10), Some([cell_1].as_slice()));
+
+        let in_place = RewriteDelta {
+            id: RewriteDeltaId::from_bytes(digest(30)),
+            footprint: footprint(
+                base.revision(),
+                vec![
+                    EntityId::Cell(cell_1),
+                    EntityId::NetBit(net_10),
+                    EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                ],
+                vec![
+                    EntityId::Cell(cell_1),
+                    EntityId::NetBit(NetBitId::from_bytes(digest(11))),
+                ],
+            ),
+            cells: vec![cell(1, "not-retimed", &[10], &[11])].into_boxed_slice(),
+            nets: vec![net(11, Some((1, 0)))].into_boxed_slice(),
+            semantic: SemanticBinding {
+                inputs: vec![net_10].into_boxed_slice(),
+                outputs: vec![NetBitId::from_bytes(digest(11))].into_boxed_slice(),
+            },
+            proof: EquivalenceCertificate {
+                regime: EquivalenceRegime::Combinational,
+                digest: digest(31),
+            },
+        };
+
+        let committed = base.commit(vec![in_place], |_| Ok(())).unwrap();
+        assert_eq!(committed.cell(cell_1).unwrap().kind, "not-retimed");
+        assert_eq!(committed.net_consumers(net_10), Some([cell_1].as_slice()));
+    }
+
+    #[test]
+    fn disjoint_deltas_sharing_a_boundary_net_merge_their_consumer_edits() {
+        // Two deltas may replace disjoint cells while both consuming the same
+        // boundary net. The consumer index is the one structure they share, so
+        // this is the case the per-net merge exists to get right.
+        let mut builder = DesignBuilder::new(DesignRevisionId::from_bytes(digest(90)));
+        builder.add_net(net(10, None));
+        builder.add_net(net(11, Some((1, 0))));
+        builder.add_net(net(12, Some((3, 0))));
+        builder.add_cell(cell(1, "not", &[10], &[11]));
+        builder.add_cell(cell(3, "buf", &[10], &[12]));
+        let base = builder.seal().unwrap();
+
+        let net_10 = NetBitId::from_bytes(digest(10));
+        assert_eq!(
+            base.net_consumers(net_10),
+            Some([CellId::from_bytes(digest(1)), CellId::from_bytes(digest(3))].as_slice())
+        );
+
+        let replace =
+            |id: u8, old_cell: u8, new_cell: u8, out: u8, kind: &'static str| RewriteDelta {
+                id: RewriteDeltaId::from_bytes(digest(id)),
+                footprint: footprint(
+                    base.revision(),
+                    vec![
+                        EntityId::Cell(CellId::from_bytes(digest(old_cell))),
+                        EntityId::NetBit(net_10),
+                        EntityId::NetBit(NetBitId::from_bytes(digest(out))),
+                    ],
+                    vec![
+                        EntityId::Cell(CellId::from_bytes(digest(old_cell))),
+                        EntityId::NetBit(NetBitId::from_bytes(digest(out))),
+                    ],
+                ),
+                cells: vec![cell(new_cell, kind, &[10], &[out])].into_boxed_slice(),
+                nets: vec![net(out, Some((new_cell, 0)))].into_boxed_slice(),
+                semantic: SemanticBinding {
+                    inputs: vec![net_10].into_boxed_slice(),
+                    outputs: vec![NetBitId::from_bytes(digest(out))].into_boxed_slice(),
+                },
+                proof: EquivalenceCertificate {
+                    regime: EquivalenceRegime::Combinational,
+                    digest: digest(id + 1),
+                },
+            };
+
+        let first = replace(40, 1, 2, 11, "nand-as-not");
+        let second = replace(42, 3, 4, 12, "and-as-buf");
+        let committed = base.commit(vec![second, first], |_| Ok(())).unwrap();
+
+        // Both old consumers are gone and both replacements are present, with
+        // the list still sorted and duplicate-free.
+        assert_eq!(
+            committed.net_consumers(net_10),
+            Some([CellId::from_bytes(digest(2)), CellId::from_bytes(digest(4))].as_slice())
+        );
     }
 
     #[test]
