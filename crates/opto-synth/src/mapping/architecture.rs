@@ -1739,64 +1739,6 @@ fn empty_target_plan(
     ))
 }
 
-pub(crate) fn extend_operation_regions_for_memories(
-    module: &word::WordModule,
-    original: &[Option<RegionRowId>],
-    memory_regions: &[Option<RegionRowId>],
-    memory_binding: &crate::planning::memory::MemoryLoweringBinding,
-) -> Result<Vec<Option<RegionRowId>>, SynthError> {
-    if original.len() > module.operations().len() {
-        return Err(SynthError::invariant(
-            "memory lowering removed source operations",
-        ));
-    }
-    let mut operation_regions = original.to_vec();
-    operation_regions.resize(module.operations().len(), None);
-    for (operation, memory) in memory_binding.operations() {
-        let region = memory_regions
-            .get(memory.index())
-            .copied()
-            .flatten()
-            .ok_or_else(|| SynthError::invariant("lowered memory has no synthesis region"))?;
-        let slot = operation_regions
-            .get_mut(operation.index())
-            .ok_or_else(|| {
-                SynthError::invariant("lowered memory operation is outside the Word arena")
-            })?;
-        if slot.replace(region).is_some() {
-            return Err(SynthError::invariant(
-                "lowered memory operation already has a synthesis region",
-            ));
-        }
-    }
-    for (value, memory) in memory_binding.state_values() {
-        let operation = match module.value(value).map(|stored| &stored.kind) {
-            Some(word::ValueKind::Operation(operation)) => *operation,
-            Some(word::ValueKind::Signal(_) | word::ValueKind::Constant(_)) | None => {
-                return Err(SynthError::invariant(
-                    "lowered memory state has no generating operation",
-                ));
-            }
-        };
-        let region = memory_regions
-            .get(memory.index())
-            .copied()
-            .flatten()
-            .ok_or_else(|| SynthError::invariant("lowered memory has no synthesis region"))?;
-        let slot = operation_regions
-            .get_mut(operation.index())
-            .ok_or_else(|| {
-                SynthError::invariant("lowered memory state operation is outside the Word arena")
-            })?;
-        if slot.replace(region).is_some() {
-            return Err(SynthError::invariant(
-                "lowered memory state already has a synthesis region",
-            ));
-        }
-    }
-    Ok(operation_regions)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -400,12 +400,7 @@ impl<B: BitBackend> BitBlaster<'_, B> {
         }
         if let word::ValueKind::Operation(operation) = value.kind
             && self.global_scope == super::GlobalBitblastScope::RegionalShell
-            && self
-                .operation_regions
-                .get(operation.index())
-                .copied()
-                .flatten()
-                .is_none()
+            && self.operation_regions.region(operation).is_none()
             && let Some(constant) = self.known_bits.constant(self.module, value_id)
         {
             let bits = self.constant_bits(value_id, &constant, value.ty, &value.source)?;
@@ -442,12 +437,7 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                 {
                     self.opaque_bits(value_id, value.ty.width(), &value.source)?
                 } else if self.global_scope == super::GlobalBitblastScope::RegionalShell
-                    && self
-                        .operation_regions
-                        .get(operation_id.index())
-                        .copied()
-                        .flatten()
-                        .is_some()
+                    && self.operation_regions.region(operation_id).is_some()
                     && !matches!(
                         operation.kind,
                         word::OpKind::Concat { .. }
@@ -460,11 +450,7 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                     self.regional_shell_bits(value_id, value.ty, &value.source)?
                 } else {
                     let previous_region = self.active_region;
-                    self.active_region = self
-                        .operation_regions
-                        .get(operation_id.index())
-                        .copied()
-                        .flatten();
+                    self.active_region = self.operation_regions.region(operation_id);
                     let bits =
                         if self.is_native_scalar_operation(&operation.kind, value.ty.width())? {
                             vec![self.legalize_native_scalar_operation(

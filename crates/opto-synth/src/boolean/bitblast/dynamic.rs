@@ -196,12 +196,7 @@ impl<B: BitBackend> BitBlaster<'_, B> {
         {
             if self.plan.is_operation_elided(source_operation)
                 || (self.global_scope == super::GlobalBitblastScope::RegionalShell
-                    && self
-                        .operation_regions
-                        .get(source_operation.index())
-                        .copied()
-                        .flatten()
-                        .is_none())
+                    && self.operation_regions.region(source_operation).is_none())
             {
                 // The regional ownership graph excludes dead operations from
                 // every implementation region, but shell lowering still walks

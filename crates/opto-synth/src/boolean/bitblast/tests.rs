@@ -4,6 +4,29 @@
 use super::*;
 
 #[test]
+fn appended_operation_placement_is_complete_and_derived_once() {
+    let region = crate::RegionRowId::from_index(0).unwrap();
+    let base = [Some(region)];
+    let first = word::OpId::from_index(1).unwrap();
+    let second = word::OpId::from_index(2).unwrap();
+    let placement =
+        OperationRegions::with_appended(3, &base, [(second, region), (first, region)]).unwrap();
+
+    assert!(placement.validate(3));
+    assert_eq!(
+        placement.region(word::OpId::from_index(0).unwrap()),
+        Some(region)
+    );
+    assert_eq!(placement.region(first), Some(region));
+    assert_eq!(placement.region(second), Some(region));
+    assert!(!placement.validate(4));
+    assert!(
+        OperationRegions::with_appended(3, &base, [(first, region)])
+            .is_ok_and(|map| { !map.validate(3) })
+    );
+}
+
+#[test]
 fn lowered_value_rejects_conflicting_region_bindings() {
     let mut binding = LoweredRegionBinding::new(1);
     let value = word::ValueId::from_index(0).unwrap();

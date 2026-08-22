@@ -1067,7 +1067,7 @@ mod tests {
             &mut module,
             &shell,
             &mut provenance,
-            regions.operation_region_rows(),
+            &regions.operation_region_rows(),
             &required,
             &[],
             crate::boolean::bitblast::GlobalBitblastScope::RegionalShell,

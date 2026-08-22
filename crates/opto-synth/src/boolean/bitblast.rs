@@ -148,7 +148,7 @@ pub(crate) fn bitblast_module_with_regions(
     module: &mut word::WordModule,
     plan: &ArchitectureDecisions,
     provenance: &mut ProvenanceBuilder,
-    operation_regions: &[Option<crate::RegionRowId>],
+    operation_regions: &dyn OperationRegionResolver,
     required_values: &[word::ValueId],
     regional_publication: &[RegionalPublicationBit],
     scope: GlobalBitblastScope,
@@ -161,7 +161,7 @@ pub(crate) fn bitblast_module_with_regions(
             "logic lowering received unmaterialized memory resources",
         ));
     }
-    if !operation_regions.is_empty() && operation_regions.len() != module.operations().len() {
+    if !operation_regions.validate(module.operations().len()) {
         return Err(crate::SynthError::invariant(
             "source operation region binding does not cover the lowering module",
         ));
@@ -228,6 +228,81 @@ pub(crate) struct RegionalPublicationBit {
     pub(crate) bit: u32,
     /// The region containing the source bit producer.
     pub(crate) producer: crate::RegionRowId,
+}
+
+pub(crate) trait OperationRegionResolver {
+    fn region(&self, operation: word::OpId) -> Option<crate::RegionRowId>;
+
+    fn validate(&self, operation_count: usize) -> bool;
+}
+
+impl<T> OperationRegionResolver for T
+where
+    T: AsRef<[Option<crate::RegionRowId>]>,
+{
+    fn region(&self, operation: word::OpId) -> Option<crate::RegionRowId> {
+        self.as_ref().get(operation.index()).copied().flatten()
+    }
+
+    fn validate(&self, operation_count: usize) -> bool {
+        self.as_ref().is_empty() || self.as_ref().len() == operation_count
+    }
+}
+
+pub(crate) struct OperationRegions<'a> {
+    base: &'a [Option<crate::RegionRowId>],
+    appended: BTreeMap<word::OpId, crate::RegionRowId>,
+    operation_count: usize,
+}
+
+impl<'a> OperationRegions<'a> {
+    pub(crate) fn with_appended(
+        operation_count: usize,
+        base: &'a [Option<crate::RegionRowId>],
+        appended: impl IntoIterator<Item = (word::OpId, crate::RegionRowId)>,
+    ) -> Result<Self, crate::SynthError> {
+        if base.len() > operation_count {
+            return Err(crate::SynthError::invariant(
+                "operation placement base exceeds the Word arena",
+            ));
+        }
+        let mut rows = BTreeMap::new();
+        for (operation, region) in appended {
+            if operation.index() < base.len() || operation.index() >= operation_count {
+                return Err(crate::SynthError::invariant(
+                    "appended operation placement is outside the appended Word suffix",
+                ));
+            }
+            if rows.insert(operation, region).is_some() {
+                return Err(crate::SynthError::invariant(
+                    "appended operation has duplicate placement",
+                ));
+            }
+        }
+        Ok(Self {
+            base,
+            appended: rows,
+            operation_count,
+        })
+    }
+}
+
+impl OperationRegionResolver for OperationRegions<'_> {
+    fn region(&self, operation: word::OpId) -> Option<crate::RegionRowId> {
+        self.base
+            .get(operation.index())
+            .copied()
+            .flatten()
+            .or_else(|| self.appended.get(&operation).copied())
+    }
+
+    fn validate(&self, operation_count: usize) -> bool {
+        operation_count == self.operation_count
+            && (self.base.len()..operation_count).all(|index| {
+                word::OpId::from_index(index)
+                    .is_ok_and(|operation| self.appended.contains_key(&operation))
+            })
+    }
 }
 
 pub(crate) struct LocalRegionBooleanRequest<'a> {
@@ -502,7 +577,7 @@ struct FrozenPublicationContract {
 
 fn freeze_publication_contract(
     module: &word::WordModule,
-    operation_regions: &[Option<crate::RegionRowId>],
+    operation_regions: &dyn OperationRegionResolver,
     regional_publication: &[RegionalPublicationBit],
     scope: GlobalBitblastScope,
 ) -> Result<FrozenPublicationContract, crate::SynthError> {
@@ -512,7 +587,8 @@ fn freeze_publication_contract(
     let mut facts = word::KnownBitsAnalysis::new(module);
     let mut bits = BTreeMap::new();
     for (index, operation) in module.operations().iter().enumerate() {
-        if operation_regions.get(index).copied().flatten().is_none()
+        let operation_id = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
+        if operation_regions.region(operation_id).is_none()
             || matches!(
                 operation.kind,
                 word::OpKind::Concat { .. }
@@ -559,13 +635,9 @@ fn freeze_publication_contract(
             // root analysis never emits a signal or constant target.
             word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => continue,
         };
-        let region = operation_regions
-            .get(operation.index())
-            .copied()
-            .flatten()
-            .ok_or_else(|| {
-                crate::SynthError::invariant("regional publication target has no region binding")
-            })?;
+        let region = operation_regions.region(operation).ok_or_else(|| {
+            crate::SynthError::invariant("regional publication target has no region binding")
+        })?;
         if region != publication.producer {
             return Err(crate::SynthError::invariant(format!(
                 "regional publication {:?}[{}] names producer {:?}, but the source operation belongs to {:?}",
@@ -620,7 +692,7 @@ pub(super) struct BitBlaster<'a, B: BitBackend = WordBackend> {
     provenance: &'a mut ProvenanceBuilder,
     active_operator: Option<OperatorId>,
     active_region: Option<crate::RegionRowId>,
-    operation_regions: &'a [Option<crate::RegionRowId>],
+    operation_regions: &'a dyn OperationRegionResolver,
     boundary_inputs: BTreeSet<word::ValueId>,
     signal_drivers: crate::word::signal_driver::SignalDriverIndex,
     known_bits: word::KnownBitsAnalysis,
@@ -639,7 +711,7 @@ pub(super) struct BitBlaster<'a, B: BitBackend = WordBackend> {
 struct BitBlasterRequest<'a> {
     plan: &'a ArchitectureDecisions,
     provenance: &'a mut ProvenanceBuilder,
-    operation_regions: &'a [Option<crate::RegionRowId>],
+    operation_regions: &'a dyn OperationRegionResolver,
     boundary_inputs: &'a [word::ValueId],
     source_operations: Option<&'a [Option<word::OpId>]>,
     source_values: Option<&'a BTreeMap<word::ValueId, word::ValueId>>,

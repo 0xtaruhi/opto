@@ -74,6 +74,39 @@ impl MemoryLoweringBinding {
             .get(ordinal as usize)
             .copied()
     }
+
+    pub(crate) fn appended_operation_regions(
+        &self,
+        module: &word::WordModule,
+        memory_regions: &[Option<crate::RegionRowId>],
+    ) -> Result<Vec<(word::OpId, crate::RegionRowId)>, crate::SynthError> {
+        let region = |memory: word::MemoryId| {
+            memory_regions
+                .get(memory.index())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("lowered memory has no synthesis work item")
+                })
+        };
+        let mut rows = self
+            .operations()
+            .map(|(operation, memory)| region(memory).map(|row| (operation, row)))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (value, memory) in self.state_values() {
+            let operation = module
+                .value(value)
+                .and_then(|stored| match stored.kind {
+                    word::ValueKind::Operation(operation) => Some(operation),
+                    word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
+                })
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("lowered memory state has no generating operation")
+                })?;
+            rows.push((operation, region(memory)?));
+        }
+        Ok(rows)
+    }
 }
 
 fn unique_name(

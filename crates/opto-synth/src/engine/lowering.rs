@@ -23,7 +23,6 @@ pub(super) fn lower_logic(
         synthesized: mut source,
     } = normalized;
     let regions = work.regions();
-    let memory_regions = regions.memory_region_rows();
     let operation_regions = regions.operation_region_rows();
     let profiling = execution.engine.config.diagnostics.timing;
     let preparation = {
@@ -69,11 +68,10 @@ pub(super) fn lower_logic(
             &environment.options.target_cells,
         )
     }?;
-    let operation_regions = crate::mapping::extend_operation_regions_for_memories(
-        &source,
+    let operation_regions = crate::boolean::bitblast::OperationRegions::with_appended(
+        source.operations().len(),
         operation_regions,
-        memory_regions,
-        &memory_binding,
+        memory_binding.appended_operation_regions(&source, regions.memory_region_rows())?,
     )?;
     for prepared in &mut prepared_regions {
         prepared
