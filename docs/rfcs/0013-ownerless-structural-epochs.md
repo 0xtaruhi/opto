@@ -3,12 +3,23 @@
 
 # RFC 0013: Ownerless structural epochs and hierarchical compilation shards
 
-- Status: proposed
+- Status: proposed, amended 2026-08-22 (see [Amendment 1](#amendment-1-word-remains-the-semantic-representation))
 - Author: Zhengyi Zhang
 - Date: 2026-08-21
-- Implementation: unimplemented. The current tree still performs provisional
-  structural ownership over a mutable global `WordModule`, propagates owner
-  rows across structural rewrites, and rebuilds a final frozen region graph.
+- Implementation: partially implemented, and the original canonical-authority
+  design is superseded by Amendment 1.
+  - Implemented: provisional structural ownership is deleted
+    (`StructuralOwnershipProvenance`, `claim_since`, `claim_range`,
+    `build_with_ownership`, and `verify_frozen` no longer exist); sealing
+    produces an immutable `DesignRevision`; work items carry exact
+    `RevisionFootprint` values that are validated against every result; the
+    deterministic `WorkGraph`, `WorkContext`, shard batching, and rebatching
+    exist.
+  - Not implemented: no task returns a `RewriteDelta` and
+    `DesignRevision::commit` has no production caller, so no rewrite has been
+    published through the delta protocol. All structural rewriting still
+    mutates `WordModule` in place. Fusion tasks, reduce workflows, the remote
+    executor, and physical context do not exist.
 - Supersedes: the provisional-owner, owner-confined global-mutation, and final
   owner-freeze contracts of RFC 0007.
 - Amends: RFC 0011's compilation-shard execution model. Semantic decision
@@ -427,6 +438,10 @@ object migration, ID replacement, and another family of remap side tables.
 
 ### Design sealing
 
+*Amended: sealing produces an immutable Word snapshot alongside the immutable
+revision, and `WordModule` is not retired. See
+[Amendment 1](#amendment-1-word-remains-the-semantic-representation).*
+
 The pre-shard serial surface is deliberately small. Before the first
 `WorkGraph`, Opto may perform only work needed to construct a valid immutable
 graph:
@@ -697,6 +712,10 @@ global coordination.
 
 ### RewriteDelta
 
+*Amended: `fragment` carries a word-level `WordFragment`, not a
+`NetlistFragment<L>`. See
+[Amendment 1](#amendment-1-word-remains-the-semantic-representation).*
+
 ```rust
 pub struct RewriteDelta<L> {
     id: RewriteDeltaId,
@@ -748,6 +767,10 @@ work requires an explicit state relation and sequential equivalence; it may not
 hide behind ordinary combinational boundary equality.
 
 #### Commit
+
+*Amended: publication is the three-step slot-assignment, splice, and
+incremental-revision procedure in
+[Amendment 1](#amendment-1-word-remains-the-semantic-representation).*
 
 Tasks in an ordinary wave have disjoint replacement footprints. Their deltas
 therefore build new copy-on-write pages in parallel. The commit procedure is:
@@ -1371,6 +1394,9 @@ can deliberately rebatch identical work items without changing their results.
 
 ### Phase 1: immutable revision and transaction substrate
 
+*Amended by [Amendment 1](#amendment-1-word-remains-the-semantic-representation);
+acceptance is unmet as of 2026-08-22.*
+
 Introduce the stable cell/net `DesignRevision`, Word import/export bindings,
 copy-on-write page construction, `RewriteDelta`, exact boundary validation, and
 atomic revision publication. Run the complete design as one task initially.
@@ -1384,6 +1410,10 @@ accepted revision byte-identical; no persistent table stores a local Word ID;
 and the adapter's time and memory are measured separately.
 
 ### Phase 2: ownerless structural epochs
+
+*Deletions below are complete. The delta and no-mutation criteria are amended
+by [Amendment 1](#amendment-1-word-remains-the-semantic-representation) and
+remain unmet as of 2026-08-22.*
 
 Build the first fine-grain `WorkGraph`. Move owner-confined FSM, priority
 dataflow, sequential sharing, and target-preparation work into private tasks.
@@ -1495,6 +1525,156 @@ Before each phase is accepted, review shall answer:
 
 If those questions cannot be answered from types, invariants, and measured
 evidence, the phase is not ready for the production path.
+
+## Amendment 1: Word remains the semantic representation
+
+*Accepted 2026-08-22. This amendment changes the design; it does not merely
+clarify it. Where it conflicts with earlier sections, this amendment controls.*
+
+### What the original design said
+
+The body of this RFC makes the cell/net `DesignRevision` the single canonical
+authority: "Dense Word, Boolean, and mapped IDs are deliberately absent from
+this module", and tasks return a `RewriteDelta` whose `NetlistFragment` is the
+new structure. Under that model the sealed revision *is* the design, and
+`WordModule` retires after sealing.
+
+Implementation evidence invalidates that model on two independent grounds.
+
+### Ground 1: the implemented revision is a lossy projection
+
+`DesignRevision<LogicalCell>` is not a representation of the design; it is a
+bit-level analysis view of one.
+
+`LogicalCell` has exactly three forms — `Operation`, `Connection`, and
+`Memory { element, depth, interface }`. The memory form keeps a 32-byte
+`interface` digest produced by hashing every read port's source identity,
+read-during-write mode, timing, and clock edge. A digest cannot be inverted, so
+a committed revision cannot reconstruct the memory ports it came from.
+
+The same gap applies more broadly. `WordModule` carries ports, instances,
+annotations, synthesis directives, named signals, type layouts, and typed
+word-level values. None of these survive into the cell/net projection. There is
+no revision-to-Word materialization anywhere in the tree, and none can be
+written against the current `LogicalCell`.
+
+Making the revision canonical therefore means re-implementing the whole Word IR
+inside the cell/net model. That is not a matter of remaining effort; it is a
+second complete representation, which is the duplication this architecture
+exists to remove.
+
+### Ground 2: a whole-design bit-level revision does not fit the memory gate
+
+`seal_logical_design` installs one `NetBit` per signal bit plus one per
+operation result bit. A `NetBit` is a 32-byte identity, a state kind, and an
+optional driver that itself carries a 32-byte `CellId`, so it occupies roughly
+eighty bytes before the persistent directory and the per-net consumer index.
+
+At the scale this RFC itself mandates for Phase 3 — a design of at least one
+million logical operations after sealing — a 64-bit-wide design yields net-bit
+counts in the 10^8 range and a whole-design revision in the multi-gigabyte
+range. That is inconsistent with this RFC's own Phase 3 acceptance target of
+peak resident memory no greater than 1.5x the qualified one-worker path.
+
+Bit-level identity is the right granularity for *footprints*, because a task may
+own some bits of a signal and not others. It is the wrong granularity for
+*whole-design storage*.
+
+### The amended model
+
+Two authorities, each at the granularity that suits it:
+
+1. **`WordModule` remains the semantic representation.** It keeps typed
+   word-level values, memories, ports, instances, and directives. It is not
+   retired after sealing.
+2. **`DesignRevision` remains the bit-level identity and footprint authority.**
+   It answers which stable entities exist, what a task may read, what it may
+   replace, and whether two tasks conflict. It is derived from Word, not a
+   replacement for it.
+
+`RewriteDelta` accordingly carries a **private Word fragment** rather than a
+`NetlistFragment` of `LogicalCell` values:
+
+```rust
+pub struct RewriteDelta {
+    id: RewriteDeltaId,
+    base: DesignRevisionId,
+    task: TaskKey,
+    reads: EntitySet,          // bit-level, unchanged
+    replaces: EntitySet,       // bit-level, unchanged
+    fragment: WordFragment,    // amended: typed word-level content
+    boundary: BoundaryBinding,
+    semantic: SemanticBinding,
+    response: InterfaceResponse,
+    proof: EquivalenceCertificate,
+}
+```
+
+The delta spans two identity systems by design. `reads` and `replaces` stay
+bit-level so disjointness and boundary checks keep their present exactness;
+`fragment` is word-level so the published result is directly usable by every
+downstream pass. `BoundaryBinding` is what joins them, and it already has that
+job in the original design.
+
+This is a real cost and is stated plainly: publication must maintain a
+Word-to-stable mapping rather than working in one identity system. That cost is
+accepted because the alternative is a second full IR.
+
+### Publication
+
+Publication replaces the "one canonical commit" step with three ordered steps:
+
+1. **Deterministic slot assignment.** New Word entities in every accepted
+   fragment receive dense IDs in a fixed order derived from the sorted delta
+   sequence, not from task completion order. `WordModule` arenas are already
+   append-structured and already support `speculation_checkpoint` and
+   `rollback_speculation` with retained-prefix validation; assignment extends
+   that from single-writer speculation to a multi-fragment merge.
+2. **Fragment splice.** Fragments with disjoint replacement footprints are
+   spliced into the module. Disjointness is proven against the bit-level
+   footprints before any splice occurs.
+3. **Incremental revision update.** The bit-level revision is updated for the
+   changed cone only, through `DesignRevision::commit`, so footprint validation
+   and tombstone rules continue to apply to the published result.
+
+Step 3 keeps `commit` on the production path. A design that instead re-derived
+the whole revision after each wave would lose the footprint validation that
+justifies the revision's existence, and would reintroduce a whole-design serial
+pass that this RFC forbids.
+
+### Consequences for the phase plan
+
+Phase 1 and Phase 2 acceptance criteria that name a `RewriteDelta` of
+`LogicalCell` fragments are replaced by the same criteria over `WordFragment`
+deltas. Specifically:
+
+- Phase 1's "move one representative combinational rewrite and one mapped
+  repair through the common delta protocol" is unchanged in intent and remains
+  **unmet**; it is now satisfied by a Word-fragment delta published through the
+  three-step procedure above.
+- Phase 2's "each returns a `RewriteDelta`; no task mutates the input design"
+  is unchanged in intent. "The input design" means the sealed Word snapshot and
+  the sealed revision together.
+- The requirement that dense Word IDs never become *semantic identity* is
+  retained without change. Stable `CellId`/`NetBitId` values remain the only
+  identities that cross a task or revision boundary; dense Word IDs remain
+  local to a module generation and are reassigned by publication.
+
+Nothing in the sealing contract, the `WorkGraph`, the determinism requirements,
+the QoR gates, or the Phase 3 through Phase 6 targets is changed by this
+amendment.
+
+### Rejected alternative: enrich `LogicalCell` into a faithful superset
+
+The considered alternative was to extend `LogicalCell` until the revision could
+reconstruct Word — real memory port structure instead of a digest, word-level
+typing, port and instance records — and then retire Word after sealing.
+
+It is rejected because it does not address Ground 2 at all: a faithful
+whole-design bit-level revision is strictly larger than the lossy one that
+already exceeds the memory target. It also maximizes the duplication cost,
+because every Word construct would exist in two modelled forms during the
+entire migration.
 
 ## References
 
