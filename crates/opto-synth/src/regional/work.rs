@@ -268,14 +268,28 @@ pub(crate) struct WorkProduct<T> {
     pub(crate) output: T,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl<T> WorkProduct<T> {
+    pub(crate) const fn compiled_artifact(
+        proof: opto_ir::design::EquivalenceCertificate,
+        output: T,
+    ) -> Self {
+        Self { proof, output }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CompiledWorkArtifact<T> {
+    footprint: RevisionFootprint,
+    proof: opto_ir::design::EquivalenceCertificate,
+    output: T,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WorkResult<T> {
     item: WorkItemId,
     shard: CompilationShardId,
     context: WorkContextKey,
-    footprint: RevisionFootprint,
-    proof: opto_ir::design::EquivalenceCertificate,
-    output: T,
+    artifact: CompiledWorkArtifact<T>,
 }
 
 pub(crate) trait SynthesisExecutor {
@@ -630,20 +644,23 @@ impl WorkGraph {
                 .ok_or_else(|| {
                     crate::SynthError::invariant("work result item has no compilation shard")
                 })?;
-            if result.footprint.base != self.design.0.revision()
-                || result.shard != shard
-                || result.context != item.context
-                || result.footprint.reads != reads
-                || result.footprint.replaces != item.core
-            {
+            if result.shard != shard || result.context != item.context {
                 return Err(crate::SynthError::invariant(
                     "work result does not match its immutable revision, context, or footprint",
                 ));
             }
+            if result.artifact.footprint.base != self.design.0.revision()
+                || result.artifact.footprint.reads != reads
+                || result.artifact.footprint.replaces != item.core
+            {
+                return Err(crate::SynthError::invariant(
+                    "compiled work artifact does not match its exact task footprint",
+                ));
+            }
             if outputs[row]
                 .replace(WorkProduct {
-                    proof: result.proof,
-                    output: result.output,
+                    proof: result.artifact.proof,
+                    output: result.artifact.output,
                 })
                 .is_some()
             {
@@ -792,10 +809,7 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                 .iter()
                 .map(|item| {
                     let product = operation(item, &packet.fragment, runtime)?;
-                    Ok(WorkResult {
-                        item: item.id,
-                        shard: packet.shard,
-                        context: item.context.key,
+                    let artifact = CompiledWorkArtifact {
                         footprint: RevisionFootprint {
                             base: packet.design,
                             reads: entity_union(&item.core, &item.halo)?,
@@ -803,6 +817,12 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                         },
                         proof: product.proof,
                         output: product.output,
+                    };
+                    Ok(WorkResult {
+                        item: item.id,
+                        shard: packet.shard,
+                        context: item.context.key,
+                        artifact,
                     })
                 })
                 .collect::<Result<Vec<_>, crate::SynthError>>()
@@ -1831,13 +1851,13 @@ mod tests {
                     let bytes = opto_archive::to_bytes(fragment).unwrap();
                     let restored: WorkPacketDesign = opto_archive::from_bytes(&bytes).unwrap();
                     assert_eq!(&restored, fragment);
-                    Ok(WorkProduct {
-                        proof: opto_ir::design::EquivalenceCertificate {
+                    Ok(WorkProduct::compiled_artifact(
+                        opto_ir::design::EquivalenceCertificate {
                             regime: opto_ir::design::EquivalenceRegime::ByConstruction,
                             digest: item.id.0,
                         },
-                        output: item.id,
-                    })
+                        item.id,
+                    ))
                 })
                 .unwrap();
             work.accept_results(results)
@@ -1850,16 +1870,19 @@ mod tests {
         assert_eq!(execute(&work), semantic_items);
         let mut invalid =
             SynthesisExecutor::execute(&runtime, work.packet_tasks(), |item, _, _| {
-                Ok(WorkProduct {
-                    proof: opto_ir::design::EquivalenceCertificate {
+                Ok(WorkProduct::compiled_artifact(
+                    opto_ir::design::EquivalenceCertificate {
                         regime: opto_ir::design::EquivalenceRegime::ByConstruction,
                         digest: item.id.0,
                     },
-                    output: item.id,
-                })
+                    item.id,
+                ))
             })
             .unwrap();
-        invalid[0].footprint.replaces = EntitySet::new(vec![]).unwrap();
+        let bytes = opto_archive::to_bytes(&invalid).unwrap();
+        let restored: Vec<WorkResult<WorkItemId>> = opto_archive::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, invalid);
+        invalid[0].artifact.footprint.replaces = EntitySet::new(vec![]).unwrap();
         assert!(work.accept_results(invalid).is_err());
         let serial =
             opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 })

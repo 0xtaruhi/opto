@@ -211,7 +211,7 @@ pub struct EquivalenceCertificate {
     pub digest: [u8; 32],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Exact public interface represented by a replacement fragment.
 pub struct SemanticBinding {
     /// Read-only boundary bits consumed by the fragment.
@@ -220,7 +220,7 @@ pub struct SemanticBinding {
     pub outputs: Box<[NetBitId]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Complete proof-carrying replacement proposed against one design revision.
 ///
 /// Records whose IDs occur in [`Self::replaces`] replace existing entities.

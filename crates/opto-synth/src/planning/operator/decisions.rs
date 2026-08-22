@@ -214,29 +214,39 @@ impl ArchitectureDecisions {
         Ok(())
     }
 
-    pub(crate) fn select_for_budget(
-        &mut self,
+    pub(crate) fn select_design_for_budgets(
+        decisions: &mut [&mut Self],
         target: &crate::planning::regional::StructuralTargetModel,
-        budget: Option<f64>,
+        budgets: &[Option<f64>],
     ) -> Result<(), crate::SynthError> {
-        let mut selections = Vec::with_capacity(self.operators().len());
-        for operator in self.operators() {
-            let mut best = None;
-            for &candidate in self.candidates(operator.id()) {
-                let key = target.score_for_budget(self.candidate_estimate(candidate)?, budget)?;
-                let stable = self.candidate_recipe_name(candidate.id()).unwrap_or("");
-                if best.as_ref().is_none_or(|(_, best_key, best_stable)| {
-                    (key, stable) < (*best_key, *best_stable)
-                }) {
-                    best = Some((candidate.id(), key, stable));
+        if decisions.len() != budgets.len() {
+            return Err(crate::SynthError::invariant(
+                "architecture decision groups do not align with design timing budgets",
+            ));
+        }
+        let mut selections = Vec::new();
+        for (region, (decisions, &budget)) in decisions.iter().zip(budgets).enumerate() {
+            for operator in decisions.operators() {
+                let mut best = None;
+                for &candidate in decisions.candidates(operator.id()) {
+                    let key = target
+                        .score_for_budget(decisions.candidate_estimate(candidate)?, budget)?;
+                    let stable = decisions
+                        .candidate_recipe_name(candidate.id())
+                        .unwrap_or("");
+                    if best.as_ref().is_none_or(|(_, best_key, best_stable)| {
+                        (key, stable) < (*best_key, *best_stable)
+                    }) {
+                        best = Some((candidate.id(), key, stable));
+                    }
+                }
+                if let Some((candidate, _, _)) = best {
+                    selections.push((region, candidate));
                 }
             }
-            if let Some((candidate, _, _)) = best {
-                selections.push(candidate);
-            }
         }
-        for candidate in selections {
-            self.select_candidate(candidate)?;
+        for (region, candidate) in selections {
+            decisions[region].select_candidate(candidate)?;
         }
         Ok(())
     }

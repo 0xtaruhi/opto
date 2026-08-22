@@ -83,10 +83,10 @@ pub(crate) fn select_architectures(
                     .collect::<Vec<_>>();
                 RegionalCacheRecord::new(contexts[row], &encoded)
             };
-            Ok(crate::regional::WorkProduct {
-                proof: decision_proof(&record),
-                output: record,
-            })
+            Ok(crate::regional::WorkProduct::compiled_artifact(
+                decision_proof(&record),
+                record,
+            ))
         })?;
     let records = work
         .accept_results(results)?

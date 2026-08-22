@@ -342,15 +342,15 @@ pub(crate) fn prepare_regional_architectures(
                 region,
                 regional_runtime,
             )?;
-            Ok(crate::regional::WorkProduct {
-                proof: characterization_proof(region, &private.decisions),
-                output: RegionalCharacterization {
+            Ok(crate::regional::WorkProduct::compiled_artifact(
+                characterization_proof(region, &private.decisions),
+                RegionalCharacterization {
                     memory_implementations,
                     restored_plan,
                     context: decision.context(),
                     private,
                 },
-            })
+            ))
         },
     )?;
     let mut characterized = work
@@ -359,12 +359,20 @@ pub(crate) fn prepare_regional_architectures(
         .into_iter()
         .map(|result| result.output)
         .collect::<Vec<_>>();
-    for (row, candidate) in characterized.iter_mut().enumerate() {
-        candidate.private.decisions.select_for_budget(
-            request.target_model,
-            request.contracts.delay_budget(regions.regions()[row].row()),
-        )?;
-    }
+    let budgets = regions
+        .regions()
+        .iter()
+        .map(|region| request.contracts.delay_budget(region.row()))
+        .collect::<Vec<_>>();
+    let mut decisions = characterized
+        .iter_mut()
+        .map(|candidate| &mut candidate.private.decisions)
+        .collect::<Vec<_>>();
+    ArchitectureDecisions::select_design_for_budgets(
+        &mut decisions,
+        request.target_model,
+        &budgets,
+    )?;
     let tasks = characterized
         .into_iter()
         .enumerate()
