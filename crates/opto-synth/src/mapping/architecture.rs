@@ -64,10 +64,7 @@ pub(crate) struct RegionalArchitectureMapping {
 
 struct LoweredPrivateRegion {
     module: word::WordModule,
-    source_to_local: BTreeMap<word::ValueId, word::ValueId>,
-    boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
-    owned_memory_logic: Vec<RegionalMemoryLogicBinding>,
-    memory_states: Vec<RegionalMemoryStateBinding>,
+    values: PrivateValueBindings,
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
     architecture: PrivateArchitecturePublication,
     operators: DurableOperatorArena,
@@ -99,11 +96,8 @@ struct RegionalMaterialization {
 
 struct OptimizedPrivateRegion {
     module: word::WordModule,
-    source_to_local: BTreeMap<word::ValueId, word::ValueId>,
-    boundary_bindings: Box<[(word::ValueId, word::ValueId)]>,
+    values: PrivateValueBindings,
     operation_sources: crate::planning::regional::LocalOperationProvenance,
-    owned_memory_logic: Vec<RegionalMemoryLogicBinding>,
-    memory_states: Vec<RegionalMemoryStateBinding>,
     root_bindings: Box<[(word::ValueId, word::SignalId)]>,
     root_pairs: Vec<(MappingRoot, word::ValueId)>,
     state_relations: BTreeMap<word::OpId, [u8; 32]>,
@@ -146,22 +140,27 @@ struct PreparedRegionCover {
     publication: Box<[crate::boolean::bitblast::RegionalPublicationBit]>,
 }
 
+struct PrivateValueBindings {
+    source_to_local: BTreeMap<word::ValueId, word::ValueId>,
+    boundary: Box<[(word::ValueId, word::ValueId)]>,
+    memory_logic: Vec<RegionalMemoryLogicBinding>,
+    memory_states: Vec<RegionalMemoryStateBinding>,
+}
+
 fn remap_private_values(
     changes: &crate::planning::dataflow::DataflowChanges,
-    source_to_local: &mut std::collections::BTreeMap<word::ValueId, word::ValueId>,
-    boundary_bindings: &mut [(word::ValueId, word::ValueId)],
-    owned_memory_logic: &mut [RegionalMemoryLogicBinding],
-    memory_states: &mut [RegionalMemoryStateBinding],
+    values: &mut PrivateValueBindings,
 ) {
     let representatives = changes.representatives();
-    source_to_local
+    values
+        .source_to_local
         .values_mut()
-        .chain(boundary_bindings.iter_mut().map(|(_, local)| local))
+        .chain(values.boundary.iter_mut().map(|(_, local)| local))
         .for_each(|local| *local = representatives[local.index()]);
-    for binding in owned_memory_logic {
+    for binding in &mut values.memory_logic {
         binding.local = representatives[binding.local.index()];
     }
-    for binding in memory_states {
+    for binding in &mut values.memory_states {
         binding.local = representatives[binding.local.index()];
     }
 }
@@ -170,10 +169,7 @@ fn commit_operation_rewrites(
     module: &mut word::WordModule,
     rewrites: &[crate::planning::operator::OperationRewrite],
     operation_sources: &mut crate::planning::regional::LocalOperationProvenance,
-    source_to_local: &mut BTreeMap<word::ValueId, word::ValueId>,
-    boundary_bindings: &mut [(word::ValueId, word::ValueId)],
-    owned_memory_logic: &mut [RegionalMemoryLogicBinding],
-    memory_states: &mut [RegionalMemoryStateBinding],
+    values: &mut PrivateValueBindings,
 ) -> Result<(), SynthError> {
     if rewrites.is_empty() && module.validate().is_ok() {
         return Ok(());
@@ -201,16 +197,17 @@ fn commit_operation_rewrites(
             "SSA rewrite side-database replacements contain a cycle",
         ))
     };
-    for local in source_to_local
+    for local in values
+        .source_to_local
         .values_mut()
-        .chain(boundary_bindings.iter_mut().map(|(_, local)| local))
+        .chain(values.boundary.iter_mut().map(|(_, local)| local))
     {
         *local = resolve(*local)?;
     }
-    for binding in owned_memory_logic.iter_mut() {
+    for binding in &mut values.memory_logic {
         binding.local = resolve(binding.local)?;
     }
-    for binding in memory_states.iter_mut() {
+    for binding in &mut values.memory_states {
         binding.local = resolve(binding.local)?;
     }
     let state_roots = module
@@ -224,32 +221,22 @@ fn commit_operation_rewrites(
             .then_some(operation.result)
         })
         .collect::<Vec<_>>();
-    compact_private_module(
-        module,
-        operation_sources,
-        source_to_local,
-        boundary_bindings,
-        owned_memory_logic,
-        memory_states,
-        &state_roots,
-    )
+    compact_private_module(module, operation_sources, values, &state_roots)
 }
 
 fn compact_private_module(
     module: &mut word::WordModule,
     operation_sources: &mut crate::planning::regional::LocalOperationProvenance,
-    source_to_local: &mut BTreeMap<word::ValueId, word::ValueId>,
-    boundary_bindings: &mut [(word::ValueId, word::ValueId)],
-    owned_memory_logic: &mut [RegionalMemoryLogicBinding],
-    memory_states: &mut [RegionalMemoryStateBinding],
+    values: &mut PrivateValueBindings,
     extra_roots: &[word::ValueId],
 ) -> Result<(), SynthError> {
-    let roots = source_to_local
+    let roots = values
+        .source_to_local
         .values()
         .copied()
-        .chain(boundary_bindings.iter().map(|&(_, local)| local))
-        .chain(owned_memory_logic.iter().map(|binding| binding.local))
-        .chain(memory_states.iter().map(|binding| binding.local))
+        .chain(values.boundary.iter().map(|&(_, local)| local))
+        .chain(values.memory_logic.iter().map(|binding| binding.local))
+        .chain(values.memory_states.iter().map(|binding| binding.local))
         .chain(extra_roots.iter().copied())
         .collect::<Vec<_>>();
     let remap = module
@@ -261,16 +248,17 @@ fn compact_private_module(
         })?;
         Ok(())
     };
-    for local in source_to_local
+    for local in values
+        .source_to_local
         .values_mut()
-        .chain(boundary_bindings.iter_mut().map(|(_, local)| local))
+        .chain(values.boundary.iter_mut().map(|(_, local)| local))
     {
         map(local)?;
     }
-    for binding in owned_memory_logic {
+    for binding in &mut values.memory_logic {
         map(&mut binding.local)?;
     }
-    for binding in memory_states {
+    for binding in &mut values.memory_states {
         map(&mut binding.local)?;
     }
     operation_sources.remap(&remap)?;
@@ -678,10 +666,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         } = cover;
         let LoweredPrivateRegion {
             module,
-            source_to_local,
-            boundary_bindings,
-            owned_memory_logic,
-            memory_states,
+            values,
             root_bindings,
             architecture,
             operators,
@@ -695,10 +680,10 @@ impl RegionArchitectureMaterializer<'_, '_> {
         let domain = CandidateBindingDomain {
             source_module: self.request.source,
             local_module: &module,
-            source_to_local: &source_to_local,
-            boundary_bindings: &boundary_bindings,
-            owned_memory_logic: &owned_memory_logic,
-            memory_states: &memory_states,
+            source_to_local: &values.source_to_local,
+            boundary_bindings: &values.boundary,
+            owned_memory_logic: &values.memory_logic,
+            memory_states: &values.memory_states,
             source_cells: self.source_cells,
             sequential_operations: &state_operations,
             root_bindings: &root_bindings,
@@ -772,17 +757,14 @@ impl RegionArchitectureMaterializer<'_, '_> {
         } = private;
         let OptimizedPrivateRegion {
             mut module,
-            source_to_local,
-            boundary_bindings,
+            values,
             operation_sources,
-            owned_memory_logic,
-            memory_states,
             root_bindings,
             root_pairs,
             state_relations,
             substrate_instances,
         } = optimized;
-        let boundary_inputs = frozen_boundary_inputs(&boundary_bindings);
+        let boundary_inputs = frozen_boundary_inputs(&values.boundary);
         let mut provenance = ProvenanceBuilder::for_regional_candidate(&module);
         let local_root_values = root_pairs
             .iter()
@@ -802,9 +784,9 @@ impl RegionArchitectureMaterializer<'_, '_> {
         let mut tracked_values = boundary_inputs
             .iter()
             .chain(&local_root_values)
-            .chain(boundary_bindings.iter().map(|(_, local)| local))
-            .chain(owned_memory_logic.iter().map(|binding| &binding.local))
-            .chain(memory_states.iter().map(|binding| &binding.local))
+            .chain(values.boundary.iter().map(|(_, local)| local))
+            .chain(values.memory_logic.iter().map(|binding| &binding.local))
+            .chain(values.memory_states.iter().map(|binding| &binding.local))
             .copied()
             .collect::<Vec<_>>();
         tracked_values.sort_unstable();
@@ -896,10 +878,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         Ok(LoweredRegionalChoice {
             private: LoweredPrivateRegion {
                 module,
-                source_to_local,
-                boundary_bindings,
-                owned_memory_logic,
-                memory_states,
+                values,
                 root_bindings,
                 architecture,
                 operators,
@@ -921,17 +900,24 @@ impl RegionArchitectureMaterializer<'_, '_> {
         runtime: &ExecutionContext,
     ) -> Result<CharacterizedPrivateRegion, SynthError> {
         let optimized = self.optimize_private_region(memory_implementations, region, runtime)?;
-        let mut tracked_values = frozen_boundary_inputs(&optimized.boundary_bindings)
+        let mut tracked_values = frozen_boundary_inputs(&optimized.values.boundary)
             .into_iter()
             .chain(optimized.root_pairs.iter().map(|(_, local)| *local))
-            .chain(optimized.boundary_bindings.iter().map(|(_, local)| *local))
+            .chain(optimized.values.boundary.iter().map(|(_, local)| *local))
             .chain(
                 optimized
-                    .owned_memory_logic
+                    .values
+                    .memory_logic
                     .iter()
                     .map(|binding| binding.local),
             )
-            .chain(optimized.memory_states.iter().map(|binding| binding.local))
+            .chain(
+                optimized
+                    .values
+                    .memory_states
+                    .iter()
+                    .map(|binding| binding.local),
+            )
             .collect::<Vec<_>>();
         tracked_values.sort_unstable();
         tracked_values.dedup();
@@ -960,8 +946,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
         let (
             RegionalWordCone {
                 mut module,
-                mut source_to_local,
-                mut boundary_bindings,
+                source_to_local,
+                boundary_bindings,
                 mut operation_sources,
                 owned_memory_logic,
                 memory_states,
@@ -969,8 +955,12 @@ impl RegionArchitectureMaterializer<'_, '_> {
             },
             mut root_pairs,
         ) = self.prepare_private_word(memory_implementations, region)?;
-        let mut owned_memory_logic = owned_memory_logic.into_vec();
-        let mut memory_states = memory_states.into_vec();
+        let mut values = PrivateValueBindings {
+            source_to_local,
+            boundary: boundary_bindings,
+            memory_logic: owned_memory_logic.into_vec(),
+            memory_states: memory_states.into_vec(),
+        };
         let fsm = crate::planning::fsm::optimize_derived_fsms(
             &mut module,
             self.request.timing,
@@ -997,13 +987,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             operation_sources.set(rewrite.replacement, sources)?;
         }
         let canonical = crate::planning::dataflow::optimize_combinational_dataflow(&mut module)?;
-        remap_private_values(
-            &canonical,
-            &mut source_to_local,
-            &mut boundary_bindings,
-            &mut owned_memory_logic,
-            &mut memory_states,
-        );
+        remap_private_values(&canonical, &mut values);
         operation_sources.inherit_appended(&module)?;
         let shareable =
             crate::planning::dataflow::shareable_sequential_operations(self.request.source)?
@@ -1062,13 +1046,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 .to_vec();
             operation_sources.merge(representative, sources)?;
         }
-        remap_private_values(
-            &sharing,
-            &mut source_to_local,
-            &mut boundary_bindings,
-            &mut owned_memory_logic,
-            &mut memory_states,
-        );
+        remap_private_values(&sharing, &mut values);
         let observability = crate::word::uses::netlist_observability(&module)?;
         let state_roots = module
             .operations()
@@ -1092,16 +1070,17 @@ impl RegionArchitectureMaterializer<'_, '_> {
         compact_private_module(
             &mut module,
             &mut operation_sources,
-            &mut source_to_local,
-            &mut boundary_bindings,
-            &mut owned_memory_logic,
-            &mut memory_states,
+            &mut values,
             &state_roots,
         )?;
         for (root, local) in &mut root_pairs {
-            *local = source_to_local.get(&root.value).copied().ok_or_else(|| {
-                SynthError::invariant("private root disappeared after local optimization")
-            })?;
+            *local = values
+                .source_to_local
+                .get(&root.value)
+                .copied()
+                .ok_or_else(|| {
+                    SynthError::invariant("private root disappeared after local optimization")
+                })?;
         }
         let state_feedback = module
             .operations()
@@ -1127,9 +1106,13 @@ impl RegionArchitectureMaterializer<'_, '_> {
                     .operation(source)
                     .ok_or_else(|| SynthError::invariant("private state source is not live"))?
                     .result;
-                let feedback = source_to_local.get(&result).copied().ok_or_else(|| {
-                    SynthError::invariant("private state has no feedback boundary")
-                })?;
+                let feedback = values
+                    .source_to_local
+                    .get(&result)
+                    .copied()
+                    .ok_or_else(|| {
+                        SynthError::invariant("private state has no feedback boundary")
+                    })?;
                 Ok::<_, SynthError>((local, feedback))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
@@ -1147,11 +1130,8 @@ impl RegionArchitectureMaterializer<'_, '_> {
         operation_sources.inherit_appended(&module)?;
         Ok(OptimizedPrivateRegion {
             module,
-            source_to_local,
-            boundary_bindings,
+            values,
             operation_sources,
-            owned_memory_logic,
-            memory_states,
             root_bindings,
             root_pairs,
             state_relations,
@@ -1219,7 +1199,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             super::logic_partition::RegionLogicDomain {
                 module: &private.module,
                 subject_inputs,
-                source_to_local: &private.source_to_local,
+                source_to_local: &private.values.source_to_local,
                 region_binding: &private.lowered_binding,
                 contracts: self.request.contracts.contracts(region.row()),
                 roots: &root_pairs,
@@ -1308,57 +1288,35 @@ impl RegionArchitectureMaterializer<'_, '_> {
         }?;
         let RegionalWordCone {
             mut module,
-            mut source_to_local,
-            mut boundary_bindings,
+            source_to_local,
+            boundary_bindings,
             operation_sources,
-            mut owned_memory_logic,
-            mut memory_states,
+            owned_memory_logic,
+            memory_states,
             root_bindings,
         } = cone;
         let mut operation_sources = operation_sources;
+        let mut values = PrivateValueBindings {
+            source_to_local,
+            boundary: boundary_bindings,
+            memory_logic: owned_memory_logic.into_vec(),
+            memory_states: memory_states.into_vec(),
+        };
         let local_changes = {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("regional_optimization.region[{row}].dataflow")
             });
             crate::planning::dataflow::canonicalize_combinational_dataflow(&mut module)?
         };
-        remap_private_values(
-            &local_changes,
-            &mut source_to_local,
-            &mut boundary_bindings,
-            &mut owned_memory_logic,
-            &mut memory_states,
-        );
+        remap_private_values(&local_changes, &mut values);
         let rewrites = crate::planning::operator::share_muxed_arithmetic(&mut module)?;
         operation_sources.apply_rewrites(&module, &rewrites)?;
-        commit_operation_rewrites(
-            &mut module,
-            &rewrites,
-            &mut operation_sources,
-            &mut source_to_local,
-            &mut boundary_bindings,
-            &mut owned_memory_logic,
-            &mut memory_states,
-        )?;
+        commit_operation_rewrites(&mut module, &rewrites, &mut operation_sources, &mut values)?;
         if !rewrites.is_empty() {
             let local_changes =
                 crate::planning::dataflow::canonicalize_combinational_dataflow(&mut module)?;
-            remap_private_values(
-                &local_changes,
-                &mut source_to_local,
-                &mut boundary_bindings,
-                &mut owned_memory_logic,
-                &mut memory_states,
-            );
-            commit_operation_rewrites(
-                &mut module,
-                &[],
-                &mut operation_sources,
-                &mut source_to_local,
-                &mut boundary_bindings,
-                &mut owned_memory_logic,
-                &mut memory_states,
-            )?;
+            remap_private_values(&local_changes, &mut values);
+            commit_operation_rewrites(&mut module, &[], &mut operation_sources, &mut values)?;
         }
         operation_sources.inherit_appended(&module)?;
         crate::api::diagnostics::trace!(
@@ -1369,14 +1327,14 @@ impl RegionArchitectureMaterializer<'_, '_> {
             regional_roots.len(),
             regional_roots
                 .iter()
-                .filter_map(|root| source_to_local.get(&root.value))
+                .filter_map(|root| values.source_to_local.get(&root.value))
                 .filter(|&&local| module
                     .value(local)
                     .is_some_and(|value| matches!(value.kind, word::ValueKind::Constant(_))))
                 .count(),
         );
         let map_source = |value: &word::ValueId| {
-            source_to_local.get(value).copied().ok_or_else(|| {
+            values.source_to_local.get(value).copied().ok_or_else(|| {
                 SynthError::invariant(
                     "regional observable value is absent from its local Word cone",
                 )
@@ -1386,14 +1344,20 @@ impl RegionArchitectureMaterializer<'_, '_> {
             .iter()
             .map(|root| map_source(&root.value).map(|local| (*root, local)))
             .collect::<Result<Vec<_>, _>>()?;
+        let PrivateValueBindings {
+            source_to_local,
+            boundary: boundary_bindings,
+            memory_logic,
+            memory_states,
+        } = values;
         Ok((
             RegionalWordCone {
                 module,
                 source_to_local,
                 boundary_bindings,
                 operation_sources,
-                owned_memory_logic,
-                memory_states,
+                owned_memory_logic: memory_logic.into_boxed_slice(),
+                memory_states: memory_states.into_boxed_slice(),
                 root_bindings,
             },
             root_pairs,
