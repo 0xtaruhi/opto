@@ -306,8 +306,13 @@ fn multi_operand_fusion_exists_only_in_private_region_catalogs() {
             input_capacitance: 1.0,
         })
     });
-    ArchitectureDecisions::select_design_for_budgets(&mut [&mut private], &target, &[None])
-        .unwrap();
+    ArchitectureDecisions::select_design_for_budgets(
+        &mut [&mut private],
+        &target,
+        &[None],
+        &opto_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
     let selected = private.selected_candidate(operator.id()).unwrap();
     let selected_score = target
         .score_for_budget(private.candidate_estimate(selected).unwrap(), None)

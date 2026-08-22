@@ -636,14 +636,9 @@ impl WorkGraph {
             })?;
             let item = &self.items[row];
             let reads = item_read_set(item)?;
-            let shard = self
-                .shards
-                .iter()
-                .find(|shard| shard.items.binary_search(&row).is_ok())
-                .map(|shard| shard.id)
-                .ok_or_else(|| {
-                    crate::SynthError::invariant("work result item has no compilation shard")
-                })?;
+            let shard = self.shard_for_item(row).ok_or_else(|| {
+                crate::SynthError::invariant("work result item has no compilation shard")
+            })?;
             if result.shard != shard || result.context != item.context {
                 return Err(crate::SynthError::invariant(
                     "work result does not match its immutable revision, context, or footprint",
@@ -675,6 +670,16 @@ impl WorkGraph {
                 output.ok_or_else(|| crate::SynthError::invariant("work item produced no result"))
             })
             .collect()
+    }
+
+    fn shard_for_item(&self, row: usize) -> Option<CompilationShardId> {
+        let index = self
+            .shards
+            .partition_point(|shard| shard.items.last().is_some_and(|&last| last < row));
+        self.shards
+            .get(index)
+            .filter(|shard| shard.items.binary_search(&row).is_ok())
+            .map(|shard| shard.id)
     }
 
     fn validate(&self) -> Result<(), crate::SynthError> {

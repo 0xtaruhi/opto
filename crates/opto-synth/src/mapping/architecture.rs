@@ -372,6 +372,7 @@ pub(crate) fn prepare_regional_architectures(
         &mut decisions,
         request.target_model,
         &budgets,
+        runtime,
     )?;
     let tasks = characterized
         .into_iter()

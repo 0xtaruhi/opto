@@ -218,14 +218,21 @@ impl ArchitectureDecisions {
         decisions: &mut [&mut Self],
         target: &crate::planning::regional::StructuralTargetModel,
         budgets: &[Option<f64>],
+        runtime: &opto_runtime::ExecutionContext,
     ) -> Result<(), crate::SynthError> {
         if decisions.len() != budgets.len() {
             return Err(crate::SynthError::invariant(
                 "architecture decision groups do not align with design timing budgets",
             ));
         }
-        let mut selections = Vec::new();
-        for (region, (decisions, &budget)) in decisions.iter().zip(budgets).enumerate() {
+        let views = decisions
+            .iter()
+            .map(|decisions| &**decisions)
+            .collect::<Vec<_>>();
+        let selections = runtime.analyze_indexed(views.len(), |region| {
+            let decisions = views[region];
+            let budget = budgets[region];
+            let mut selections = Vec::with_capacity(decisions.operators().len());
             for operator in decisions.operators() {
                 let mut best = None;
                 for &candidate in decisions.candidates(operator.id()) {
@@ -241,12 +248,15 @@ impl ArchitectureDecisions {
                     }
                 }
                 if let Some((candidate, _, _)) = best {
-                    selections.push((region, candidate));
+                    selections.push(candidate);
                 }
             }
-        }
-        for (region, candidate) in selections {
-            decisions[region].select_candidate(candidate)?;
+            Ok::<_, crate::SynthError>(selections)
+        })?;
+        for (region, selections) in selections.into_iter().enumerate() {
+            for candidate in selections {
+                decisions[region].select_candidate(candidate)?;
+            }
         }
         Ok(())
     }
