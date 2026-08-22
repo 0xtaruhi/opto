@@ -34,6 +34,8 @@ pub(crate) struct ExecutionContextInner {
     pub(crate) composite_batches: AtomicU64,
     pub(crate) composite_active_nanoseconds: AtomicU64,
     pub(crate) composite_wall_nanoseconds: AtomicU64,
+    pub(crate) composite_worker_capacity_nanoseconds: AtomicU64,
+    pub(crate) composite_longest_task_nanoseconds: AtomicU64,
     pub(crate) composite_estimated_work: AtomicU64,
     pub(crate) composite_peak_ready_tasks: AtomicU64,
     pub(crate) composite_peak_admitted_memory: AtomicU64,
@@ -73,6 +75,8 @@ impl ExecutionContext {
                 composite_batches: AtomicU64::new(0),
                 composite_active_nanoseconds: AtomicU64::new(0),
                 composite_wall_nanoseconds: AtomicU64::new(0),
+                composite_worker_capacity_nanoseconds: AtomicU64::new(0),
+                composite_longest_task_nanoseconds: AtomicU64::new(0),
                 composite_estimated_work: AtomicU64::new(0),
                 composite_peak_ready_tasks: AtomicU64::new(0),
                 composite_peak_admitted_memory: AtomicU64::new(0),
@@ -147,6 +151,14 @@ impl ExecutionContext {
                 .inner
                 .composite_wall_nanoseconds
                 .load(Ordering::Relaxed),
+            composite_worker_capacity_nanoseconds: self
+                .inner
+                .composite_worker_capacity_nanoseconds
+                .load(Ordering::Relaxed),
+            composite_longest_task_nanoseconds: self
+                .inner
+                .composite_longest_task_nanoseconds
+                .load(Ordering::Relaxed),
             composite_estimated_work: self.inner.composite_estimated_work.load(Ordering::Relaxed),
             composite_peak_ready_tasks: self
                 .inner
@@ -202,8 +214,8 @@ impl ExecutionContext {
         if tasks.is_empty() {
             return Ok(Vec::new());
         }
-        let _batch = CompositeBatchTimer::start(&self.inner, &tasks);
         let workers = self.parallelism().max(1);
+        let _batch = CompositeBatchTimer::start(&self.inner, &tasks, workers);
         let memory_limit = self.memory_limit.map_or(u64::MAX, NonZeroU64::get);
         if let Some(task) = tasks
             .iter()
@@ -446,6 +458,10 @@ pub struct ExecutionMetrics {
     pub composite_active_nanoseconds: u64,
     /// Sum of end-to-end wall time for composite scheduler invocations.
     pub composite_wall_nanoseconds: u64,
+    /// Sum of wall time multiplied by the admitted worker capacity of each batch.
+    pub composite_worker_capacity_nanoseconds: u64,
+    /// Longest measured composite task callback.
+    pub composite_longest_task_nanoseconds: u64,
     /// Sum of declared work admitted to composite scheduler invocations.
     pub composite_estimated_work: u64,
     /// Largest ready composite task batch observed by this runtime.
@@ -454,13 +470,23 @@ pub struct ExecutionMetrics {
     pub composite_peak_admitted_memory: u64,
 }
 
+impl ExecutionMetrics {
+    /// Worker capacity not occupied by measured composite callbacks.
+    #[must_use]
+    pub const fn composite_idle_nanoseconds(self) -> u64 {
+        self.composite_worker_capacity_nanoseconds
+            .saturating_sub(self.composite_active_nanoseconds)
+    }
+}
+
 struct CompositeBatchTimer<'a> {
     metrics: &'a ExecutionContextInner,
     started: Instant,
+    workers: usize,
 }
 
 impl<'a> CompositeBatchTimer<'a> {
-    fn start<I>(metrics: &'a ExecutionContextInner, tasks: &[Task<I>]) -> Self {
+    fn start<I>(metrics: &'a ExecutionContextInner, tasks: &[Task<I>], workers: usize) -> Self {
         metrics.composite_batches.fetch_add(1, Ordering::Relaxed);
         metrics.composite_peak_ready_tasks.fetch_max(
             u64::try_from(tasks.len()).unwrap_or(u64::MAX),
@@ -475,22 +501,34 @@ impl<'a> CompositeBatchTimer<'a> {
         Self {
             metrics,
             started: Instant::now(),
+            workers,
         }
     }
 }
 
 impl Drop for CompositeBatchTimer<'_> {
     fn drop(&mut self) {
+        let wall = elapsed_nanoseconds(self.started);
         self.metrics
             .composite_wall_nanoseconds
-            .fetch_add(elapsed_nanoseconds(self.started), Ordering::Relaxed);
+            .fetch_add(wall, Ordering::Relaxed);
+        self.metrics
+            .composite_worker_capacity_nanoseconds
+            .fetch_add(
+                wall.saturating_mul(u64::try_from(self.workers).unwrap_or(u64::MAX)),
+                Ordering::Relaxed,
+            );
     }
 }
 
 fn record_active_time(metrics: &ExecutionContextInner, started: Instant) {
+    let elapsed = elapsed_nanoseconds(started);
     metrics
         .composite_active_nanoseconds
-        .fetch_add(elapsed_nanoseconds(started), Ordering::Relaxed);
+        .fetch_add(elapsed, Ordering::Relaxed);
+    metrics
+        .composite_longest_task_nanoseconds
+        .fetch_max(elapsed, Ordering::Relaxed);
 }
 
 fn elapsed_nanoseconds(started: Instant) -> u64 {

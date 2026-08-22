@@ -132,6 +132,9 @@ fn composite_scheduler_admits_tasks_within_the_memory_limit() {
     assert_eq!(metrics.composite_peak_admitted_memory, 10);
     assert!(metrics.composite_active_nanoseconds > 0);
     assert!(metrics.composite_wall_nanoseconds > 0);
+    assert!(metrics.composite_worker_capacity_nanoseconds >= metrics.composite_wall_nanoseconds);
+    assert!(metrics.composite_longest_task_nanoseconds > 0);
+    assert!(metrics.composite_idle_nanoseconds() <= metrics.composite_worker_capacity_nanoseconds);
 }
 
 #[test]
