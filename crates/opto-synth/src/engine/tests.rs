@@ -680,3 +680,70 @@ fn failed_stage_emits_a_terminal_failure_event() {
         ]
     );
 }
+
+#[test]
+fn mapped_output_is_identical_across_worker_counts() {
+    // Multi-driver wires force the RFC 0013 fragment-publication path, so this
+    // also pins the protocol's cross-worker determinism.
+    let mut module = word::WordModule::new("worker_determinism");
+    let byte = word::WordType::bits(8).unwrap();
+    let wide = word::WordType::bits(32).unwrap();
+    let source = test_span();
+    let inputs = (0..4)
+        .map(|index| {
+            let port = module
+                .add_port(
+                    format!("a{index}"),
+                    word::PortDirection::Input,
+                    byte,
+                    source.clone(),
+                )
+                .unwrap();
+            module
+                .read_signal(module.port(port).unwrap().signal, source.clone())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let aggregate = module.add_wire("aggregate", wide, source.clone()).unwrap();
+    for (index, &value) in inputs.iter().enumerate() {
+        let lsb = u32::try_from(index).unwrap() * 8;
+        module
+            .connect(
+                word::LValue::signal(aggregate).with_range(word::BitRange { msb: lsb + 7, lsb }),
+                value,
+                source.clone(),
+            )
+            .unwrap();
+    }
+    let output = module
+        .add_port("y", word::PortDirection::Output, wide, source.clone())
+        .unwrap();
+    let read = module.read_signal(aggregate, source.clone()).unwrap();
+    module
+        .connect(
+            word::LValue::signal(module.port(output).unwrap().signal),
+            read,
+            source,
+        )
+        .unwrap();
+
+    let options = inverter_options();
+    let one = synthesize_rtl_module(
+        structural(module.clone()),
+        options.clone(),
+        &ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 }).unwrap(),
+    )
+    .unwrap();
+    let four = synthesize_rtl_module(
+        structural(module),
+        options,
+        &ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 4 }).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        serde_json::to_string(&one.mapped).unwrap(),
+        serde_json::to_string(&four.mapped).unwrap(),
+        "mapped netlists must not depend on the worker count",
+    );
+}

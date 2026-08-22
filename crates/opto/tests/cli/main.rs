@@ -522,6 +522,9 @@ fn strip_volatile_report_fields(report: &str) -> String {
                 && !line.starts_with("Synthesis stage: elapsed=")
                 && !line.starts_with("Synthesis heartbeat: elapsed=")
                 && !line.starts_with("Optimization: elapsed=")
+                // Scheduler execution carries real nanosecond utilization
+                // counters; they describe the run, not the design.
+                && !line.starts_with("Scheduler execution:")
         })
         .collect::<Vec<_>>()
         .join("\n")

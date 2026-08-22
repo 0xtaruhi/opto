@@ -154,13 +154,7 @@ pub(crate) struct LogicalOperation {
 struct LogicalDependencyRefinement {
     known_outputs: Box<[u64]>,
     mux_branch: Option<bool>,
-    exact: Option<LogicalDependencyRows>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct LogicalDependencyRows {
-    offsets: Box<[u32]>,
-    ranges: Box<[LogicalDependencyRange]>,
+    exact: Option<opto_core::PackedRows<LogicalDependencyRange>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,10 +243,11 @@ impl LogicalOperation {
             return;
         }
         if let Some(rows) = refinement.and_then(|dependencies| dependencies.exact.as_ref()) {
-            let start = rows.offsets[output] as usize;
-            let end = rows.offsets[output + 1] as usize;
-            for range in &rows.ranges[start..end] {
-                for input in range.start..range.start + range.width {
+            let Some(range) = rows.row_range(output) else {
+                return;
+            };
+            for encoded in &rows.values()[range] {
+                for input in encoded.start..encoded.start + encoded.width {
                     visit(input as usize);
                 }
             }
@@ -1093,6 +1088,182 @@ impl WorkDesign {
     pub(crate) const fn revision(&self) -> DesignRevisionId {
         self.0.revision()
     }
+
+    pub(crate) const fn design(&self) -> &DesignRevision<LogicalCell> {
+        &self.0
+    }
+
+    pub(crate) const fn from_revision(design: DesignRevision<LogicalCell>) -> Self {
+        Self(design)
+    }
+}
+
+/// Lowers published static-wire coalescing fragments into bit-level revision
+/// deltas against the sealed base generation.
+///
+/// Every fragment replaces the connection cells of one candidate wire so each
+/// signal bit is driven from its coalesced value, and installs the appended
+/// extract/concat/cast cells those inputs read. Stable identities reuse the
+/// sealing recipes over the spliced module, so a fresh seal of the same module
+/// reproduces exactly these entities.
+pub(crate) fn coalesce_revision_deltas(
+    module: &word::WordModule,
+    regions: &crate::SynthesisRegionGraph,
+    base: &DesignRevision<LogicalCell>,
+    published: &word::PublishedWave,
+    signals: &[(word::FragmentKey, word::SignalId)],
+) -> Result<Vec<opto_ir::design::RewriteDelta<LogicalCell>>, crate::SynthError> {
+    use opto_ir::design::{
+        EquivalenceCertificate, EquivalenceRegime, RewriteDelta, RewriteDeltaId, SemanticBinding,
+    };
+
+    if published.entries().len() != signals.len() {
+        return Err(crate::SynthError::invariant(
+            "published coalescing wave does not match its candidate wires",
+        ));
+    }
+    let anchors = LogicalAnchors::new(module, regions)?;
+    let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
+    let mut known_bits = word::KnownBitsAnalysis::new(module);
+    let mut unsigned_values = word::UnsignedValueAnalysis::new(module);
+    let mut deltas = Vec::with_capacity(published.entries().len());
+    for (entry, &(_, signal)) in published.entries().iter().zip(signals) {
+        let stored_signal = module
+            .signal(signal)
+            .ok_or_else(|| crate::SynthError::invariant("coalesced candidate wire disappeared"))?;
+        let width = stored_signal.ty.width();
+        let state = stored_signal.ty.state();
+        let source_span = stored_signal.source.clone();
+        let signal_anchor = signal_anchor(module, signal)?;
+        let mut nets = NetTable::default();
+        let mut connection_cells = Vec::<Cell<LogicalCell>>::new();
+        let mut replaces = Vec::<EntityId>::new();
+        let mut existing_inputs = std::collections::BTreeSet::new();
+        for bit in 0..width {
+            let Some(source) = connectivity.signal_source(signal, bit)? else {
+                return Err(crate::SynthError::invariant(format!(
+                    "coalesced wire lost the driver for bit {bit}"
+                )));
+            };
+            let input_net = source_net(module, &anchors, source, state, &mut nets)?;
+            if base.net(input_net).is_some() {
+                existing_inputs.insert(input_net);
+            }
+            let cell = connection_cell_id(signal_anchor, bit);
+            replaces.push(EntityId::Cell(cell));
+            connection_cells.push(Cell {
+                id: cell,
+                kind: LogicalCell::Connection,
+                class: CellClass::Combinational,
+                inputs: Box::new([input_net]),
+                outputs: Box::new([signal_net_id(signal_anchor, bit)]),
+                source: source_span.clone(),
+            });
+        }
+        let mut operation_cells = Vec::<Cell<LogicalCell>>::with_capacity(entry.operations().len());
+        for &operation in entry.operations() {
+            let kind = logical_operation(module, operation, &mut known_bits, &mut unsigned_values)?;
+            let stored = module.operation(operation).ok_or_else(|| {
+                crate::SynthError::invariant("published coalescing operation disappeared")
+            })?;
+            let cell = anchors.operation(operation)?;
+            let inputs = crate::word::operation_inputs(&stored.kind)
+                .into_iter()
+                .map(|value| value_nets(module, &anchors, &connectivity, value, &mut nets))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Box<[_]>>();
+            for &input in &inputs {
+                if base.net(input).is_some() {
+                    existing_inputs.insert(input);
+                }
+            }
+            let outputs = operation_outputs(module, &anchors, operation, &mut nets)?;
+            for (output, &net) in outputs.iter().enumerate() {
+                install_driver(
+                    &mut nets,
+                    net,
+                    NetDriver::Cell {
+                        cell,
+                        output: u32::try_from(output).map_err(|_| {
+                            crate::SynthError::capacity("logical output bit ordinal")
+                        })?,
+                    },
+                )?;
+            }
+            operation_cells.push(Cell {
+                id: cell,
+                kind: LogicalCell::Operation(kind),
+                class: if matches!(
+                    stored.kind,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                ) {
+                    CellClass::StateBoundary
+                } else {
+                    CellClass::Combinational
+                },
+                inputs,
+                outputs,
+                source: stored.source.clone(),
+            });
+        }
+        // Only genuinely new nets may enter the fragment; producer and
+        // boundary nets already live in the base generation.
+        let nets = nets
+            .into_nets()
+            .into_iter()
+            .filter(|net| base.net(net.id).is_none())
+            .collect::<Vec<_>>();
+        let mut cells = operation_cells;
+        cells.extend(connection_cells);
+        let mut reads = replaces.clone();
+        reads.extend(existing_inputs.iter().copied().map(EntityId::NetBit));
+        deltas.push(RewriteDelta {
+            id: RewriteDeltaId::from_bytes(entry.key().bytes()),
+            footprint: RevisionFootprint {
+                base: base.revision(),
+                reads: EntitySet::new(reads).map_err(|error| design_error(&error))?,
+                replaces: EntitySet::new(replaces).map_err(|error| design_error(&error))?,
+            },
+            cells: cells.into_boxed_slice(),
+            nets: nets.into_boxed_slice(),
+            semantic: SemanticBinding {
+                inputs: existing_inputs.into_iter().collect::<Box<[_]>>(),
+                outputs: Box::new([]),
+            },
+            proof: EquivalenceCertificate {
+                regime: EquivalenceRegime::ByConstruction,
+                digest: coalesce_proof_digest(entry.key()),
+            },
+        });
+    }
+    Ok(deltas)
+}
+
+/// Rejects any coalescing certificate that does not carry this layer's own
+/// construction-equivalence recipe.
+pub(crate) fn validate_coalesce_proof(
+    delta: &opto_ir::design::RewriteDelta<LogicalCell>,
+) -> Result<(), opto_ir::design::DesignError> {
+    use opto_ir::design::{DesignError, EquivalenceRegime};
+    if delta.proof.regime != EquivalenceRegime::ByConstruction
+        || delta.proof.digest
+            != coalesce_proof_digest(opto_ir::word::FragmentKey::from_bytes(delta.id.bytes()))
+    {
+        return Err(DesignError::ProofRejected(
+            "static-wire coalescing requires its own by-construction certificate".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn coalesce_proof_digest(key: opto_ir::word::FragmentKey) -> [u8; 32] {
+    *blake3::Hasher::new()
+        .update(b"opto/dataflow-coalesce-proof/v1\0")
+        .update(&key.bytes())
+        .finalize()
+        .as_bytes()
 }
 
 fn seal_logical_design(
@@ -1527,59 +1698,57 @@ fn logical_operation(
         },
         _ => None,
     };
-    let exact =
-        if matches!(stored.kind, word::OpKind::DynamicExtract { .. }) {
-            let mut offsets = Vec::with_capacity(result.width() as usize + 1);
+    let exact = if matches!(stored.kind, word::OpKind::DynamicExtract { .. }) {
+        let mut rows = opto_core::PackedRowsBuilder::<LogicalDependencyRange>::try_with_capacity(
+            result.width() as usize,
+            0,
+        )
+        .map_err(|_| crate::SynthError::capacity("logical dependency range directory"))?;
+        for output in 0..result.width() {
             let mut ranges = Vec::new();
-            offsets.push(0);
-            for output in 0..result.width() {
-                if known_bits.bit(module, stored.result, output) == word::KnownBit::Unknown {
-                    for dependency in crate::word::cycle::operation_dependencies(
-                        module,
-                        known_bits,
-                        unsigned_values,
-                        &stored.kind,
-                        crate::word::cycle::ValueSlice {
-                            value: stored.result,
-                            lsb: output,
-                            width: 1,
-                        },
-                    )? {
-                        let operand = operand_values
-                            .iter()
-                            .position(|&value| value == dependency.value)
-                            .ok_or_else(|| {
-                                crate::SynthError::invariant(
-                                    "logical dependency is not a direct operation input",
-                                )
-                            })?;
-                        let start = operands[..operand]
-                            .iter()
-                            .try_fold(0u32, |total, ty| total.checked_add(ty.width()))
-                            .ok_or_else(|| {
-                                crate::SynthError::capacity("logical dependency operand width")
-                            })?
-                            .checked_add(dependency.lsb)
-                            .ok_or_else(|| {
-                                crate::SynthError::capacity("logical dependency input offset")
-                            })?;
-                        ranges.push(LogicalDependencyRange {
-                            start,
-                            width: dependency.width,
-                        });
-                    }
+            if known_bits.bit(module, stored.result, output) == word::KnownBit::Unknown {
+                for dependency in crate::word::cycle::operation_dependencies(
+                    module,
+                    known_bits,
+                    unsigned_values,
+                    &stored.kind,
+                    crate::word::cycle::ValueSlice {
+                        value: stored.result,
+                        lsb: output,
+                        width: 1,
+                    },
+                )? {
+                    let operand = operand_values
+                        .iter()
+                        .position(|&value| value == dependency.value)
+                        .ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "logical dependency is not a direct operation input",
+                            )
+                        })?;
+                    let start = operands[..operand]
+                        .iter()
+                        .try_fold(0u32, |total, ty| total.checked_add(ty.width()))
+                        .ok_or_else(|| {
+                            crate::SynthError::capacity("logical dependency operand width")
+                        })?
+                        .checked_add(dependency.lsb)
+                        .ok_or_else(|| {
+                            crate::SynthError::capacity("logical dependency input offset")
+                        })?;
+                    ranges.push(LogicalDependencyRange {
+                        start,
+                        width: dependency.width,
+                    });
                 }
-                offsets.push(u32::try_from(ranges.len()).map_err(|_| {
-                    crate::SynthError::capacity("logical dependency range directory")
-                })?);
             }
-            Some(LogicalDependencyRows {
-                offsets: offsets.into_boxed_slice(),
-                ranges: ranges.into_boxed_slice(),
-            })
-        } else {
-            None
-        };
+            rows.try_push_row(ranges)
+                .map_err(|_| crate::SynthError::capacity("logical dependency range directory"))?;
+        }
+        Some(rows.finish())
+    } else {
+        None
+    };
     let dependencies =
         (!known_outputs.is_empty() || mux_branch.is_some() || exact.is_some()).then(|| {
             Box::new(LogicalDependencyRefinement {
@@ -2434,5 +2603,161 @@ mod tests {
         .unwrap();
 
         WorkDesign::seal(&module, &regions).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod coalescing_publication_tests {
+    use super::*;
+    use opto_ir::word;
+
+    fn multi_driver_module(name: &str) -> word::WordModule {
+        let mut module = word::WordModule::new(name);
+        let byte = word::WordType::bits(8).unwrap();
+        let wide = word::WordType::bits(32).unwrap();
+        let source = word::SourceSpan::stable("coalescing publication test");
+        let inputs = (0..4)
+            .map(|index| {
+                let port = module
+                    .add_port(
+                        format!("a{index}"),
+                        word::PortDirection::Input,
+                        byte,
+                        source.clone(),
+                    )
+                    .unwrap();
+                module
+                    .read_signal(module.port(port).unwrap().signal, source.clone())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let aggregate = module.add_wire("aggregate", wide, source.clone()).unwrap();
+        for (index, &value) in inputs.iter().enumerate() {
+            let lsb = u32::try_from(index).unwrap() * 8;
+            module
+                .connect(
+                    word::LValue::signal(aggregate)
+                        .with_range(word::BitRange { msb: lsb + 7, lsb }),
+                    value,
+                    source.clone(),
+                )
+                .unwrap();
+        }
+        // Keep the wire observable so every published entity stays live.
+        let output = module
+            .add_port("y", word::PortDirection::Output, wide, source.clone())
+            .unwrap();
+        let read = module.read_signal(aggregate, source.clone()).unwrap();
+        module
+            .connect(
+                word::LValue::signal(module.port(output).unwrap().signal),
+                read,
+                source,
+            )
+            .unwrap();
+        module
+    }
+
+    #[test]
+    fn committed_coalescing_revision_matches_a_fresh_seal() {
+        let mut module = multi_driver_module("coalescing");
+        let coalescing = crate::planning::dataflow::static_wire_driver_fragments(&module).unwrap();
+        assert!(!coalescing.is_empty());
+        let base_regions = crate::regional::region_graph::partition::build(
+            &module,
+            crate::regional::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let base = WorkDesign::seal(&module, &base_regions).unwrap();
+        let (wave, signals) = coalescing.into_parts();
+        let published = module
+            .publish_fragments(wave)
+            .map_err(crate::SynthError::from)
+            .unwrap();
+
+        let regions = crate::regional::region_graph::partition::build(
+            &module,
+            crate::regional::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let deltas =
+            coalesce_revision_deltas(&module, &regions, base.design(), &published, &signals)
+                .unwrap();
+        assert_eq!(deltas.len(), signals.len());
+        let committed = base
+            .design()
+            .commit(deltas, validate_coalesce_proof)
+            .map_err(|error| design_error(&error))
+            .unwrap();
+
+        // The published generation must reproduce exactly what sealing the
+        // spliced module from scratch would produce.
+        let fresh = WorkDesign::seal(&module, &regions).unwrap();
+        let cells = |design: &DesignRevision<LogicalCell>| {
+            let mut stored = design.cells().cloned().collect::<Vec<_>>();
+            stored.sort_unstable_by_key(|cell| cell.id);
+            stored
+        };
+        let nets = |design: &DesignRevision<LogicalCell>| {
+            let mut stored = design.nets().cloned().collect::<Vec<_>>();
+            stored.sort_unstable_by_key(|net| net.id);
+            stored
+        };
+        assert_eq!(cells(&committed), cells(fresh.design()));
+        assert_eq!(nets(&committed), nets(fresh.design()));
+        assert_ne!(committed.revision(), base.revision());
+    }
+
+    #[test]
+    fn failed_commit_leaves_the_base_generation_unchanged() {
+        use opto_ir::design::{EquivalenceCertificate, EquivalenceRegime};
+
+        let mut module = multi_driver_module("rollback");
+        let coalescing = crate::planning::dataflow::static_wire_driver_fragments(&module).unwrap();
+        let base_regions = crate::regional::region_graph::partition::build(
+            &module,
+            crate::regional::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let base = WorkDesign::seal(&module, &base_regions).unwrap();
+        let before = base.design().clone();
+
+        let (wave, signals) = coalescing.into_parts();
+        let published = module
+            .publish_fragments(wave)
+            .map_err(crate::SynthError::from)
+            .unwrap();
+        let regions = crate::regional::region_graph::partition::build(
+            &module,
+            crate::regional::region_graph::RegionPartitionPolicy::default(),
+        )
+        .unwrap();
+        let mut deltas =
+            coalesce_revision_deltas(&module, &regions, base.design(), &published, &signals)
+                .unwrap();
+        // Corrupt one certificate so the wave must be rejected wholesale.
+        deltas[0].proof = EquivalenceCertificate {
+            regime: EquivalenceRegime::ByConstruction,
+            digest: [0u8; 32],
+        };
+        assert!(
+            base.design()
+                .commit(deltas, validate_coalesce_proof)
+                .is_err()
+        );
+        // Byte-identity is observable through identical live content: every
+        // surviving cell and net must still resolve to the same record.
+        let after = base.design().clone();
+        assert_eq!(after.cell_count(), before.cell_count());
+        assert_eq!(after.net_count(), before.net_count());
+        for (fresh, frozen) in after.cells().zip(before.cells()) {
+            assert_eq!(fresh.id, frozen.id);
+            assert_eq!(fresh.inputs, frozen.inputs);
+            assert_eq!(fresh.outputs, frozen.outputs);
+        }
+        for (fresh, frozen) in after.nets().zip(before.nets()) {
+            assert_eq!(fresh.id, frozen.id);
+            assert_eq!(fresh.driver, frozen.driver);
+        }
     }
 }

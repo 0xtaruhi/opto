@@ -23,9 +23,14 @@ use std::collections::BTreeMap;
 /// regional boundary value. Canonicalizing only complete, forward, static,
 /// non-overlapping wire drivers preserves the source semantics while giving
 /// partitioning and publication one explicit dataflow value.
-pub(crate) fn coalesce_static_wire_drivers(
-    module: &mut word::WordModule,
-) -> Result<(), crate::SynthError> {
+///
+/// The rewrite no longer mutates the Word module in place. It returns one
+/// [`WordFragment`] per candidate wire, keyed so publication reproduces the
+/// dense-ID sequence the retired in-place pass produced; RFC 0013 Amendment 1
+/// publication splices them and commits the changed revision cone.
+pub(crate) fn static_wire_driver_fragments(
+    module: &word::WordModule,
+) -> Result<StaticWireCoalescing, crate::SynthError> {
     #[derive(Clone, Copy)]
     struct DrivenBit {
         value: word::ValueId,
@@ -36,6 +41,13 @@ pub(crate) fn coalesce_static_wire_drivers(
         .preserved_signals()
         .collect::<std::collections::BTreeSet<_>>();
     let mut candidates = BTreeMap::<word::SignalId, (Vec<DrivenBit>, word::SourceSpan)>::new();
+    let mut candidate_connects = BTreeMap::<word::SignalId, Vec<usize>>::new();
+    for (connect_index, connect) in module.connects().iter().enumerate() {
+        candidate_connects
+            .entry(connect.target.signal)
+            .or_default()
+            .push(connect_index);
+    }
     for signal_index in 0..module.signals().len() {
         let signal_id =
             word::SignalId::from_index(signal_index).map_err(crate::SynthError::Word)?;
@@ -46,17 +58,16 @@ pub(crate) fn coalesce_static_wire_drivers(
         {
             continue;
         }
-        let drivers = module
-            .connects()
-            .iter()
-            .filter(|connect| connect.target.signal == signal_id)
-            .collect::<Vec<_>>();
+        let Some(drivers) = candidate_connects.get(&signal_id) else {
+            continue;
+        };
         if drivers.len() < 2 {
             continue;
         }
         let mut bits = vec![None; signal.ty.width() as usize];
         let mut valid = true;
-        for connect in &drivers {
+        for &connect_index in drivers {
+            let connect = &module.connects()[connect_index];
             if connect.target.dynamic.is_some() {
                 valid = false;
                 break;
@@ -102,22 +113,28 @@ pub(crate) fn coalesce_static_wire_drivers(
             }
         }
         if !valid || bits.iter().any(Option::is_none) {
+            candidate_connects.remove(&signal_id);
             continue;
         }
         candidates.insert(
             signal_id,
             (
                 bits.into_iter().map(Option::unwrap).collect(),
-                drivers[0].source.clone(),
+                module.connects()[drivers[0]].source.clone(),
             ),
         );
     }
     if candidates.is_empty() {
-        return Ok(());
+        return Ok(StaticWireCoalescing::default());
     }
 
-    let mut replacements = BTreeMap::new();
+    let mut wave = word::PublicationWave::new();
+    let mut signals = Vec::with_capacity(candidates.len());
     for (&signal, (bits, source)) in &candidates {
+        // The key orders fragments exactly like the retired in-place pass
+        // appended its rows: ascending base signal identity.
+        let key = coalesce_fragment_key(signal);
+        let mut builder = word::WordFragmentBuilder::new(module);
         let mut runs = Vec::<(word::ValueId, u32, u32)>::new();
         for &bit in bits {
             if let Some((value, first, width)) = runs.last_mut()
@@ -145,7 +162,7 @@ pub(crate) fn coalesce_static_wire_drivers(
             parts.push(if lsb == 0 && width == value_width {
                 value
             } else {
-                module
+                builder
                     .extract(value, lsb, width, source.clone())
                     .map_err(crate::SynthError::from)?
             });
@@ -154,7 +171,7 @@ pub(crate) fn coalesce_static_wire_drivers(
         let mut value = if let [value] = parts.as_slice() {
             *value
         } else {
-            module
+            builder
                 .concat(parts, source.clone())
                 .map_err(crate::SynthError::from)?
         };
@@ -162,11 +179,8 @@ pub(crate) fn coalesce_static_wire_drivers(
             .signal(signal)
             .ok_or_else(|| crate::SynthError::invariant("coalesced wire disappeared"))?
             .ty;
-        if module
-            .value(value)
-            .is_none_or(|stored| stored.ty != signal_ty)
-        {
-            value = module
+        if builder.value_ty(value)? != signal_ty {
+            value = builder
                 .cast(
                     if signal_ty.is_signed() {
                         word::CastKind::SignExtend
@@ -179,22 +193,51 @@ pub(crate) fn coalesce_static_wire_drivers(
                 )
                 .map_err(crate::SynthError::from)?;
         }
-        replacements.insert(signal, (value, source.clone()));
+        for &connect_index in &candidate_connects[&signal] {
+            builder.remove_connect(connect_index)?;
+        }
+        builder.connect(word::LValue::signal(signal), value, source.clone());
+        let fragment = builder.build().map_err(crate::SynthError::from)?;
+        signals.push((key, signal));
+        wave.push(key, fragment);
+    }
+    Ok(StaticWireCoalescing {
+        wave,
+        signals: signals.into_boxed_slice(),
+    })
+}
+
+fn coalesce_fragment_key(signal: word::SignalId) -> word::FragmentKey {
+    // The key orders fragments exactly like the retired in-place pass appended
+    // its rows: ascending base signal identity.
+    let mut bytes = [0u8; 32];
+    bytes[..8].copy_from_slice(&(signal.index() as u64).to_be_bytes());
+    word::FragmentKey::from_bytes(bytes)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StaticWireCoalescing {
+    wave: word::PublicationWave,
+    /// Candidate wires ordered exactly like [`Self::wave`] entries after
+    /// publication sorts them by key.
+    signals: Box<[(word::FragmentKey, word::SignalId)]>,
+}
+
+impl StaticWireCoalescing {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.signals.is_empty()
     }
 
-    for connect in module.take_connects() {
-        if !replacements.contains_key(&connect.target.signal) {
-            module
-                .connect(connect.target, connect.value, connect.source)
-                .map_err(crate::SynthError::from)?;
-        }
+    /// Splits into the publication wave and its candidate wires, which stay
+    /// aligned with the wave entries after key-ordered publication.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        word::PublicationWave,
+        Box<[(word::FragmentKey, word::SignalId)]>,
+    ) {
+        (self.wave, self.signals)
     }
-    for (signal, (value, source)) in replacements {
-        module
-            .connect(word::LValue::signal(signal), value, source)
-            .map_err(crate::SynthError::from)?;
-    }
-    Ok(())
 }
 
 pub(crate) struct DataflowChanges {

@@ -436,8 +436,12 @@ fn coalesces_complete_static_wire_slices_before_region_freeze() {
             .unwrap();
     }
 
-    coalesce_static_wire_drivers(&mut module).unwrap();
+    let coalescing = static_wire_driver_fragments(&module).unwrap();
+    assert!(!coalescing.is_empty());
+    let (wave, signals) = coalescing.into_parts();
+    module.publish_fragments(wave).unwrap();
     module.validate().unwrap();
+    assert_eq!(signals.len(), 1);
 
     let connects = module
         .connects()
@@ -488,7 +492,8 @@ fn leaves_incomplete_static_wire_slices_separate() {
             .unwrap();
     }
 
-    coalesce_static_wire_drivers(&mut module).unwrap();
+    let coalescing = static_wire_driver_fragments(&module).unwrap();
+    assert!(coalescing.is_empty());
 
     assert_eq!(
         module
