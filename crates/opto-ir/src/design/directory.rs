@@ -39,6 +39,14 @@ where
     K: StableKey,
     V: Copy,
 {
+    pub(super) fn from_sorted_entries(entries: Vec<(K, V)>) -> Self {
+        let len = entries.len();
+        Self {
+            root: (!entries.is_empty()).then(|| build_node(entries, 0)),
+            len,
+        }
+    }
+
     pub(super) fn get(&self, key: K) -> Option<V> {
         let bytes = key.bytes();
         let mut node = self.root.as_deref()?;
@@ -81,6 +89,33 @@ where
     pub(super) const fn len(&self) -> usize {
         self.len
     }
+}
+
+fn build_node<K, V>(entries: Vec<(K, V)>, depth: usize) -> Arc<Node<K, V>>
+where
+    K: StableKey,
+    V: Copy,
+{
+    if entries.len() <= LEAF_CAPACITY || depth == MAX_DEPTH {
+        return Arc::new(Node::Leaf(entries.into_boxed_slice()));
+    }
+    let mut groups: [Vec<(K, V)>; 16] = std::array::from_fn(|_| Vec::new());
+    for entry in entries {
+        groups[key_slot(&entry.0.bytes(), depth)].push(entry);
+    }
+    let mut bitmap = 0u16;
+    let mut children = Vec::new();
+    for (slot, group) in groups.into_iter().enumerate() {
+        if group.is_empty() {
+            continue;
+        }
+        bitmap |= 1u16 << slot;
+        children.push(build_node(group, depth + 1));
+    }
+    Arc::new(Node::Branch {
+        bitmap,
+        children: children.into_boxed_slice(),
+    })
 }
 
 fn insert_node<K, V>(
@@ -213,5 +248,27 @@ mod tests {
         assert_eq!(replacement.len(), 1);
         assert_eq!(original.get(key), Some(1));
         assert_eq!(replacement.get(key), Some(2));
+    }
+
+    #[test]
+    fn bulk_construction_matches_incremental_insertion() {
+        let entries = (0..97u32)
+            .map(|value| {
+                let mut bytes = [0; 32];
+                bytes[..4].copy_from_slice(&value.to_be_bytes());
+                (Key(bytes), value)
+            })
+            .collect::<Vec<_>>();
+        let bulk = PersistentDirectory::from_sorted_entries(entries.clone());
+        let incremental = entries
+            .iter()
+            .fold(PersistentDirectory::default(), |map, row| {
+                map.insert(row.0, row.1).0
+            });
+        assert_eq!(bulk.len(), incremental.len());
+        for (key, value) in entries {
+            assert_eq!(bulk.get(key), Some(value));
+            assert_eq!(bulk.get(key), incremental.get(key));
+        }
     }
 }

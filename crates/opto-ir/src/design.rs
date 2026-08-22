@@ -287,22 +287,62 @@ where
     pub fn seal(mut self) -> Result<DesignRevision<L>, DesignError> {
         self.cells.sort_unstable_by_key(|cell| cell.id);
         self.nets.sort_unstable_by_key(|net| net.id);
-        let mut design = DesignRevision {
+        validate_unique_cells(&self.cells)?;
+        validate_unique_nets(&self.nets)?;
+        let cell_directory = PersistentDirectory::from_sorted_entries(
+            self.cells
+                .iter()
+                .enumerate()
+                .map(|(slot, cell)| {
+                    u32::try_from(slot)
+                        .map(|slot| (cell.id, slot))
+                        .map_err(|_| DesignError::Capacity(opto_core::CapacityError))
+                })
+                .collect::<Result<_, _>>()?,
+        );
+        let net_directory = PersistentDirectory::from_sorted_entries(
+            self.nets
+                .iter()
+                .enumerate()
+                .map(|(slot, net)| {
+                    u32::try_from(slot)
+                        .map(|slot| (net.id, slot))
+                        .map_err(|_| DesignError::Capacity(opto_core::CapacityError))
+                })
+                .collect::<Result<_, _>>()?,
+        );
+        let mut consumers = vec![Vec::new(); self.nets.len()];
+        for cell in &self.cells {
+            for &input in &cell.inputs {
+                let slot = net_directory
+                    .get(input)
+                    .ok_or(DesignError::UnknownCellNet {
+                        cell: cell.id,
+                        net: input,
+                    })? as usize;
+                consumers[slot].push(cell.id);
+            }
+        }
+        let consumers = consumers
+            .into_iter()
+            .map(|mut cells| {
+                cells.sort_unstable();
+                cells.dedup();
+                cells.into_boxed_slice()
+            })
+            .collect();
+        let live_cells = self.cells.len();
+        let live_nets = self.nets.len();
+        let design = DesignRevision {
             revision: self.revision,
-            cells: PagedCowVec::new(None),
-            nets: PagedCowVec::new(None),
-            consumers: PagedCowVec::new(Box::new([])),
-            cell_directory: PersistentDirectory::default(),
-            net_directory: PersistentDirectory::default(),
-            live_cells: 0,
-            live_nets: 0,
+            cells: PagedCowVec::try_from_values(self.cells.into_iter().map(Some).collect(), None)?,
+            nets: PagedCowVec::try_from_values(self.nets.into_iter().map(Some).collect(), None)?,
+            consumers: PagedCowVec::try_from_values(consumers, Box::new([]))?,
+            cell_directory,
+            net_directory,
+            live_cells,
+            live_nets,
         };
-        for net in self.nets {
-            design.insert_new_net(net)?;
-        }
-        for cell in self.cells {
-            design.insert_new_cell(cell)?;
-        }
         design.validate()?;
         Ok(design)
     }
