@@ -18,6 +18,16 @@ pub(in crate::mapping::cover::search) struct CoverEndpoints<'a> {
 }
 
 impl<'a> CoverPlanner<'a> {
+    pub(in crate::mapping::cover::search) fn rebuild_nominal_flow(
+        &mut self,
+        runtime: &ExecutionContext,
+    ) -> Result<(), crate::SynthError> {
+        self.choices.fill(None);
+        self.choice_areas.fill(0.0);
+        self.loads_ready = false;
+        self.flow_pass(runtime)
+    }
+
     pub(in crate::mapping::cover::search) fn joint_count(&self) -> usize {
         self.joints.len()
     }

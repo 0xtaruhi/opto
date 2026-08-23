@@ -128,6 +128,47 @@ impl CoverDemand {
     }
 }
 
+fn contains_dependency_cycle(
+    slot_count: usize,
+    roots: &[usize],
+    mut dependencies: impl FnMut(usize) -> Option<LiteralDependencies>,
+) -> bool {
+    let mut state = vec![0u8; slot_count];
+    let mut stack = Vec::new();
+    for &root in roots {
+        if state.get(root).copied().unwrap_or(2) == 2 {
+            continue;
+        }
+        stack.push((root, false));
+        while let Some((slot, expanded)) = stack.pop() {
+            let Some(&slot_state) = state.get(slot) else {
+                continue;
+            };
+            match (slot_state, expanded) {
+                (2, _) => {}
+                (1, false) => return true,
+                (_, true) => state[slot] = 2,
+                (0, false) => {
+                    state[slot] = 1;
+                    stack.push((slot, true));
+                    let Some(dependencies) = dependencies(slot) else {
+                        continue;
+                    };
+                    for dependency in dependencies.into_iter().rev() {
+                        match state.get(dependency).copied() {
+                            Some(0) => stack.push((dependency, false)),
+                            Some(1) => return true,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => unreachable!("cover cycle state is bounded"),
+            }
+        }
+    }
+    false
+}
+
 fn increment(references: &mut [u32], slot: usize) -> Result<bool, crate::SynthError> {
     let reference = references.get_mut(slot).ok_or_else(|| {
         crate::SynthError::invariant("cover reference is outside the planner arena")
@@ -139,6 +180,19 @@ fn increment(references: &mut [u32], slot: usize) -> Result<bool, crate::SynthEr
 }
 
 impl CoverPlanner<'_> {
+    pub(in crate::mapping::cover::search) fn selected_cover_has_cycle(
+        &self,
+        output_slots: &[usize],
+    ) -> bool {
+        contains_dependency_cycle(self.choices.len(), output_slots, |slot| {
+            self.choices
+                .get(slot)
+                .copied()
+                .flatten()
+                .map(|choice| self.choice_dependencies(slot, choice))
+        })
+    }
+
     pub(crate) fn candidate_dependencies(
         &self,
         slot: usize,
@@ -252,5 +306,16 @@ mod tests {
         assert!(demand.change_by(0, -1, 2).unwrap());
         assert_eq!(demand.reference_count(0), 0);
         assert!(demand.change_by(0, -1, 1).is_err());
+    }
+
+    #[test]
+    fn detects_a_cycle_inside_the_selected_root_cone() {
+        let selected = [
+            Some(LiteralDependencies::new()),
+            Some(LiteralDependencies::from_slice(&[2])),
+            Some(LiteralDependencies::from_slice(&[1])),
+        ];
+        assert!(contains_dependency_cycle(3, &[1], |slot| selected[slot].clone()));
+        assert!(!contains_dependency_cycle(3, &[0], |slot| selected[slot].clone()));
     }
 }

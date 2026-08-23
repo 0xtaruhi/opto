@@ -600,7 +600,9 @@ fn synthesis_drives_logic_in_every_unpacked_array_element() {
 
     assert!(output.status.success(), "{}", output_text(&output));
     assert!(!netlist.contains("values"), "{netlist}");
-    assert!(netlist.matches("XOR2_X1 ").count() >= 7, "{netlist}");
+    for bit in 0..7 {
+        assert!(netlist.contains(&format!(".Y(y[{bit}])")), "{netlist}");
+    }
 }
 
 #[test]

@@ -172,30 +172,47 @@ fn cover_logic_network_with_recovery(
     let passes_started = std::time::Instant::now();
     let output_slots = outputs.iter().copied().map(slot).collect::<Vec<_>>();
     planner.flow_pass(runtime)?;
-    if !planner.select(&output_slots)? {
+    if !planner.select(&output_slots).map_err(|error| {
+        crate::SynthError::invariant(format!("initial flow cover selection failed: {error}"))
+    })? {
         return Ok(None);
     }
     planner.update_reference_estimates();
     planner.update_required_arrivals(&output_slots, required_times)?;
     planner.update_load_estimates()?;
     planner.flow_pass(runtime)?;
-    if !planner.select(&output_slots)? {
+    if planner.selected_cover_has_cycle(&output_slots) {
+        planner.rebuild_nominal_flow(runtime)?;
+    }
+    if !planner.select(&output_slots).map_err(|error| {
+        crate::SynthError::invariant(format!("electrical flow cover selection failed: {error}"))
+    })? {
         return Ok(None);
     }
     planner.update_required_arrivals(&output_slots, required_times)?;
     planner.joint_pass()?;
-    if !planner.select(&output_slots)? {
+    if !planner.select(&output_slots).map_err(|error| {
+        crate::SynthError::invariant(format!("initial joint cover selection failed: {error}"))
+    })? {
         return Err(crate::SynthError::invariant(
             "joint recovery produced an incomplete cover",
         ));
     }
     {
+        // Exact and joint recovery can revisit a coupled choice state without
+        // either pass reaching an individual fixed point. Remember complete
+        // states so such cycles terminate before consuming the remaining bound.
+        let mut recovery_states = vec![planner.recovery_fingerprint()];
         for recovery_iteration in 1..=RECOVERY_ROUND_LIMIT {
             let before = planner.selected_area();
             let exact_started = std::time::Instant::now();
             let exact_changes = planner.exact_pass(runtime)?;
             let exact_elapsed = exact_started.elapsed();
-            if !planner.select(&output_slots)? {
+            if !planner.select(&output_slots).map_err(|error| {
+                crate::SynthError::invariant(format!(
+                    "exact recovery cover selection failed in round {recovery_iteration}: {error}"
+                ))
+            })? {
                 return Err(crate::SynthError::invariant(
                     "exact recovery produced an incomplete cover",
                 ));
@@ -203,7 +220,11 @@ fn cover_logic_network_with_recovery(
             let joint_started = std::time::Instant::now();
             let joint_changes = planner.joint_pass()?;
             let joint_elapsed = joint_started.elapsed();
-            if !planner.select(&output_slots)? {
+            if !planner.select(&output_slots).map_err(|error| {
+                crate::SynthError::invariant(format!(
+                    "joint recovery cover selection failed in round {recovery_iteration}: {error}"
+                ))
+            })? {
                 return Err(crate::SynthError::invariant(
                     "joint recovery produced an incomplete cover",
                 ));
@@ -216,17 +237,10 @@ fn cover_logic_network_with_recovery(
                  exact={exact_elapsed:?}/{exact_changes} \
                  joint={joint_elapsed:?}/{joint_changes}"
             );
-            match recovery_converged(recovery_iteration, exact_changes, joint_changes) {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(error) => {
-                    crate::api::diagnostics::trace!(
-                        trace,
-                        "cover.recovery_limit",
-                        "rounds={RECOVERY_ROUND_LIMIT}"
-                    );
-                    return Err(error);
-                }
+            if remember_recovery_state(&mut recovery_states, planner.recovery_fingerprint())
+                || recovery_finished(recovery_iteration, exact_changes, joint_changes)
+            {
+                break;
             }
         }
     }
@@ -256,20 +270,17 @@ fn cover_logic_network_with_recovery(
     Ok(cover)
 }
 
-fn recovery_converged(
-    iteration: usize,
-    exact_changes: usize,
-    joint_changes: usize,
-) -> Result<bool, crate::SynthError> {
-    if exact_changes == 0 && joint_changes == 0 {
-        return Ok(true);
+fn recovery_finished(iteration: usize, exact_changes: usize, joint_changes: usize) -> bool {
+    (exact_changes == 0 && joint_changes == 0) || iteration == RECOVERY_ROUND_LIMIT
+}
+
+fn remember_recovery_state(seen: &mut Vec<blake3::Hash>, state: blake3::Hash) -> bool {
+    if seen.contains(&state) {
+        true
+    } else {
+        seen.push(state);
+        false
     }
-    if iteration == RECOVERY_ROUND_LIMIT {
-        return Err(crate::SynthError::invariant(format!(
-            "cover recovery did not converge within {RECOVERY_ROUND_LIMIT} rounds"
-        )));
-    }
-    Ok(false)
 }
 
 fn slot(node: LogicNodeId) -> usize {

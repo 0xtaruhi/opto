@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 503
+expected_tests = 506
 
 [[owners]]
 path = "src/api"
@@ -56,7 +56,7 @@ contract = "Fingerprints, recipe caches, source metrics, snapshots, and portable
 [[owners]]
 path = "src/mapping"
 owner = "mapping"
-tests = 110
+tests = 113
 contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and materialization."
 
 [[owners]]
@@ -86,5 +86,5 @@ contract = "Partition atoms, stable region and boundary identities, and determin
 [[focused_contracts]]
 path = "src/mapping/cover/search/tests.rs"
 owner = "mapping-cover"
-tests = 20
+tests = 21
 contract = "Library matching, candidate cost, observability care, and deterministic joint cover selection."

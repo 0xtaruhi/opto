@@ -172,15 +172,19 @@ fn exact_recovery_uses_area_delay_only_for_timing_driven_logic() {
 }
 
 #[test]
-fn recovery_limit_rejects_a_changing_final_round() {
-    assert!(!recovery_converged(RECOVERY_ROUND_LIMIT - 1, 1, 0).unwrap());
-    assert!(recovery_converged(RECOVERY_ROUND_LIMIT, 0, 0).unwrap());
-    assert!(
-        recovery_converged(RECOVERY_ROUND_LIMIT, 0, 1)
-            .unwrap_err()
-            .to_string()
-            .contains("did not converge")
-    );
+fn recovery_stops_at_a_fixed_point_or_the_bounded_final_round() {
+    assert!(!recovery_finished(RECOVERY_ROUND_LIMIT - 1, 1, 0));
+    assert!(recovery_finished(RECOVERY_ROUND_LIMIT - 1, 0, 0));
+    assert!(recovery_finished(RECOVERY_ROUND_LIMIT, 0, 1));
+}
+
+#[test]
+fn recovery_detects_a_revisited_complete_choice_state() {
+    let first = blake3::hash(b"first");
+    let second = blake3::hash(b"second");
+    let mut seen = vec![first];
+    assert!(!remember_recovery_state(&mut seen, second));
+    assert!(remember_recovery_state(&mut seen, first));
 }
 
 #[test]

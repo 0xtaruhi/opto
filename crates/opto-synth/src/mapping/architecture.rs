@@ -1057,90 +1057,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                     SynthError::invariant("private root disappeared after local optimization")
                 })?;
         }
-        let state_feedback = module
-            .operations()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, operation)| {
-                matches!(
-                    operation.kind,
-                    word::OpKind::Register(_) | word::OpKind::Latch(_)
-                )
-                .then_some(index)
-            })
-            .map(|index| {
-                let local = word::OpId::from_index(index).map_err(SynthError::from)?;
-                let states = operation_sources.states(local).ok_or_else(|| {
-                    SynthError::invariant("private state has no semantic binding")
-                })?;
-                // The feedback must describe the value THIS register holds,
-                // so its width has to match the register data. A recorded
-                // source of a different width belongs to another state and
-                // would corrupt the enable-hold mux built from it.
-                let data_width = match &module
-                    .operation(local)
-                    .ok_or_else(|| SynthError::invariant("private state is not live"))?
-                    .kind
-                {
-                    word::OpKind::Register(register) => {
-                        module.value(register.d).map(|stored| stored.ty.width())
-                    }
-                    word::OpKind::Latch(latch) => {
-                        module.value(latch.d).map(|stored| stored.ty.width())
-                    }
-                    _ => None,
-                };
-                let selected = states
-                    .iter()
-                    .copied()
-                    .find(|state| match state {
-                        crate::planning::regional::LocalStateSource::Operation(source) => {
-                            let Some(source_result) = self
-                                .request
-                                .source
-                                .operation(*source)
-                                .map(|stored| stored.result)
-                                .and_then(|result| values.source_to_local.get(&result).copied())
-                                .and_then(|local| module.value(local).map(|stored| stored.ty))
-                            else {
-                                return false;
-                            };
-                            data_width.is_some_and(|width| source_result.width() == width)
-                        }
-                        crate::planning::regional::LocalStateSource::Memory { .. } => true,
-                    })
-                    .or_else(|| states.first().copied())
-                    .ok_or_else(|| {
-                        SynthError::invariant("private state has no semantic binding")
-                    })?;
-                let feedback = match selected {
-                    crate::planning::regional::LocalStateSource::Operation(source) => {
-                        let result = self
-                            .request
-                            .source
-                            .operation(source)
-                            .ok_or_else(|| {
-                                SynthError::invariant("private state source is not live")
-                            })?
-                            .result;
-                        values
-                            .source_to_local
-                            .get(&result)
-                            .copied()
-                            .ok_or_else(|| {
-                                SynthError::invariant("private state has no feedback boundary")
-                            })?
-                    }
-                    crate::planning::regional::LocalStateSource::Memory { .. } => {
-                        module
-                            .operation(local)
-                            .ok_or_else(|| SynthError::invariant("private state is not live"))?
-                            .result
-                    }
-                };
-                Ok::<_, SynthError>((local, feedback))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let state_feedback = private_state_feedback(&module, &operation_sources)?;
         let first_generated_instance = module.instances().len();
         self.request.mapping_context.prepare_private_structure(
             &mut module,
@@ -1388,6 +1305,104 @@ impl RegionArchitectureMaterializer<'_, '_> {
             root_pairs,
         ))
     }
+}
+
+/// Resolves each private state operation to the structural read of the wire it
+/// drives. This relation remains exact after FSM re-encoding and sequential
+/// sharing, while source semantic rows may intentionally contain states with a
+/// different representation width.
+fn private_state_feedback(
+    module: &word::WordModule,
+    operation_sources: &crate::planning::regional::LocalOperationSemantics,
+) -> Result<BTreeMap<word::OpId, word::ValueId>, SynthError> {
+    let mut whole_generated_reads = BTreeMap::new();
+    for (index, value) in module.values().iter().enumerate() {
+        let word::ValueKind::Signal(reference) = value.kind else {
+            continue;
+        };
+        let Some(signal) = module.signal(reference.signal) else {
+            return Err(SynthError::invariant(
+                "private state feedback read references an unknown signal",
+            ));
+        };
+        if signal.name.is_none()
+            && matches!(signal.kind, word::SignalKind::Wire)
+            && reference.lsb == 0
+            && reference.width() == signal.ty.width()
+        {
+            whole_generated_reads
+                .entry(reference.signal)
+                .or_insert(word::ValueId::from_index(index).map_err(SynthError::from)?);
+        }
+    }
+
+    let mut feedback = BTreeMap::new();
+    for (index, operation) in module.operations().iter().enumerate() {
+        if !matches!(
+            operation.kind,
+            word::OpKind::Register(_) | word::OpKind::Latch(_)
+        ) {
+            continue;
+        }
+        let local = word::OpId::from_index(index).map_err(SynthError::from)?;
+        let states = operation_sources
+            .states(local)
+            .ok_or_else(|| SynthError::invariant("private state has no semantic binding"))?;
+        if states.is_empty() {
+            return Err(SynthError::invariant(
+                "private state has an empty semantic binding",
+            ));
+        }
+        let memory_state = states.iter().any(|state| {
+            matches!(
+                state,
+                crate::planning::regional::LocalStateSource::Memory { .. }
+            )
+        });
+        if memory_state {
+            if !states.iter().all(|state| {
+                matches!(
+                    state,
+                    crate::planning::regional::LocalStateSource::Memory { .. }
+                )
+            }) {
+                return Err(SynthError::invariant(
+                    "private state mixes memory and operation semantics",
+                ));
+            }
+            feedback.insert(local, operation.result);
+            continue;
+        }
+        let held = module
+            .connects()
+            .iter()
+            .filter(|connect| {
+                connect.value == operation.result
+                    && connect.target.range.is_none()
+                    && connect.target.dynamic.is_none()
+            })
+            .find_map(|connect| whole_generated_reads.get(&connect.target.signal).copied())
+            .ok_or_else(|| {
+                SynthError::invariant(format!(
+                    "private state {local:?} has no exact feedback boundary"
+                ))
+            })?;
+        let held_ty = module
+            .value(held)
+            .ok_or_else(|| SynthError::invariant("private state feedback value is not live"))?
+            .ty;
+        let result_ty = module
+            .value(operation.result)
+            .ok_or_else(|| SynthError::invariant("private state result is not live"))?
+            .ty;
+        if held_ty != result_ty {
+            return Err(SynthError::invariant(format!(
+                "private state {local:?} feedback type {held_ty:?} does not match result type {result_ty:?}"
+            )));
+        }
+        feedback.insert(local, held);
+    }
+    Ok(feedback)
 }
 
 pub(crate) fn regional_proof(
@@ -1731,6 +1746,92 @@ fn empty_target_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_state_feedback_uses_the_state_driven_generated_wire() {
+        let mut module = word::WordModule::new("encoded_state_feedback");
+        let span = word::SourceSpan::default();
+        let bit = word::WordType::bits(1).unwrap();
+        let original_ty = word::WordType::bits(2).unwrap();
+        let original_data = module
+            .constant(
+                opto_ir::ConstBits::from_bin_str("00").unwrap(),
+                original_ty,
+                span.clone(),
+            )
+            .unwrap();
+        let encoded_data = module
+            .constant(
+                opto_ir::ConstBits::from_bin_str("0").unwrap(),
+                bit,
+                span.clone(),
+            )
+            .unwrap();
+        let clock = module
+            .constant(
+                opto_ir::ConstBits::from_bin_str("0").unwrap(),
+                bit,
+                span.clone(),
+            )
+            .unwrap();
+        let original = module
+            .register(
+                word::RegisterOp {
+                    name: None,
+                    d: original_data,
+                    clock,
+                    edge: word::Edge::Pos,
+                    enable: None,
+                    resets: Vec::new(),
+                },
+                span.clone(),
+            )
+            .unwrap();
+        let encoded = module
+            .register(
+                word::RegisterOp {
+                    name: None,
+                    d: encoded_data,
+                    clock,
+                    edge: word::Edge::Pos,
+                    enable: None,
+                    resets: Vec::new(),
+                },
+                span.clone(),
+            )
+            .unwrap();
+        let original_wire = module
+            .add_generated_wire(original_ty, span.clone())
+            .unwrap();
+        let original_feedback = module.read_signal(original_wire, span.clone()).unwrap();
+        let encoded_wire = module.add_generated_wire(bit, span.clone()).unwrap();
+        let encoded_feedback = module.read_signal(encoded_wire, span.clone()).unwrap();
+        module
+            .connect(word::LValue::signal(original_wire), original, span.clone())
+            .unwrap();
+        module
+            .connect(word::LValue::signal(encoded_wire), encoded, span)
+            .unwrap();
+
+        let operation = |value| match module.value(value).unwrap().kind {
+            word::ValueKind::Operation(operation) => operation,
+            _ => unreachable!(),
+        };
+        let mut semantics = crate::planning::regional::LocalOperationSemantics::default();
+        semantics
+            .record_source(
+                operation(original),
+                word::OpId::from_index(4).unwrap(),
+                true,
+            )
+            .unwrap();
+        semantics
+            .record_source(operation(encoded), word::OpId::from_index(5).unwrap(), true)
+            .unwrap();
+        let feedback = private_state_feedback(&module, &semantics).unwrap();
+        assert_eq!(feedback[&operation(original)], original_feedback);
+        assert_eq!(feedback[&operation(encoded)], encoded_feedback);
+    }
 
     #[test]
     fn frozen_boundary_value_is_the_only_hard_input() {

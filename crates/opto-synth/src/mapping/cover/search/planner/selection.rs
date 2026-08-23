@@ -10,6 +10,30 @@ use super::{
 };
 
 impl CoverPlanner<'_> {
+    pub(in crate::mapping::cover::search) fn recovery_fingerprint(&self) -> blake3::Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"opto.cover.recovery.choices.v1");
+        for &choice in &self.choices {
+            let (tag, payload) = match choice {
+                None => (0, 0),
+                Some(SlotChoice::Constant(false)) => (1, 0),
+                Some(SlotChoice::Constant(true)) => (2, 0),
+                Some(SlotChoice::Boundary(boundary)) => (
+                    3,
+                    u64::try_from(boundary)
+                        .expect("cover boundary construction enforces compact indices"),
+                ),
+                Some(SlotChoice::Cell(cell)) => (4, u64::from(cell)),
+                Some(SlotChoice::Inverter) => (5, 0),
+                Some(SlotChoice::JointOutput(joint)) => (6, u64::from(joint)),
+                Some(SlotChoice::JointCell(joint)) => (7, u64::from(joint)),
+            };
+            hasher.update(&[tag]);
+            hasher.update(&payload.to_le_bytes());
+        }
+        hasher.finalize()
+    }
+
     pub(in crate::mapping::cover::search) fn select(
         &mut self,
         output_slots: &[usize],

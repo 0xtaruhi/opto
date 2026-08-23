@@ -1705,6 +1705,13 @@ turns a remaining enable into a next-state mux, so a register's held value is
 read through a wire with exactly one driver and denotes the register's output
 rather than whichever assignment ran last.
 
+Private-region materialization resolves that held value from the unnamed wire
+driven by the local register or latch result. Semantic state-source rows are not
+feedback identities: FSM re-encoding may deliberately bind a source state and
+its encoded replacement even when their widths differ. The structural driver
+relation supplies the exact same-typed feedback value without introducing an
+SSA cycle through the state operation itself.
+
 The earlier pipeline discarded the exact enable in control lowering and then had
 feedback-enable recovery pattern-match it back out of the next state, with the
 expansion implemented twice. Recovery decided that a path holds by comparing it
@@ -1876,6 +1883,20 @@ charged exactly when it is unreferenced and the trial has not reached it yet,
 which visited marks decide without touching the cover. The trial walks and sorts
 its frontier exactly as the committing update does, so the two sum areas in the
 same order and agree bit for bit.
+
+Choice cuts remain available to the ordinary flow-cost ranking. The complete
+electrical-cost flow pass is transactional: if its final selected root cone has
+a dependency cycle, the planner discards it and rebuilds a nominal-cost cover
+from empty availability in network-level order. Normal choice ranking and
+transient alternatives are unchanged, while an invalid electrical refinement
+cannot be published.
+
+Exact and joint recovery update coupled reference costs and remember a stable
+fingerprint of each complete selected-choice state. Revisiting a state
+terminates recovery before the two passes can cycle through it again without
+cloning the cover. Recovery remains structurally bounded, and reaching the
+final bounded round is a valid termination rather than an assertion that every
+individual slot stopped changing.
 
 ## Known Architectural Gaps
 
