@@ -16,7 +16,7 @@ use crate::artifact::MappedCellSource;
 use crate::mapping::sequential::SelectedRegisterCell;
 use opto_ir::mapped::{AppliedRegionDelta, CellId, NetId, RegionDelta, TempCellId};
 use opto_ir::word;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// Immutable topology for state cells and generated target cells in one lowered design.
@@ -47,6 +47,7 @@ enum SequentialStateSource {
         memory: word::MemoryId,
         ordinal: u32,
         width: u32,
+        value: Option<word::ValueId>,
     },
 }
 
@@ -60,7 +61,7 @@ impl SequentialStateSource {
     const fn source_value(self) -> Option<word::ValueId> {
         match self {
             Self::Operation { value, .. } => Some(value),
-            Self::Memory { .. } => None,
+            Self::Memory { value, .. } => value,
         }
     }
 
@@ -121,6 +122,46 @@ impl SequentialSourceBit {
             },
         }
     }
+
+    fn resolve_memory(
+        &mut self,
+        memories: &crate::planning::memory::MemoryLoweringBinding,
+    ) -> Result<(), crate::SynthError> {
+        let SequentialStateSource::Memory {
+            memory,
+            ordinal,
+            ref mut value,
+            ..
+        } = self.source
+        else {
+            return Ok(());
+        };
+        *value = Some(memories.state_value(memory, ordinal).ok_or_else(|| {
+            crate::SynthError::invariant("regional memory state has no global lowered value")
+        })?);
+        Ok(())
+    }
+
+    fn lowered_value(
+        &self,
+        module: &word::WordModule,
+        binding: &crate::boolean::bitblast::LoweredRegionBinding,
+    ) -> Result<word::ValueId, crate::SynthError> {
+        let value = self.source_value().ok_or_else(|| {
+            crate::SynthError::invariant("state source has no global lowered value")
+        })?;
+        let stored = module
+            .value(value)
+            .ok_or_else(|| crate::SynthError::invariant("regional state source is not live"))?;
+        binding
+            .lowered_bits(value)
+            .and_then(|bits| bits.get(self.bit as usize))
+            .copied()
+            .or_else(|| (stored.ty.width() == 1 && self.bit == 0).then_some(value))
+            .ok_or_else(|| {
+                crate::SynthError::invariant("regional state source bit was not lowered")
+            })
+    }
 }
 
 /// Exact semantic state relation for one live scalar state operation.
@@ -140,6 +181,52 @@ pub(crate) struct RegionalSequentialCellPlan {
     pub(crate) cell_name: Box<str>,
     pub(crate) inputs: Box<[(Box<str>, crate::mapping::RegionalEndpoint)]>,
     pub(crate) output: (Box<str>, crate::mapping::RegionalEndpoint),
+}
+
+pub(crate) fn resolve_sequential_memory_sources(
+    plans: &mut [RegionalSequentialCellPlan],
+    memories: &crate::planning::memory::MemoryLoweringBinding,
+) -> Result<(), crate::SynthError> {
+    let mut endpoints = BTreeMap::new();
+    for source in plans.iter_mut().flat_map(|plan| plan.sources.iter_mut()) {
+        source.resolve_memory(memories)?;
+        let SequentialStateSource::Memory { .. } = source.source else {
+            continue;
+        };
+        let key = crate::mapping::RegionalPinKey::Sequential(crate::mapping::SequentialPinKey {
+            state: source.cell(),
+            role: crate::mapping::SequentialPinRole::StateOutput,
+            bit: source.semantic_bit()?,
+        });
+        let endpoint = crate::mapping::RegionalEndpoint::SourceBit {
+            value: source.source_value().ok_or_else(|| {
+                crate::SynthError::invariant("memory state source was not resolved")
+            })?,
+            bit: source.bit,
+        };
+        if endpoints
+            .insert(key, endpoint)
+            .is_some_and(|old| old != endpoint)
+        {
+            return Err(crate::SynthError::invariant(
+                "memory state output has conflicting global endpoints",
+            ));
+        }
+    }
+    let resolve = |endpoint: &mut crate::mapping::RegionalEndpoint| {
+        if let crate::mapping::RegionalEndpoint::Pin(pin) = *endpoint
+            && let Some(&resolved) = endpoints.get(&pin)
+        {
+            *endpoint = resolved;
+        }
+    };
+    for plan in plans {
+        plan.inputs
+            .iter_mut()
+            .for_each(|(_, endpoint)| resolve(endpoint));
+        resolve(&mut plan.output.1);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,6 +381,7 @@ pub(crate) fn local_sequential_bindings(
                             memory,
                             ordinal,
                             width: stored.element_type.width(),
+                            value: None,
                         })
                     }
                 })
@@ -611,20 +699,7 @@ pub(crate) fn reconcile_sequential_publication<'a>(
             .sources
             .iter()
             .filter(|source| source.state_relation.is_none())
-            .filter_map(|source| source.source_value().map(|value| (source, value)))
-            .map(|(source, value)| {
-                let stored = module.value(value).ok_or_else(|| {
-                    crate::SynthError::invariant("regional state source is not live")
-                })?;
-                region_binding
-                    .lowered_bits(value)
-                    .and_then(|bits| bits.get(source.bit as usize))
-                    .copied()
-                    .or_else(|| (stored.ty.width() == 1 && source.bit == 0).then_some(value))
-                    .ok_or_else(|| {
-                        crate::SynthError::invariant("regional state source bit was not lowered")
-                    })
-            })
+            .map(|source| source.lowered_value(module, region_binding))
             .collect::<Result<Vec<_>, _>>()?;
         members.sort_unstable();
         members.dedup();
@@ -670,27 +745,36 @@ pub(crate) fn sequential_plan_values<'a>(
     plans: impl IntoIterator<Item = &'a RegionalSequentialCellPlan>,
 ) -> Result<Box<[word::ValueId]>, crate::SynthError> {
     let mut values = BTreeSet::new();
-    for endpoint in plans.into_iter().flat_map(|plan| {
-        plan.inputs
+    for plan in plans {
+        values.extend(
+            plan.sources
+                .iter()
+                .filter(|source| source.state_relation.is_none())
+                .map(|source| source.lowered_value(module, binding))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        for endpoint in plan
+            .inputs
             .iter()
             .map(|(_, endpoint)| endpoint)
             .chain(std::iter::once(&plan.output.1))
-    }) {
-        let crate::mapping::RegionalEndpoint::SourceBit { value, bit } = *endpoint else {
-            continue;
-        };
-        let stored = module
-            .value(value)
-            .ok_or_else(|| crate::SynthError::invariant("state endpoint source is not live"))?;
-        let lowered = binding
-            .lowered_bits(value)
-            .and_then(|bits| bits.get(bit as usize))
-            .copied()
-            .or_else(|| (stored.ty.width() == 1 && bit == 0).then_some(value))
-            .ok_or_else(|| {
-                crate::SynthError::invariant("state endpoint source bit was not lowered")
-            })?;
-        values.insert(lowered);
+        {
+            let crate::mapping::RegionalEndpoint::SourceBit { value, bit } = *endpoint else {
+                continue;
+            };
+            let stored = module
+                .value(value)
+                .ok_or_else(|| crate::SynthError::invariant("state endpoint source is not live"))?;
+            let lowered = binding
+                .lowered_bits(value)
+                .and_then(|bits| bits.get(bit as usize))
+                .copied()
+                .or_else(|| (stored.ty.width() == 1 && bit == 0).then_some(value))
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("state endpoint source bit was not lowered")
+                })?;
+            values.insert(lowered);
+        }
     }
     Ok(values.into_iter().collect())
 }

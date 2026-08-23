@@ -58,12 +58,12 @@ impl RegionalWordCone {
         } = request;
         if operation_regions.len() != source.operations().len() {
             return Err(crate::SynthError::invariant(
-                "region-local Word import has incomplete operation ownership",
+                "region-local Word import has incomplete operation-region assignment",
             ));
         }
         if memories.len() != memory_implementations.len() {
             return Err(crate::SynthError::invariant(
-                "region-local memory decisions do not align with region ownership",
+                "region-local memory decisions do not align with semantic region membership",
             ));
         }
         let mut importer = RegionalWordImporter {

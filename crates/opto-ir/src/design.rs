@@ -3,11 +3,14 @@
 
 //! Immutable stable-identity cell/net revisions and transactional replacement.
 //!
-//! [`DesignRevision`] is the canonical shared graph. Workers construct private
+//! [`DesignRevision`] is the stable bit-level identity and footprint authority
+//! derived from the semantic Word module. Workers construct private
 //! [`RewriteDelta`] values against one revision; [`DesignRevision::commit`]
 //! validates their complete read and replacement footprints, proof
 //! certificates, exact bit boundaries, and disjointness before returning a new
-//! revision. The input revision is never mutated.
+//! revision. The input revision is never mutated. Word remains the typed
+//! semantic representation and publishes its corresponding fragment in the
+//! same coordinator transaction.
 //!
 //! Dense Word, Boolean, and mapped IDs are deliberately absent from this
 //! module. Stable entity identities resolve through a persistent directory to
@@ -241,10 +244,10 @@ pub struct SemanticBinding {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// Complete proof-carrying replacement proposed against one design revision.
 ///
-/// Records whose IDs occur in [`Self::replaces`] replace existing entities.
-/// Replacement entities omitted from `cells` or `nets` are removed. Records
-/// with previously unknown IDs are new entities. A surviving entity outside
-/// `replaces` cannot be modified.
+/// Records whose IDs occur in [`RevisionFootprint::replaces`] replace existing
+/// entities. Replacement entities omitted from `cells` or `nets` are removed.
+/// Records with previously unknown IDs are new entities. A surviving entity
+/// outside the replacement footprint cannot be modified.
 pub struct RewriteDelta<L> {
     /// Stable transaction identity covering the recipe and complete fragment.
     pub id: RewriteDeltaId,
@@ -404,7 +407,7 @@ impl ConsumerLedger {
 }
 
 #[derive(Debug, Clone)]
-/// Immutable canonical design generation.
+/// Immutable stable-identity and footprint generation.
 ///
 /// Cloning shares record pages and persistent directory paths. Mutation is
 /// available only through [`Self::commit`], which returns another revision.

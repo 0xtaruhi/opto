@@ -69,7 +69,10 @@ impl<'a> CoverPlanner<'a> {
                 cost: catalog.cost_for_binding(binding),
             });
         let mut reference_estimates = vec![0.0f64; slots];
-        for (index, &is_live) in live_nodes.iter().enumerate() {
+        // Retained alternatives are mutually exclusive implementations. Seed
+        // flow from the selected root cone; recovery updates exact references
+        // when a choice crosses into an alternative cone.
+        for (index, &is_live) in network.live_nodes(outputs).iter().enumerate() {
             if !is_live {
                 continue;
             }

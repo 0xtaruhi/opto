@@ -495,12 +495,17 @@ fn regional_shell_rejects_a_producer_claim_for_a_full_domain_constant() {
             target: result,
             bit: 0,
             producer: region,
+            binding: RegionalPublicationBinding::Artifact,
         }],
         GlobalBitblastScope::RegionalShell,
     )
     .unwrap_err();
 
-    assert!(error.to_string().contains("claims full-domain constant"));
+    assert!(
+        error
+            .to_string()
+            .contains("replaces a full-domain constant")
+    );
 }
 
 #[test]
@@ -682,12 +687,17 @@ fn regional_shell_freezes_constants_reached_through_connects() {
             target: result,
             bit: 0,
             producer: region,
+            binding: RegionalPublicationBinding::Artifact,
         }],
         GlobalBitblastScope::RegionalShell,
     )
     .unwrap_err();
 
-    assert!(error.to_string().contains("claims full-domain constant"));
+    assert!(
+        error
+            .to_string()
+            .contains("replaces a full-domain constant")
+    );
 }
 
 #[test]
@@ -715,6 +725,7 @@ fn regional_shell_rejects_a_claim_from_the_wrong_producer() {
             target: result,
             bit: 0,
             producer: claimant,
+            binding: RegionalPublicationBinding::Artifact,
         }],
         GlobalBitblastScope::RegionalShell,
     )

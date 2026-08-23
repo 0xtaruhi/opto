@@ -25,6 +25,10 @@ fn rtl(module: WordModule) -> RtlModule {
     RtlModule::structural(module).unwrap()
 }
 
+fn stable_signal(module: &str, signal: &str) -> SourceSpan {
+    SourceSpan::stable(format!("session-tests/{module}/{signal}"))
+}
+
 fn empty_rtl_module(name: &str) -> RtlModule {
     rtl(WordModule::new(name))
 }
@@ -103,10 +107,10 @@ fn hierarchy_leaf(name: &str, width: u32, invert: bool) -> RtlModule {
     let mut module = WordModule::new(name);
     let ty = WordType::new(width, false, LogicStateKind::FourState).unwrap();
     let a = module
-        .add_port("a", PortDirection::Input, ty, SourceSpan::default())
+        .add_port("a", PortDirection::Input, ty, stable_signal(name, "a"))
         .unwrap();
     let y = module
-        .add_port("y", PortDirection::Output, ty, SourceSpan::default())
+        .add_port("y", PortDirection::Output, ty, stable_signal(name, "y"))
         .unwrap();
     let mut value = module
         .read_signal(module.port(a).unwrap().signal, SourceSpan::default())
@@ -134,10 +138,10 @@ fn hierarchy_parent(name: &str, width: u32, children: &[(&str, &str)]) -> RtlMod
     let mut module = WordModule::new(name);
     let ty = WordType::new(width, false, LogicStateKind::FourState).unwrap();
     let a = module
-        .add_port("a", PortDirection::Input, ty, SourceSpan::default())
+        .add_port("a", PortDirection::Input, ty, stable_signal(name, "a"))
         .unwrap();
     let y = module
-        .add_port("y", PortDirection::Output, ty, SourceSpan::default())
+        .add_port("y", PortDirection::Output, ty, stable_signal(name, "y"))
         .unwrap();
     let a_value = module
         .read_signal(module.port(a).unwrap().signal, SourceSpan::default())
@@ -154,7 +158,7 @@ fn hierarchy_parent(name: &str, width: u32, children: &[(&str, &str)]) -> RtlMod
                 .add_wire(
                     format!("{instance}_y"),
                     ty,
-                    SourceSpan::construct("child output"),
+                    stable_signal(name, &format!("{instance}/y")),
                 )
                 .unwrap();
             let value = module.read_signal(signal, SourceSpan::default()).unwrap();
@@ -192,15 +196,25 @@ fn independent_mapping_cones(left_operation: BinaryOp) -> RtlModule {
         .into_iter()
         .map(|name| {
             module
-                .add_port(name, PortDirection::Input, ty, SourceSpan::default())
+                .add_port(name, PortDirection::Input, ty, stable_signal("top", name))
                 .unwrap()
         })
         .collect::<Vec<_>>();
     let y_left = module
-        .add_port("y_left", PortDirection::Output, ty, SourceSpan::default())
+        .add_port(
+            "y_left",
+            PortDirection::Output,
+            ty,
+            stable_signal("top", "y_left"),
+        )
         .unwrap();
     let y_right = module
-        .add_port("y_right", PortDirection::Output, ty, SourceSpan::default())
+        .add_port(
+            "y_right",
+            PortDirection::Output,
+            ty,
+            stable_signal("top", "y_right"),
+        )
         .unwrap();
     let values = ports
         .into_iter()
@@ -242,10 +256,10 @@ fn unsupported_tri_state_leaf(name: &str) -> RtlModule {
     let mut module = WordModule::new(name);
     let ty = WordType::new(1, false, LogicStateKind::FourState).unwrap();
     module
-        .add_port("a", PortDirection::Input, ty, SourceSpan::default())
+        .add_port("a", PortDirection::Input, ty, stable_signal(name, "a"))
         .unwrap();
     let y = module
-        .add_port("y", PortDirection::Output, ty, SourceSpan::default())
+        .add_port("y", PortDirection::Output, ty, stable_signal(name, "y"))
         .unwrap();
     let value = module
         .constant(

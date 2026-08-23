@@ -158,6 +158,10 @@ pub(super) fn lower_logic(
         for row in &mut regional_plans {
             row.binding
                 .materialize_source_bits(&source, &region_binding, &memory_binding)?;
+            crate::mapping::materialize::resolve_sequential_memory_sources(
+                &mut row.sequential,
+                &memory_binding,
+            )?;
         }
     }
     ledger.lowered_values = source.values().len();
@@ -182,8 +186,13 @@ fn aggregate_regional_publication(
     operation_regions: &[Option<crate::RegionRowId>],
     entries: impl IntoIterator<Item = crate::boolean::bitblast::RegionalPublicationBit>,
 ) -> Result<Vec<crate::boolean::bitblast::RegionalPublicationBit>, crate::SynthError> {
-    let mut publication_by_bit =
-        std::collections::BTreeMap::<(opto_ir::word::ValueId, u32), crate::RegionRowId>::new();
+    let mut publication_by_bit = std::collections::BTreeMap::<
+        (opto_ir::word::ValueId, u32),
+        (
+            crate::RegionRowId,
+            crate::boolean::bitblast::RegionalPublicationBinding,
+        ),
+    >::new();
     let mut claimed_bits = std::collections::BTreeSet::new();
     for entry in entries {
         let key = (entry.target, entry.bit);
@@ -211,7 +220,16 @@ fn aggregate_regional_publication(
                 ))
             })?;
         if entry.producer == authoritative {
-            publication_by_bit.insert(key, authoritative);
+            let publication = (authoritative, entry.binding);
+            if publication_by_bit
+                .insert(key, publication)
+                .is_some_and(|previous| previous != publication)
+            {
+                return Err(crate::SynthError::invariant(format!(
+                    "regional publication {:?}[{}] has conflicting authoritative bindings",
+                    entry.target, entry.bit,
+                )));
+            }
         }
     }
     if let Some((target, bit)) = claimed_bits
@@ -224,13 +242,14 @@ fn aggregate_regional_publication(
     }
     Ok(publication_by_bit
         .into_iter()
-        .map(
-            |((target, bit), producer)| crate::boolean::bitblast::RegionalPublicationBit {
+        .map(|((target, bit), (producer, binding))| {
+            crate::boolean::bitblast::RegionalPublicationBit {
                 target,
                 bit,
                 producer,
-            },
-        )
+                binding,
+            }
+        })
         .collect())
 }
 
@@ -269,6 +288,7 @@ mod publication_tests {
             target,
             bit: 0,
             producer,
+            binding: crate::boolean::bitblast::RegionalPublicationBinding::Artifact,
         };
 
         let duplicate = aggregate_regional_publication(

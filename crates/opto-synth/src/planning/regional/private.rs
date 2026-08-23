@@ -28,26 +28,31 @@ pub(crate) fn seal_work_design(
     // partition is discarded; rebuilding it over the spliced module keeps one
     // region graph that names every published entity (accepted cutover cost).
     let (wave, signals) = coalescing.into_parts();
-    let published = module
-        .publish_fragments(wave)
-        .map_err(crate::SynthError::Word)?;
-    let regions = crate::regional::region_graph::partition::build(
-        module,
-        crate::regional::region_graph::RegionPartitionPolicy::default(),
+    let (_, (regions, committed)) = module.publish_fragments_checked(
+        wave,
+        |published_module, published| -> Result<_, crate::SynthError> {
+            let regions = crate::regional::region_graph::partition::build(
+                published_module,
+                crate::regional::region_graph::RegionPartitionPolicy::default(),
+            )?;
+            let deltas = crate::regional::coalesce_revision_deltas(
+                published_module,
+                &regions,
+                design.design(),
+                published,
+                &signals,
+            )?;
+            let committed = design
+                .design()
+                .commit(deltas, crate::regional::validate_coalesce_proof)
+                .map_err(|error| {
+                    crate::SynthError::invariant(format!(
+                        "static-wire revision commit failed: {error}"
+                    ))
+                })?;
+            Ok((regions, committed))
+        },
     )?;
-    let deltas = crate::regional::coalesce_revision_deltas(
-        module,
-        &regions,
-        design.design(),
-        &published,
-        &signals,
-    )?;
-    let committed = design
-        .design()
-        .commit(deltas, crate::regional::validate_coalesce_proof)
-        .map_err(|error| {
-            crate::SynthError::invariant(format!("static-wire revision commit failed: {error}"))
-        })?;
     Ok((
         regions,
         crate::regional::WorkDesign::from_revision(committed),

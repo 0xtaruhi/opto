@@ -15,7 +15,7 @@ use opto_ir::word;
 use std::collections::BTreeMap;
 
 /// Reconstruct fully and uniquely driven wires as one canonical whole-signal
-/// connection before region ownership is frozen.
+/// connection before the semantic region graph is sealed.
 ///
 /// A packed or flattened aggregate is commonly assembled by several static
 /// slice assignments. Keeping those assignments separate makes a whole-signal
@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 /// partitioning and publication one explicit dataflow value.
 ///
 /// The rewrite no longer mutates the Word module in place. It returns one
-/// [`WordFragment`] per candidate wire, keyed so publication reproduces the
+/// [`word::WordFragment`] per candidate wire, keyed so publication reproduces the
 /// dense-ID sequence the retired in-place pass produced; RFC 0013 Amendment 1
 /// publication splices them and commits the changed revision cone.
 pub(crate) fn static_wire_driver_fragments(

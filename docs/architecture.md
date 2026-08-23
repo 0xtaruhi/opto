@@ -10,10 +10,11 @@ violates this contract is removed rather than preserved behind a compatibility
 path.
 
 [RFC 0013](rfcs/0013-ownerless-structural-epochs.md) supersedes RFC 0007's
-structural-owner protocol. The coordinator seals one immutable stable-identity
-design revision and a semantic `WorkGraph`; workers read exact core/halo
-fragments and publish proof-carrying results without mutating that revision.
-Scheduling shards are neither identity nor optimization boundaries.
+structural-owner protocol. Word remains the semantic representation; the
+coordinator derives one immutable stable-identity design revision and a
+semantic `WorkGraph`. Workers read exact core/halo fragments and publish
+proof-carrying results without mutating either input. Scheduling shards are
+neither identity nor optimization boundaries.
 
 [RFC 0010](rfcs/0010-command-surface.md) defines the public command design: a
 flat Tcl surface with a coherent typed database model and one
@@ -754,8 +755,10 @@ Workers receive an immutable revision fragment plus its complete context. A
 structural worker may publish only a `RewriteDelta` whose read/replacement sets
 and semantic boundary match that task. An analysis or compilation worker
 publishes an immutable keyed artifact under the same revision/footprint checks.
-Only the coordinator validates proofs and commits disjoint deltas in stable
-transaction order. There is no structural owner column, generated-node owner
+Only the coordinator recomputes proofs and commits disjoint deltas in stable
+transaction order. Word publication and revision commit share one undo-backed
+transaction, so rejection by either authority leaves the accepted generation
+unchanged. There is no structural owner column, generated-node owner
 inheritance, owner repair, or owner-based mutation API.
 
 Full-domain connectivity is resolved per bit without consulting scheduling.
@@ -979,11 +982,11 @@ the publication root, so a local simplification cannot reinterpret an owned
 output as an imported copy of itself.
 Before private optimization, each bit-flow producer and observable root
 receives a full-domain publication obligation from the source Word graph. If
-that graph does not
-prove the root to be a constant, an imported projection, or an already-owned
-state artifact, the plan must retain a combinational artifact even when its
-local care set reduces the function to a constant or pass-through. Local cover
-may simplify the implementation, but it cannot weaken this frozen obligation.
+that graph does not prove the root to be a constant, an imported projection,
+or an already-owned state artifact, the plan must retain a combinational
+artifact unless a full-domain private rewrite proves an exact constant and
+records it in the publication contract. Local care may simplify the
+implementation, but it cannot weaken or refine this frozen obligation.
 ### 5. Publish Deterministically
 
 The coordinator reconstructs region artifacts in stable region order. The
@@ -1659,8 +1662,8 @@ defect.
 | Structural-owner side columns and mutation APIs absent | Implemented |
 | Stable WorkGraph items with exact core/halo/context footprints | Implemented |
 | Rebatching independent of semantic identity and result | Implemented |
-| Serializable local `WorkPacket` / `WorkResult` contract | Implemented |
-| Every structural worker publishes `RewriteDelta` and production commits the revision | Pending cutover; compiled-artifact workers currently publish checked read-only results |
+| Serializable local `WorkPacket` / `WorkResult` contract | Test-only packet round trip; production results validate revision, exact footprint, context, shard, cardinality, and coordinator-recomputed proof |
+| Every structural worker publishes `RewriteDelta` and production commits the revision | Partial; static-wire coalescing commits Word and revision atomically, while read-only compilation workers publish checked artifacts |
 | Fusion tasks, overlap waves, and reduce tasks | Not yet implemented |
 | Remote executor with deterministic retry | Not yet implemented |
 | Stable typed region graph over the synthesis-root closure | Implemented |

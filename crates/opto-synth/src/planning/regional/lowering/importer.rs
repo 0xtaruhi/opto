@@ -86,7 +86,7 @@ impl RegionalWordImporter<'_> {
             let address = self.import(read.address)?;
             let memory = local_memories.get(&read.memory).copied().ok_or_else(|| {
                 crate::SynthError::invariant(
-                    "region-local memory read lost its imported memory owner",
+                    "region-local memory read lost its imported memory origin",
                 )
             })?;
             let data = self
@@ -137,7 +137,7 @@ impl RegionalWordImporter<'_> {
                 .transpose()?;
             let memory = local_memories.get(&write.memory).copied().ok_or_else(|| {
                 crate::SynthError::invariant(
-                    "region-local memory write lost its imported memory owner",
+                    "region-local memory write lost its imported memory origin",
                 )
             })?;
             self.module

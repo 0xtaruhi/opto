@@ -31,8 +31,8 @@ pub(crate) use sequential_delta::{
     MappedFixedSubstrateArtifact, RegionalSequentialCellPlan, RegionalSubstrateCellPlan,
     RegionalSubstrateConnection, SequentialRegionBinding, SequentialSourceBit,
     local_sequential_bindings, lowered_sequential_operations, plan_regional_sequential_cells,
-    reconcile_sequential_publication, sequential_binding_values, sequential_plan_values,
-    sequential_region_bindings,
+    reconcile_sequential_publication, resolve_sequential_memory_sources, sequential_binding_values,
+    sequential_plan_values, sequential_region_bindings,
 };
 
 fn region_instance_prefix(region: crate::RegionAnchorId) -> String {

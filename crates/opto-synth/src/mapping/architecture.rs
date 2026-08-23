@@ -127,6 +127,7 @@ struct PendingRegionalPublicationBit {
     target: word::ValueId,
     bit: u32,
     local: word::ValueId,
+    binding: crate::boolean::bitblast::RegionalPublicationBinding,
 }
 
 struct ExpandedMappingRoots {
@@ -265,6 +266,21 @@ fn compact_private_module(
     module.validate().map_err(SynthError::from)
 }
 
+fn characterization_result_proof(
+    region: crate::RegionAnchorId,
+    result: &RegionalCharacterization,
+    regions: &crate::SynthesisRegionGraph,
+    rows: &BTreeMap<crate::RegionAnchorId, crate::RegionRowId>,
+) -> Result<opto_ir::design::EquivalenceCertificate, SynthError> {
+    let row = rows.get(&region).copied().ok_or_else(|| {
+        SynthError::invariant("regional characterization has no fixed-logic proof scope")
+    })?;
+    Ok(characterization_proof(
+        regions.regions()[row.index()],
+        &result.private.decisions,
+    ))
+}
+
 /// Builds every selected construction in a task-local Word module and publishes
 /// only its portable plan and source binding.
 #[expect(
@@ -351,7 +367,9 @@ pub(crate) fn prepare_regional_architectures(
             ))
         })?;
     let mut characterized = work
-        .accept_results(results)?
+        .accept_results(results, |item, result| {
+            characterization_result_proof(item.fixed_logic(), result, regions, &region_rows)
+        })?
         .into_vec()
         .into_iter()
         .map(|result| result.output)
@@ -505,7 +523,7 @@ pub(crate) fn prepare_regional_architectures(
         let memories = regions.memories(region);
         if memories.len() != memory_implementations.len() {
             return Err(SynthError::invariant(
-                "selected memory implementations do not align with region ownership",
+                "selected memory implementations do not align with semantic region membership",
             ));
         }
         for (&memory, &implementation) in memories.iter().zip(&memory_implementations) {
@@ -1094,6 +1112,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
             publication: pending_publication,
         } = expand_mapping_root_pairs(
             self.request.source,
+            &private.module,
             self.semantics,
             &private.lowered_binding,
             &self
@@ -1169,7 +1188,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
         let memories = self.request.work.regions().memories(region);
         if memory_implementations.len() != memories.len() {
             return Err(SynthError::invariant(
-                "regional memory decision does not match region ownership",
+                "regional memory decision does not match semantic region membership",
             ));
         }
         let mut regional_observations = Vec::new();
@@ -1571,6 +1590,7 @@ fn merge_mapping_root_pairs(
 
 fn expand_mapping_root_pairs(
     source: &word::WordModule,
+    local_module: &word::WordModule,
     semantics: &super::roots::FullDomainRootSemantics<'_>,
     binding: &LoweredRegionBinding,
     publication_targets: &std::collections::BTreeSet<(word::ValueId, u32)>,
@@ -1580,6 +1600,7 @@ fn expand_mapping_root_pairs(
     let mut publication = Vec::new();
     let mut covered_publication_targets = std::collections::BTreeSet::new();
     let mut facts = word::KnownBitsAnalysis::new(source);
+    let mut local_facts = word::KnownBitsAnalysis::new(local_module);
     for (root, local) in roots {
         let source_width = source
             .value(root.value)
@@ -1613,12 +1634,37 @@ fn expand_mapping_root_pairs(
                 }
                 if facts.bit(source, target, target_bit) != word::KnownBit::Unknown {
                     requires_artifact = false;
-                } else if requires_artifact && publication_targets.contains(&(target, target_bit)) {
-                    publication.push(PendingRegionalPublicationBit {
-                        target,
-                        bit: target_bit,
-                        local,
-                    });
+                } else if publication_targets.contains(&(target, target_bit)) {
+                    let binding = match local_facts.bit(local_module, local, 0) {
+                        word::KnownBit::Zero => {
+                            requires_artifact = false;
+                            Some(
+                                crate::boolean::bitblast::RegionalPublicationBinding::Constant(
+                                    false,
+                                ),
+                            )
+                        }
+                        word::KnownBit::One => {
+                            requires_artifact = false;
+                            Some(
+                                crate::boolean::bitblast::RegionalPublicationBinding::Constant(
+                                    true,
+                                ),
+                            )
+                        }
+                        word::KnownBit::Unknown if requires_artifact => {
+                            Some(crate::boolean::bitblast::RegionalPublicationBinding::Artifact)
+                        }
+                        word::KnownBit::Unknown => None,
+                    };
+                    if let Some(binding) = binding {
+                        publication.push(PendingRegionalPublicationBit {
+                            target,
+                            bit: target_bit,
+                            local,
+                            binding,
+                        });
+                    }
                 }
             }
             expanded.push((
@@ -1653,6 +1699,7 @@ fn finalize_regional_publication(
 ) -> Result<Box<[crate::boolean::bitblast::RegionalPublicationBit]>, SynthError> {
     let semantics = super::roots::FullDomainRootSemantics::new(local_module)?;
     let mut cover_owners = BTreeMap::new();
+    let mut facts = word::KnownBitsAnalysis::new(local_module);
     for root in roots {
         let local = semantics.canonical_root(root.value)?;
         cover_owners
@@ -1663,16 +1710,34 @@ fn finalize_regional_publication(
     let mut publication = Vec::with_capacity(pending.len());
     for entry in pending {
         let local = semantics.canonical_root(entry.local)?;
-        if !cover_owners.get(&local).copied().unwrap_or(false) {
-            return Err(SynthError::invariant(format!(
-                "full-domain regional publication {:?}[{}] lost its combinational cover root",
-                entry.target, entry.bit,
-            )));
+        let owns_cover = cover_owners.get(&local).copied().unwrap_or(false);
+        match entry.binding {
+            crate::boolean::bitblast::RegionalPublicationBinding::Artifact if !owns_cover => {
+                return Err(SynthError::invariant(format!(
+                    "full-domain regional publication {:?}[{}] lost its combinational cover root",
+                    entry.target, entry.bit,
+                )));
+            }
+            crate::boolean::bitblast::RegionalPublicationBinding::Constant(value) => {
+                let expected = if value {
+                    word::KnownBit::One
+                } else {
+                    word::KnownBit::Zero
+                };
+                if owns_cover || facts.bit(local_module, local, 0) != expected {
+                    return Err(SynthError::invariant(format!(
+                        "regional constant publication {:?}[{}] differs from its private proof",
+                        entry.target, entry.bit,
+                    )));
+                }
+            }
+            crate::boolean::bitblast::RegionalPublicationBinding::Artifact => {}
         }
         publication.push(crate::boolean::bitblast::RegionalPublicationBit {
             target: entry.target,
             bit: entry.bit,
             producer,
+            binding: entry.binding,
         });
     }
     publication.sort_unstable_by_key(|entry| (entry.target, entry.bit));
@@ -1913,6 +1978,7 @@ mod tests {
         let binding = LoweredRegionBinding::new(module.values().len());
 
         let expanded = expand_mapping_root_pairs(
+            &module,
             &module,
             &semantics,
             &binding,

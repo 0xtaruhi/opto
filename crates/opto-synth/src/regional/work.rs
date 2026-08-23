@@ -862,6 +862,11 @@ impl WorkGraph {
     pub(crate) fn accept_results<T>(
         &self,
         results: Vec<WorkResult<T>>,
+        expected_proof: impl Fn(
+            &WorkItem,
+            &T,
+        )
+            -> Result<opto_ir::design::EquivalenceCertificate, crate::SynthError>,
     ) -> Result<Box<[WorkProduct<T>]>, crate::SynthError> {
         if results.len() != self.items.len() {
             return Err(crate::SynthError::invariant(
@@ -893,13 +898,16 @@ impl WorkGraph {
                     "compiled work artifact does not match its exact task footprint",
                 ));
             }
-            if outputs[row]
-                .replace(WorkProduct {
-                    proof: result.artifact.proof,
-                    output: result.artifact.output,
-                })
-                .is_some()
-            {
+            let product = WorkProduct {
+                proof: result.artifact.proof,
+                output: result.artifact.output,
+            };
+            if product.proof != expected_proof(item, &product.output)? {
+                return Err(crate::SynthError::invariant(
+                    "work product proof does not match its accepted output",
+                ));
+            }
+            if outputs[row].replace(product).is_some() {
                 return Err(crate::SynthError::invariant(
                     "work item produced more than one result",
                 ));
@@ -2361,18 +2369,20 @@ mod tests {
             restored.fragment.validate(&restored.items).unwrap();
         }
         let semantic_items = work.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let proof = |item: WorkItemId| opto_ir::design::EquivalenceCertificate {
+            regime: opto_ir::design::EquivalenceRegime::ByConstruction,
+            digest: item.0,
+        };
+        let expected_proof = |item: &WorkItem, output: &WorkItemId| {
+            assert_eq!(*output, item.id);
+            Ok(proof(item.id))
+        };
         let execute = |work: &WorkGraph| {
             let results = SynthesisExecutor::execute(&runtime, work, |item, _| {
-                Ok(WorkProduct::compiled_artifact(
-                    opto_ir::design::EquivalenceCertificate {
-                        regime: opto_ir::design::EquivalenceRegime::ByConstruction,
-                        digest: item.id.0,
-                    },
-                    item.id,
-                ))
+                Ok(WorkProduct::compiled_artifact(proof(item.id), item.id))
             })
             .unwrap();
-            work.accept_results(results)
+            work.accept_results(results, expected_proof)
                 .unwrap()
                 .into_vec()
                 .into_iter()
@@ -2381,20 +2391,25 @@ mod tests {
         };
         assert_eq!(execute(&work), semantic_items);
         let mut invalid = SynthesisExecutor::execute(&runtime, &work, |item, _| {
-            Ok(WorkProduct::compiled_artifact(
-                opto_ir::design::EquivalenceCertificate {
-                    regime: opto_ir::design::EquivalenceRegime::ByConstruction,
-                    digest: item.id.0,
-                },
-                item.id,
-            ))
+            Ok(WorkProduct::compiled_artifact(proof(item.id), item.id))
         })
         .unwrap();
         let bytes = opto_archive::to_bytes(&invalid).unwrap();
         let restored: Vec<WorkResult<WorkItemId>> = opto_archive::from_bytes(&bytes).unwrap();
         assert_eq!(restored, invalid);
         invalid[0].artifact.footprint.replaces = EntitySet::new(vec![]).unwrap();
-        assert!(work.accept_results(invalid).is_err());
+        assert!(work.accept_results(invalid, expected_proof).is_err());
+        let invalid_proof = SynthesisExecutor::execute(&runtime, &work, |item, _| {
+            Ok(WorkProduct::compiled_artifact(
+                opto_ir::design::EquivalenceCertificate {
+                    regime: opto_ir::design::EquivalenceRegime::ByConstruction,
+                    digest: [0; 32],
+                },
+                item.id,
+            ))
+        })
+        .unwrap();
+        assert!(work.accept_results(invalid_proof, expected_proof).is_err());
         let serial =
             opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 })
                 .unwrap();

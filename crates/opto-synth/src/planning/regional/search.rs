@@ -88,7 +88,7 @@ pub(crate) fn select_architectures(
         ))
     })?;
     let records = work
-        .accept_results(results)?
+        .accept_results(results, |_, record| Ok(decision_proof(record)))?
         .into_vec()
         .into_iter()
         .map(|result| result.output)

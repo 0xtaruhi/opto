@@ -148,17 +148,19 @@ impl MappedRegionArtifact {
         }
 
         let mut nets = ArtifactNetTable::default();
-        let input_values = plan_binding.resolve_inputs(region_binding)?;
-        let inputs = input_values
+        let mut input_values = plan_binding.resolve_inputs(region_binding)?.into_iter();
+        let inputs = plan_binding
+            .inputs
             .iter()
             .copied()
-            .zip(plan_binding.inputs.iter().copied())
-            .map(|(value, binding)| {
+            .map(|binding| {
                 let signal = match binding {
                     crate::mapping::RegionPlanValueBinding::ArtifactPinBit { pin, .. } => {
                         MappedValueSignal::Net(regional_pins.require(pin)?)
                     }
-                    _ => mapped_values.require(value)?,
+                    _ => mapped_values.require(input_values.next().ok_or_else(|| {
+                        crate::SynthError::invariant("regional input binding has no lowered value")
+                    })?)?,
                 };
                 Ok::<_, crate::SynthError>(nets.signal(signal))
             })

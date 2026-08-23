@@ -447,14 +447,39 @@ impl WordModule {
     /// overlapping connect removals, a failed connect insertion, or failed
     /// whole-module validation. The module is rolled back atomically on every
     /// error.
-    pub fn publish_fragments(
+    pub fn publish_fragments(&mut self, wave: PublicationWave) -> Result<PublishedWave, WordError> {
+        self.publish_fragments_checked(wave, |_, _| Ok::<_, WordError>(()))
+            .map(|(published, ())| published)
+    }
+
+    /// Publishes one fragment wave and accepts it only after a caller-owned
+    /// validation succeeds against the complete spliced module.
+    ///
+    /// This is the transaction boundary between Word publication and an
+    /// external identity, proof, or analysis authority. The callback observes
+    /// the fully validated provisional module and its deterministic slot
+    /// assignment. If it rejects the wave, every append, operation retarget,
+    /// connect removal, and connect addition is rolled back before the error is
+    /// returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns the caller's error type for either Word publication failure or
+    /// callback rejection. `self` is restored exactly on every error.
+    pub fn publish_fragments_checked<T, E>(
         &mut self,
         mut wave: PublicationWave,
-    ) -> Result<PublishedWave, WordError> {
+        accept: impl FnOnce(&Self, &PublishedWave) -> Result<T, E>,
+    ) -> Result<(PublishedWave, T), E>
+    where
+        E: From<WordError>,
+    {
         if wave.entries.is_empty() {
-            return Ok(PublishedWave {
+            let published = PublishedWave {
                 entries: Box::new([]),
-            });
+            };
+            let accepted = accept(self, &published)?;
+            return Ok((published, accepted));
         }
         wave.entries.sort_by_key(|(key, _)| key.0);
         if let Some(&(duplicate, _)) = wave
@@ -465,7 +490,8 @@ impl WordModule {
             return Err(WordError::new(format!(
                 "publication wave repeats fragment key {:02x?}",
                 duplicate.bytes()
-            )));
+            ))
+            .into());
         }
 
         let base_values = self.values.len();
@@ -479,7 +505,8 @@ impl WordModule {
                 return Err(WordError::new(format!(
                     "fragment {:02x?} was built against a different base generation",
                     key.bytes()
-                )));
+                ))
+                .into());
             }
         }
 
@@ -510,11 +537,11 @@ impl WordModule {
         };
         if let Err(error) = self.apply_wave(&wave.entries, &slots, &mut undo) {
             self.rollback_fragments(undo);
-            return Err(error);
+            return Err(E::from(error));
         }
         if let Err(error) = self.validate() {
             self.rollback_fragments(undo);
-            return Err(error);
+            return Err(E::from(error));
         }
 
         let entries = wave
@@ -527,7 +554,14 @@ impl WordModule {
                 operations: operations.into_boxed_slice(),
             })
             .collect::<Box<[_]>>();
-        Ok(PublishedWave { entries })
+        let published = PublishedWave { entries };
+        match accept(self, &published) {
+            Ok(accepted) => Ok((published, accepted)),
+            Err(error) => {
+                self.rollback_fragments(undo);
+                Err(error)
+            }
+        }
     }
 
     fn apply_wave(
@@ -814,6 +848,28 @@ mod tests {
             fixture.module.signals()[fixture.wide.index()].kind,
             SignalKind::Wire
         );
+    }
+
+    #[test]
+    fn rejected_cross_authority_validation_restores_the_module_exactly() {
+        let mut fixture = fixture();
+        let before = fixture.module.clone();
+        let mut wave = PublicationWave::new();
+        for (key, fragment) in coalesce_fragments(&fixture) {
+            wave.push(key, fragment);
+        }
+
+        let error = fixture
+            .module
+            .publish_fragments_checked(wave, |module, published| {
+                assert!(!published.entries().is_empty());
+                assert_ne!(before, *module);
+                Err::<(), _>(WordError::new("revision authority rejected the wave"))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("revision authority rejected"));
+        assert_eq!(before, fixture.module);
     }
 
     #[test]

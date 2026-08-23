@@ -223,11 +223,18 @@ pub(crate) struct LocalRegionBooleanLowering {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegionalPublicationBinding {
+    Artifact,
+    Constant(bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RegionalPublicationBit {
     pub(crate) target: word::ValueId,
     pub(crate) bit: u32,
     /// The region containing the source bit producer.
     pub(crate) producer: crate::RegionRowId,
+    pub(crate) binding: RegionalPublicationBinding,
 }
 
 pub(crate) trait OperationRegionResolver {
@@ -594,8 +601,6 @@ fn freeze_publication_contract(
                 word::OpKind::Concat { .. }
                     | word::OpKind::Extract { .. }
                     | word::OpKind::Cast { .. }
-                    | word::OpKind::Register(_)
-                    | word::OpKind::Latch(_)
             )
         {
             continue;
@@ -644,7 +649,7 @@ fn freeze_publication_contract(
                 publication.target, publication.bit, publication.producer, region,
             )));
         }
-        let contract = bits.get(&publication.target).ok_or_else(|| {
+        let contract = bits.get_mut(&publication.target).ok_or_else(|| {
             crate::SynthError::invariant(format!(
                 "regional publication contract target {:?}[{}] from producer {:?} has no frozen shell binding ({:?})",
                 publication.target,
@@ -653,20 +658,26 @@ fn freeze_publication_contract(
                 module.operation(operation).map(|operation| &operation.kind),
             ))
         })?;
-        let frozen = contract
-            .get(publication.bit as usize)
-            .copied()
-            .ok_or_else(|| {
-                crate::SynthError::invariant(
-                    "regional publication bit exceeds its frozen shell contract",
-                )
-            })?;
-        if frozen != FrozenPublicationBit::RegionArtifact {
+        let frozen = contract.get_mut(publication.bit as usize).ok_or_else(|| {
+            crate::SynthError::invariant(
+                "regional publication bit exceeds its frozen shell contract",
+            )
+        })?;
+        if *frozen != FrozenPublicationBit::RegionArtifact {
             return Err(crate::SynthError::invariant(format!(
-                "regional producer {:?} claims full-domain constant publication {:?}[{}]",
+                "regional producer {:?} replaces a full-domain constant publication {:?}[{}]",
                 publication.producer, publication.target, publication.bit,
             )));
         }
+        *frozen = match publication.binding {
+            RegionalPublicationBinding::Artifact => FrozenPublicationBit::RegionArtifact,
+            RegionalPublicationBinding::Constant(false) => {
+                FrozenPublicationBit::SubstrateConstant(BitVal::Zero)
+            }
+            RegionalPublicationBinding::Constant(true) => {
+                FrozenPublicationBit::SubstrateConstant(BitVal::One)
+            }
+        };
     }
     Ok(FrozenPublicationContract { bits })
 }

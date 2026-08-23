@@ -429,12 +429,11 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                         ))
                     })?
                     .clone();
-                if self.backend.treats_state_as_input()
-                    && matches!(
-                        operation.kind,
-                        word::OpKind::Register(_) | word::OpKind::Latch(_)
-                    )
-                {
+                let state_operation = matches!(
+                    &operation.kind,
+                    word::OpKind::Register(_) | word::OpKind::Latch(_)
+                );
+                if self.backend.treats_state_as_input() && state_operation {
                     self.opaque_bits(value_id, value.ty.width(), &value.source)?
                 } else if self.global_scope == super::GlobalBitblastScope::RegionalShell
                     && self.operation_regions.region(operation_id).is_some()
@@ -451,7 +450,7 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                 } else {
                     let previous_region = self.active_region;
                     self.active_region = self.operation_regions.region(operation_id);
-                    let bits =
+                    let mut bits =
                         if self.is_native_scalar_operation(&operation.kind, value.ty.width())? {
                             vec![self.legalize_native_scalar_operation(
                                 value_id,
@@ -467,6 +466,17 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                             )?
                         };
                     self.active_region = previous_region;
+                    if self.global_scope == super::GlobalBitblastScope::RegionalShell
+                        && state_operation
+                    {
+                        bits = self.apply_publication_contract(
+                            value_id,
+                            bits,
+                            value.ty,
+                            None,
+                            &value.source,
+                        )?;
+                    }
                     bits
                 }
             }
@@ -503,6 +513,18 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                 ));
             }
         };
+        let bits = self.signal_bits(endpoint, reference, source)?;
+        self.apply_publication_contract(original, bits, ty, Some(signal), source)
+    }
+
+    fn apply_publication_contract(
+        &mut self,
+        original: word::ValueId,
+        endpoint_bits: Vec<ScalarBit>,
+        ty: word::WordType,
+        signal: Option<word::SignalId>,
+        source: &word::SourceSpan,
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let publication = self
             .publication_contract
             .bits
@@ -513,7 +535,6 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                     "regional shell value has no frozen publication contract",
                 )
             })?;
-        let endpoint_bits = self.signal_bits(endpoint, reference, source)?;
         if publication.len() != endpoint_bits.len() {
             return Err(crate::SynthError::invariant(
                 "regional shell publication width changed after it was frozen",
@@ -537,16 +558,18 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                     let index = u32::try_from(index).map_err(|_| {
                         crate::SynthError::capacity("regional publication bit index")
                     })?;
-                    self.module
-                        .connect(
-                            word::LValue::signal(signal).with_range(word::BitRange {
-                                msb: index,
-                                lsb: index,
-                            }),
-                            value,
-                            source.clone(),
-                        )
-                        .map_err(crate::SynthError::from)?;
+                    if let Some(signal) = signal {
+                        self.module
+                            .connect(
+                                word::LValue::signal(signal).with_range(word::BitRange {
+                                    msb: index,
+                                    lsb: index,
+                                }),
+                                value,
+                                source.clone(),
+                            )
+                            .map_err(crate::SynthError::from)?;
+                    }
                     bit
                 }
             };

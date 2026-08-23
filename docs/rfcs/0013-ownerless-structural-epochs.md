@@ -14,12 +14,12 @@
     produces an immutable `DesignRevision`; work items carry exact
     `RevisionFootprint` values that are validated against every result; the
     deterministic `WorkGraph`, `WorkContext`, shard batching, and rebatching
-    exist.
-  - Not implemented: no task returns a `RewriteDelta` and
-    `DesignRevision::commit` has no production caller, so no rewrite has been
-    published through the delta protocol. All structural rewriting still
-    mutates `WordModule` in place. Fusion tasks, reduce workflows, the remote
-    executor, and physical context do not exist.
+    exist; static-wire coalescing publishes its Word fragment and corresponding
+    `RewriteDelta` in one rollback-capable production transaction; compilation
+    results are accepted only after coordinator proof recomputation.
+  - Not implemented: mapped repair does not use the RFC's common logical delta
+    protocol. Fusion tasks, reduce workflows, the remote executor, physical
+    context, and the Phase 3 scale evidence do not exist.
 - Supersedes: the provisional-owner, owner-confined global-mutation, and final
   owner-freeze contracts of RFC 0007.
 - Amends: RFC 0011's compilation-shard execution model. Semantic decision
@@ -1648,10 +1648,9 @@ Phase 1 and Phase 2 acceptance criteria that name a `RewriteDelta` of
 `LogicalCell` fragments are replaced by the same criteria over `WordFragment`
 deltas. Specifically:
 
-- Phase 1's "move one representative combinational rewrite and one mapped
-  repair through the common delta protocol" is unchanged in intent and remains
-  **unmet**; it is now satisfied by a Word-fragment delta published through the
-  three-step procedure above.
+- Phase 1's representative combinational rewrite is implemented by static-wire
+  coalescing through the three-step procedure above. Its mapped-repair half
+  remains **unmet**.
 - Phase 2's "each returns a `RewriteDelta`; no task mutates the input design"
   is unchanged in intent. "The input design" means the sealed Word snapshot and
   the sealed revision together.

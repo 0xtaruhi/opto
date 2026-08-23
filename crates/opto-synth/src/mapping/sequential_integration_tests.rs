@@ -29,6 +29,9 @@ fn sparse_encoded_fsm() -> WordModule {
     let active = module
         .add_port("active", PortDirection::Output, bit(), test_span())
         .unwrap();
+    let state_output = module
+        .add_port("state_o", PortDirection::Output, state_type, test_span())
+        .unwrap();
     let state = module.add_wire("state", state_type, test_span()).unwrap();
     let [clock, reset, select] = [clock, reset, select].map(|port| read_port(&mut module, port));
     let state_read = module.read_signal(state, test_span()).unwrap();
@@ -48,6 +51,7 @@ fn sparse_encoded_fsm() -> WordModule {
         .binary(BinaryOp::Eq, state_read, second, test_span())
         .unwrap();
     connect_port(&mut module, active, is_active);
+    connect_port(&mut module, state_output, state_read);
     let first_or_hold = module.mux(select, first, state_read, test_span()).unwrap();
     let next = module
         .mux(select, second, first_or_hold, test_span())
@@ -113,6 +117,7 @@ fn synthesize_publishes_encoded_fsm_state_through_its_proved_relation() {
     assert_eq!(text.matches("DFD1 ").count(), 1, "{text}");
     assert!(!text.contains(".Q(\\state["), "{text}");
     assert!(text.contains("active"), "{text}");
+    assert!(text.contains("assign state_o[0] = 1'b0;"), "{text}");
 }
 
 #[test]

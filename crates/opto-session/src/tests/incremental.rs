@@ -491,7 +491,7 @@ fn changing_a_child_interface_resynthesizes_the_root_artifact() {
             "unused",
             PortDirection::Input,
             WordType::new(1, false, LogicStateKind::FourState).unwrap(),
-            SourceSpan::default(),
+            stable_signal("leaf", "unused"),
         )
         .unwrap();
     let changed_leaf = RtlModule::new(changed_leaf, procedures).unwrap();

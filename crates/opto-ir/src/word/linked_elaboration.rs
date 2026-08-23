@@ -220,7 +220,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
             memory_write_port_base,
         };
         self.copy_values_and_operations(source, prefix, &remap)?;
-        self.copy_memory_ports(source, &remap)?;
+        self.copy_memory_ports(source, prefix, &remap)?;
         self.copy_connects(source, &remap)?;
         self.copy_annotations(source, preserve_ports, &remap)?;
         self.copy_synthesis_directives(source, preserve_ports, &remap)?;
@@ -259,6 +259,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
                 |name| source.name_str(name).to_string(),
             );
             let name = self.unique_signal_name(&hierarchical_name(prefix, &local_name));
+            let declaration = signal.source.in_occurrence(prefix);
             let copied = match signal.kind {
                 SignalKind::Port(port) if preserve_ports => {
                     let port = source.port(port).ok_or_else(|| {
@@ -274,28 +275,24 @@ impl<'a, F> HierarchyInliner<'a, F> {
                             source.name_str(port.name)
                         )));
                     }
-                    let port_id = self.target.add_port(
-                        &name,
-                        port.direction,
-                        signal.ty,
-                        signal.source.clone(),
-                    )?;
+                    let port_id =
+                        self.target
+                            .add_port(&name, port.direction, signal.ty, declaration)?;
                     self.target
                         .port(port_id)
                         .expect("newly inserted port must exist")
                         .signal
                 }
                 SignalKind::Port(_) | SignalKind::Wire => {
-                    self.target
-                        .add_wire(&name, signal.ty, signal.source.clone())?
+                    self.target.add_wire(&name, signal.ty, declaration)?
                 }
                 SignalKind::Register => {
                     self.target
-                        .add_register_signal(&name, signal.ty, signal.source.clone())?
+                        .add_register_signal(&name, signal.ty, declaration)?
                 }
                 SignalKind::ProcessLocal => {
                     self.target
-                        .add_process_local_signal(&name, signal.ty, signal.source.clone())?
+                        .add_process_local_signal(&name, signal.ty, declaration)?
                 }
             };
             if let Some(layout) = source.signal_type_layout_spec(SignalId::from_index(index)?)? {
@@ -406,7 +403,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
                     name,
                     memory.element_type,
                     memory.depth,
-                    memory.source.clone(),
+                    memory.source.in_occurrence(prefix),
                 )
             })
             .collect()
@@ -415,6 +412,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
     fn copy_memory_ports(
         &mut self,
         source: &WordModule,
+        prefix: &str,
         remap: &ModuleRemap,
     ) -> Result<(), WordError> {
         for port in source.memory_read_ports() {
@@ -438,7 +436,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
                 data: remap.signal(port.data)?,
                 timing,
                 read_during_write: port.read_during_write,
-                source: port.source.clone(),
+                source: port.source.in_occurrence(prefix),
             })?;
         }
         for port in source.memory_write_ports() {
@@ -462,7 +460,7 @@ impl<'a, F> HierarchyInliner<'a, F> {
                     })
                     .transpose()?,
                 priority: port.priority,
-                source: port.source.clone(),
+                source: port.source.in_occurrence(prefix),
             })?;
         }
         Ok(())
