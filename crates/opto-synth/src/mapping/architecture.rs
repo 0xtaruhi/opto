@@ -1073,8 +1073,48 @@ impl RegionArchitectureMaterializer<'_, '_> {
                 let states = operation_sources.states(local).ok_or_else(|| {
                     SynthError::invariant("private state has no semantic binding")
                 })?;
-                let feedback = match states.first().copied() {
-                    Some(crate::planning::regional::LocalStateSource::Operation(source)) => {
+                // The feedback must describe the value THIS register holds,
+                // so its width has to match the register data. A recorded
+                // source of a different width belongs to another state and
+                // would corrupt the enable-hold mux built from it.
+                let data_width = match &module
+                    .operation(local)
+                    .ok_or_else(|| SynthError::invariant("private state is not live"))?
+                    .kind
+                {
+                    word::OpKind::Register(register) => {
+                        module.value(register.d).map(|stored| stored.ty.width())
+                    }
+                    word::OpKind::Latch(latch) => {
+                        module.value(latch.d).map(|stored| stored.ty.width())
+                    }
+                    _ => None,
+                };
+                let selected = states
+                    .iter()
+                    .copied()
+                    .find(|state| match state {
+                        crate::planning::regional::LocalStateSource::Operation(source) => {
+                            let Some(source_result) = self
+                                .request
+                                .source
+                                .operation(*source)
+                                .map(|stored| stored.result)
+                                .and_then(|result| values.source_to_local.get(&result).copied())
+                                .and_then(|local| module.value(local).map(|stored| stored.ty))
+                            else {
+                                return false;
+                            };
+                            data_width.is_some_and(|width| source_result.width() == width)
+                        }
+                        crate::planning::regional::LocalStateSource::Memory { .. } => true,
+                    })
+                    .or_else(|| states.first().copied())
+                    .ok_or_else(|| {
+                        SynthError::invariant("private state has no semantic binding")
+                    })?;
+                let feedback = match selected {
+                    crate::planning::regional::LocalStateSource::Operation(source) => {
                         let result = self
                             .request
                             .source
@@ -1091,16 +1131,11 @@ impl RegionArchitectureMaterializer<'_, '_> {
                                 SynthError::invariant("private state has no feedback boundary")
                             })?
                     }
-                    Some(crate::planning::regional::LocalStateSource::Memory { .. }) => {
+                    crate::planning::regional::LocalStateSource::Memory { .. } => {
                         module
                             .operation(local)
                             .ok_or_else(|| SynthError::invariant("private state is not live"))?
                             .result
-                    }
-                    None => {
-                        return Err(SynthError::invariant(
-                            "private state has no semantic binding",
-                        ));
                     }
                 };
                 Ok::<_, SynthError>((local, feedback))
