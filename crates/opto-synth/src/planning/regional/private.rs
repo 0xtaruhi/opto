@@ -13,20 +13,21 @@ pub(crate) fn seal_work_design(
     crate::planning::dataflow::resolve_static_connect_aliases(module)?;
     let coalescing = crate::planning::dataflow::static_wire_driver_fragments(module)?;
     module.validate().map_err(crate::SynthError::Word)?;
-    let regions = crate::regional::region_graph::partition::build(
-        module,
-        crate::regional::region_graph::RegionPartitionPolicy::default(),
-    )?;
-    let design = crate::regional::WorkDesign::seal(module, &regions)?;
     if coalescing.is_empty() {
+        let regions = crate::regional::region_graph::partition::build(
+            module,
+            crate::regional::region_graph::RegionPartitionPolicy::default(),
+        )?;
+        let design = crate::regional::WorkDesign::seal(module, &regions)?;
         return Ok((regions, design));
     }
 
     // RFC 0013 Amendment 1 publication: deterministic slot assignment and
     // fragment splice into the semantic Word module, followed by an
-    // incremental revision update through the changed cone only. The base
-    // partition is discarded; rebuilding it over the spliced module keeps one
-    // region graph that names every published entity (accepted cutover cost).
+    // incremental revision update through the changed cone only. Partitioning
+    // happens once, after the canonical Word splice, so no provisional region
+    // geometry can leak into stable revision identity.
+    let base = crate::regional::WorkDesign::revision_of(module)?;
     let (wave, signals) = coalescing.into_parts();
     let (_, (regions, committed)) = module.publish_fragments_checked(
         wave,
@@ -38,23 +39,14 @@ pub(crate) fn seal_work_design(
             let deltas = crate::regional::coalesce_revision_deltas(
                 published_module,
                 &regions,
-                design.design(),
+                base,
                 published,
                 &signals,
             )?;
-            let committed = design
-                .design()
-                .commit(deltas, crate::regional::validate_coalesce_proof)
-                .map_err(|error| {
-                    crate::SynthError::invariant(format!(
-                        "static-wire revision commit failed: {error}"
-                    ))
-                })?;
+            let next = crate::regional::WorkDesign::seal(published_module, &regions)?;
+            let committed = crate::regional::commit_coalescing_revision(base, next, &deltas)?;
             Ok((regions, committed))
         },
     )?;
-    Ok((
-        regions,
-        crate::regional::WorkDesign::from_revision(committed),
-    ))
+    Ok((regions, committed))
 }

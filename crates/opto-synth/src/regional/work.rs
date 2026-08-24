@@ -4,34 +4,34 @@
 //! Stable revision and execution rows derived from one sealed region graph.
 
 use opto_ir::design::{
-    Cell, CellClass, CellId, DesignBuilder, DesignRevision, DesignRevisionId, EntityId, EntitySet,
-    NetBit, NetBitId, NetDriver, RevisionFootprint,
+    Cell, CellClass, CellId, DesignRevisionId, EntityId, EntitySet, NetBit, NetBitId, NetDriver,
+    RevisionFootprint,
 };
 use opto_ir::word;
 use opto_runtime::{Task, TaskKey};
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::collections::BTreeSet;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 const WORK_TASK_DOMAIN: u32 = 0x574f_524b;
 const COARSE_GROUP_SHARDS: usize = 16;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Delta-local cell role retained only while validating Word publication.
+pub(crate) enum WordFragmentCell {
+    /// Operation appended by the private Word fragment.
+    Operation,
+    /// Connection from the fragment result to its stable published signal bit.
+    Connection,
+}
+
 #[derive(Default)]
-struct NetTable {
+struct FragmentNetTable {
     nets: Vec<NetBit>,
     rows: HashMap<NetBitId, usize>,
 }
 
-impl NetTable {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            nets: Vec::with_capacity(capacity),
-            rows: HashMap::with_capacity(capacity),
-        }
-    }
-
+impl FragmentNetTable {
     fn into_nets(self) -> Vec<NetBit> {
         self.nets
     }
@@ -142,220 +142,201 @@ impl From<crate::RegionContextKey> for WorkContextKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LogicalOperation {
-    kind: LogicalOperationKind,
-    operands: Box<[word::WordType]>,
-    result: word::WordType,
-    dependencies: Option<Box<LogicalDependencyRefinement>>,
+#[derive(Debug, Clone)]
+/// Canonical immutable macro design consumed by every regional work epoch.
+pub(crate) struct WorkDesign {
+    revision: DesignRevisionId,
+    state_cells: Box<[CellId]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct LogicalDependencyRefinement {
-    known_outputs: Box<[u64]>,
-    mux_branch: Option<bool>,
-    exact: Option<opto_core::PackedRows<LogicalDependencyRange>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+enum WorkEntityKind {
+    Cell(CellId),
+    OperationNet(CellId),
+    SignalNet([u8; 32]),
+    ConstantNet { value: u8, state: u8 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct LogicalDependencyRange {
-    start: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct WorkEntitySpan {
+    kind: WorkEntityKind,
+    lsb: u32,
     width: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum LogicalOperationKind {
-    Unary(word::UnaryOp),
-    Binary(word::BinaryOp),
-    Mux,
-    Concat,
-    Extract {
-        lsb: u32,
-        width: u32,
-    },
-    Cast(word::CastKind),
-    TriState {
-        enable_active_high: bool,
-    },
-    DynamicExtract {
-        width: u32,
-    },
-    DynamicInsert,
-    Register {
-        edge: word::Edge,
-        enable_active_high: Option<bool>,
-        resets: Box<[LogicalReset]>,
-    },
-    Latch {
-        enable_active_high: bool,
-        resets: Box<[LogicalReset]>,
-    },
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct WorkEntityRange {
+    lsb: u32,
+    width: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct LogicalReset {
-    kind: word::ResetKind,
-    active_high: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum LogicalCell {
-    Operation(LogicalOperation),
-    Connection,
-    Memory {
-        element: word::WordType,
-        depth: u32,
-        interface: [u8; 32],
-    },
-}
-
-impl opto_ir::design::DesignPayload for LogicalCell {
-    fn semantic_fingerprint(&self) -> [u8; 32] {
-        let mut digest = blake3::Hasher::new();
-        digest.update(b"opto/logical-cell/v1\0");
-        hash_logical_cell(&mut digest, self);
-        *digest.finalize().as_bytes()
-    }
-
-    fn visit_comb_dependencies(
-        &self,
-        output: usize,
-        input_count: usize,
-        visit: &mut dyn FnMut(usize),
-    ) {
-        match self {
-            Self::Operation(operation) => operation.visit_dependencies(output, visit),
-            Self::Connection => visit(0),
-            Self::Memory { .. } => {
-                let _ = (output, input_count, visit);
-            }
-        }
+impl WorkEntityRange {
+    fn end(self) -> Result<u32, crate::SynthError> {
+        self.lsb
+            .checked_add(self.width)
+            .ok_or_else(|| crate::SynthError::capacity("work-entity span"))
     }
 }
 
-impl LogicalOperation {
-    fn visit_dependencies(&self, output: usize, visit: &mut dyn FnMut(usize)) {
-        let refinement = self.dependencies.as_deref();
-        if refinement
-            .and_then(|dependencies| dependencies.known_outputs.get(output / u64::BITS as usize))
-            .is_some_and(|word| word & (1 << (output % u64::BITS as usize)) != 0)
-        {
-            return;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkEntityGroup {
+    kind: WorkEntityKind,
+    ranges: Box<[WorkEntityRange]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkEntitySet(Box<[WorkEntityGroup]>);
+
+#[derive(Default)]
+struct WorkEntitySetBuilder(BTreeMap<WorkEntityKind, Vec<WorkEntityRange>>);
+
+impl WorkEntitySetBuilder {
+    fn push(&mut self, span: WorkEntitySpan) -> Result<(), crate::SynthError> {
+        if span.width == 0 {
+            return Err(crate::SynthError::invariant(
+                "work-entity span has zero width",
+            ));
         }
-        if let Some(rows) = refinement.and_then(|dependencies| dependencies.exact.as_ref()) {
-            let Some(range) = rows.row_range(output) else {
-                return;
-            };
-            for encoded in &rows.values()[range] {
-                for input in encoded.start..encoded.start + encoded.width {
-                    visit(input as usize);
-                }
-            }
-            return;
-        }
-        let all = |visit: &mut dyn FnMut(usize)| {
-            for input in 0..self.operands.iter().map(|ty| ty.width() as usize).sum() {
-                visit(input);
-            }
+        let range = WorkEntityRange {
+            lsb: span.lsb,
+            width: span.width,
         };
-        match self.kind {
-            LogicalOperationKind::Unary(word::UnaryOp::BitNot) => {
-                self.visit_operand_bit(0, output, false, visit);
-            }
-            LogicalOperationKind::Binary(
-                word::BinaryOp::BitAnd | word::BinaryOp::BitOr | word::BinaryOp::BitXor,
-            ) => {
-                self.visit_operand_bit(0, output, true, visit);
-                self.visit_operand_bit(1, output, true, visit);
-            }
-            LogicalOperationKind::Mux => {
-                if let Some(branch) = refinement.and_then(|dependencies| dependencies.mux_branch) {
-                    self.visit_operand_bit(if branch { 1 } else { 2 }, output, false, visit);
-                } else {
-                    self.visit_operand(0, visit);
-                    self.visit_operand_bit(1, output, false, visit);
-                    self.visit_operand_bit(2, output, false, visit);
+        range.end()?;
+        let ranges = self.0.entry(span.kind).or_default();
+        if let Some(previous) = ranges.last_mut()
+            && previous.end()? == range.lsb
+        {
+            previous.width = previous
+                .width
+                .checked_add(range.width)
+                .ok_or_else(|| crate::SynthError::capacity("work-entity span"))?;
+        } else {
+            ranges.push(range);
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<WorkEntitySet, crate::SynthError> {
+        let mut groups = Vec::with_capacity(self.0.len());
+        for (kind, mut ranges) in self.0 {
+            ranges.sort_unstable();
+            let mut merged = Vec::<WorkEntityRange>::with_capacity(ranges.len());
+            for range in ranges {
+                let range_end = range.end()?;
+                if let Some(previous) = merged.last_mut() {
+                    let previous_end = previous.end()?;
+                    if range.lsb <= previous_end {
+                        previous.width = previous_end.max(range_end) - previous.lsb;
+                        continue;
+                    }
                 }
+                merged.push(range);
             }
-            LogicalOperationKind::TriState { .. } => {
-                self.visit_operand_bit(0, output, false, visit);
-                self.visit_operand(1, visit);
-            }
-            LogicalOperationKind::Concat => {
-                let mut result_lsb = 0usize;
-                for operand in (0..self.operands.len()).rev() {
-                    let width = self.operands[operand].width() as usize;
-                    if (result_lsb..result_lsb + width).contains(&output) {
-                        self.visit_operand_bit(operand, output - result_lsb, false, visit);
+            groups.push(WorkEntityGroup {
+                kind,
+                ranges: merged.into_boxed_slice(),
+            });
+        }
+        Ok(WorkEntitySet(groups.into_boxed_slice()))
+    }
+}
+
+impl WorkEntitySet {
+    fn new(spans: Vec<WorkEntitySpan>) -> Result<Self, crate::SynthError> {
+        let mut builder = WorkEntitySetBuilder::default();
+        for span in spans {
+            builder.push(span)?;
+        }
+        builder.finish()
+    }
+
+    fn spans(&self) -> impl Iterator<Item = WorkEntitySpan> + '_ {
+        self.0.iter().flat_map(|group| {
+            group.ranges.iter().map(|range| WorkEntitySpan {
+                kind: group.kind,
+                lsb: range.lsb,
+                width: range.width,
+            })
+        })
+    }
+
+    fn union(&self, other: &Self) -> Result<Self, crate::SynthError> {
+        Self::new(self.spans().chain(other.spans()).collect())
+    }
+
+    fn difference(&self, other: &Self) -> Result<Self, crate::SynthError> {
+        let mut builder = WorkEntitySetBuilder::default();
+        for group in &self.0 {
+            let blockers = other
+                .0
+                .binary_search_by_key(&group.kind, |candidate| candidate.kind)
+                .ok()
+                .map(|index| other.0[index].ranges.as_ref())
+                .unwrap_or_default();
+            let mut first_candidate = 0usize;
+            for range in &group.ranges {
+                let range_end = range.end()?;
+                while let Some(blocker) = blockers.get(first_candidate) {
+                    if blocker.end()? > range.lsb {
                         break;
                     }
-                    result_lsb += width;
+                    first_candidate += 1;
+                }
+                let mut cursor = range.lsb;
+                for blocker in &blockers[first_candidate..] {
+                    if blocker.lsb >= range_end {
+                        break;
+                    }
+                    if blocker.lsb > cursor {
+                        builder.push(WorkEntitySpan {
+                            kind: group.kind,
+                            lsb: cursor,
+                            width: blocker.lsb - cursor,
+                        })?;
+                    }
+                    cursor = cursor.max(blocker.end()?);
+                    if cursor >= range_end {
+                        break;
+                    }
+                }
+                if cursor < range_end {
+                    builder.push(WorkEntitySpan {
+                        kind: group.kind,
+                        lsb: cursor,
+                        width: range_end - cursor,
+                    })?;
                 }
             }
-            LogicalOperationKind::Extract { lsb, .. } => {
-                self.visit_operand_bit(0, lsb as usize + output, false, visit);
-            }
-            LogicalOperationKind::Cast(kind) => {
-                let width = self.operands[0].width() as usize;
-                if output < width {
-                    self.visit_operand_bit(0, output, false, visit);
-                } else if kind == word::CastKind::SignExtend {
-                    self.visit_operand_bit(0, width - 1, false, visit);
-                }
-            }
-            LogicalOperationKind::Register { .. } | LogicalOperationKind::Latch { .. } => {}
-            LogicalOperationKind::Unary(_)
-            | LogicalOperationKind::Binary(_)
-            | LogicalOperationKind::DynamicExtract { .. }
-            | LogicalOperationKind::DynamicInsert => all(visit),
         }
+        builder.finish()
     }
 
-    fn visit_operand(&self, operand: usize, visit: &mut dyn FnMut(usize)) {
-        let start = self.operands[..operand]
+    fn cardinality(&self) -> u64 {
+        self.0
             .iter()
-            .map(|ty| ty.width() as usize)
-            .sum::<usize>();
-        for input in start..start + self.operands[operand].width() as usize {
-            visit(input);
-        }
+            .flat_map(|group| group.ranges.iter())
+            .map(|range| u64::from(range.width))
+            .sum()
     }
 
-    fn visit_operand_bit(
-        &self,
-        operand: usize,
-        bit: usize,
-        extend: bool,
-        visit: &mut dyn FnMut(usize),
-    ) {
-        let width = self.operands[operand].width() as usize;
-        let bit = if bit < width {
-            Some(bit)
-        } else if extend && self.operands[operand].is_signed() {
-            Some(width - 1)
-        } else {
-            None
-        };
-        if let Some(bit) = bit {
-            let start = self.operands[..operand]
-                .iter()
-                .map(|ty| ty.width() as usize)
-                .sum::<usize>();
-            visit(start + bit);
-        }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[cfg(test)]
+    fn contains_cell(&self, cell: CellId) -> bool {
+        self.0
+            .binary_search_by_key(&WorkEntityKind::Cell(cell), |group| group.kind)
+            .is_ok()
     }
 }
-
-#[derive(Debug, Clone)]
-/// Canonical immutable macro design consumed by every regional work epoch.
-pub(crate) struct WorkDesign(DesignRevision<LogicalCell>);
 
 #[derive(Debug)]
 pub(crate) struct WorkItem {
     id: WorkItemId,
     kind: WorkItemKind,
-    core: EntitySet,
-    halo: EntitySet,
+    core: WorkEntitySet,
+    halo: WorkEntitySet,
     context: WorkContextKey,
     estimated_work: u64,
     estimated_memory: u64,
@@ -389,97 +370,9 @@ struct WorkBoundaryContext {
 pub(crate) struct WorkPacketItem {
     id: WorkItemId,
     kind: WorkItemKind,
-    core: EntitySet,
-    halo: EntitySet,
+    core: WorkEntitySet,
+    halo: WorkEntitySet,
     context: WorkContext,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WorkPacketDesign {
-    revision: DesignRevisionId,
-    cells: Box<[Cell<LogicalCell>]>,
-    nets: Box<[NetBit]>,
-}
-
-#[cfg(test)]
-impl WorkPacketDesign {
-    fn validate(&self, items: &[WorkPacketItem]) -> Result<(), crate::SynthError> {
-        if self.cells.windows(2).any(|pair| pair[0].id >= pair[1].id)
-            || self.nets.windows(2).any(|pair| pair[0].id >= pair[1].id)
-        {
-            return Err(crate::SynthError::invariant(
-                "work packet design records are not in stable identity order",
-            ));
-        }
-        let cells = self
-            .cells
-            .iter()
-            .map(|cell| cell.id)
-            .collect::<BTreeSet<_>>();
-        let nets = self.nets.iter().map(|net| net.id).collect::<BTreeSet<_>>();
-        let halo_nets = items
-            .iter()
-            .flat_map(|item| item.halo.as_slice())
-            .filter_map(|entity| match *entity {
-                EntityId::NetBit(net) => Some(net),
-                EntityId::Cell(_) => None,
-            })
-            .collect::<BTreeSet<_>>();
-        if items.iter().any(|item| {
-            item.core
-                .as_slice()
-                .iter()
-                .chain(item.halo.as_slice())
-                .any(|entity| match *entity {
-                    EntityId::Cell(cell) => !cells.contains(&cell),
-                    EntityId::NetBit(net) => !nets.contains(&net),
-                })
-        }) {
-            return Err(crate::SynthError::invariant(
-                "work packet omits a core or halo design record",
-            ));
-        }
-        for cell in &self.cells {
-            if cell
-                .inputs
-                .iter()
-                .chain(&cell.outputs)
-                .any(|net| !nets.contains(net))
-            {
-                return Err(crate::SynthError::invariant(
-                    "work packet cell references a net outside its fragment",
-                ));
-            }
-            for (output, &net) in cell.outputs.iter().enumerate() {
-                let output = u32::try_from(output)
-                    .map_err(|_| crate::SynthError::capacity("packet cell output ordinal"))?;
-                if self
-                    .nets
-                    .binary_search_by_key(&net, |candidate| candidate.id)
-                    .ok()
-                    .and_then(|index| self.nets[index].driver)
-                    != Some(NetDriver::Cell {
-                        cell: cell.id,
-                        output,
-                    })
-                {
-                    return Err(crate::SynthError::invariant(
-                        "work packet cell and output net disagree",
-                    ));
-                }
-            }
-        }
-        if self.nets.iter().any(|net| {
-            matches!(net.driver, Some(NetDriver::Cell { cell, .. }) if !cells.contains(&cell))
-                && !halo_nets.contains(&net.id)
-        }) {
-            return Err(crate::SynthError::invariant(
-                "work packet core net has a driver outside its fragment",
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -488,7 +381,6 @@ pub(crate) struct WorkPacket {
     schema: u32,
     design: DesignRevisionId,
     shard: CompilationShardId,
-    fragment: WorkPacketDesign,
     items: Box<[WorkPacketItem]>,
     estimated_work: u64,
     estimated_memory: u64,
@@ -510,7 +402,7 @@ impl<T> WorkProduct<T> {
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct CompiledWorkArtifact<T> {
-    footprint: RevisionFootprint,
+    footprint: RevisionFootprint<WorkEntitySet>,
     proof: opto_ir::design::EquivalenceCertificate,
     output: T,
 }
@@ -608,41 +500,17 @@ impl WorkGraph {
                 "work contexts do not cover the sealed region graph",
             ));
         }
-        let revision = &design.0;
         let anchors = LogicalAnchors::new(module, regions.as_ref())?;
         let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
         let rows = runtime.analyze_indexed(regions.regions().len(), |index| {
             let region = regions.regions()[index];
-            let cells = region_cells(module, regions.as_ref(), &anchors, region)?;
-            let mut core = region_value_entities(
+            let (core, halo) = region_entities(
                 module,
                 &anchors,
                 regions.as_ref(),
                 &connectivity,
                 region,
-                crate::RegionPortDirection::Output,
-                revision,
             )?;
-            let mut halo = region_value_entities(
-                module,
-                &anchors,
-                regions.as_ref(),
-                &connectivity,
-                region,
-                crate::RegionPortDirection::Input,
-                revision,
-            )?;
-            for cell in cells {
-                let stored = revision.cell(cell).ok_or_else(|| {
-                    crate::SynthError::invariant(
-                        "work item cell is absent from the logical revision",
-                    )
-                })?;
-                core.insert(EntityId::Cell(cell));
-                core.extend(stored.outputs.iter().copied().map(EntityId::NetBit));
-                halo.extend(stored.inputs.iter().copied().map(EntityId::NetBit));
-            }
-            halo.retain(|entity| !core.contains(entity));
             if core.is_empty() {
                 return Err(crate::SynthError::invariant(format!(
                     "region {} has no writable logical entity (operations={}, memories={}, outputs={}, publications={})",
@@ -653,13 +521,10 @@ impl WorkGraph {
                     regions.bit_flows(region).len(),
                 )));
             }
-            let core =
-                EntitySet::new(core.into_iter().collect()).map_err(|error| design_error(&error))?;
-            let halo =
-                EntitySet::new(halo.into_iter().collect()).map_err(|error| design_error(&error))?;
-            let id = work_item_id(revision.revision(), region.id());
-            let estimated_memory = u64::try_from(core.as_slice().len() + halo.as_slice().len())
-                .unwrap_or(u64::MAX)
+            let id = work_item_id(design.revision, region.id());
+            let estimated_memory = core
+                .cardinality()
+                .saturating_add(halo.cardinality())
                 .max(1);
             let item = WorkItem {
                 id,
@@ -724,7 +589,7 @@ impl WorkGraph {
                     total.saturating_add(self.items[index].estimated_memory)
                 });
                 CompilationShard {
-                    id: shard_id(self.design.0.revision(), indices, &self.items),
+                    id: shard_id(self.design.revision, indices, &self.items),
                     items: indices.into(),
                     estimated_work,
                     estimated_memory,
@@ -775,14 +640,10 @@ impl WorkGraph {
                         context: self.contexts[row].clone(),
                     })
                     .collect();
-                let fragment = self
-                    .packet_design(shard, &items)
-                    .expect("validated work shard resolves its exact design fragment");
                 WorkPacket {
                     schema: 1,
-                    design: self.design.0.revision(),
+                    design: self.design.revision,
                     shard: shard.id,
-                    fragment,
                     items,
                     estimated_work: shard.estimated_work,
                     estimated_memory: shard.estimated_memory,
@@ -791,72 +652,12 @@ impl WorkGraph {
             .collect()
     }
 
-    #[cfg(test)]
-    fn packet_design(
-        &self,
-        shard: &CompilationShard,
-        items: &[WorkPacketItem],
-    ) -> Result<WorkPacketDesign, crate::SynthError> {
-        let entities = shard
-            .items
-            .iter()
-            .flat_map(|&row| {
-                self.items[row]
-                    .core
-                    .as_slice()
-                    .iter()
-                    .chain(self.items[row].halo.as_slice())
-            })
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let cells = entities
-            .iter()
-            .filter_map(|entity| match *entity {
-                EntityId::Cell(id) => Some(
-                    self.design
-                        .0
-                        .cell(id)
-                        .cloned()
-                        .ok_or_else(|| crate::SynthError::invariant("packet cell is not live")),
-                ),
-                EntityId::NetBit(_) => None,
-            })
-            .collect::<Result<_, _>>()?;
-        let nets = entities
-            .iter()
-            .filter_map(|entity| match *entity {
-                EntityId::NetBit(id) => Some(
-                    self.design
-                        .0
-                        .net(id)
-                        .cloned()
-                        .ok_or_else(|| crate::SynthError::invariant("packet net is not live")),
-                ),
-                EntityId::Cell(_) => None,
-            })
-            .collect::<Result<_, _>>()?;
-        let fragment = WorkPacketDesign {
-            revision: self.design.0.revision(),
-            cells,
-            nets,
-        };
-        fragment.validate(items)?;
-        Ok(fragment)
-    }
-
     pub(crate) fn regions(&self) -> &crate::SynthesisRegionGraph {
         &self.regions
     }
 
     pub(crate) fn state_cells(&self) -> impl Iterator<Item = CellId> + '_ {
-        self.design
-            .0
-            .cells()
-            .filter(|cell| {
-                cell.class == CellClass::StateBoundary
-                    && matches!(cell.kind, LogicalCell::Operation(_))
-            })
-            .map(|cell| cell.id)
+        self.design.state_cells.iter().copied()
     }
 
     pub(crate) fn accept_results<T>(
@@ -890,7 +691,7 @@ impl WorkGraph {
                     "work result does not match its immutable revision, context, or footprint",
                 ));
             }
-            if result.artifact.footprint.base != self.design.0.revision()
+            if result.artifact.footprint.base != self.design.revision
                 || result.artifact.footprint.reads != reads
                 || result.artifact.footprint.replaces != item.core
             {
@@ -942,7 +743,7 @@ impl WorkGraph {
                 "work shards do not match their stable semantic items",
             ));
         }
-        let revision = self.design.0.revision();
+        let revision = self.design.revision;
         if self
             .contexts
             .iter()
@@ -966,8 +767,10 @@ impl WorkGraph {
         if let Some((row, _)) = self.items.iter().enumerate().find(|(_, item)| {
             item.core.is_empty()
                 || item.estimated_memory
-                    < u64::try_from(item.core.as_slice().len() + item.halo.as_slice().len())
-                        .unwrap_or(u64::MAX)
+                    < item
+                        .core
+                        .cardinality()
+                        .saturating_add(item.halo.cardinality())
         }) {
             return Err(crate::SynthError::invariant(format!(
                 "work item {row} has an invalid core, halo, or memory estimate"
@@ -981,7 +784,7 @@ impl WorkGraph {
         if scheduled != (0..self.items.len()).collect::<Vec<_>>()
             || self.shards.iter().any(|shard| {
                 shard.items.is_empty()
-                    || shard.id != shard_id(self.design.0.revision(), &shard.items, &self.items)
+                    || shard.id != shard_id(self.design.revision, &shard.items, &self.items)
                     || shard.estimated_work
                         != shard.items.iter().fold(0_u64, |total, &item| {
                             total.saturating_add(self.items[item].estimated_work)
@@ -1050,7 +853,7 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                     let product = operation(item, runtime)?;
                     let artifact = CompiledWorkArtifact {
                         footprint: RevisionFootprint {
-                            base: work.design.0.revision(),
+                            base: work.design.revision,
                             reads: entity_union(&item.core, &item.halo)?,
                             replaces: item.core.clone(),
                         },
@@ -1070,57 +873,69 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
     }
 }
 
-fn item_read_set(item: &WorkItem) -> Result<EntitySet, crate::SynthError> {
+fn item_read_set(item: &WorkItem) -> Result<WorkEntitySet, crate::SynthError> {
     entity_union(&item.core, &item.halo)
 }
 
-fn entity_union(left: &EntitySet, right: &EntitySet) -> Result<EntitySet, crate::SynthError> {
-    EntitySet::new(
-        left.as_slice()
-            .iter()
-            .chain(right.as_slice())
-            .copied()
-            .collect(),
-    )
-    .map_err(|error| crate::SynthError::invariant(error.to_string()))
+fn entity_union(
+    left: &WorkEntitySet,
+    right: &WorkEntitySet,
+) -> Result<WorkEntitySet, crate::SynthError> {
+    left.union(right)
 }
 
 impl WorkDesign {
+    pub(crate) fn revision_of(
+        module: &word::WordModule,
+    ) -> Result<DesignRevisionId, crate::SynthError> {
+        logical_revision_id(module)
+    }
+
     pub(crate) fn seal(
         module: &word::WordModule,
         regions: &crate::SynthesisRegionGraph,
     ) -> Result<Self, crate::SynthError> {
-        seal_logical_design(module, regions).map(Self)
+        let anchors = LogicalAnchors::new(module, regions)?;
+        let state_cells = regions
+            .regions()
+            .iter()
+            .flat_map(|&region| regions.operations(region))
+            .filter(|&&operation| {
+                module.operation(operation).is_some_and(|operation| {
+                    matches!(
+                        operation.kind,
+                        word::OpKind::Register(_) | word::OpKind::Latch(_)
+                    )
+                })
+            })
+            .map(|&operation| anchors.operation(operation))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            revision: logical_revision_id(module)?,
+            state_cells: state_cells.into_boxed_slice(),
+        })
     }
 
     pub(crate) const fn revision(&self) -> DesignRevisionId {
-        self.0.revision()
-    }
-
-    pub(crate) const fn design(&self) -> &DesignRevision<LogicalCell> {
-        &self.0
-    }
-
-    pub(crate) const fn from_revision(design: DesignRevision<LogicalCell>) -> Self {
-        Self(design)
+        self.revision
     }
 }
 
 /// Lowers published static-wire coalescing fragments into bit-level revision
 /// deltas against the sealed base generation.
 ///
-/// Every fragment replaces the connection cells of one candidate wire so each
-/// signal bit is driven from its coalesced value, and installs the appended
-/// extract/concat/cast cells those inputs read. Stable identities reuse the
-/// sealing recipes over the spliced module, so a fresh seal of the same module
-/// reproduces exactly these entities.
+/// Every fragment replaces the published bits of one candidate wire and
+/// describes only the delta-local operation/connection topology needed to
+/// validate that replacement. Stable identities reuse the sealing recipes over
+/// the spliced module, so a fresh seal reproduces exactly these entities
+/// without retaining a second whole-design topology.
 pub(crate) fn coalesce_revision_deltas(
     module: &word::WordModule,
     regions: &crate::SynthesisRegionGraph,
-    base: &DesignRevision<LogicalCell>,
+    base: DesignRevisionId,
     published: &word::PublishedWave,
     signals: &[(word::FragmentKey, word::SignalId)],
-) -> Result<Vec<opto_ir::design::RewriteDelta<LogicalCell>>, crate::SynthError> {
+) -> Result<Vec<opto_ir::design::RewriteDelta<WordFragmentCell>>, crate::SynthError> {
     use opto_ir::design::{
         EquivalenceCertificate, EquivalenceRegime, RewriteDelta, RewriteDeltaId, SemanticBinding,
     };
@@ -1132,8 +947,6 @@ pub(crate) fn coalesce_revision_deltas(
     }
     let anchors = LogicalAnchors::new(module, regions)?;
     let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
-    let mut known_bits = word::KnownBitsAnalysis::new(module);
-    let mut unsigned_values = word::UnsignedValueAnalysis::new(module);
     let mut deltas = Vec::with_capacity(published.entries().len());
     for (entry, &(_, signal)) in published.entries().iter().zip(signals) {
         let stored_signal = module
@@ -1141,12 +954,11 @@ pub(crate) fn coalesce_revision_deltas(
             .ok_or_else(|| crate::SynthError::invariant("coalesced candidate wire disappeared"))?;
         let width = stored_signal.ty.width();
         let state = stored_signal.ty.state();
-        let source_span = stored_signal.source.clone();
         let signal_anchor = signal_anchor(module, signal)?;
-        let mut nets = NetTable::default();
-        let mut connection_cells = Vec::<Cell<LogicalCell>>::new();
+        let mut nets = FragmentNetTable::default();
+        let mut connection_cells = Vec::<Cell<WordFragmentCell>>::new();
         let mut replaces = Vec::<EntityId>::new();
-        let mut existing_inputs = std::collections::BTreeSet::new();
+        let mut outputs = Vec::with_capacity(width as usize);
         for bit in 0..width {
             let Some(source) = connectivity.signal_source(signal, bit)? else {
                 return Err(crate::SynthError::invariant(format!(
@@ -1154,41 +966,49 @@ pub(crate) fn coalesce_revision_deltas(
                 )));
             };
             let input_net = source_net(module, &anchors, source, state, &mut nets)?;
-            if base.net(input_net).is_some() {
-                existing_inputs.insert(input_net);
-            }
             let cell = connection_cell_id(signal_anchor, bit);
-            replaces.push(EntityId::Cell(cell));
+            let output = signal_net_id(signal_anchor, bit);
+            install_net(&mut nets, output, state, None)?;
+            install_driver(&mut nets, output, NetDriver::Cell { cell, output: 0 })?;
+            replaces.push(EntityId::NetBit(output));
+            outputs.push(output);
             connection_cells.push(Cell {
                 id: cell,
-                kind: LogicalCell::Connection,
+                kind: WordFragmentCell::Connection,
                 class: CellClass::Combinational,
                 inputs: Box::new([input_net]),
-                outputs: Box::new([signal_net_id(signal_anchor, bit)]),
-                source: source_span.clone(),
+                outputs: Box::new([output]),
+                source: stored_signal.source.clone(),
             });
         }
-        let mut operation_cells = Vec::<Cell<LogicalCell>>::with_capacity(entry.operations().len());
+        let mut operation_cells =
+            Vec::<Cell<WordFragmentCell>>::with_capacity(entry.operations().len());
         for &operation in entry.operations() {
-            let kind = logical_operation(module, operation, &mut known_bits, &mut unsigned_values)?;
             let stored = module.operation(operation).ok_or_else(|| {
                 crate::SynthError::invariant("published coalescing operation disappeared")
             })?;
             let cell = anchors.operation(operation)?;
             let inputs = crate::word::operation_inputs(&stored.kind)
                 .into_iter()
-                .map(|value| value_nets(module, &anchors, &connectivity, value, &mut nets))
+                .map(|value| {
+                    materialize_value_nets(module, &anchors, &connectivity, value, &mut nets)
+                })
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .flatten()
                 .collect::<Box<[_]>>();
-            for &input in &inputs {
-                if base.net(input).is_some() {
-                    existing_inputs.insert(input);
-                }
-            }
-            let outputs = operation_outputs(module, &anchors, operation, &mut nets)?;
+            let outputs = operation_outputs(module, &anchors, operation)?;
             for (output, &net) in outputs.iter().enumerate() {
+                let state = module
+                    .value(stored.result)
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "published coalescing result value disappeared",
+                        )
+                    })?
+                    .ty
+                    .state();
+                install_net(&mut nets, net, state, None)?;
                 install_driver(
                     &mut nets,
                     net,
@@ -1202,7 +1022,7 @@ pub(crate) fn coalesce_revision_deltas(
             }
             operation_cells.push(Cell {
                 id: cell,
-                kind: LogicalCell::Operation(kind),
+                kind: WordFragmentCell::Operation,
                 class: if matches!(
                     stored.kind,
                     word::OpKind::Register(_) | word::OpKind::Latch(_)
@@ -1216,21 +1036,30 @@ pub(crate) fn coalesce_revision_deltas(
                 source: stored.source.clone(),
             });
         }
-        // Only genuinely new nets may enter the fragment; producer and
-        // boundary nets already live in the base generation.
-        let nets = nets
-            .into_nets()
-            .into_iter()
-            .filter(|net| base.net(net.id).is_none())
-            .collect::<Vec<_>>();
+        let nets = nets.into_nets();
         let mut cells = operation_cells;
         cells.extend(connection_cells);
+        let net_rows = nets
+            .iter()
+            .enumerate()
+            .map(|(row, net)| (net.id, row))
+            .collect::<BTreeMap<_, _>>();
+        let mut existing_inputs = BTreeSet::new();
+        for &input in cells.iter().flat_map(|cell| cell.inputs.iter()) {
+            let net = net_rows
+                .get(&input)
+                .and_then(|&row| nets.get(row))
+                .ok_or_else(|| crate::SynthError::invariant("fragment input net is absent"))?;
+            if net.driver.is_none() {
+                existing_inputs.insert(input);
+            }
+        }
         let mut reads = replaces.clone();
         reads.extend(existing_inputs.iter().copied().map(EntityId::NetBit));
         deltas.push(RewriteDelta {
             id: RewriteDeltaId::from_bytes(entry.key().bytes()),
             footprint: RevisionFootprint {
-                base: base.revision(),
+                base,
                 reads: EntitySet::new(reads).map_err(|error| design_error(&error))?,
                 replaces: EntitySet::new(replaces).map_err(|error| design_error(&error))?,
             },
@@ -1238,7 +1067,7 @@ pub(crate) fn coalesce_revision_deltas(
             nets: nets.into_boxed_slice(),
             semantic: SemanticBinding {
                 inputs: existing_inputs.into_iter().collect::<Box<[_]>>(),
-                outputs: Box::new([]),
+                outputs: outputs.into_boxed_slice(),
             },
             proof: EquivalenceCertificate {
                 regime: EquivalenceRegime::ByConstruction,
@@ -1252,7 +1081,7 @@ pub(crate) fn coalesce_revision_deltas(
 /// Rejects any coalescing certificate that does not carry this layer's own
 /// construction-equivalence recipe.
 pub(crate) fn validate_coalesce_proof(
-    delta: &opto_ir::design::RewriteDelta<LogicalCell>,
+    delta: &opto_ir::design::RewriteDelta<WordFragmentCell>,
 ) -> Result<(), opto_ir::design::DesignError> {
     use opto_ir::design::{DesignError, EquivalenceRegime};
     if delta.proof.regime != EquivalenceRegime::ByConstruction
@@ -1266,6 +1095,133 @@ pub(crate) fn validate_coalesce_proof(
     Ok(())
 }
 
+fn validate_coalesce_fragment(
+    delta: &opto_ir::design::RewriteDelta<WordFragmentCell>,
+) -> Result<(), crate::SynthError> {
+    let mut cells = BTreeMap::new();
+    for cell in &delta.cells {
+        if cells.insert(cell.id, cell).is_some() {
+            return Err(crate::SynthError::invariant(
+                "coalescing fragment repeats a cell identity",
+            ));
+        }
+    }
+    let mut nets = BTreeMap::new();
+    for net in &delta.nets {
+        if nets.insert(net.id, net).is_some() {
+            return Err(crate::SynthError::invariant(
+                "coalescing fragment repeats a net identity",
+            ));
+        }
+    }
+
+    let mut boundary_inputs = BTreeSet::new();
+    for cell in &delta.cells {
+        for &input in &cell.inputs {
+            let net = nets.get(&input).ok_or_else(|| {
+                crate::SynthError::invariant("coalescing cell input is absent from its fragment")
+            })?;
+            if net.driver.is_none() {
+                boundary_inputs.insert(input);
+            }
+        }
+        for (output, &net_id) in cell.outputs.iter().enumerate() {
+            let output = u32::try_from(output)
+                .map_err(|_| crate::SynthError::capacity("coalescing output ordinal"))?;
+            if nets.get(&net_id).and_then(|net| net.driver)
+                != Some(NetDriver::Cell {
+                    cell: cell.id,
+                    output,
+                })
+            {
+                return Err(crate::SynthError::invariant(
+                    "coalescing cell output has an inconsistent driver",
+                ));
+            }
+        }
+    }
+    for net in &delta.nets {
+        let Some(NetDriver::Cell { cell, output }) = net.driver else {
+            continue;
+        };
+        if cells
+            .get(&cell)
+            .and_then(|cell| cell.outputs.get(output as usize))
+            .copied()
+            != Some(net.id)
+        {
+            return Err(crate::SynthError::invariant(
+                "coalescing net driver is absent from its fragment",
+            ));
+        }
+    }
+
+    if !boundary_inputs
+        .iter()
+        .copied()
+        .eq(delta.semantic.inputs.iter().copied())
+    {
+        return Err(crate::SynthError::invariant(
+            "coalescing fragment input boundary is not exact",
+        ));
+    }
+    let boundary_outputs = EntitySet::new(
+        delta
+            .semantic
+            .outputs
+            .iter()
+            .copied()
+            .map(EntityId::NetBit)
+            .collect(),
+    )
+    .map_err(|error| design_error(&error))?;
+    if boundary_outputs != delta.footprint.replaces {
+        return Err(crate::SynthError::invariant(
+            "coalescing fragment output boundary is not its exact replacement footprint",
+        ));
+    }
+    let expected_reads = EntitySet::new(
+        boundary_inputs
+            .into_iter()
+            .map(EntityId::NetBit)
+            .chain(boundary_outputs.as_slice().iter().copied())
+            .collect(),
+    )
+    .map_err(|error| design_error(&error))?;
+    if expected_reads != delta.footprint.reads {
+        return Err(crate::SynthError::invariant(
+            "coalescing fragment read footprint is not its exact boundary closure",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn commit_coalescing_revision(
+    base: DesignRevisionId,
+    next: WorkDesign,
+    deltas: &[opto_ir::design::RewriteDelta<WordFragmentCell>],
+) -> Result<WorkDesign, crate::SynthError> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut replacements = std::collections::BTreeSet::new();
+    for delta in deltas {
+        if delta.footprint.base != base || !ids.insert(delta.id) {
+            return Err(crate::SynthError::invariant(
+                "coalescing wave does not target one unique base revision",
+            ));
+        }
+        validate_coalesce_proof(delta).map_err(|error| design_error(&error))?;
+        validate_coalesce_fragment(delta)?;
+        for &entity in delta.footprint.replaces.as_slice() {
+            if !replacements.insert(entity) {
+                return Err(crate::SynthError::invariant(
+                    "coalescing wave has overlapping replacement footprints",
+                ));
+            }
+        }
+    }
+    Ok(next)
+}
+
 fn coalesce_proof_digest(key: opto_ir::word::FragmentKey) -> [u8; 32] {
     *blake3::Hasher::new()
         .update(b"opto/dataflow-coalesce-proof/v1\0")
@@ -1274,176 +1230,10 @@ fn coalesce_proof_digest(key: opto_ir::word::FragmentKey) -> [u8; 32] {
         .as_bytes()
 }
 
-fn seal_logical_design(
-    module: &word::WordModule,
-    regions: &crate::SynthesisRegionGraph,
-) -> Result<DesignRevision<LogicalCell>, crate::SynthError> {
-    let signal_bits = module.signals().iter().fold(0usize, |total, signal| {
-        total.saturating_add(signal.ty.width() as usize)
-    });
-    let operation_bits = module.operations().iter().fold(0usize, |total, operation| {
-        total.saturating_add(
-            module
-                .value(operation.result)
-                .map_or(0, |value| value.ty.width() as usize),
-        )
-    });
-    let mut nets = NetTable::with_capacity(signal_bits.saturating_add(operation_bits));
-    let mut cells = Vec::with_capacity(
-        module
-            .operations()
-            .len()
-            .saturating_add(module.memories().len())
-            .saturating_add(signal_bits),
-    );
-    let anchors = LogicalAnchors::new(module, regions)?;
-    let memory_ports = MemoryPortIndex::new(module);
-    let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
-    let mut known_bits = word::KnownBitsAnalysis::new(module);
-    let mut unsigned_values = word::UnsignedValueAnalysis::new(module);
-    for (index, signal) in module.signals().iter().enumerate() {
-        let signal_id = word::SignalId::from_index(index).map_err(crate::SynthError::from)?;
-        let anchor = anchors.signal(signal_id)?;
-        for bit in 0..signal.ty.width() {
-            install_net(
-                &mut nets,
-                signal_net_id(anchor, bit),
-                signal.ty.state(),
-                None,
-            )?;
-        }
-    }
-    for &region in regions.regions() {
-        for &operation in regions.operations(region) {
-            let kind = logical_operation(module, operation, &mut known_bits, &mut unsigned_values)?;
-            let stored = module.operation(operation).ok_or_else(|| {
-                crate::SynthError::invariant("logical revision references an unknown operation")
-            })?;
-            let cell = anchors.operation(operation)?;
-            let inputs = crate::word::operation_inputs(&stored.kind)
-                .into_iter()
-                .map(|value| value_nets(module, &anchors, &connectivity, value, &mut nets))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect::<Box<[_]>>();
-            let outputs = operation_outputs(module, &anchors, operation, &mut nets)?;
-            for (output, &net) in outputs.iter().enumerate() {
-                let output = u32::try_from(output)
-                    .map_err(|_| crate::SynthError::capacity("logical output bit ordinal"))?;
-                install_driver(&mut nets, net, NetDriver::Cell { cell, output })?;
-            }
-            cells.push(Cell {
-                id: cell,
-                kind: LogicalCell::Operation(kind),
-                class: if matches!(
-                    stored.kind,
-                    word::OpKind::Register(_) | word::OpKind::Latch(_)
-                ) {
-                    CellClass::StateBoundary
-                } else {
-                    CellClass::Combinational
-                },
-                inputs,
-                outputs,
-                source: stored.source.clone(),
-            });
-        }
-        for &memory in regions.memories(region) {
-            let stored = module.memory(memory).ok_or_else(|| {
-                crate::SynthError::invariant("logical revision references an unknown memory")
-            })?;
-            let cell = logical_memory_cell_id(module, memory)?;
-            let (inputs, outputs) = memory_nets(
-                module,
-                &anchors,
-                &connectivity,
-                &memory_ports,
-                memory,
-                &mut nets,
-            )?;
-            for (output, &net) in outputs.iter().enumerate() {
-                install_driver(
-                    &mut nets,
-                    net,
-                    NetDriver::Cell {
-                        cell,
-                        output: u32::try_from(output).map_err(|_| {
-                            crate::SynthError::capacity("memory output bit ordinal")
-                        })?,
-                    },
-                )?;
-            }
-            cells.push(Cell {
-                id: cell,
-                kind: LogicalCell::Memory {
-                    element: stored.element_type,
-                    depth: stored.depth.get(),
-                    interface: memory_interface_id(module, memory)?,
-                },
-                class: CellClass::StateBoundary,
-                inputs,
-                outputs,
-                source: stored.source.clone(),
-            });
-        }
-        for &port in regions
-            .input_ports(region)
-            .iter()
-            .chain(regions.output_ports(region))
-        {
-            let value = regions
-                .port(port)
-                .ok_or_else(|| crate::SynthError::invariant("logical boundary port is unknown"))?
-                .value();
-            value_nets(module, &anchors, &connectivity, value, &mut nets)?;
-        }
-        for flow in regions.bit_flows(region) {
-            value_nets(module, &anchors, &connectivity, flow.value(), &mut nets)?;
-        }
-    }
-    for (index, signal) in module.signals().iter().enumerate() {
-        let signal_id = word::SignalId::from_index(index).map_err(crate::SynthError::from)?;
-        let anchor = anchors.signal(signal_id)?;
-        for bit in 0..signal.ty.width() {
-            let Some(source) = connectivity.signal_source(signal_id, bit)? else {
-                continue;
-            };
-            let input = source_net(module, &anchors, source, signal.ty.state(), &mut nets)?;
-            let output = signal_net_id(anchor, bit);
-            if input == output {
-                continue;
-            }
-            let cell = connection_cell_id(anchor, bit);
-            install_driver(&mut nets, output, NetDriver::Cell { cell, output: 0 })?;
-            cells.push(Cell {
-                id: cell,
-                kind: LogicalCell::Connection,
-                class: CellClass::Combinational,
-                inputs: Box::new([input]),
-                outputs: Box::new([output]),
-                source: signal.source.clone(),
-            });
-        }
-    }
-    let mut nets = nets.into_nets();
-    nets.sort_unstable_by_key(|net| net.id);
-    let revision = logical_revision_id(&cells, &nets);
-    let mut builder = DesignBuilder::new(revision);
-    for net in nets {
-        builder.add_net(net);
-    }
-    for cell in cells {
-        builder.add_cell(cell);
-    }
-    builder.seal().map_err(|error| design_error(&error))
-}
-
 fn operation_outputs(
     module: &word::WordModule,
     anchors: &LogicalAnchors,
     operation: word::OpId,
-    nets: &mut NetTable,
 ) -> Result<Box<[NetBitId]>, crate::SynthError> {
     let operation = module
         .operation(operation)
@@ -1460,105 +1250,110 @@ fn operation_outputs(
         }
     };
     (0..result.ty.width())
-        .map(|bit| {
-            let id = operation_net_id(anchors.operation(cell)?, bit);
-            install_net(nets, id, result.ty.state(), None)?;
-            Ok(id)
-        })
+        .map(|bit| Ok(operation_net_id(anchors.operation(cell)?, bit)))
         .collect()
 }
 
-fn region_value_entities(
+fn region_entities(
     module: &word::WordModule,
     anchors: &LogicalAnchors,
     regions: &crate::SynthesisRegionGraph,
     connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
     region: crate::SynthesisRegion,
-    direction: crate::RegionPortDirection,
-    design: &DesignRevision<LogicalCell>,
-) -> Result<std::collections::BTreeSet<EntityId>, crate::SynthError> {
-    let ports = match direction {
-        crate::RegionPortDirection::Input => regions.input_ports(region),
-        crate::RegionPortDirection::Output => regions.output_ports(region),
-    };
-    let mut scratch = NetTable::default();
-    let mut entities = std::collections::BTreeSet::new();
-    for &port in ports {
+) -> Result<(WorkEntitySet, WorkEntitySet), crate::SynthError> {
+    let mut core = WorkEntitySetBuilder::default();
+    let mut halo = WorkEntitySetBuilder::default();
+    for &operation in regions.operations(region) {
+        let stored = module
+            .operation(operation)
+            .ok_or_else(|| crate::SynthError::invariant("work item operation is unknown"))?;
+        let cell = anchors.operation(operation)?;
+        core.push(WorkEntitySpan {
+            kind: WorkEntityKind::Cell(cell),
+            lsb: 0,
+            width: 1,
+        })?;
+        let result = module
+            .value(stored.result)
+            .ok_or_else(|| crate::SynthError::invariant("work item operation result is unknown"))?;
+        core.push(WorkEntitySpan {
+            kind: WorkEntityKind::OperationNet(cell),
+            lsb: 0,
+            width: result.ty.width(),
+        })?;
+        for value in crate::word::operation_inputs(&stored.kind) {
+            append_value_spans(&mut halo, module, anchors, connectivity, value, 0, None)?;
+        }
+    }
+    let memory_ports = MemoryPortIndex::new(module);
+    for &memory in regions.memories(region) {
+        core.push(WorkEntitySpan {
+            kind: WorkEntityKind::Cell(logical_memory_cell_id(module, memory)?),
+            lsb: 0,
+            width: 1,
+        })?;
+        append_memory_spans(
+            &mut halo,
+            &mut core,
+            module,
+            anchors,
+            connectivity,
+            &memory_ports,
+            memory,
+        )?;
+    }
+    for &port in regions.input_ports(region) {
         let value = regions
             .port(port)
-            .ok_or_else(|| crate::SynthError::invariant("work item boundary port is unknown"))?
+            .ok_or_else(|| crate::SynthError::invariant("work item input port is unknown"))?
             .value();
-        for net in value_nets(module, anchors, connectivity, value, &mut scratch)? {
-            if design.net(net).is_none() {
-                return Err(crate::SynthError::invariant(
-                    "work item boundary net is absent from the logical revision",
-                ));
-            }
-            entities.insert(EntityId::NetBit(net));
-        }
+        append_value_spans(&mut halo, module, anchors, connectivity, value, 0, None)?;
     }
-    if direction == crate::RegionPortDirection::Output {
-        for flow in regions.bit_flows(region) {
-            let value = value_nets(module, anchors, connectivity, flow.value(), &mut scratch)?;
-            let net = value.get(flow.bit() as usize).ok_or_else(|| {
-                crate::SynthError::invariant("work item bit flow is outside its Word value")
-            })?;
-            if design.net(*net).is_none() {
-                return Err(crate::SynthError::invariant(
-                    "work item publication net is absent from the logical revision",
-                ));
-            }
-            entities.insert(EntityId::NetBit(*net));
-        }
+    for &port in regions.output_ports(region) {
+        let value = regions
+            .port(port)
+            .ok_or_else(|| crate::SynthError::invariant("work item output port is unknown"))?
+            .value();
+        append_value_spans(&mut core, module, anchors, connectivity, value, 0, None)?;
     }
-    Ok(entities)
+    for flow in regions.bit_flows(region) {
+        append_value_spans(
+            &mut core,
+            module,
+            anchors,
+            connectivity,
+            flow.value(),
+            flow.lsb(),
+            Some(flow.width()),
+        )?;
+    }
+    let core = core.finish()?;
+    let halo = halo.finish()?.difference(&core)?;
+    Ok((core, halo))
 }
 
-type MemoryNetBinding = (Box<[NetBitId]>, Box<[NetBitId]>);
-
-fn memory_nets(
+fn append_memory_spans(
+    inputs: &mut WorkEntitySetBuilder,
+    outputs: &mut WorkEntitySetBuilder,
     module: &word::WordModule,
     anchors: &LogicalAnchors,
     connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
     ports: &MemoryPortIndex,
     memory: word::MemoryId,
-    nets: &mut NetTable,
-) -> Result<MemoryNetBinding, crate::SynthError> {
+) -> Result<(), crate::SynthError> {
     let reads = ports.reads.get(memory.index()).ok_or_else(|| {
         crate::SynthError::invariant("logical memory read-port row is out of range")
     })?;
     let writes = ports.writes.get(memory.index()).ok_or_else(|| {
         crate::SynthError::invariant("logical memory write-port row is out of range")
     })?;
-    let mut inputs = Vec::new();
     for &row in reads {
         let read = &module.memory_read_ports()[row];
-        append_value_nets(
-            &mut inputs,
-            module,
-            anchors,
-            connectivity,
-            read.address,
-            nets,
-        )?;
+        append_value_spans(inputs, module, anchors, connectivity, read.address, 0, None)?;
         if let word::MemoryReadTiming::Synchronous { clock, enable, .. } = read.timing {
-            append_value_nets(
-                &mut inputs,
-                module,
-                anchors,
-                connectivity,
-                clock.value,
-                nets,
-            )?;
+            append_value_spans(inputs, module, anchors, connectivity, clock.value, 0, None)?;
             if let Some(enable) = enable {
-                append_value_nets(
-                    &mut inputs,
-                    module,
-                    anchors,
-                    connectivity,
-                    enable.value,
-                    nets,
-                )?;
+                append_value_spans(inputs, module, anchors, connectivity, enable.value, 0, None)?;
             }
         }
     }
@@ -1574,233 +1369,113 @@ fn memory_nets(
         .into_iter()
         .flatten()
         {
-            append_value_nets(&mut inputs, module, anchors, connectivity, value, nets)?;
+            append_value_spans(inputs, module, anchors, connectivity, value, 0, None)?;
         }
     }
-    let outputs = reads
-        .iter()
-        .map(|&row| signal_nets(module, anchors, module.memory_read_ports()[row].data, nets))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    Ok((inputs.into_boxed_slice(), outputs))
-}
-
-fn append_value_nets(
-    output: &mut Vec<NetBitId>,
-    module: &word::WordModule,
-    anchors: &LogicalAnchors,
-    connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
-    value: word::ValueId,
-    nets: &mut NetTable,
-) -> Result<(), crate::SynthError> {
-    output.extend(value_nets(module, anchors, connectivity, value, nets)?);
+    for &row in reads {
+        let signal = module.memory_read_ports()[row].data;
+        let stored = module.signal(signal).ok_or_else(|| {
+            crate::SynthError::invariant("logical memory output signal is unknown")
+        })?;
+        outputs.push(WorkEntitySpan {
+            kind: WorkEntityKind::SignalNet(anchors.signal(signal)?),
+            lsb: 0,
+            width: stored.ty.width(),
+        })?;
+    }
     Ok(())
 }
 
-fn signal_nets(
-    module: &word::WordModule,
-    anchors: &LogicalAnchors,
-    signal: word::SignalId,
-    nets: &mut NetTable,
-) -> Result<Box<[NetBitId]>, crate::SynthError> {
-    let anchor = anchors.signal(signal)?;
-    let stored = module
-        .signal(signal)
-        .ok_or_else(|| crate::SynthError::invariant("logical memory output signal is unknown"))?;
-    (0..stored.ty.width())
-        .map(|bit| {
-            let id = signal_net_id(anchor, bit);
-            install_net(nets, id, stored.ty.state(), None)?;
-            Ok(id)
-        })
-        .collect()
-}
-
-#[cfg(test)]
-fn same_design(left: &DesignRevision<LogicalCell>, right: &DesignRevision<LogicalCell>) -> bool {
-    left.cell_count() == right.cell_count()
-        && left.net_count() == right.net_count()
-        && left.cells().all(|cell| right.cell(cell.id) == Some(cell))
-        && left.nets().all(|net| right.net(net.id) == Some(net))
-}
-
-fn logical_operation(
-    module: &word::WordModule,
-    operation: word::OpId,
-    known_bits: &mut word::KnownBitsAnalysis,
-    unsigned_values: &mut word::UnsignedValueAnalysis,
-) -> Result<LogicalOperation, crate::SynthError> {
-    let stored = module.operation(operation).ok_or_else(|| {
-        crate::SynthError::invariant("logical operation recipe references an unknown operation")
-    })?;
-    let kind = match &stored.kind {
-        word::OpKind::Unary { op, .. } => LogicalOperationKind::Unary(*op),
-        word::OpKind::Binary { op, .. } => LogicalOperationKind::Binary(*op),
-        word::OpKind::Mux { .. } => LogicalOperationKind::Mux,
-        word::OpKind::TriState { enable, .. } => LogicalOperationKind::TriState {
-            enable_active_high: enable.active_high,
-        },
-        word::OpKind::DynamicExtract { width, .. } => {
-            LogicalOperationKind::DynamicExtract { width: width.get() }
-        }
-        word::OpKind::DynamicInsert { .. } => LogicalOperationKind::DynamicInsert,
-        word::OpKind::Register(register) => LogicalOperationKind::Register {
-            edge: register.edge,
-            enable_active_high: register.enable.map(|enable| enable.active_high),
-            resets: register
-                .resets
-                .iter()
-                .map(|reset| LogicalReset {
-                    kind: reset.kind,
-                    active_high: reset.active_high,
-                })
-                .collect(),
-        },
-        word::OpKind::Latch(latch) => LogicalOperationKind::Latch {
-            enable_active_high: latch.enable.active_high,
-            resets: latch
-                .resets
-                .iter()
-                .map(|reset| LogicalReset {
-                    kind: reset.kind,
-                    active_high: reset.active_high,
-                })
-                .collect(),
-        },
-        word::OpKind::Concat { .. } => LogicalOperationKind::Concat,
-        word::OpKind::Extract { lsb, width, .. } => LogicalOperationKind::Extract {
-            lsb: *lsb,
-            width: width.get(),
-        },
-        word::OpKind::Cast { kind, .. } => LogicalOperationKind::Cast(*kind),
-    };
-    let operand_values = crate::word::operation_inputs(&stored.kind);
-    let operands: Box<[word::WordType]> = operand_values
-        .iter()
-        .map(|&value| {
-            module.value(value).map(|value| value.ty).ok_or_else(|| {
-                crate::SynthError::invariant("logical operation has an unknown operand")
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    let result = module
-        .value(stored.result)
-        .map(|value| value.ty)
-        .ok_or_else(|| crate::SynthError::invariant("logical operation has an unknown result"))?;
-    let mut known_outputs = vec![0u64; (result.width() as usize).div_ceil(u64::BITS as usize)];
-    for bit in 0..result.width() {
-        if known_bits.bit(module, stored.result, bit) != word::KnownBit::Unknown {
-            known_outputs[bit as usize / u64::BITS as usize] |= 1 << (bit % u64::BITS);
-        }
-    }
-    while known_outputs.last() == Some(&0) {
-        known_outputs.pop();
-    }
-    let mux_branch = match stored.kind {
-        word::OpKind::Mux { cond, .. } => match known_bits.bit(module, cond, 0) {
-            word::KnownBit::Zero => Some(false),
-            word::KnownBit::One => Some(true),
-            word::KnownBit::Unknown => None,
-        },
-        _ => None,
-    };
-    let exact = if matches!(stored.kind, word::OpKind::DynamicExtract { .. }) {
-        let mut rows = opto_core::PackedRowsBuilder::<LogicalDependencyRange>::try_with_capacity(
-            result.width() as usize,
-            0,
-        )
-        .map_err(|_| crate::SynthError::capacity("logical dependency range directory"))?;
-        for output in 0..result.width() {
-            let mut ranges = Vec::new();
-            if known_bits.bit(module, stored.result, output) == word::KnownBit::Unknown {
-                for dependency in crate::word::cycle::operation_dependencies(
-                    module,
-                    known_bits,
-                    unsigned_values,
-                    &stored.kind,
-                    crate::word::cycle::ValueSlice {
-                        value: stored.result,
-                        lsb: output,
-                        width: 1,
-                    },
-                )? {
-                    let operand = operand_values
-                        .iter()
-                        .position(|&value| value == dependency.value)
-                        .ok_or_else(|| {
-                            crate::SynthError::invariant(
-                                "logical dependency is not a direct operation input",
-                            )
-                        })?;
-                    let start = operands[..operand]
-                        .iter()
-                        .try_fold(0u32, |total, ty| total.checked_add(ty.width()))
-                        .ok_or_else(|| {
-                            crate::SynthError::capacity("logical dependency operand width")
-                        })?
-                        .checked_add(dependency.lsb)
-                        .ok_or_else(|| {
-                            crate::SynthError::capacity("logical dependency input offset")
-                        })?;
-                    ranges.push(LogicalDependencyRange {
-                        start,
-                        width: dependency.width,
-                    });
-                }
-            }
-            rows.try_push_row(ranges)
-                .map_err(|_| crate::SynthError::capacity("logical dependency range directory"))?;
-        }
-        Some(rows.finish())
-    } else {
-        None
-    };
-    let dependencies =
-        (!known_outputs.is_empty() || mux_branch.is_some() || exact.is_some()).then(|| {
-            Box::new(LogicalDependencyRefinement {
-                known_outputs: known_outputs.into_boxed_slice(),
-                mux_branch,
-                exact,
-            })
-        });
-    Ok(LogicalOperation {
-        kind,
-        operands,
-        result,
-        dependencies,
-    })
-}
-
-fn region_cells(
-    module: &word::WordModule,
-    regions: &crate::SynthesisRegionGraph,
-    anchors: &LogicalAnchors,
-    region: crate::SynthesisRegion,
-) -> Result<Box<[CellId]>, crate::SynthError> {
-    let mut cells = Vec::new();
-    for &operation in regions.operations(region) {
-        cells.push(anchors.operation(operation)?);
-    }
-    for &memory in regions.memories(region) {
-        cells.push(logical_memory_cell_id(module, memory)?);
-    }
-    cells.sort_unstable();
-    cells.dedup();
-    Ok(cells.into_boxed_slice())
-}
-
-fn value_nets(
+fn append_value_spans(
+    output: &mut WorkEntitySetBuilder,
     module: &word::WordModule,
     anchors: &LogicalAnchors,
     connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
     value: word::ValueId,
-    nets: &mut NetTable,
-) -> Result<Box<[NetBitId]>, crate::SynthError> {
+    lsb: u32,
+    width: Option<u32>,
+) -> Result<(), crate::SynthError> {
     let stored = module
         .value(value)
         .ok_or_else(|| crate::SynthError::invariant("logical net references an unknown value"))?;
+    let width = width.unwrap_or_else(|| stored.ty.width().saturating_sub(lsb));
+    let end = lsb
+        .checked_add(width)
+        .filter(|&end| width != 0 && end <= stored.ty.width())
+        .ok_or_else(|| crate::SynthError::invariant("work-entity range exceeds its Word value"))?;
+    for bit in lsb..end {
+        let span = source_entity_span(
+            module,
+            anchors,
+            connectivity.source(value, bit)?,
+            stored.ty.state(),
+        )?;
+        append_adjacent_span(output, span)?;
+    }
+    Ok(())
+}
+
+fn source_entity_span(
+    module: &word::WordModule,
+    anchors: &LogicalAnchors,
+    source: crate::word::bit_connectivity::BitSource,
+    state: word::LogicStateKind,
+) -> Result<WorkEntitySpan, crate::SynthError> {
+    let (kind, lsb) = match source {
+        crate::word::bit_connectivity::BitSource::Constant(value) => (
+            WorkEntityKind::ConstantNet {
+                value: bit_value_key(value),
+                state: logic_state_key(state),
+            },
+            0,
+        ),
+        crate::word::bit_connectivity::BitSource::Value { value, bit } => {
+            let stored = module
+                .value(value)
+                .ok_or_else(|| crate::SynthError::invariant("work-entity bit source is unknown"))?;
+            match stored.kind {
+                word::ValueKind::Operation(operation) => (
+                    WorkEntityKind::OperationNet(anchors.operation(operation)?),
+                    bit,
+                ),
+                word::ValueKind::Signal(reference) => (
+                    WorkEntityKind::SignalNet(anchors.signal(reference.signal)?),
+                    reference.lsb.checked_add(bit).ok_or_else(|| {
+                        crate::SynthError::capacity("work-entity signal bit offset")
+                    })?,
+                ),
+                word::ValueKind::Constant(_) => {
+                    return Err(crate::SynthError::invariant(
+                        "constant work-entity source lost its classification",
+                    ));
+                }
+            }
+        }
+    };
+    Ok(WorkEntitySpan {
+        kind,
+        lsb,
+        width: 1,
+    })
+}
+
+fn append_adjacent_span(
+    spans: &mut WorkEntitySetBuilder,
+    span: WorkEntitySpan,
+) -> Result<(), crate::SynthError> {
+    spans.push(span)
+}
+
+fn materialize_value_nets(
+    module: &word::WordModule,
+    anchors: &LogicalAnchors,
+    connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
+    value: word::ValueId,
+    nets: &mut FragmentNetTable,
+) -> Result<Box<[NetBitId]>, crate::SynthError> {
+    let stored = module.value(value).ok_or_else(|| {
+        crate::SynthError::invariant("logical fragment references an unknown value")
+    })?;
     (0..stored.ty.width())
         .map(|bit| {
             source_net(
@@ -1819,49 +1494,54 @@ fn source_net(
     anchors: &LogicalAnchors,
     source: crate::word::bit_connectivity::BitSource,
     state: word::LogicStateKind,
-    nets: &mut NetTable,
+    nets: &mut FragmentNetTable,
 ) -> Result<NetBitId, crate::SynthError> {
-    let (id, state, driver) = match source {
-        crate::word::bit_connectivity::BitSource::Constant(constant) => (
-            constant_net_id(constant, state),
-            state,
-            Some(NetDriver::Constant(constant)),
-        ),
-        crate::word::bit_connectivity::BitSource::Value { value, bit } => {
-            let source = module
-                .value(value)
-                .ok_or_else(|| crate::SynthError::invariant("logical bit source is unknown"))?;
-            match source.kind {
-                word::ValueKind::Operation(operation) => (
-                    operation_net_id(anchors.operation(operation)?, bit),
-                    source.ty.state(),
-                    None,
-                ),
-                word::ValueKind::Signal(reference) => {
-                    let physical = reference
-                        .lsb
-                        .checked_add(bit)
-                        .ok_or_else(|| crate::SynthError::capacity("logical signal bit offset"))?;
-                    (
-                        signal_net_id(anchors.signal(reference.signal)?, physical),
-                        source.ty.state(),
-                        None,
-                    )
-                }
-                word::ValueKind::Constant(_) => {
-                    return Err(crate::SynthError::invariant(
-                        "constant bit source lost its constant classification",
-                    ));
-                }
-            }
+    let id = source_net_id(module, anchors, source, state)?;
+    let driver = match source {
+        crate::word::bit_connectivity::BitSource::Constant(constant) => {
+            Some(NetDriver::Constant(constant))
         }
+        crate::word::bit_connectivity::BitSource::Value { .. } => None,
     };
     install_net(nets, id, state, driver)?;
     Ok(id)
 }
 
+fn source_net_id(
+    module: &word::WordModule,
+    anchors: &LogicalAnchors,
+    source: crate::word::bit_connectivity::BitSource,
+    state: word::LogicStateKind,
+) -> Result<NetBitId, crate::SynthError> {
+    match source {
+        crate::word::bit_connectivity::BitSource::Constant(constant) => {
+            Ok(constant_net_id(constant, state))
+        }
+        crate::word::bit_connectivity::BitSource::Value { value, bit } => {
+            let source = module
+                .value(value)
+                .ok_or_else(|| crate::SynthError::invariant("logical bit source is unknown"))?;
+            match source.kind {
+                word::ValueKind::Operation(operation) => {
+                    Ok(operation_net_id(anchors.operation(operation)?, bit))
+                }
+                word::ValueKind::Signal(reference) => {
+                    let physical = reference
+                        .lsb
+                        .checked_add(bit)
+                        .ok_or_else(|| crate::SynthError::capacity("logical signal bit offset"))?;
+                    Ok(signal_net_id(anchors.signal(reference.signal)?, physical))
+                }
+                word::ValueKind::Constant(_) => Err(crate::SynthError::invariant(
+                    "constant bit source lost its constant classification",
+                )),
+            }
+        }
+    }
+}
+
 fn install_net(
-    nets: &mut NetTable,
+    nets: &mut FragmentNetTable,
     id: NetBitId,
     state: word::LogicStateKind,
     driver: Option<NetDriver>,
@@ -1885,7 +1565,7 @@ fn install_net(
 }
 
 fn install_driver(
-    nets: &mut NetTable,
+    nets: &mut FragmentNetTable,
     id: NetBitId,
     driver: NetDriver,
 ) -> Result<(), crate::SynthError> {
@@ -1906,155 +1586,65 @@ fn install_driver(
     Ok(())
 }
 
-fn logical_revision_id(cells: &[Cell<LogicalCell>], nets: &[NetBit]) -> DesignRevisionId {
-    let mut digest = blake3::Hasher::new();
-    digest.update(b"opto/logical-design-revision/v1\0");
-    let mut cells = cells.iter().collect::<Vec<_>>();
-    cells.sort_unstable_by_key(|cell| cell.id);
-    for cell in cells {
-        digest.update(&cell.id.bytes());
-        digest.update(&[match cell.class {
-            CellClass::Combinational => 0,
-            CellClass::StateBoundary => 1,
-        }]);
-        hash_logical_cell(&mut digest, &cell.kind);
-        for input in &cell.inputs {
-            digest.update(&input.bytes());
-        }
-        digest.update(&[0xff]);
-        for output in &cell.outputs {
-            digest.update(&output.bytes());
-        }
+fn logical_revision_id(module: &word::WordModule) -> Result<DesignRevisionId, crate::SynthError> {
+    let value_keys = crate::regional::region_graph::partition::semantic::value_keys(module)?;
+    let operation_anchors = crate::regional::region_graph::partition::operation_anchors(module)?;
+    let mut records = Vec::new();
+    for (index, stored) in module.operations().iter().enumerate() {
+        let mut record = blake3::Hasher::new();
+        record.update(b"opto/logical-revision-operation/v2\0");
+        record.update(&operation_anchors[index].bytes());
+        record.update(&value_keys[stored.result.index()]);
+        records.push(*record.finalize().as_bytes());
     }
-    for net in nets {
-        digest.update(&net.id.bytes());
-        digest.update(&[match net.state {
-            word::LogicStateKind::TwoState => 0,
-            word::LogicStateKind::FourState => 1,
-        }]);
-        match net.driver {
-            None => {
-                digest.update(&[0]);
-            }
-            Some(NetDriver::Cell { cell, output }) => {
-                digest.update(&[1]);
-                digest.update(&cell.bytes());
-                digest.update(&output.to_le_bytes());
-            }
-            Some(NetDriver::Constant(value)) => {
-                digest.update(&[2, bit_value_tag(value)]);
-            }
+    for index in 0..module.memories().len() {
+        let memory = word::MemoryId::from_index(index).map_err(crate::SynthError::from)?;
+        let stored = &module.memories()[index];
+        let mut record = blake3::Hasher::new();
+        record.update(b"opto/logical-revision-memory/v2\0");
+        record.update(&logical_memory_cell_id(module, memory)?.bytes());
+        record.update(&stored.element_type.width().to_le_bytes());
+        record.update(&[
+            u8::from(stored.element_type.is_signed()),
+            stored.element_type.state() as u8,
+        ]);
+        record.update(&stored.depth.get().to_le_bytes());
+        record.update(&memory_interface_id(module, memory)?);
+        records.push(*record.finalize().as_bytes());
+    }
+    for connect in module.connects() {
+        let mut record = blake3::Hasher::new();
+        record.update(b"opto/logical-revision-connect/v2\0");
+        record.update(&signal_anchor(module, connect.target.signal)?);
+        if let Some(range) = connect.target.range {
+            record.update(&[1]);
+            record.update(&range.msb.to_le_bytes());
+            record.update(&range.lsb.to_le_bytes());
+        } else {
+            record.update(&[0]);
         }
-    }
-    DesignRevisionId::from_bytes(*digest.finalize().as_bytes())
-}
-
-fn hash_logical_cell(digest: &mut blake3::Hasher, cell: &LogicalCell) {
-    match cell {
-        LogicalCell::Operation(operation) => {
-            digest.update(&[0]);
-            match &operation.kind {
-                LogicalOperationKind::Unary(op) => {
-                    digest.update(&[0, *op as u8]);
-                }
-                LogicalOperationKind::Binary(op) => {
-                    digest.update(&[1, *op as u8]);
-                }
-                LogicalOperationKind::Mux => {
-                    digest.update(&[2]);
-                }
-                LogicalOperationKind::Concat => {
-                    digest.update(&[8]);
-                }
-                LogicalOperationKind::Extract { lsb, width } => {
-                    digest.update(&[9]);
-                    digest.update(&lsb.to_le_bytes());
-                    digest.update(&width.to_le_bytes());
-                }
-                LogicalOperationKind::Cast(kind) => {
-                    digest.update(&[10, *kind as u8]);
-                }
-                LogicalOperationKind::TriState { enable_active_high } => {
-                    digest.update(&[3, u8::from(*enable_active_high)]);
-                }
-                LogicalOperationKind::DynamicExtract { width } => {
-                    digest.update(&[4]);
-                    digest.update(&width.to_le_bytes());
-                }
-                LogicalOperationKind::DynamicInsert => {
-                    digest.update(&[5]);
-                }
-                LogicalOperationKind::Register {
-                    edge,
-                    enable_active_high,
-                    resets,
-                } => {
-                    digest.update(&[6, *edge as u8, option_bool_tag(*enable_active_high)]);
-                    hash_resets(digest, resets);
-                }
-                LogicalOperationKind::Latch {
-                    enable_active_high,
-                    resets,
-                } => {
-                    digest.update(&[7, u8::from(*enable_active_high)]);
-                    hash_resets(digest, resets);
-                }
-            }
-            for operand in &operation.operands {
-                hash_word_type(digest, *operand);
-            }
-            digest.update(&[0xff]);
-            hash_word_type(digest, operation.result);
+        if let Some(dynamic) = connect.target.dynamic {
+            record.update(&[1]);
+            record.update(&value_keys[dynamic.offset.index()]);
+            record.update(&dynamic.width.get().to_le_bytes());
+        } else {
+            record.update(&[0]);
         }
-        LogicalCell::Memory {
-            element,
-            depth,
-            interface,
-        } => {
-            digest.update(&[1]);
-            hash_word_type(digest, *element);
-            digest.update(&depth.to_le_bytes());
-            digest.update(interface);
-        }
-        LogicalCell::Connection => {
-            digest.update(&[2]);
-        }
+        record.update(&value_keys[connect.value.index()]);
+        records.push(*record.finalize().as_bytes());
     }
-}
-
-fn hash_resets(digest: &mut blake3::Hasher, resets: &[LogicalReset]) {
-    digest.update(&(resets.len() as u64).to_le_bytes());
-    for reset in resets {
-        digest.update(&[reset.kind as u8, u8::from(reset.active_high)]);
+    records.sort_unstable();
+    let mut revision = blake3::Hasher::new();
+    revision.update(b"opto/logical-footprint-revision/v2\0");
+    revision.update(&(module.name().len() as u64).to_le_bytes());
+    revision.update(module.name().as_bytes());
+    revision.update(&(records.len() as u64).to_le_bytes());
+    for record in records {
+        revision.update(&record);
     }
-}
-
-fn hash_word_type(digest: &mut blake3::Hasher, ty: word::WordType) {
-    digest.update(&ty.width().to_le_bytes());
-    digest.update(&[
-        u8::from(ty.is_signed()),
-        match ty.state() {
-            word::LogicStateKind::TwoState => 0,
-            word::LogicStateKind::FourState => 1,
-        },
-    ]);
-}
-
-const fn option_bool_tag(value: Option<bool>) -> u8 {
-    match value {
-        None => 0,
-        Some(false) => 1,
-        Some(true) => 2,
-    }
-}
-
-const fn bit_value_tag(value: opto_ir::BitVal) -> u8 {
-    match value {
-        opto_ir::BitVal::Zero => 0,
-        opto_ir::BitVal::One => 1,
-        opto_ir::BitVal::X => 2,
-        opto_ir::BitVal::Z => 3,
-    }
+    Ok(DesignRevisionId::from_bytes(
+        *revision.finalize().as_bytes(),
+    ))
 }
 
 fn digest(domain: &[u8], parts: impl IntoIterator<Item = [u8; 32]>) -> [u8; 32] {
@@ -2187,6 +1777,14 @@ fn memory_interface_id(
     Ok(*digest.finalize().as_bytes())
 }
 
+const fn option_bool_tag(value: Option<bool>) -> u8 {
+    match value {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    }
+}
+
 fn operation_net_id(cell: CellId, bit: u32) -> NetBitId {
     net_id(b"opto/logical-operation-net/v1\0", cell.bytes(), bit)
 }
@@ -2217,20 +1815,26 @@ fn signal_net_id(signal: [u8; 32], bit: u32) -> NetBitId {
 }
 
 fn constant_net_id(value: opto_ir::BitVal, state: word::LogicStateKind) -> NetBitId {
-    let value = match value {
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"opto/logical-constant-net/v1\0");
+    digest.update(&[bit_value_key(value), logic_state_key(state)]);
+    NetBitId::from_bytes(*digest.finalize().as_bytes())
+}
+
+const fn bit_value_key(value: opto_ir::BitVal) -> u8 {
+    match value {
         opto_ir::BitVal::Zero => 0,
         opto_ir::BitVal::One => 1,
         opto_ir::BitVal::X => 2,
         opto_ir::BitVal::Z => 3,
-    };
-    let state = match state {
+    }
+}
+
+const fn logic_state_key(state: word::LogicStateKind) -> u8 {
+    match state {
         word::LogicStateKind::TwoState => 0,
         word::LogicStateKind::FourState => 1,
-    };
-    let mut digest = blake3::Hasher::new();
-    digest.update(b"opto/logical-constant-net/v1\0");
-    digest.update(&[value, state]);
-    NetBitId::from_bytes(*digest.finalize().as_bytes())
+    }
 }
 
 fn net_id(domain: &[u8], source: [u8; 32], bit: u32) -> NetBitId {
@@ -2267,6 +1871,51 @@ fn design_error(error: &opto_ir::design::DesignError) -> crate::SynthError {
 mod tests {
     use super::*;
     use opto_ir::word;
+
+    #[test]
+    fn work_entity_ranges_merge_and_subtract_exactly() {
+        let kind = WorkEntityKind::SignalNet([3; 32]);
+        let set = WorkEntitySet::new(vec![
+            WorkEntitySpan {
+                kind,
+                lsb: 8,
+                width: 8,
+            },
+            WorkEntitySpan {
+                kind,
+                lsb: 0,
+                width: 8,
+            },
+        ])
+        .unwrap();
+        let removed = WorkEntitySet::new(vec![
+            WorkEntitySpan {
+                kind,
+                lsb: 4,
+                width: 4,
+            },
+            WorkEntitySpan {
+                kind,
+                lsb: 10,
+                width: 2,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(set.0.len(), 1);
+        assert_eq!(set.cardinality(), 16);
+        let difference = set.difference(&removed).unwrap();
+        assert_eq!(difference.0.len(), 1);
+        assert_eq!(difference.0[0].kind, kind);
+        assert_eq!(
+            difference.0[0].ranges.as_ref(),
+            &[
+                WorkEntityRange { lsb: 0, width: 4 },
+                WorkEntityRange { lsb: 8, width: 2 },
+                WorkEntityRange { lsb: 12, width: 4 },
+            ]
+        );
+    }
 
     #[test]
     fn stable_work_rows_are_independent_of_dense_word_ids() {
@@ -2338,26 +1987,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(work.design.0.revision(), design.0.revision());
-        assert!(design.0.cell_count() >= regions.regions().len());
+        assert_eq!(work.design.revision(), design.revision());
         assert_eq!(work.items.len(), regions.regions().len());
         assert_eq!(work.shards.len(), regions.regions().len());
-        let mut known_bits = word::KnownBitsAnalysis::new(&module);
-        let mut unsigned_values = word::UnsignedValueAnalysis::new(&module);
         for (index, &region) in regions.regions().iter().enumerate() {
             assert_eq!(
                 work.items[index].kind,
                 WorkItemKind::FixedLogic(region.id())
             );
             for &operation in regions.operations(region) {
-                let _ =
-                    logical_operation(&module, operation, &mut known_bits, &mut unsigned_values)
-                        .unwrap();
                 assert!(
-                    design
-                        .0
-                        .cell(operation_cell_id(&regions, operation).unwrap())
-                        .is_some()
+                    work.items[index]
+                        .core
+                        .contains_cell(operation_cell_id(&regions, operation).unwrap())
                 );
             }
         }
@@ -2365,8 +2007,7 @@ mod tests {
             let bytes = opto_archive::to_bytes(&packet).unwrap();
             let restored: WorkPacket = opto_archive::from_bytes(&bytes).unwrap();
             assert_eq!(restored.design, packet.design);
-            assert_eq!(restored.fragment, packet.fragment);
-            restored.fragment.validate(&restored.items).unwrap();
+            assert_eq!(opto_archive::to_bytes(&restored).unwrap(), bytes);
         }
         let semantic_items = work.items.iter().map(|item| item.id).collect::<Vec<_>>();
         let proof = |item: WorkItemId| opto_ir::design::EquivalenceCertificate {
@@ -2397,7 +2038,7 @@ mod tests {
         let bytes = opto_archive::to_bytes(&invalid).unwrap();
         let restored: Vec<WorkResult<WorkItemId>> = opto_archive::from_bytes(&bytes).unwrap();
         assert_eq!(restored, invalid);
-        invalid[0].artifact.footprint.replaces = EntitySet::new(vec![]).unwrap();
+        invalid[0].artifact.footprint.replaces = WorkEntitySet::new(vec![]).unwrap();
         assert!(work.accept_results(invalid, expected_proof).is_err());
         let invalid_proof = SynthesisExecutor::execute(&runtime, &work, |item, _| {
             Ok(WorkProduct::compiled_artifact(
@@ -2485,11 +2126,7 @@ mod tests {
             .unwrap();
             let design = WorkDesign::seal(&module, &regions).unwrap();
             let net = signal_net_id(signal_anchor(&module, output_signal).unwrap(), 0);
-            assert!(matches!(
-                design.0.net(net).and_then(|net| net.driver),
-                Some(NetDriver::Cell { .. })
-            ));
-            (net, design.0.revision())
+            (net, design.revision())
         };
 
         let inverted = build(word::UnaryOp::BitNot);
@@ -2540,8 +2177,7 @@ mod tests {
         let fine = WorkDesign::seal(&module, &fine).unwrap();
         let coarse = WorkDesign::seal(&module, &coarse).unwrap();
 
-        assert_eq!(fine.0.revision(), coarse.0.revision());
-        assert!(same_design(&fine.0, &coarse.0));
+        assert_eq!(fine.revision(), coarse.revision());
     }
 
     #[test]
@@ -2696,30 +2332,13 @@ mod coalescing_publication_tests {
         )
         .unwrap();
         let deltas =
-            coalesce_revision_deltas(&module, &regions, base.design(), &published, &signals)
+            coalesce_revision_deltas(&module, &regions, base.revision(), &published, &signals)
                 .unwrap();
         assert_eq!(deltas.len(), signals.len());
-        let committed = base
-            .design()
-            .commit(deltas, validate_coalesce_proof)
-            .map_err(|error| design_error(&error))
-            .unwrap();
-
-        // The published generation must reproduce exactly what sealing the
-        // spliced module from scratch would produce.
         let fresh = WorkDesign::seal(&module, &regions).unwrap();
-        let cells = |design: &DesignRevision<LogicalCell>| {
-            let mut stored = design.cells().cloned().collect::<Vec<_>>();
-            stored.sort_unstable_by_key(|cell| cell.id);
-            stored
-        };
-        let nets = |design: &DesignRevision<LogicalCell>| {
-            let mut stored = design.nets().cloned().collect::<Vec<_>>();
-            stored.sort_unstable_by_key(|net| net.id);
-            stored
-        };
-        assert_eq!(cells(&committed), cells(fresh.design()));
-        assert_eq!(nets(&committed), nets(fresh.design()));
+        let committed =
+            commit_coalescing_revision(base.revision(), fresh.clone(), &deltas).unwrap();
+        assert_eq!(committed.revision(), fresh.revision());
         assert_ne!(committed.revision(), base.revision());
     }
 
@@ -2735,7 +2354,7 @@ mod coalescing_publication_tests {
         )
         .unwrap();
         let base = WorkDesign::seal(&module, &base_regions).unwrap();
-        let before = base.design().clone();
+        let before = base.revision();
 
         let (wave, signals) = coalescing.into_parts();
         let published = module
@@ -2748,31 +2367,24 @@ mod coalescing_publication_tests {
         )
         .unwrap();
         let mut deltas =
-            coalesce_revision_deltas(&module, &regions, base.design(), &published, &signals)
+            coalesce_revision_deltas(&module, &regions, base.revision(), &published, &signals)
                 .unwrap();
         // Corrupt one certificate so the wave must be rejected wholesale.
+        let proof = deltas[0].proof;
         deltas[0].proof = EquivalenceCertificate {
             regime: EquivalenceRegime::ByConstruction,
             digest: [0u8; 32],
         };
-        assert!(
-            base.design()
-                .commit(deltas, validate_coalesce_proof)
-                .is_err()
-        );
-        // Byte-identity is observable through identical live content: every
-        // surviving cell and net must still resolve to the same record.
-        let after = base.design().clone();
-        assert_eq!(after.cell_count(), before.cell_count());
-        assert_eq!(after.net_count(), before.net_count());
-        for (fresh, frozen) in after.cells().zip(before.cells()) {
-            assert_eq!(fresh.id, frozen.id);
-            assert_eq!(fresh.inputs, frozen.inputs);
-            assert_eq!(fresh.outputs, frozen.outputs);
-        }
-        for (fresh, frozen) in after.nets().zip(before.nets()) {
-            assert_eq!(fresh.id, frozen.id);
-            assert_eq!(fresh.driver, frozen.driver);
-        }
+        let next = WorkDesign::seal(&module, &regions).unwrap();
+        assert!(commit_coalescing_revision(base.revision(), next.clone(), &deltas).is_err());
+        deltas[0].proof = proof;
+        let driven = deltas[0]
+            .nets
+            .iter_mut()
+            .find(|net| matches!(net.driver, Some(NetDriver::Cell { .. })))
+            .unwrap();
+        driven.driver = None;
+        assert!(commit_coalescing_revision(base.revision(), next, &deltas).is_err());
+        assert_eq!(base.revision(), before);
     }
 }

@@ -10,8 +10,8 @@
 //! producer endpoints.
 
 use opto_ir::word;
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::RwLock;
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 // Exact aliases can revisit one packed value at different bit offsets, so the
 // walk needs a deterministic bound independent of host resources.
@@ -31,7 +31,7 @@ pub(crate) struct BitConnectivity<'a> {
     module: &'a word::WordModule,
     drivers: super::signal_driver::SignalDriverIndex,
     canonical_signal_views: BTreeMap<word::SignalId, Box<[SignalView]>>,
-    source_cache: RwLock<BTreeMap<(word::ValueId, u32), BitSource>>,
+    source_cache: Box<[OnceLock<Box<[BitSource]>>]>,
 }
 
 #[derive(Clone, Copy)]
@@ -70,7 +70,9 @@ impl<'a> BitConnectivity<'a> {
                 .into_iter()
                 .map(|(signal, views)| (signal, views.into_boxed_slice()))
                 .collect(),
-            source_cache: RwLock::new(BTreeMap::new()),
+            source_cache: std::iter::repeat_with(OnceLock::new)
+                .take(module.values().len())
+                .collect(),
         })
     }
 
@@ -88,30 +90,38 @@ impl<'a> BitConnectivity<'a> {
                 "bit connectivity exceeds its Word value",
             ));
         }
-        let mut active = BTreeSet::new();
-        let mut path = Vec::new();
+        if let ResolutionStep::Source(source) = resolution_step(
+            self.module,
+            &self.drivers,
+            &self.canonical_signal_views,
+            value,
+            bit,
+        )? {
+            return Ok(source);
+        }
+        let cache = self.source_cache.get(value.index()).ok_or_else(|| {
+            crate::SynthError::invariant("bit connectivity cache is out of range")
+        })?;
+        if cache.get().is_none() {
+            let mut sources = Vec::new();
+            sources
+                .try_reserve_exact(stored.ty.width() as usize)
+                .map_err(|_| crate::SynthError::capacity("bit-connectivity source cache"))?;
+            for row_bit in 0..stored.ty.width() {
+                sources.push(self.resolve(value, row_bit)?);
+            }
+            let _ = cache.set(sources.into_boxed_slice());
+        }
+        cache
+            .get()
+            .and_then(|sources| sources.get(bit as usize))
+            .copied()
+            .ok_or_else(|| crate::SynthError::invariant("bit connectivity cache is out of range"))
+    }
+
+    fn resolve(&self, value: word::ValueId, bit: u32) -> Result<BitSource, crate::SynthError> {
         let mut current = (value, bit);
-        let source = loop {
-            if let Some(source) = self
-                .source_cache
-                .read()
-                .map_err(|_| crate::SynthError::invariant("bit connectivity cache is poisoned"))?
-                .get(&current)
-                .copied()
-            {
-                break source;
-            }
-            if path.len() == MAX_BIT_ALIAS_STEPS {
-                return Err(crate::SynthError::invariant(format!(
-                    "bit connectivity exceeds the {MAX_BIT_ALIAS_STEPS}-step alias limit"
-                )));
-            }
-            if !active.insert(current) {
-                return Err(crate::SynthError::invariant(
-                    "bit connectivity contains an exact-alias cycle",
-                ));
-            }
-            path.push(current);
+        for _ in 0..MAX_BIT_ALIAS_STEPS {
             match resolution_step(
                 self.module,
                 &self.drivers,
@@ -119,18 +129,13 @@ impl<'a> BitConnectivity<'a> {
                 current.0,
                 current.1,
             )? {
-                ResolutionStep::Source(source) => break source,
+                ResolutionStep::Source(source) => return Ok(source),
                 ResolutionStep::Alias(value, bit) => current = (value, bit),
             }
-        };
-        let mut sources = self
-            .source_cache
-            .write()
-            .map_err(|_| crate::SynthError::invariant("bit connectivity cache is poisoned"))?;
-        for bit in path {
-            sources.insert(bit, source);
         }
-        Ok(source)
+        Err(crate::SynthError::invariant(format!(
+            "bit connectivity exceeds the {MAX_BIT_ALIAS_STEPS}-step alias limit"
+        )))
     }
 
     /// Resolves the unique structural driver of one physical signal bit.
@@ -281,6 +286,55 @@ fn resolution_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_aliases_follow_connections() {
+        let mut module = word::WordModule::new("exact_aliases");
+        let ty = word::WordType::bits(300).unwrap();
+        let source = module
+            .add_port(
+                "source",
+                word::PortDirection::Input,
+                ty,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let source = module
+            .read_signal(
+                module.port(source).unwrap().signal,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let target = module
+            .add_wire("target", ty, word::SourceSpan::default())
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(target),
+                source,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let target = module
+            .read_signal(target, word::SourceSpan::default())
+            .unwrap();
+
+        let connectivity = BitConnectivity::new(&module).unwrap();
+        assert_eq!(
+            connectivity.source(target, 256).unwrap(),
+            BitSource::Value {
+                value: source,
+                bit: 256
+            }
+        );
+        assert_eq!(
+            connectivity.source(target, 17).unwrap(),
+            BitSource::Value {
+                value: source,
+                bit: 17
+            }
+        );
+    }
 
     #[test]
     fn signal_views_share_one_canonical_physical_bit() {

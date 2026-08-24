@@ -294,6 +294,32 @@ impl KnownBitsAnalysis {
         self.invalidate(changed_signals.into_iter().map(FactNode::Signal));
     }
 
+    /// Extends dense value storage without admitting newly published drivers.
+    ///
+    /// A normalization epoch may append private expression values while its
+    /// completed signal assignments remain outside the epoch's analysis
+    /// snapshot. In that case new values may consume facts from the frozen
+    /// prefix, but appended connects must not trigger repeated whole-cone
+    /// invalidation or become visible to later tasks in the same epoch.
+    pub fn extend_frozen_connectivity(&mut self, module: &WordModule) {
+        if module.values().len() < self.values.len() || module.signals().len() < self.signals.len()
+        {
+            *self = Self::new(module);
+            return;
+        }
+        self.values
+            .resize(module.values().len(), FactState::Uncomputed);
+        self.signals
+            .resize(module.signals().len(), FactState::Uncomputed);
+        self.value_dependents
+            .resize(module.values().len(), Vec::new());
+        self.signal_dependents
+            .resize(module.signals().len(), Vec::new());
+        self.value_visited.resize(module.values().len(), 0);
+        self.signal_visited.resize(module.signals().len(), 0);
+        self.external_signals.resize(module.signals().len(), false);
+    }
+
     fn dependents_mut(&mut self, node: FactNode) -> Option<&mut Vec<FactNode>> {
         match node {
             FactNode::Value(value) => self.value_dependents.get_mut(value.index()),
@@ -1480,6 +1506,41 @@ mod tests {
         assert_eq!(facts.constant(&module, read), None);
         assert_eq!(
             facts.constant(&module, one),
+            Some(ConstBits::from_bin_str("1").unwrap())
+        );
+    }
+
+    #[test]
+    fn frozen_connectivity_extends_values_without_admitting_new_drivers() {
+        let mut module = WordModule::new("frozen_connectivity");
+        let signal = module
+            .add_wire("value", ty(1), SourceSpan::default())
+            .unwrap();
+        let read = module.read_signal(signal, SourceSpan::default()).unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+        assert_eq!(facts.constant(&module, read), None);
+
+        let one = module
+            .constant(
+                ConstBits::from_bin_str("1").unwrap(),
+                ty(1),
+                SourceSpan::default(),
+            )
+            .unwrap();
+        module
+            .connect(LValue::signal(signal), one, SourceSpan::default())
+            .unwrap();
+
+        facts.extend_frozen_connectivity(&module);
+        assert_eq!(facts.constant(&module, read), None);
+        assert_eq!(
+            facts.constant(&module, one),
+            Some(ConstBits::from_bin_str("1").unwrap())
+        );
+
+        facts.sync_append_only(&module);
+        assert_eq!(
+            facts.constant(&module, read),
             Some(ConstBits::from_bin_str("1").unwrap())
         );
     }

@@ -672,7 +672,7 @@ fn synthesis_constant_bits(
     analysis: &mut word::KnownBitsAnalysis,
     value: word::ValueId,
 ) -> Option<opto_ir::ConstBits> {
-    analysis.sync_append_only(module);
+    analysis.extend_frozen_connectivity(module);
     if let Some(bits) = analysis.constant(module, value) {
         return Some(bits);
     }

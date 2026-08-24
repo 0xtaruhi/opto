@@ -3,20 +3,23 @@
 
 # RFC 0013: Ownerless structural epochs and hierarchical compilation shards
 
-- Status: proposed, amended 2026-08-22 (see [Amendment 1](#amendment-1-word-remains-the-semantic-representation))
+- Status: proposed, amended 2026-08-22 and 2026-08-24 (see
+  [Amendment 1](#amendment-1-word-remains-the-semantic-representation) and
+  [Amendment 2](#amendment-2-exact-identities-without-a-duplicate-design))
 - Author: Zhengyi Zhang
 - Date: 2026-08-21
 - Implementation: partially implemented, and the original canonical-authority
-  design is superseded by Amendment 1.
+  design is superseded by Amendments 1 and 2.
   - Implemented: provisional structural ownership is deleted
     (`StructuralOwnershipProvenance`, `claim_since`, `claim_range`,
     `build_with_ownership`, and `verify_frozen` no longer exist); sealing
-    produces an immutable `DesignRevision`; work items carry exact
-    `RevisionFootprint` values that are validated against every result; the
-    deterministic `WorkGraph`, `WorkContext`, shard batching, and rebatching
-    exist; static-wire coalescing publishes its Word fragment and corresponding
-    `RewriteDelta` in one rollback-capable production transaction; compilation
-    results are accepted only after coordinator proof recomputation.
+    produces a compact semantic `DesignRevisionId` rather than a duplicate
+    whole-design bit database; work items carry exact `RevisionFootprint`
+    values derived from the Word snapshot; the deterministic `WorkGraph`,
+    `WorkContext`, shard batching, and rebatching exist; static-wire coalescing
+    publishes its Word fragment and corresponding delta-local `RewriteDelta` in
+    one rollback-capable production transaction; compilation results are
+    accepted only after coordinator proof recomputation.
   - Not implemented: mapped repair does not use the RFC's common logical delta
     protocol. Fusion tasks, reduce workflows, the remote executor, physical
     context, and the Phase 3 scale evidence do not exist.
@@ -35,8 +38,9 @@ while a shared `WordModule` is being rewritten.
 
 The replacement architecture has four concepts:
 
-1. `DesignRevision` is the immutable, canonical cell/net graph for one logical
-   or mapped generation.
+1. The immutable Word snapshot is the semantic design; `DesignRevisionId` and
+   stable entity recipes identify that generation and its exact task
+   footprints without storing a second complete cell/net graph.
 2. `WorkGraph` is an epoch-local graph of explicit semantic work items and a
    hierarchy-independent batching of those items into coarse and fine
    compilation shards.
@@ -58,7 +62,8 @@ None of those domains may stand in for another. In particular:
 - provenance does not authorize mutation; and
 - a worker never mutates the design revision from which its task was derived.
 
-The global database uses a simple high-level cell and bit-net model. Dense SSA
+The global database uses the typed Word model. Stable cell and bit-net recipes
+are projected only into work footprints and changed fragments. Dense SSA
 remains available as a worker-private representation, where topological
 renumbering and compaction are local implementation details. A semantic
 `WorkItem` declares one writable core, a read-only halo, exact boundary bits,
@@ -1582,6 +1587,10 @@ own some bits of a signal and not others. It is the wrong granularity for
 
 ### The amended model
 
+*The whole-design `DesignRevision` authority described in this subsection is
+further superseded by
+[Amendment 2](#amendment-2-exact-identities-without-a-duplicate-design).*
+
 Two authorities, each at the granularity that suits it:
 
 1. **`WordModule` remains the semantic representation.** It keeps typed
@@ -1621,6 +1630,9 @@ Word-to-stable mapping rather than working in one identity system. That cost is
 accepted because the alternative is a second full IR.
 
 ### Publication
+
+*The incremental cell/net database update described in step 3 is superseded by
+[Amendment 2](#amendment-2-exact-identities-without-a-duplicate-design).*
 
 Publication replaces the "one canonical commit" step with three ordered steps:
 
@@ -1674,6 +1686,91 @@ whole-design bit-level revision is strictly larger than the lossy one that
 already exceeds the memory target. It also maximizes the duplication cost,
 because every Word construct would exist in two modelled forms during the
 entire migration.
+
+## Amendment 2: Exact identities without a duplicate design
+
+*Accepted 2026-08-24. This amendment narrows Amendment 1 after production-scale
+evidence showed that even a lossy bit-level authority retained the full-design
+storage cost. Where it conflicts with an earlier section or Amendment 1, this
+amendment controls.*
+
+### Decision
+
+`WordModule` is the only retained logical-design topology. Sealing derives a
+compact `WorkDesign` containing:
+
+- a semantic `DesignRevisionId` hashed from canonical Word operations,
+  memories, connections, and source identities; and
+- stable state-cell identities needed by later mapped publication.
+
+Stable `CellId` and `NetBitId` values remain exact, but they are recipes rather
+than rows in a second global database. `WorkGraph` derives each work item's
+exact entity closure directly from the immutable Word snapshot and region
+graph. It groups contiguous operation/signal ranges by canonical identity
+recipe, storing each recipe once with sorted `(lsb, width)` ranges rather than
+materializing one 32-byte hash per bit or repeating that recipe for disjoint
+ranges. Groups have exact union and difference semantics and expand only when a
+scalar consumer needs `NetBitId`. The same semantic entity therefore receives
+the same identity independent of dense Word IDs, region geometry, shard
+batching, worker count, and publication order.
+
+The production `RewriteDelta` retains scalar cells and nets only for the changed
+fragment. That delta-local topology is sufficient to check its stable boundary,
+driver recipe, proof, and replacement footprint; it is released after the Word
+fragment and next compact revision are accepted. No production type owns a
+complete parallel cell/net copy of the Word design.
+
+### Transaction validation
+
+For each publication wave, the coordinator validates before acceptance that:
+
+1. every delta targets the same accepted semantic revision and has a unique
+   delta identity;
+2. delta-local cell outputs and net drivers agree in both directions, and every
+   referenced input exists;
+3. undriven inputs are exactly the semantic input boundary, semantic outputs
+   are exactly the replacement footprint, and the read footprint is exactly
+   their union;
+4. replacement footprints are pairwise disjoint;
+5. the owning layer accepts the equivalence certificate and construction
+   recipe; and
+6. the next compact revision equals a fresh semantic seal of the published Word
+   module.
+
+Word fragment splice and this validation run inside the same speculation
+checkpoint. Any error rolls Word back and leaves the accepted `WorkDesign`
+unchanged. The generic `DesignRevision`, `DesignBuilder`, persistent stable-ID
+directory, consumer index, tombstone storage, and whole-design commit path are
+deleted rather than retained as a fallback.
+
+### Compact bit-flow storage
+
+Per-bit connectivity remains the semantic authority for finding producers, but
+the sealed region graph coalesces adjacent bits with identical producer and
+consumer endpoints into one `(value, lsb, width)` range. Consumers expand a
+range only when they need individual stable bit identities. This preserves
+exact footprints without allocating one region-publication record per crossing
+bit.
+
+Because the region-revision encoding now hashes ranges rather than individual
+rows, its internal local-key and graph-revision domains advance from version 1
+to version 2. Old regional cache records are intentionally invalidated; there
+is no compatibility decoder because those records are derived, reproducible
+cache state rather than a public persistent format.
+
+### Consequences for the phase plan
+
+Phase 1's immutable-generation requirement means an immutable Word snapshot,
+compact semantic revision identity, exact work footprints, and rollback-safe
+publication; it no longer requires persistent pages for every cell and bit.
+The static-wire coalescing half is implemented. The mapped-repair half remains
+unmet.
+
+Phase 2's owner deletion, stable work-item identity, exact core/halo formation,
+and no-shared-worker-mutation rules are implemented. Its complete external
+qualification and requirement that every remaining structural producer use the
+common delta protocol remain unmet. Phase 3 and later acceptance gates are
+unchanged.
 
 ## References
 

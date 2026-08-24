@@ -27,5 +27,5 @@ pub use plan::{BoundaryResponse, BoundaryResponseRow, RegionCoverPlan, RegionPla
 pub(crate) use plan::{RegionCoverPlanRecord, RegionImplementationCell, RegionalSharedAllocations};
 pub(crate) use work::{
     SynthesisExecutor, WorkContext, WorkDesign, WorkGraph, WorkProduct, coalesce_revision_deltas,
-    logical_memory_cell_id, logical_operation_cell_id, validate_coalesce_proof,
+    commit_coalescing_revision, logical_memory_cell_id, logical_operation_cell_id,
 };

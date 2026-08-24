@@ -159,6 +159,47 @@ fn deterministic_split_materializes_typed_cross_region_ports() {
 }
 
 #[test]
+fn contiguous_crossing_bits_use_one_publication_range() {
+    let mut module = WordModule::new("wide_crossing");
+    let ty = WordType::bits(64).unwrap();
+    let input = input_with_type(&mut module, "a", ty);
+    let producer = module.unary(UnaryOp::BitNot, input, test_span()).unwrap();
+    let result = module
+        .unary(UnaryOp::BitNot, producer, test_span())
+        .unwrap();
+    let port = module
+        .add_port("y", PortDirection::Output, ty, test_span())
+        .unwrap();
+    module
+        .connect(
+            LValue::signal(module.port(port).unwrap().signal),
+            result,
+            test_span(),
+        )
+        .unwrap();
+
+    let graph =
+        super::partition::build(&module, RegionPartitionPolicy::with_target_work(1)).unwrap();
+    let owner = graph
+        .operation_region(operation(&module, producer))
+        .unwrap();
+    let consumer = graph
+        .operation_region(operation(&module, result))
+        .unwrap()
+        .row();
+    let flows = graph
+        .bit_flows(owner)
+        .iter()
+        .filter(|flow| flow.value() == producer && flow.consumer() == Some(consumer))
+        .collect::<Vec<_>>();
+
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].lsb(), 0);
+    assert_eq!(flows[0].width(), 64);
+    assert_eq!(flows[0].bits().count(), 64);
+}
+
+#[test]
 fn packed_crossings_freeze_each_bit_at_its_semantic_producer() {
     let mut module = WordModule::new("packed_bit_producers");
     let a = input(&mut module, "a");
@@ -205,7 +246,10 @@ fn packed_crossings_freeze_each_bit_at_its_semantic_producer() {
             .operation_region(operation(&module, producer))
             .unwrap();
         assert!(graph.bit_flows(owner).iter().any(|flow| {
-            flow.value() == producer && flow.bit() == 0 && flow.consumer() == Some(consumer)
+            flow.value() == producer
+                && flow.lsb() == 0
+                && flow.width() == 1
+                && flow.consumer() == Some(consumer)
         }));
         assert!(
             graph

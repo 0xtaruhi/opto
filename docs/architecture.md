@@ -11,10 +11,11 @@ path.
 
 [RFC 0013](rfcs/0013-ownerless-structural-epochs.md) supersedes RFC 0007's
 structural-owner protocol. Word remains the semantic representation; the
-coordinator derives one immutable stable-identity design revision and a
-semantic `WorkGraph`. Workers read exact core/halo fragments and publish
-proof-carrying results without mutating either input. Scheduling shards are
-neither identity nor optimization boundaries.
+coordinator derives one immutable semantic revision identity and a `WorkGraph`
+whose exact stable-entity footprints come directly from that Word snapshot.
+Workers read private core/halo fragments and publish proof-carrying results
+without mutating either input. Scheduling shards are neither identity nor
+optimization boundaries.
 
 [RFC 0010](rfcs/0010-command-surface.md) defines the public command design: a
 flat Tcl surface with a coherent typed database model and one
@@ -287,7 +288,7 @@ linked RTL + constraints + libraries
 process normalization and design validation
   |
   v
-stable `DesignRevision` sealing and semantic WorkGraph construction
+semantic revision sealing and WorkGraph construction
   |
   v
 immutable SynthesisRegionGraph + monotone boundary contracts
@@ -735,13 +736,18 @@ Failures carry the structured diagnostic contract defined above, including the
 Tcl invocation that triggered the work when available. A raw failure string
 without a stable owning-domain code is not the diagnostic contract.
 
-### 2. Seal The Design Revision And Work Graph
+### 2. Seal The Semantic Revision And Work Graph
 
-The validated synthesis-root closure seals once into `DesignRevision`. Stable
-cell and scalar-net identities resolve through persistent directories to
-copy-on-write record pages; dense Word IDs remain adapter-local. The revision
-validates exact drivers, consumers, state boundaries, and bit-level
-combinational acyclicity before any work packet is admitted.
+The validated Word snapshot seals once into a compact `WorkDesign`: a semantic
+`DesignRevisionId` plus stable state-cell identities. Stable cell and scalar-net
+IDs are deterministic recipes, not records in a duplicate whole-design
+database. `WorkGraph` derives each exact core and halo directly from the same
+validated Word snapshot and region graph. Cell/signal bit identities are
+retained as canonical recipe groups containing sorted `(lsb, width)` ranges;
+each recipe is stored once even when its ranges are disjoint, and ranges expand
+only for a consumer that requires scalar IDs; delta-local bit topology exists only while
+validating a changed fragment. Dense Word IDs remain generation-local and never
+become persistent or scheduling identity.
 
 `SynthesisRegionGraph` records semantic decomposition only: stable anchors,
 exact operations and observable memories, typed boundary ports, immutable bit
@@ -751,20 +757,22 @@ read-only halos, context generations, and dependency rows. Rebatching changes
 only scheduler packets; it cannot change an entity, context, candidate, or
 result identity.
 
-Workers receive an immutable revision fragment plus its complete context. A
+Workers receive an immutable Word fragment plus its complete context. A
 structural worker may publish only a `RewriteDelta` whose read/replacement sets
 and semantic boundary match that task. An analysis or compilation worker
 publishes an immutable keyed artifact under the same revision/footprint checks.
-Only the coordinator recomputes proofs and commits disjoint deltas in stable
-transaction order. Word publication and revision commit share one undo-backed
-transaction, so rejection by either authority leaves the accepted generation
+Only the coordinator recomputes proofs and validates disjoint deltas in stable
+transaction order. Word publication and the compact revision transition share
+one undo-backed transaction, so rejection leaves the accepted generation
 unchanged. There is no structural owner column, generated-node owner
-inheritance, owner repair, or owner-based mutation API.
+inheritance, owner repair, owner-based mutation API, or retained bit-level copy
+of the complete design.
 
 Full-domain connectivity is resolved per bit without consulting scheduling.
-Every live crossing is an immutable `(producer value, producer bit, producer
-task, consumer task/root)` row. Aggregate ports carry contract identity; bit
-flows are the publication authority. Global substrate equivalence may come
+Adjacent bits with the same producer and consumer are stored as one immutable
+range; the range expands to the exact bit identities only at a consumer that
+requires them. Aggregate ports carry contract identity; bit flows are the
+publication authority. Global substrate equivalence may come
 only from a unique static connect, an exact full-domain pass-through, or a
 proved constant. Regional care or a private truth-table reduction cannot create
 a global alias. Publication endpoints prefer the real source bit and retain one
@@ -1658,12 +1666,12 @@ defect.
 | Contract | Current tree |
 |---|---|
 | Single `opto` production entry | Implemented |
-| Stable `DesignRevision` with bit-level cells/nets and CoW publication | Implemented; initial seal uses bulk pages/directories |
+| Compact semantic `DesignRevisionId` with stable exact footprints derived from Word | Implemented; no duplicate whole-design cell/net database |
 | Structural-owner side columns and mutation APIs absent | Implemented |
 | Stable WorkGraph items with exact core/halo/context footprints | Implemented |
 | Rebatching independent of semantic identity and result | Implemented |
 | Serializable local `WorkPacket` / `WorkResult` contract | Test-only packet round trip; production results validate revision, exact footprint, context, shard, cardinality, and coordinator-recomputed proof |
-| Every structural worker publishes `RewriteDelta` and production commits the revision | Partial; static-wire coalescing commits Word and revision atomically, while read-only compilation workers publish checked artifacts |
+| Every structural worker publishes `RewriteDelta` and production validates the revision transition | Partial; static-wire coalescing publishes Word and its checked delta atomically, while read-only compilation workers publish checked artifacts |
 | Fusion tasks, overlap waves, and reduce tasks | Not yet implemented |
 | Remote executor with deterministic retry | Not yet implemented |
 | Stable typed region graph over the synthesis-root closure | Implemented |

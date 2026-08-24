@@ -191,40 +191,57 @@ pub struct RegionBoundaryPort {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-/// One frozen per-bit publication obligation derived before region placement.
+/// One frozen contiguous publication range derived before region placement.
 ///
-/// The value and bit identify the semantic producer. `consumer` is absent for
-/// a design root and names the consuming region for an internal crossing.
-pub struct RegionBitFlow {
+/// The value and bit range identify the semantic producer. `consumer` is
+/// absent for a design root and names the consuming region for an internal
+/// crossing.
+pub(crate) struct RegionBitFlowRange {
     pub(super) producer: RegionRowId,
     pub(super) consumer: Option<RegionRowId>,
     pub(super) value: word::ValueId,
-    pub(super) bit: u32,
+    pub(super) lsb: u32,
+    pub(super) width: u32,
 }
 
-impl RegionBitFlow {
+impl RegionBitFlowRange {
     #[must_use]
     /// Return the region responsible only for placing this producer artifact.
-    pub const fn producer(self) -> RegionRowId {
+    pub(crate) const fn producer(self) -> RegionRowId {
         self.producer
     }
 
     #[must_use]
     /// Return the consuming region, or `None` for a design-root publication.
-    pub const fn consumer(self) -> Option<RegionRowId> {
+    pub(crate) const fn consumer(self) -> Option<RegionRowId> {
         self.consumer
     }
 
     #[must_use]
     /// Return the canonical producer value before bit lowering.
-    pub const fn value(self) -> word::ValueId {
+    pub(crate) const fn value(self) -> word::ValueId {
         self.value
     }
 
     #[must_use]
-    /// Return the least-significant-bit-based index within the producer value.
-    pub const fn bit(self) -> u32 {
-        self.bit
+    /// Return the least-significant-bit-based range start.
+    pub(crate) const fn lsb(self) -> u32 {
+        self.lsb
+    }
+
+    #[must_use]
+    /// Return the nonzero number of contiguous producer bits.
+    pub(crate) const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// Iterate over the exact producer bits in this validated range.
+    pub(crate) fn bits(self) -> std::ops::Range<u32> {
+        let end = self
+            .lsb
+            .checked_add(self.width)
+            .expect("validated regional bit-flow range cannot overflow");
+        self.lsb..end
     }
 }
 
@@ -392,7 +409,7 @@ pub struct SynthesisRegionGraph {
     pub(super) ports: Box<[RegionBoundaryPort]>,
     pub(super) input_ports: opto_core::PackedRows<RegionBoundaryPortId>,
     pub(super) output_ports: opto_core::PackedRows<RegionBoundaryPortId>,
-    pub(super) bit_flows: opto_core::PackedRows<RegionBitFlow>,
+    pub(super) bit_flows: opto_core::PackedRows<RegionBitFlowRange>,
     pub(super) predecessors: opto_core::PackedRows<RegionRowId>,
     pub(super) successors: opto_core::PackedRows<RegionRowId>,
 }
@@ -501,7 +518,7 @@ impl SynthesisRegionGraph {
 
     #[must_use]
     /// Return exact bit publication obligations owned by `region`.
-    pub fn bit_flows(&self, region: SynthesisRegion) -> &[RegionBitFlow] {
+    pub(crate) fn bit_flows(&self, region: SynthesisRegion) -> &[RegionBitFlowRange] {
         &self.bit_flows[self.checked_row(region)]
     }
 
@@ -563,9 +580,14 @@ impl SynthesisRegionGraph {
                         "regional bit publication references an unknown value",
                     )
                 })?;
-                if publication.bit() >= stored.ty.width() {
+                if publication.width() == 0
+                    || publication
+                        .lsb()
+                        .checked_add(publication.width())
+                        .is_none_or(|end| end > stored.ty.width())
+                {
                     return Err(crate::SynthError::invariant(
-                        "regional bit publication exceeds its producer value",
+                        "regional bit publication range exceeds its producer value",
                     ));
                 }
                 match stored.kind {

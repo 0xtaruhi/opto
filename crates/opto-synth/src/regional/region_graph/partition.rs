@@ -8,7 +8,7 @@
 //! mutable provenance side table, or arena position.
 
 use super::graph::{
-    BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBitFlow,
+    BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBitFlowRange,
     RegionBoundaryPort, RegionBoundaryPortId, RegionGraphGenerationId, RegionPortDirection,
     RegionRevision, RegionRowId, SynthesisRegion, SynthesisRegionGraph, SynthesisRegionKind,
     SynthesisRegionRevision, packed_rows, remap_optional_region_rows,
@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod connectivity;
-mod semantic;
+pub(crate) mod semantic;
 mod work;
 use connectivity::{ConnectivityIndex, InputOperations};
 use work::{is_state, memory_read_inputs, memory_work, memory_write_inputs, operation_work};
@@ -27,8 +27,8 @@ use work::{is_state, memory_read_inputs, memory_work, memory_write_inputs, opera
 const OPERATION_ANCHOR_DOMAIN: &[u8] = b"opto/operation-anchor/v1\0";
 const WHOLE_DESIGN_REGION_ANCHOR_DOMAIN: &[u8] = b"opto/whole-design-region-anchor/v1\0";
 const REGION_ID_DOMAIN: &[u8] = b"opto/region-anchor/v1\0";
-const REGION_LOCAL_KEY_DOMAIN: &[u8] = b"opto/synthesis-region/local-key/v1\0";
-const REGION_REVISION_DOMAIN: &[u8] = b"opto/synthesis-region/revision/v1\0";
+const REGION_LOCAL_KEY_DOMAIN: &[u8] = b"opto/synthesis-region/local-key/v2\0";
+const REGION_REVISION_DOMAIN: &[u8] = b"opto/synthesis-region/revision/v2\0";
 const MEMORY_ANCHOR_DOMAIN: &[u8] = b"opto/memory-region-anchor/v1\0";
 const BOUNDARY_EDGE_ID_DOMAIN: &[u8] = b"opto/boundary-port/id/v1\0";
 const BOUNDARY_ENDPOINT_ID_DOMAIN: &[u8] = b"opto/boundary-port/endpoint/v1\0";
@@ -122,7 +122,8 @@ struct TempBitFlow {
     source: usize,
     sink: Option<usize>,
     value: word::ValueId,
-    bit: u32,
+    lsb: u32,
+    width: u32,
 }
 
 impl Ord for TempEdge {
@@ -167,7 +168,7 @@ struct CanonicalEdge {
     value_revision: [u8; 32],
 }
 
-fn operation_anchors(
+pub(crate) fn operation_anchors(
     module: &word::WordModule,
 ) -> Result<Box<[OperationAnchorId]>, crate::SynthError> {
     let mut occurrences = BTreeMap::<word::SourceIdentity, u32>::new();
@@ -221,6 +222,7 @@ pub(crate) fn build(
     let (mut edges, bit_flows) = build_edges(
         module,
         &value_keys,
+        &drivers,
         &operation_region,
         &memory_region,
         &memory_signal_region,
@@ -1067,19 +1069,29 @@ fn memory_signal_regions(
 fn build_edges(
     module: &word::WordModule,
     value_keys: &[[u8; 32]],
+    drivers: &SignalDriverIndex,
     operation_region: &[Option<usize>],
     memory_region: &[Option<usize>],
     memory_signal_region: &BTreeMap<word::SignalId, usize>,
 ) -> Result<(Vec<TempEdge>, Vec<TempBitFlow>), crate::SynthError> {
     let mut edges = BTreeSet::new();
-    let mut bit_flows = BTreeSet::new();
+    let mut bit_flows = Vec::new();
     let connectivity =
         ConnectivityIndex::new(module, value_keys, operation_region, memory_signal_region)?;
+    let mut input_operations = InputOperations::new(module, drivers);
     for (index, operation) in module.operations().iter().enumerate() {
         let Some(sink) = operation_region[index] else {
             continue;
         };
         for value in crate::word::operation_inputs(&operation.kind) {
+            let producers = input_operations.resolve(value);
+            if !producers.is_empty()
+                && producers
+                    .iter()
+                    .all(|&producer| operation_region[producer] == Some(sink))
+            {
+                continue;
+            }
             connectivity.append_input_edge(value, sink, &mut edges, &mut bit_flows)?;
         }
     }
@@ -1121,7 +1133,29 @@ fn build_edges(
             });
         }
     }
-    Ok((edges.into_iter().collect(), bit_flows.into_iter().collect()))
+    bit_flows.sort_unstable();
+    let mut merged = Vec::<TempBitFlow>::with_capacity(bit_flows.len());
+    for flow in bit_flows {
+        if let Some(previous) = merged.last_mut()
+            && (previous.source, previous.sink, previous.value)
+                == (flow.source, flow.sink, flow.value)
+        {
+            let previous_end = previous
+                .lsb
+                .checked_add(previous.width)
+                .ok_or_else(|| crate::SynthError::capacity("regional bit-flow range"))?;
+            let flow_end = flow
+                .lsb
+                .checked_add(flow.width)
+                .ok_or_else(|| crate::SynthError::capacity("regional bit-flow range"))?;
+            if flow.lsb <= previous_end {
+                previous.width = previous_end.max(flow_end) - previous.lsb;
+                continue;
+            }
+        }
+        merged.push(flow);
+    }
+    Ok((edges.into_iter().collect(), merged))
 }
 
 fn seal_region_identities(
@@ -1135,47 +1169,49 @@ fn seal_region_identities(
         .iter()
         .map(|region| region.anchor)
         .collect::<Vec<_>>();
+    let mut boundaries = vec![Vec::new(); regions.len()];
+    for edge in edges {
+        if let Some(source) = edge.source {
+            boundaries[source].push((1u8, edge.sink.is_none(), edge.ty, edge.semantic_key));
+        }
+        if let Some(sink) = edge.sink {
+            boundaries[sink].push((0u8, edge.source.is_none(), edge.ty, edge.semantic_key));
+        }
+    }
+    for boundary in &mut boundaries {
+        boundary.sort_unstable_by_key(|&(direction, external, ty, key)| {
+            (direction, external, type_key(ty), key)
+        });
+    }
+    let mut publications = vec![Vec::new(); regions.len()];
+    for flow in bit_flows {
+        publications[flow.source].push((
+            value_keys[flow.value.index()],
+            flow.lsb,
+            flow.width,
+            flow.sink.map(|sink| region_anchors[sink]),
+        ));
+    }
+    for row in &mut publications {
+        row.sort_unstable();
+    }
     for (index, region) in regions.iter_mut().enumerate() {
         let mut local = blake3::Hasher::new();
         local.update(REGION_LOCAL_KEY_DOMAIN);
         append_region_content_identity(module, region, value_keys, &mut local)?;
-        let mut boundary = edges
-            .iter()
-            .filter_map(|edge| {
-                if edge.source == Some(index) {
-                    Some((1u8, edge.sink.is_none(), edge.ty, edge.semantic_key))
-                } else if edge.sink == Some(index) {
-                    Some((0u8, edge.source.is_none(), edge.ty, edge.semantic_key))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        boundary.sort_unstable_by_key(|&(direction, external, ty, key)| {
-            (direction, external, type_key(ty), key)
-        });
+        let boundary = &boundaries[index];
         local.update(&(boundary.len() as u64).to_le_bytes());
-        for (direction, external, ty, key) in boundary {
+        for &(direction, external, ty, key) in boundary {
             local.update(&[direction, u8::from(external)]);
             append_type_hash(&mut local, ty);
             local.update(&key);
         }
-        let mut publications = bit_flows
-            .iter()
-            .filter(|flow| flow.source == index)
-            .map(|flow| {
-                (
-                    value_keys[flow.value.index()],
-                    flow.bit,
-                    flow.sink.map(|sink| region_anchors[sink]),
-                )
-            })
-            .collect::<Vec<_>>();
-        publications.sort_unstable();
-        local.update(&(publications.len() as u64).to_le_bytes());
-        for (value_key, bit, consumer_anchor) in publications {
+        let publication = &publications[index];
+        local.update(&(publication.len() as u64).to_le_bytes());
+        for &(value_key, lsb, width, consumer_anchor) in publication {
             local.update(&value_key);
-            local.update(&bit.to_le_bytes());
+            local.update(&lsb.to_le_bytes());
+            local.update(&width.to_le_bytes());
             if let Some(anchor) = consumer_anchor {
                 local.update(&[1]);
                 local.update(&anchor);
@@ -1353,11 +1389,12 @@ fn canonicalize(
     let mut publication_bits = vec![Vec::new(); regions.len()];
     for flow in bit_flows {
         let producer = old_to_new[flow.source];
-        publication_bits[producer.index()].push(RegionBitFlow {
+        publication_bits[producer.index()].push(RegionBitFlowRange {
             producer,
             consumer: flow.sink.map(|sink| old_to_new[sink]),
             value: flow.value,
-            bit: flow.bit,
+            lsb: flow.lsb,
+            width: flow.width,
         });
     }
     for row in &mut publication_bits {
@@ -1482,7 +1519,8 @@ fn canonicalize(
                     .to_le_bytes(),
             );
             revision.update(&publication.value().raw().to_le_bytes());
-            revision.update(&publication.bit().to_le_bytes());
+            revision.update(&publication.lsb().to_le_bytes());
+            revision.update(&publication.width().to_le_bytes());
         }
     }
     let graph = SynthesisRegionGraph {

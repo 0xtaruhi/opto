@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 506
+expected_tests = 509
 
 [[owners]]
 path = "src/api"
@@ -26,7 +26,7 @@ contract = "Procedural normalization and the single validated Word-IR entry boun
 [[owners]]
 path = "src/word"
 owner = "word"
-tests = 17
+tests = 18
 contract = "Reusable Word-IR dependency, driver, cycle, use, and instance analyses."
 
 [[owners]]
@@ -44,7 +44,7 @@ contract = "Bit lowering, canonical Boolean subject construction, rewriting, and
 [[owners]]
 path = "src/regional"
 owner = "regional"
-tests = 35
+tests = 37
 contract = "Stable region graph identity, boundary contracts, portable plans, and convergence policy."
 
 [[owners]]
@@ -80,7 +80,7 @@ contract = "Transactional candidate evaluation, mapped edits, rollback, and dete
 [[focused_contracts]]
 path = "src/regional/region_graph/tests.rs"
 owner = "region-graph"
-tests = 23
+tests = 24
 contract = "Partition atoms, stable region and boundary identities, and deterministic graph construction."
 
 [[focused_contracts]]

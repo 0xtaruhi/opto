@@ -122,13 +122,35 @@ impl<'a> ConnectivityIndex<'a> {
         value: word::ValueId,
         sink: usize,
         edges: &mut BTreeSet<TempEdge>,
-        bit_flows: &mut BTreeSet<TempBitFlow>,
+        bit_flows: &mut Vec<TempBitFlow>,
     ) -> Result<(), crate::SynthError> {
         let stored = self.module.value(value).ok_or_else(|| {
             crate::SynthError::invariant("region input references an unknown value")
         })?;
-        self.append_bit_flows(value, Some(sink), bit_flows)?;
-        let source = self.value_region(value)?;
+        let mut source = None;
+        let mut mixed = false;
+        for bit in 0..stored.ty.width() {
+            let BitSource::Value {
+                value: bit_value,
+                bit: source_bit,
+            } = self.bit_connectivity.source(value, bit)?
+            else {
+                continue;
+            };
+            let Some(producer) = self.endpoint_region(bit_value)? else {
+                continue;
+            };
+            if source
+                .replace(producer)
+                .is_some_and(|current| current != producer)
+            {
+                mixed = true;
+            }
+            if producer != sink {
+                append_flow(bit_flows, producer, Some(sink), bit_value, source_bit);
+            }
+        }
+        let source = (!mixed).then_some(source).flatten();
         if source == Some(sink) || matches!(stored.kind, word::ValueKind::Constant(_)) {
             return Ok(());
         }
@@ -148,7 +170,7 @@ impl<'a> ConnectivityIndex<'a> {
         &self,
         value: word::ValueId,
         sink: Option<usize>,
-        bit_flows: &mut BTreeSet<TempBitFlow>,
+        bit_flows: &mut Vec<TempBitFlow>,
     ) -> Result<(), crate::SynthError> {
         let width = self
             .module
@@ -168,12 +190,7 @@ impl<'a> ConnectivityIndex<'a> {
                 continue;
             };
             if Some(producer) != sink {
-                bit_flows.insert(TempBitFlow {
-                    source: producer,
-                    sink,
-                    value: source,
-                    bit: source_bit,
-                });
+                append_flow(bit_flows, producer, sink, source, source_bit);
             }
         }
         Ok(())
@@ -267,6 +284,31 @@ impl<'a> ConnectivityIndex<'a> {
             word::ValueKind::Constant(_) => Ok(None),
         }
     }
+}
+
+fn append_flow(
+    flows: &mut Vec<TempBitFlow>,
+    source: usize,
+    sink: Option<usize>,
+    value: word::ValueId,
+    bit: u32,
+) {
+    if let Some(previous) = flows.last_mut()
+        && previous.source == source
+        && previous.sink == sink
+        && previous.value == value
+        && previous.lsb.checked_add(previous.width) == Some(bit)
+    {
+        previous.width += 1;
+        return;
+    }
+    flows.push(TempBitFlow {
+        source,
+        sink,
+        value,
+        lsb: bit,
+        width: 1,
+    });
 }
 
 fn collect_projection_signal_leaves(

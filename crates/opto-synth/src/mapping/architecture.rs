@@ -1127,7 +1127,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                         .value(flow.value())
                         .is_some_and(|stored| matches!(stored.kind, word::ValueKind::Operation(_)))
                 })
-                .map(|flow| (flow.value(), flow.bit()))
+                .flat_map(|flow| flow.bits().map(move |bit| (flow.value(), bit)))
                 .collect(),
             root_pairs,
         )?;
@@ -1216,10 +1216,11 @@ impl RegionArchitectureMaterializer<'_, '_> {
         // unambiguous producer. Import only the frozen bit-flow endpoints so a
         // wrapper operation can never become a foreign regional input.
         for flow in self.request.work.regions().bit_flows(region) {
-            if self
-                .semantics
-                .bit_requires_artifact(flow.value(), flow.bit())?
-            {
+            let mut requires_artifact = false;
+            for bit in flow.bits() {
+                requires_artifact |= self.semantics.bit_requires_artifact(flow.value(), bit)?;
+            }
+            if requires_artifact {
                 regional_observations.push(flow.value());
                 regional_roots.push(MappingRoot {
                     value: flow.value(),
