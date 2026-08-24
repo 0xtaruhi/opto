@@ -93,6 +93,19 @@ pub(crate) struct SequentialSourceBit {
 }
 
 impl SequentialSourceBit {
+    #[cfg(test)]
+    pub(crate) fn operation_for_test(
+        cell: opto_ir::design::CellId,
+        value: word::ValueId,
+        bit: u32,
+    ) -> Self {
+        Self {
+            source: SequentialStateSource::Operation { cell, value },
+            bit,
+            state_relation: None,
+        }
+    }
+
     pub(crate) const fn cell(&self) -> opto_ir::design::CellId {
         self.source.cell()
     }

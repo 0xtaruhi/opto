@@ -74,6 +74,140 @@ fn artifact_pins_do_not_escape_into_word_provenance() {
 }
 
 #[test]
+fn state_inputs_resolve_only_through_their_own_publication() {
+    let ty = word::WordType::bits(1).unwrap();
+    let span = word::SourceSpan::default();
+    let mut module = word::WordModule::new("state_endpoint_identity");
+    let source_data = ["d0", "d1"].map(|name| {
+        let port = module
+            .add_port(name, word::PortDirection::Input, ty, span.clone())
+            .unwrap();
+        module
+            .read_signal(module.port(port).unwrap().signal, span.clone())
+            .unwrap()
+    });
+    let bus = module
+        .add_wire("data", word::WordType::bits(2).unwrap(), span.clone())
+        .unwrap();
+    for (bit, value) in source_data.into_iter().enumerate() {
+        let bit = u32::try_from(bit).unwrap();
+        module
+            .connect(
+                word::LValue::signal(bus).with_range(word::BitRange { msb: bit, lsb: bit }),
+                value,
+                span.clone(),
+            )
+            .unwrap();
+    }
+    let data = [0, 1].map(|bit| module.read_signal_slice(bus, bit, 1, span.clone()).unwrap());
+    let clock_port = module
+        .add_port("clk", word::PortDirection::Input, ty, span.clone())
+        .unwrap();
+    let clock = module
+        .read_signal(module.port(clock_port).unwrap().signal, span.clone())
+        .unwrap();
+    let states = data.map(|d| {
+        module
+            .register(
+                word::RegisterOp {
+                    name: None,
+                    d,
+                    clock,
+                    edge: word::Edge::Pos,
+                    enable: None,
+                    resets: Vec::new(),
+                },
+                span.clone(),
+            )
+            .unwrap()
+    });
+    let operations = states.map(|value| match module.value(value).unwrap().kind {
+        word::ValueKind::Operation(operation) => operation,
+        _ => unreachable!("register result is produced by an operation"),
+    });
+    let mut lowering = crate::boolean::bitblast::LoweredRegionBinding::new(module.values().len());
+    for value in source_data
+        .into_iter()
+        .chain(data)
+        .chain([clock])
+        .chain(states)
+    {
+        lowering.bind_identity_for_test(value);
+    }
+    let region = crate::RegionAnchorId::from_bytes_for_test([7; 32]);
+    let bindings = operations
+        .into_iter()
+        .zip(states)
+        .enumerate()
+        .map(|(index, (operation, value))| {
+            let byte = u8::try_from(index + 1).unwrap();
+            crate::mapping::materialize::SequentialRegionBinding {
+                operation,
+                region,
+                sources: Box::new([
+                    crate::mapping::materialize::SequentialSourceBit::operation_for_test(
+                        opto_ir::design::CellId::from_bytes([byte; 32]),
+                        value,
+                        0,
+                    ),
+                ]),
+                lowering_sources: Box::new([]),
+            }
+        })
+        .collect::<Vec<_>>();
+    let semantics = super::super::roots::FullDomainRootSemantics::new(&module).unwrap();
+    for (&local, &source) in data.iter().zip(&source_data) {
+        assert_eq!(
+            canonical_lowered_value(&module, &lowering, &semantics, local).unwrap(),
+            source
+        );
+    }
+    let outputs = source_data
+        .into_iter()
+        .map(|source| {
+            (
+                source,
+                vec![RegionPlanValueBinding::SourceBit {
+                    value: source,
+                    bit: 0,
+                }],
+            )
+        })
+        .collect::<BindingMap>();
+    let endpoint_sources = BindingMap::from([(
+        clock,
+        vec![RegionPlanValueBinding::SourceBit {
+            value: clock,
+            bit: 0,
+        }],
+    )]);
+
+    let publications = outputs.values().flatten().copied().collect::<Vec<_>>();
+    let endpoints = build_state_endpoints(
+        &module,
+        &lowering,
+        &bindings,
+        &endpoint_sources,
+        &outputs,
+        &publications,
+    )
+    .unwrap();
+
+    for (index, value) in source_data.into_iter().enumerate() {
+        let source = bindings[index].sources[0];
+        let key = SequentialPinKey {
+            state: source.cell(),
+            role: SequentialPinRole::Data,
+            bit: 0,
+        };
+        assert_eq!(
+            endpoints.get(&key.into()),
+            Some(&RegionalEndpoint::SourceBit { value, bit: 0 })
+        );
+    }
+}
+
+#[test]
 fn memory_logic_ownership_is_always_a_cover_output() {
     let combinational = word::ValueId::from_index(0).unwrap();
     let memory = word::MemoryId::from_index(0).unwrap();
