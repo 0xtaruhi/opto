@@ -475,6 +475,16 @@ impl ProcedureCfg {
             }
             (MergeSite::Block(_), MergeOrigin::Edge(incoming)) => {
                 let source = self.edge_source(incoming)?;
+                // Reflexive dominance does not assign a join to one choice;
+                // every edge entering the shared target must belong to it.
+                let shared_target = choice_target == source
+                    && self
+                        .predecessors(source)
+                        .iter()
+                        .any(|predecessor| !choice.contains(predecessor));
+                if shared_target {
+                    return Ok(false);
+                }
                 self.dominators.dominates(choice_target, source)
             }
             (MergeSite::Exit, MergeOrigin::Return(block)) => {

@@ -138,9 +138,7 @@ impl ProcedureNormalizer<'_> {
                         )
                     })?;
                     if !result.slot.semantically_eq(&candidate.slot) {
-                        return Err(crate::SynthError::invariant(
-                            "one procedural control choice produces conflicting state inputs",
-                        ));
+                        return self.merge_slots_plain(inputs, reset_kind, key);
                     }
                 }
                 results[node_index] = Some(result);

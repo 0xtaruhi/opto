@@ -7,6 +7,7 @@ module top(
   input  logic [3:0] remaining,
   input  logic [4:0] post_data,
   input  logic       bit_value,
+  input  logic [3:0] hits,
   output logic [3:0] while_mask,
   output logic [2:0] while_count,
   output logic [2:0] do_count,
@@ -16,7 +17,9 @@ module top(
   output logic [2:0] nested_count,
   output logic [4:0] post_overwrite,
   output logic [4:0] post_compound,
-  output logic [4:0] post_partial
+  output logic [4:0] post_partial,
+  output logic       selected_data,
+  output logic [2:0] match_position
 );
   integer while_index;
   integer while_limit;
@@ -31,6 +34,7 @@ module top(
   integer overwrite_index;
   integer compound_index;
   integer partial_index;
+  integer match_index;
 
   function automatic logic [2:0] bounded_count(
     input logic [3:0] left
@@ -116,5 +120,17 @@ module top(
     while (partial_index < 4) partial_index++;
     partial_index[0] = bit_value;
     post_partial = partial_index[4:0];
+  end
+
+  always_comb begin
+    selected_data = 1'b0;
+    for (match_index = 0; match_index < 4; match_index++) begin
+      if (keep[match_index] && hits[match_index]) begin
+        selected_data = data[match_index];
+        break;
+      end
+    end
+    if (match_index == 4) selected_data = bit_value;
+    match_position = match_index[2:0];
   end
 endmodule

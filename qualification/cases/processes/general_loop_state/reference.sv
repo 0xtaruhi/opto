@@ -7,6 +7,7 @@ module top(
   input  logic [3:0] remaining,
   input  logic [4:0] post_data,
   input  logic       bit_value,
+  input  logic [3:0] hits,
   output logic [3:0] while_mask,
   output logic [2:0] while_count,
   output logic [2:0] do_count,
@@ -16,7 +17,9 @@ module top(
   output logic [2:0] nested_count,
   output logic [4:0] post_overwrite,
   output logic [4:0] post_compound,
-  output logic [4:0] post_partial
+  output logic [4:0] post_partial,
+  output logic       selected_data,
+  output logic [2:0] match_position
 );
   always_comb begin
     if (!keep[0]) begin
@@ -50,5 +53,22 @@ module top(
     post_overwrite = post_data;
     post_compound = 5'd4 + post_data;
     post_partial = bit_value ? 5'd5 : 5'd4;
+
+    if (keep[0] && hits[0]) begin
+      selected_data = data[0];
+      match_position = 3'd0;
+    end else if (keep[1] && hits[1]) begin
+      selected_data = data[1];
+      match_position = 3'd1;
+    end else if (keep[2] && hits[2]) begin
+      selected_data = data[2];
+      match_position = 3'd2;
+    end else if (keep[3] && hits[3]) begin
+      selected_data = data[3];
+      match_position = 3'd3;
+    end else begin
+      selected_data = bit_value;
+      match_position = 3'd4;
+    end
   end
 endmodule
