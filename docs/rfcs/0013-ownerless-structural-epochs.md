@@ -3,13 +3,41 @@
 
 # RFC 0013: Ownerless structural epochs
 
-- Status: proposed
+- Status: withdrawn
 - Author: Zhengyi Zhang
 - Date: 2026-08-21
 - Revised: 2026-08-24
-- Supersedes: RFC 0007's provisional structural-owner protocol
-- Amends: RFC 0011's execution model; semantic choices are independent of
-  compilation shards
+- Withdrawn: 2026-08-24
+- Disposition: does not supersede RFC 0007 or amend RFC 0011
+
+## Withdrawal
+
+The architecture was implemented and evaluated in PR 109, then withdrawn. The
+experiment established that its additional WorkGraph, packet, fusion,
+map/reduce, and global-selection machinery did not justify replacing the
+existing production architecture:
+
+- the candidate added 13,411 lines and removed 5,494 relative to `main`;
+- after correcting a regional endpoint bug that had produced a functionally
+  invalid Ibex netlist, the 14 pinned PULP AXI cases had 14.89% more cells and
+  7.08% more total cell area in aggregate;
+- the same single-run comparison was 12.50% slower with 16.58% higher peak RSS;
+- Ibex had 7.99% more cells and 3.76% more area, although its corrected gate
+  smoke test completed with the expected signature; and
+- both pinned CVA6 configurations still stopped at the pre-existing procedural
+  state-input limitation.
+
+These measurements compared release builds of `main` at `dae69de3` and the
+corrected candidate at `2a103abb`, using eight synthesis workers and the pinned
+qualification inputs. They are withdrawal evidence, not a reusable benchmark
+baseline.
+
+The experiment retained four narrower principles in the normative
+[architecture contract](../architecture.md): Word remains the logical source
+of truth, scheduling does not define identity, concurrent workers read
+immutable inputs, and only the coordinator publishes accepted mutations. The
+rest of this RFC is a non-normative historical design record. Its implementation
+status describes the abandoned branch, not the current production tree.
 
 ## Decision
 
@@ -235,7 +263,7 @@ parasitic, and interconnect model. Fabricated coordinates or wire estimates
 would create false authority and are forbidden. Adding such a model extends
 `WorkContext`; it does not select a second synthesis architecture.
 
-## Implementation status
+## Historical experimental implementation status
 
 | Contract | Status |
 | --- | --- |
@@ -250,8 +278,9 @@ would create false authority and are forbidden. Adding such a model extends
 | Real physical context | Conditional on a physical model |
 | Common delta protocol for every remaining structural producer | Not yet implemented |
 
-The table distinguishes implemented behavior from architectural direction. A
-phase label or RFC text is not evidence that a production path exists.
+The table records the abandoned PR 109 branch only. It is not a conformance
+claim for the current production tree; current behavior is recorded solely in
+`docs/architecture.md`.
 
 ## Compatibility and persistence
 
@@ -289,9 +318,10 @@ safe rebatching or distributed scheduling.
 
 ### Require fixed performance gates for architectural completion
 
-Rejected. Runtime and QoR depend on inputs, target data, host configuration,
-and implementation maturity. Reproducible experiments are evidence for a
-specific claim, not part of the semantic contract.
+The proposal rejected this alternative. Withdrawal evidence showed that was a
+design error: an architectural cutover need not promise one universal speedup,
+but it must pass representative correctness, complexity, runtime, memory, and
+QoR non-regression gates before displacing the production path.
 
 ## Review checklist
 

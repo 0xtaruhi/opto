@@ -9,13 +9,27 @@ Source code is not architectural precedent merely because it exists; code that
 violates this contract is removed rather than preserved behind a compatibility
 path.
 
-[RFC 0013](rfcs/0013-ownerless-structural-epochs.md) supersedes RFC 0007's
-structural-owner protocol. Word remains the semantic representation; the
-coordinator derives one immutable semantic revision identity and a `WorkGraph`
-whose exact stable-entity footprints come directly from that Word snapshot.
-Workers read private core/halo fragments and publish proof-carrying results
-without mutating either input. Scheduling shards are neither identity nor
-optimization boundaries.
+[RFC 0007](rfcs/0007-timing-driven-partitioning.md) replaced the global
+synthesis front half with timing-driven ownership and region-private mapping.
+The coordinator validates, establishes provisional ownership, commits only
+owner-confined structural transformations, seals the final region graph,
+propagates contracts, and publishes private artifacts. No semantic candidate
+may span owners.
+
+Four execution invariants apply independently of that regional decomposition:
+
+- Word is the sole authoritative logical topology before lowering;
+- scheduler batching, worker assignment, and completion order do not define
+  stable semantic identity;
+- concurrently executed workers read immutable inputs and return proposals or
+  immutable artifacts; and
+- only the coordinator validates and publishes accepted mutations, atomically
+  and in deterministic order.
+
+[RFC 0013](rfcs/0013-ownerless-structural-epochs.md) explored a substantially
+larger ownerless execution architecture and was withdrawn after implementation
+evidence showed broad complexity, QoR, runtime, and memory regressions. It does
+not supersede RFC 0007 or amend RFC 0011.
 
 [RFC 0010](rfcs/0010-command-surface.md) defines the public command design: a
 flat Tcl surface with a coherent typed database model and one
@@ -89,8 +103,7 @@ every other definition.
 ## Non-Negotiable Rules
 
 - There is no fallback, legacy, shadow, or environment-selected synthesis path.
-- Stable design entities have one canonical record; tasks carry exact read and
-  replacement footprints instead of per-entity structural owners.
+- A semantic operation has one authoritative owner at every stage.
 - Stable identities and dense row identities are different types.
 - Cross-region dataflow is represented by explicit typed ports.
 - Global connectivity, boundary identity, and publication obligations freeze
@@ -188,7 +201,7 @@ boundaries, not a flat inventory of individual passes:
 | `engine` | synthesis stage ordering, immutable stage states, regional mapping epochs, and final publication | pass-local transformation algorithms |
 | `frontend` | procedural RTL normalization and the single validated Word-IR entry point | architecture selection or mapped-netlist mutation |
 | `word` | reusable Word-IR dependency, driver, cycle, use, and instance analyses | transformation policy or mapped artifacts |
-| `planning` | private Word optimization, semantic recognition, mapping cost policy, resource choices, and architecture recipes | target-cell cover, mapped publication, or post-map repair |
+| `planning` | region-owned Word optimization, semantic recognition, mapping cost policy, resource choices, and regional architecture recipes | cross-owner semantic optimization, target-cell cover, or post-map repair |
 | `boolean` | bit lowering, canonical Boolean subject construction, rewriting, and graph analysis | target-library policy or mapped closure |
 | `regional` | stable region graph identities, boundary contracts, portable plans, and deterministic convergence policy | incremental persistence or MMMC measurement |
 | `incremental` | source/Word fingerprints, recipe caches, metrics, and portable regional cache records | architecture selection or live mapped state |
@@ -228,12 +241,15 @@ net names (`_n<slot>`) are formatted into reusable boundary scratch and become
 owned only by the persistent object registry or an actual command result, not
 by another full-netlist name arena.
 
-Mapped provenance and mapped fragment containment are independent relations.
-`ImplementationDb` interns each exact `FragmentFootprint` (`Global`, `Region`,
-or directed `Boundary`) and binds a live cell to that committed fragment.
-Transactions update containment and semantic origin sets together; the reverse
-fragment index is rebuilt or updated only by that transaction boundary. HFNS
-and cloning publish one boundary fragment per driver/sink pair. Semantic
+Mapped provenance and mapped ownership are independent relations.
+`ImplementationDb` assigns every live cell exactly one compact owner atom:
+the static global substrate, one `RegionAnchorId`, or one
+`BoundaryEdgeId(driver_region -> sink_region)`. Source/link instances, memory
+macros, black boxes, ports, and clock infrastructure belong to the global
+substrate unless lowering gives a generated cell an explicit region owner.
+HFNS and cloning split a multi-region sink set into one segment per sink-region
+endpoint; `BoundaryEdgeId -> [CellId]` is the stable reverse footprint used by
+transactions, checkpoint validation, and publication remapping. Semantic
 operator provenance follows the cells that implement the operator and never
 acquires sink provenance merely because a repair crosses a boundary.
 
@@ -268,11 +284,11 @@ therefore neither duplicates each operator row into a boxed tree key nor treats
 hash equality as identity.
 
 An accepted cross-region repair is represented once in the live implementation
-database as an exact `(driver region, sink region)` fragment with a stable
+database as an exact `(driver region, sink region)` edge owner with a stable
 reverse cell footprint. Physical repair topology is not copied into the
 regional decision cache: every synthesis run reconstructs it through the same
 canonical post-map transaction flow. Missing, same-region, global, and
-multi-region endpoints are never silently converted into a boundary fragment;
+multi-region endpoints are never silently converted into a boundary owner;
 non-crossing root segments take an explicit region/global lineage at their call
 site.
 
@@ -288,13 +304,19 @@ linked RTL + constraints + libraries
 process normalization and design validation
   |
   v
-semantic revision sealing and WorkGraph construction
+stable structural anchoring and root-closure partitioning
+  |
+  v
+owner-confined FSM / sharing / sequential preparation
+  |
+  v
+final region-graph rebuild and identity seal
   |
   v
 immutable SynthesisRegionGraph + monotone boundary contracts
   |
   v
-parallel private Word optimize / plan / lower / cover
+parallel region-private Word optimize / plan / lower / cover
   |
 portable regional plans + explicit source/boundary bindings
   |
@@ -736,56 +758,102 @@ Failures carry the structured diagnostic contract defined above, including the
 Tcl invocation that triggered the work when available. A raw failure string
 without a stable owning-domain code is not the diagnostic contract.
 
-### 2. Seal The Semantic Revision And Work Graph
+### 2. Establish Ownership And Freeze The Region Graph
 
-The validated Word snapshot seals once into a compact `WorkDesign`: a semantic
-`DesignRevisionId` plus stable state-cell identities. Stable cell and scalar-net
-IDs are deterministic recipes, not records in a duplicate whole-design
-database. `WorkGraph` derives each exact core and halo directly from the same
-validated Word snapshot and region graph. Cell/signal bit identities are
-retained as canonical recipe groups containing sorted `(lsb, width)` ranges;
-each recipe is stored once even when its ranges are disjoint, and ranges expand
-only for a consumer that requires scalar IDs. Word publication validates changed
-topology directly; `RewriteDelta` retains only its stable boundary, exact
-footprint, and proof rather than encoding that topology again. Dense Word IDs
-remain generation-local and never become persistent or scheduling identity.
+The coordinator first partitions the validated synthesis-root closure to give
+every live operation one provisional owner. FSM optimization, equivalent
+sequential sharing, and target sequential preparation may then analyze and
+rewrite only candidates whose complete footprint has one owner. Generated
+operations inherit that owner through stable source provenance, so the stages
+compose without renumbering the arena or rebuilding the partition between
+passes. One final build seals the post-rewrite graph.
 
-`SynthesisRegionGraph` records semantic decomposition only: stable anchors,
-exact operations and observable memories, typed boundary ports, immutable bit
-flows, predecessor/successor rows, and architecture-independent work estimates.
-`WorkGraph` then creates stable task identities with exact writable cores,
-read-only halos, context generations, and dependency rows. Rebatching changes
-only scheduler packets; it cannot change an entity, context, candidate, or
-result identity.
+No opportunity discovered in this stage influences the initial ownership
+partition, and no candidate may span owners. Combinational canonicalization,
+muxed-arithmetic sharing, architecture selection, operator fusion, and cover do
+not run here. After the owned structural stage,
+`SynthesisRegionGraph` is rebuilt and sealed with:
 
-Workers receive an immutable Word fragment plus its complete context. A
-structural worker may publish only a `RewriteDelta` whose read/replacement sets
-and semantic boundary match that task. An analysis or compilation worker
-publishes an immutable keyed artifact under the same revision/footprint checks.
-Only the coordinator recomputes proofs and validates disjoint deltas in stable
-transaction order. Word publication and the compact revision transition share
-one undo-backed transaction, so rejection leaves the accepted generation
-unchanged. There is no structural owner column, generated-node owner
-inheritance, owner repair, owner-based mutation API, or retained bit-level copy
-of the complete design.
+- stable operation, region-anchor, and region-revision identities;
+- dense revision-local `RegionRowId`;
+- exact member operations and observable first-class memories;
+- typed input/output boundary ports with identities separate from value
+  revisions;
+- predecessor/successor packed rows;
+- architecture-independent delay, logic, and wiring estimates;
+- local and contextual fingerprints.
 
-Full-domain connectivity is resolved per bit without consulting scheduling.
-Adjacent bits with the same producer and consumer are stored as one immutable
-range; the range expands to the exact bit identities only at a consumer that
-requires them. Aggregate ports carry contract identity; bit flows are the
-publication authority. Global substrate equivalence may come
-only from a unique static connect, an exact full-domain pass-through, or a
-proved constant. Regional care or a private truth-table reduction cannot create
-a global alias. Publication endpoints prefer the real source bit and retain one
-artifact representative only when no source endpoint exists.
+`StructuralOwnershipProvenance` is the write authority during structural
+preparation. Initial operations carry their frozen owner atom; every transform
+must claim each generated operation from an exact source set with one common
+atom. The final graph consumes the shared observability closure, rejects an
+unowned live operation, and verifies that every surviving
+frozen atom remains whole. Final partitioning may merge whole atoms but may not
+split one. Ownership is not a preparation-side lookup that later partitioning
+may discard: it survives operation replacement, final partition, private-IR
+construction, plan binding, and provenance. It is placement and write
+authority only; it is not a connectivity classifier and never decides whether
+a bit is external, live, or publishable.
+Published objects use exactly three owner classes: global substrate, one
+region, or one directed boundary edge.
 
-Semantic partition policy and stable identities do not depend on worker count.
-Fusion and reduce tasks may span ordinary work items through explicit bounded
-footprints; scheduling boundaries therefore never prohibit a semantic
-candidate. Adjacent fusion scopes use the exact union of their writable cores,
-subtract that union from their combined halo, and execute in deterministic
-disjoint overlap waves. Summary-only map/shuffle/reduce drives global candidate
-pricing without creating a serial structural mutation owner.
+The same freeze first resolves full-domain connectivity per bit, through exact
+signal connects and width-only projections, without consulting placement. It
+then records every live crossing as an immutable
+`(producer value, producer bit, producer region, consumer region/root)` row.
+An operation reached by that table without a placement owner is an invariant
+failure; `None` is reserved for a real physical boundary or constant, never an
+unknown-owner fallback. Aggregate typed ports remain boundary contract
+identities, while bit-flow rows are the sole source of producer publication.
+Global
+substrate equivalence may come only from an explicit unique static connect, a
+globally exact pass-through, or a constant proved over the complete Word
+domain. A care set, truth-table reduction, or region-local rewrite is not
+connectivity evidence and cannot enter the substrate alias classes.
+An involution such as two logical or bitwise inversions is not an alias without
+an explicit two-state domain proof: `Z` may become `X` and cannot be recovered.
+When publication needs a physical identity and the target library has no
+buffer, the cover retains a two-inverter artifact instead of merging nets.
+Full-domain per-bit constant facts are captured before the regional shell
+mutates the Word graph. Proven bits enter substrate constant classes directly;
+unknown bits receive publication endpoints. A private cover may omit an
+artifact for one of those frozen constants, but a private pass-through never
+creates a substrate alias or weakens a source-level publication obligation.
+When several private cones reconstruct the same source operation bit, only
+that operation's frozen owner may publish it. A proven constant operation that
+has no live regional owner remains a substrate constant instead of entering
+regional implementation planning.
+
+State and output roots claim their fan-in cones. Size truncation promotes a
+frontier operation to a seed; shared fan-in receives one owner. Coarsening
+scores adjacent cones by the accumulated criticality and bit width of the
+boundary that a merge removes. Below-minimum fragments propose to a feasible
+established neighbour, which may absorb several independent fragments in one
+round; otherwise a deterministic maximal matching merges disjoint highest-gain
+pairs. A fixed maximum round count bounds propagation, and coarsening stops
+early when no admissible adjacent merge remains.
+
+Partition activation, minimum useful work, target work, and maximum merge work
+are separate deterministic limits. When the complete reachable operation
+closure fits the activation limit, the initial cone partitioner emits exactly
+one operation region before seed construction; this preserves all region-local
+sharing and amortizes regional scheduling and publication for small blocks.
+The final structural-owner path groups its already-frozen owner atoms directly
+and does not evaluate the activation limit. Larger initial closures use the
+bounded cone partitioner and never merge disconnected work merely to reduce
+region count. There is no global bin packing,
+resource-affinity proposer, cross-owner candidate analysis, or architecture
+candidate analysis before the final freeze.
+
+The final freeze contracts each provisional `StructuralOwnershipProvenance`
+owner into an indivisible atom before coarsening. Generated operations inherit
+both the owner and its stable partition anchor. The final partition may merge
+whole atoms but never repartitions individual operations and then repairs a
+split owner after the fact; therefore capacity accounting observes the actual
+atomic input to the final partition.
+
+Partition size does not depend on thread count. This preserves incremental
+identity and makes one-thread and many-thread output equivalent.
 
 ### 3. Allocate Boundary Contracts
 
@@ -994,11 +1062,11 @@ the publication root, so a local simplification cannot reinterpret an owned
 output as an imported copy of itself.
 Before private optimization, each bit-flow producer and observable root
 receives a full-domain publication obligation from the source Word graph. If
-that graph does not prove the root to be a constant, an imported projection,
-or an already-owned state artifact, the plan must retain a combinational
-artifact unless a full-domain private rewrite proves an exact constant and
-records it in the publication contract. Local care may simplify the
-implementation, but it cannot weaken or refine this frozen obligation.
+that graph does not
+prove the root to be a constant, an imported projection, or an already-owned
+state artifact, the plan must retain a combinational artifact even when its
+local care set reduces the function to a constant or pass-through. Local cover
+may simplify the implementation, but it cannot weaken this frozen obligation.
 ### 5. Publish Deterministically
 
 The coordinator reconstructs region artifacts in stable region order. The
@@ -1670,24 +1738,15 @@ defect.
 | Contract | Current tree |
 |---|---|
 | Single `opto` production entry | Implemented |
-| Compact semantic `DesignRevisionId` with stable exact footprints derived from Word | Implemented; no duplicate whole-design cell/net database |
-| Structural-owner side columns and mutation APIs absent | Implemented |
-| Stable WorkGraph items with exact core/halo/context footprints | Implemented |
-| Rebatching independent of semantic identity and result | Implemented |
-| Serializable `WorkPacket` / `WorkPacketResult` contract | Implemented in production; schema version 2 carries program ABI, design/content references, stable shard/item/context identities, and estimates. Local scheduling and remote transport use the same envelope; accepted item results validate exact footprints and coordinator-recomputed proofs |
-| Every structural worker publishes `RewriteDelta` and production validates the revision transition | Partial; static-wire coalescing publishes Word and its checked delta atomically, while read-only compilation workers publish checked artifacts |
-| Fusion tasks, overlap waves, and reduce tasks | Implemented; bounded adjacent scopes, stable overlap coloring, parallel disjoint waves, and deterministic summary reduction |
-| Design-wide analytical architecture selection | Implemented; fixed backward price rounds and joint selection over disjoint adjacent fusion scopes replace the regional production selector |
-| Compile-once choice mapping | Implemented; one immutable `CompiledChoiceDesign` owns every scope's cut/truth/match records for mapping and recovery |
-| Remote executor with deterministic retry | Implemented; stable worker rotation, bounded replay, fatal-error termination, and TaskKey-ordered results |
-| Physical work context | Deliberately absent until Opto owns a real placement, congestion, parasitic, and interconnect model |
+| Every semantic opportunity has one explicit region owner | Implemented |
 | Stable typed region graph over the synthesis-root closure | Implemented |
+| Timing-driven cone claiming and fixed-round local matching | Implemented |
 | Architecture-independent partition and budget estimates | Implemented |
 | Separate region anchors/revisions and boundary identities/revisions | Implemented |
 | Word graph as the sole pre-cover connectivity and dataflow authority | Implemented |
 | Absolute locally dependent timing budgets | Implemented |
-| Private Word optimization and architecture characterization | Implemented |
-| Private muxed arithmetic, CSA, Wallace/Dadda, fused MAC, FSM, and sequential sharing | Implemented |
+| Region-private Word optimization and architecture selection | Implemented |
+| Private muxed arithmetic, CSA, Wallace/Dadda, and fused MAC; owner-confined FSM and sequential sharing | Implemented |
 | No memory admission mechanism | Implemented |
 | Parallel private technology-independent optimization and Liberty lowering/cover | Implemented |
 | Proof-backed AXM functional reduction before the optimization portfolio | Implemented; shard-parallel, deterministic across worker counts |
@@ -1698,7 +1757,7 @@ defect.
 | Constant-register removal proved through a bounded influence cone | Implemented; one batched transaction per round |
 | Weighted outer/inner worker allocation | Implemented |
 | Direct transactional region artifact commit | Implemented |
-| Interned mapped fragment containment and directed-boundary repair | Implemented |
+| Single-atom mapped ownership and edge-owned boundary repair | Implemented |
 | Sparse boundary measurement and bounded feedback | Implemented |
 | Selected sequential clock-to-Q/setup projection plus exact mapped checkpoint timing | Implemented |
 | One shared sparse MMMC owner service | Implemented |
@@ -1722,13 +1781,6 @@ consume exact enables. `expand_unsupported_enables` is the single, last site tha
 turns a remaining enable into a next-state mux, so a register's held value is
 read through a wire with exactly one driver and denotes the register's output
 rather than whichever assignment ran last.
-
-Private-region materialization resolves that held value from the unnamed wire
-driven by the local register or latch result. Semantic state-source rows are not
-feedback identities: FSM re-encoding may deliberately bind a source state and
-its encoded replacement even when their widths differ. The structural driver
-relation supplies the exact same-typed feedback value without introducing an
-SSA cycle through the state operation itself.
 
 The earlier pipeline discarded the exact enable in control lowering and then had
 feedback-enable recovery pattern-match it back out of the next state, with the
@@ -1901,20 +1953,6 @@ charged exactly when it is unreferenced and the trial has not reached it yet,
 which visited marks decide without touching the cover. The trial walks and sorts
 its frontier exactly as the committing update does, so the two sum areas in the
 same order and agree bit for bit.
-
-Choice cuts remain available to the ordinary flow-cost ranking. The complete
-electrical-cost flow pass is transactional: if its final selected root cone has
-a dependency cycle, the planner discards it and rebuilds a nominal-cost cover
-from empty availability in network-level order. Normal choice ranking and
-transient alternatives are unchanged, while an invalid electrical refinement
-cannot be published.
-
-Exact and joint recovery update coupled reference costs and remember a stable
-fingerprint of each complete selected-choice state. Revisiting a state
-terminates recovery before the two passes can cycle through it again without
-cloning the cover. Recovery remains structurally bounded, and reaching the
-final bounded round is a valid termination rather than an assertion that every
-individual slot stopped changing.
 
 ## Known Architectural Gaps
 

@@ -8,13 +8,11 @@
 - Date: 2026-08-14
 - Revised: 2026-08-14, after the measured QoR decomposition recorded under
   Motivation
-- Implementation: Phase 1a (functional reduction), Phase 1b (sequential
-  excess), and Phase 3a are implemented. Production now characterizes compact
-  architecture candidates through the WorkGraph, performs design-wide bounded
-  price selection including disjoint adjacent fusion scopes, compiles every
-  choice scope once per design epoch, and hands the selected topology to exact
-  MMMC timing and bounded mapped correction. Fixed rollout budgets are
-  withdrawn by RFC 0013.
+- Implementation: Phase 1a (functional reduction) and Phase 1b (sequential
+  excess) are implemented and measured, the unconditional post-map area MFS
+  sweep is removed, and the independently optimized AXM implementation named in
+  Phase 3 is deleted. The choice graph and compiled mapping arena are
+  unimplemented, as is every later phase.
 
 ## Summary
 
@@ -1039,15 +1037,9 @@ The design never owns `P` complete implementations for a portfolio size `P`.
 Candidate recipes, response rows, choice nodes, and match records share their
 canonical arenas. Peak RSS and construction scratch are reported separately.
 
-## Historical performance contract (non-normative)
+## Performance contract
 
-RFC 0013 withdraws every fixed runtime, memory, scaling, and QoR
-threshold in this section as an implementation or cutover gate. The material
-below is retained only as historical motivation and as a reproducibility record
-for any future claim; it does not define current completion status.
-
-The five-second goal was the original acceptance condition and is now
-withdrawn. The reference
+The five-second goal is an acceptance condition, not a forecast. The reference
 Ibex run starts a fresh process and includes input and Liberty parsing, target-
 catalog construction, elaboration, synthesis, exact timing, publication, and
 the requested reports. It uses a pinned public RTL revision, public SKY130
@@ -1055,7 +1047,7 @@ library checksum, constraints, exact command, release binary digest, worker
 count, and host description checked into the benchmark record. No prior process
 state or pre-warmed target catalog contributes to the primary result.
 
-The historical end-to-end budget was:
+The initial end-to-end budget is:
 
 | Stage | Ibex target |
 | --- | ---: |
@@ -1066,8 +1058,10 @@ The historical end-to-end budget was:
 | exact timing, closure, publication, and reports | <= 0.8 s |
 | **total** | **<= 5.0 s** |
 
-These sub-budgets may still guide profiling, but none accepts or rejects the
-architecture. A budget is never enforced by skipping valid work at runtime.
+These sub-budgets guide profiling; only the total and QoR gates accept the
+architecture. If a stage exceeds its budget, optimization targets its dominant
+algorithm or data movement. The budget is never enforced by skipping valid
+work at runtime.
 
 Phase 0 freezes the comparison contract in a checked benchmark manifest. It
 records the baseline Opto commit and release-binary SHA-256, the exact
@@ -1078,7 +1072,7 @@ implementation against that artifact, not against a moving branch or a
 developer build. Baseline and candidate runs are interleaved on the same idle
 host image and use identical inputs and worker limits.
 
-The withdrawn product-level gate required all of the following:
+The product-level gate requires all of the following:
 
 - the reference Ibex median from at least five serial fresh-process,
   cold-catalog runs is `<= 5.0 s`;
@@ -1105,7 +1099,7 @@ The withdrawn product-level gate required all of the following:
   ordering are normalized.
 
 A timeout, crash, missing result, missing timing tuple, unavailable requested
-equivalence result, or non-finite metric failed that gate before aggregation; it
+equivalence result, or non-finite metric fails the gate before aggregation; it
 is never dropped or replaced with the last successful run. No statistical
 outlier is discarded. If the median absolute deviation of paired runtime ratios
 for any case exceeds five percent of its median, the host run is unstable and
@@ -1113,7 +1107,7 @@ the complete baseline/candidate set is repeated; two unstable attempts fail
 qualification rather than relaxing the bound. Warm-catalog, resident-session,
 and incremental results are reported separately and never enter the cold gate.
 
-The historical suite also included control-heavy, arithmetic,
+Ibex alone cannot accept the RFC. The suite includes control-heavy, arithmetic,
 reconvergent, high-fanout, memory, and larger production-shaped open designs.
 
 ## Validation
@@ -1396,7 +1390,7 @@ implementation never won a cover. Recovering it is the job of the choice graph
 in Phase 3b, which keeps both structures as per-node alternatives inside one
 compilation instead of as two compilations.
 
-### Phase 3b: decision groups, partition scopes, and choice graph — implemented
+### Phase 3b: decision groups, partition scopes, and choice graph
 
 Introduce complete disjoint decision-group footprints and sealed interfaces.
 Give decision groups, analytical regions, and compilation shards distinct index
@@ -1406,51 +1400,58 @@ with one `ChoiceGraph` and one `CompiledMapping`; compile bounded cuts, truth,
 and matches across its equivalence classes once. Retain the existing selected
 result only as a test oracle, not a production fallback.
 
-Production has distinct stable decision, analytical-region, and compilation-
-shard domains. `ChoiceDesign` owns the design scopes and
-`CompiledChoiceDesign` owns each scope's immutable cut, truth, and target-match
-records for the complete mapping epoch. There is no second production cover
-path.
+Accept when equivalence holds, Boolean preparation drops below its stage budget,
+memory remains within the declared bound, group/shard invariants pass on
+reconvergent and coupled multi-output cases, and the compiled arenas can
+reproduce or improve the accepted mapped cover. The implementation review must
+also identify the three authoritative owners, show that derived scopes are
+views or ranges, and find no full-field `Plan`/`Record` conversion in the hot
+path. The retained equivalence classes must additionally show at least a 1.0%
+combinational-area reduction beyond the Phase 1a result on the reference case,
+which is the measured `&dch -f` contribution; a choice graph that reproduces
+the Phase 1a area is a representation change without its stated benefit and
+does not pass.
 
-### Phase 4: analytical semantic selection — implemented
+### Phase 4: analytical semantic selection
 
 Introduce lane-preserving CandidateResponse evaluation and the design-wide
 bounded proposal engine. Delete scalar or independently regional semantic
 selection when the global selector cuts over.
 
-Production reduces characterized candidate summaries across all WorkGraph
-items, runs a fixed four-round backward price propagation, jointly evaluates
-the critical groups of adjacent disjoint fusion scopes, and installs only the
-selected compact candidate IDs. The displaced regional selector is deleted.
+Accept when timing-sensitive groups may select different microarchitectures,
+share-versus-duplicate cases are jointly evaluated, small exhaustive problems
+quantify heuristic gap, analytical/exact correlation is recorded, and the stage
+meets its runtime budget.
 
-### Phase 5: choice-aware mapping and integrated area recovery — implemented
+### Phase 5: choice-aware mapping and integrated area recovery
 
 Make required times, loads, slews, and timing prices drive the compiled-record
 selector. Add exact-area recovery over mapping reference counts. Delete
 independent proposal cover runs and unconditional default full-netlist area MFS.
 
-Mapping compiles each choice scope once before selection. Timing-feasible cover
-and recovery reuse the same compiled records; independent proposal cover runs
-and the unconditional default full-netlist area MFS are absent.
+Accept when the complete public QoR gate passes and mapping plus recovery meets
+its stage budget.
 
-### Phase 6: zero-copy exact timing handoff and bounded correction — implemented
+### Phase 6: zero-copy exact timing handoff and bounded correction
 
 Make exact MMMC consume the selected compact topology directly. Add one bounded
 compiled-record correction, one exceptional bounded decision-group structural
 round, and seal the accepted topology without rebuilding clean connectivity.
 
-The selected mapped topology is retained in regional mapped state and consumed
-directly by exact MMMC timing. `MappedTimingTransaction` applies mapped changes
-and incremental timing views atomically; the existing bounded correction path
-operates on that topology without returning to Boolean or mapping discovery.
+Accept when exact and published topology identities agree, rollback is atomic,
+systematic model error and structural-repair activation are reported, timing-
+only cache reuse follows candidate identity, unresolved electrical illegality
+fails explicitly, and timing/publication meets its stage budget.
 
-### Phase 7: optional qualification and deletion
+### Phase 7: production qualification and deletion
 
-Performance and QoR experiments may be run independently under the repository
-benchmark policy. Deletion of displaced plan portfolios, duplicate
-lowering/cover paths, obsolete cache fields, old objectives, and conflicting
-architecture text is part of the implementation cutover and is not conditional
-on a fixed benchmark threshold.
+Run the complete performance, QoR, equivalence, determinism, checkpoint, and
+incremental suites. Delete displaced plan portfolios, duplicate lowering/cover
+paths, obsolete cache fields, old objectives, old tests, and conflicting
+architecture text.
+
+Accept only when the reference Ibex median is at most 5.0 seconds, the suite-level
+3x and QoR gates pass, and no fallback or hidden selector remains.
 
 ## Alternatives
 
