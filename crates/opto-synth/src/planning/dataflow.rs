@@ -26,8 +26,8 @@ use std::collections::BTreeMap;
 ///
 /// The rewrite no longer mutates the Word module in place. It returns one
 /// [`word::WordFragment`] per candidate wire, keyed so publication reproduces the
-/// dense-ID sequence the retired in-place pass produced; RFC 0013 Amendment 1
-/// publication splices them and commits the changed revision cone.
+/// dense-ID sequence the retired in-place pass produced; RFC 0013 publication
+/// splices them and commits the changed revision.
 pub(crate) fn static_wire_driver_fragments(
     module: &word::WordModule,
 ) -> Result<StaticWireCoalescing, crate::SynthError> {

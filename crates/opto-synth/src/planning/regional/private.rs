@@ -22,11 +22,8 @@ pub(crate) fn seal_work_design(
         return Ok((regions, design));
     }
 
-    // RFC 0013 Amendment 1 publication: deterministic slot assignment and
-    // fragment splice into the semantic Word module, followed by an
-    // incremental revision update through the changed cone only. Partitioning
-    // happens once, after the canonical Word splice, so no provisional region
-    // geometry can leak into stable revision identity.
+    // Publish every fragment atomically before the only partition, so
+    // provisional region geometry cannot enter semantic identity.
     let base = crate::regional::WorkDesign::revision_of(module)?;
     let (wave, signals) = coalescing.into_parts();
     let (_, (regions, committed)) = module.publish_fragments_checked(

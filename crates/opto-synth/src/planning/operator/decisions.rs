@@ -339,7 +339,7 @@ impl ArchitectureDecisions {
                         .saturating_add(1)
                 })
                 .collect::<Vec<_>>();
-            prices = work.backward_prices(&local)?;
+            prices = work.backward_prices(&local, &prices)?;
             for (row, region) in summaries.iter().enumerate() {
                 for (group, candidates) in region.groups.iter().enumerate() {
                     selected[row][group] =

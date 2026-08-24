@@ -745,9 +745,10 @@ database. `WorkGraph` derives each exact core and halo directly from the same
 validated Word snapshot and region graph. Cell/signal bit identities are
 retained as canonical recipe groups containing sorted `(lsb, width)` ranges;
 each recipe is stored once even when its ranges are disjoint, and ranges expand
-only for a consumer that requires scalar IDs; delta-local bit topology exists only while
-validating a changed fragment. Dense Word IDs remain generation-local and never
-become persistent or scheduling identity.
+only for a consumer that requires scalar IDs. Word publication validates changed
+topology directly; `RewriteDelta` retains only its stable boundary, exact
+footprint, and proof rather than encoding that topology again. Dense Word IDs
+remain generation-local and never become persistent or scheduling identity.
 
 `SynthesisRegionGraph` records semantic decomposition only: stable anchors,
 exact operations and observable memories, typed boundary ports, immutable bit

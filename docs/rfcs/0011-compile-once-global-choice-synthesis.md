@@ -14,7 +14,7 @@
   price selection including disjoint adjacent fusion scopes, compiles every
   choice scope once per design epoch, and hands the selected topology to exact
   MMMC timing and bounded mapped correction. Fixed rollout budgets are
-  withdrawn by RFC 0013 Amendment 3.
+  withdrawn by RFC 0013.
 
 ## Summary
 
@@ -1041,7 +1041,7 @@ canonical arenas. Peak RSS and construction scratch are reported separately.
 
 ## Historical performance contract (non-normative)
 
-RFC 0013 Amendment 3 withdraws every fixed runtime, memory, scaling, and QoR
+RFC 0013 withdraws every fixed runtime, memory, scaling, and QoR
 threshold in this section as an implementation or cutover gate. The material
 below is retained only as historical motivation and as a reproducibility record
 for any future claim; it does not define current completion status.

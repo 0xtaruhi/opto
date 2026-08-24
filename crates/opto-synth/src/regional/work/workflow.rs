@@ -194,50 +194,29 @@ impl WorkGraph {
         })
     }
 
-    /// Propagates bounded non-negative analytical prices from successors to
-    /// predecessors over the immutable work graph.
-    pub(crate) fn backward_prices(&self, local: &[u64]) -> Result<Box<[u64]>, crate::SynthError> {
-        if local.len() != self.items.len() {
+    /// Performs one synchronous backward-price step over the immutable graph.
+    pub(crate) fn backward_prices(
+        &self,
+        local: &[u64],
+        downstream: &[u64],
+    ) -> Result<Box<[u64]>, crate::SynthError> {
+        if local.len() != self.items.len() || downstream.len() != self.items.len() {
             return Err(crate::SynthError::invariant(
                 "analytical prices do not cover every work item",
             ));
         }
-        let mut indegree = self
-            .predecessors
-            .iter()
-            .map(<[WorkItemId]>::len)
-            .collect::<Vec<_>>();
-        let mut ready = indegree
+        Ok(local
             .iter()
             .enumerate()
-            .filter_map(|(row, &degree)| (degree == 0).then_some(row))
-            .collect::<BTreeSet<_>>();
-        let mut order = Vec::with_capacity(self.items.len());
-        while let Some(row) = ready.pop_first() {
-            order.push(row);
-            for successor in &self.successors[row] {
-                let successor = self.item_rows[successor];
-                indegree[successor] -= 1;
-                if indegree[successor] == 0 {
-                    ready.insert(successor);
-                }
-            }
-        }
-        if order.len() != self.items.len() {
-            return Err(crate::SynthError::invariant(
-                "work-item dependency graph is cyclic",
-            ));
-        }
-        let mut prices = local.to_vec();
-        for &row in order.iter().rev() {
-            let successor = self.successors[row]
-                .iter()
-                .map(|id| prices[self.item_rows[id]])
-                .max()
-                .unwrap_or(0);
-            prices[row] = prices[row].saturating_add(successor);
-        }
-        Ok(prices.into_boxed_slice())
+            .map(|(row, &price)| {
+                let successor = self.successors[row]
+                    .iter()
+                    .map(|id| downstream[self.item_rows[id]])
+                    .max()
+                    .unwrap_or(0);
+                price.saturating_add(successor)
+            })
+            .collect())
     }
 }
 

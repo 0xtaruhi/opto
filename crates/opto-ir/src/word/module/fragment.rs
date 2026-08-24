@@ -10,8 +10,8 @@
 //! fragment's own future rows through provisional dense IDs numbered beyond
 //! the base arena lengths.
 //!
-//! [`WordModule::publish_fragments`] implements RFC 0013 Amendment 1 steps one
-//! and two. Slot assignment walks the wave in ascending [`FragmentKey`] order
+//! [`WordModule::publish_fragments`] implements RFC 0013 publication. Slot
+//! assignment walks the wave in ascending [`FragmentKey`] order
 //! and assigns dense arena IDs, so published numbering never depends on task
 //! completion order. Splicing applies every fragment inside one undo journal:
 //! any failure restores the module byte-exactly, including connect removals
@@ -429,8 +429,7 @@ struct FragmentUndo {
 }
 
 impl WordModule {
-    /// Publishes one deterministic wave of fragments (RFC 0013 Amendment 1,
-    /// steps one and two).
+    /// Publishes one deterministic wave of fragments under RFC 0013.
     ///
     /// Step one assigns dense value and operation slots to every fragment's
     /// appended rows in ascending [`FragmentKey`] order, making the resulting

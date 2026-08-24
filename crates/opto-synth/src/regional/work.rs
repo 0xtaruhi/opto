@@ -5,39 +5,15 @@
 
 mod workflow;
 
-use opto_ir::design::{
-    Cell, CellClass, CellId, DesignRevisionId, EntityId, EntitySet, NetBit, NetBitId, NetDriver,
-    RevisionFootprint,
-};
+use opto_ir::design::{CellId, DesignRevisionId, EntityId, EntitySet, NetBitId, RevisionFootprint};
 use opto_ir::word;
 use opto_runtime::{Task, TaskKey};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 const WORK_TASK_DOMAIN: u32 = 0x574f_524b;
 const COARSE_GROUP_SHARDS: usize = 16;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Delta-local cell role retained only while validating Word publication.
-pub(crate) enum WordFragmentCell {
-    /// Operation appended by the private Word fragment.
-    Operation,
-    /// Connection from the fragment result to its stable published signal bit.
-    Connection,
-}
-
-#[derive(Default)]
-struct FragmentNetTable {
-    nets: Vec<NetBit>,
-    rows: HashMap<NetBitId, usize>,
-}
-
-impl FragmentNetTable {
-    fn into_nets(self) -> Vec<NetBit> {
-        self.nets
-    }
-}
 
 struct LogicalAnchors {
     operations: Box<[CellId]>,
@@ -52,7 +28,7 @@ impl LogicalAnchors {
         let operations = (0..module.operations().len())
             .map(|index| {
                 let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
-                operation_cell_id(regions, operation)
+                logical_operation_cell_id(regions, operation)
             })
             .collect::<Result<_, _>>()?;
         let signals = (0..module.signals().len())
@@ -728,7 +704,7 @@ impl WorkGraph {
                 crate::SynthError::invariant("work result references an unknown item")
             })?;
             let item = &self.items[row];
-            let reads = item_read_set(item)?;
+            let reads = item.core.union(&item.halo)?;
             let shard = self.shard_for_item(row).ok_or_else(|| {
                 crate::SynthError::invariant("work result item has no compilation shard")
             })?;
@@ -938,7 +914,7 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                     let artifact = CompiledWorkArtifact {
                         footprint: RevisionFootprint {
                             base: work.design.revision,
-                            reads: entity_union(&item.core, &item.halo)?,
+                            reads: item.core.union(&item.halo)?,
                             replaces: item.core.clone(),
                         },
                         proof: product.proof,
@@ -975,17 +951,6 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
         }
         Ok(results)
     }
-}
-
-fn item_read_set(item: &WorkItem) -> Result<WorkEntitySet, crate::SynthError> {
-    entity_union(&item.core, &item.halo)
-}
-
-fn entity_union(
-    left: &WorkEntitySet,
-    right: &WorkEntitySet,
-) -> Result<WorkEntitySet, crate::SynthError> {
-    left.union(right)
 }
 
 impl WorkDesign {
@@ -1025,21 +990,14 @@ impl WorkDesign {
     }
 }
 
-/// Lowers published static-wire coalescing fragments into bit-level revision
-/// deltas against the sealed base generation.
-///
-/// Every fragment replaces the published bits of one candidate wire and
-/// describes only the delta-local operation/connection topology needed to
-/// validate that replacement. Stable identities reuse the sealing recipes over
-/// the spliced module, so a fresh seal reproduces exactly these entities
-/// without retaining a second whole-design topology.
+/// Records the exact stable boundary of each published static-wire fragment.
 pub(crate) fn coalesce_revision_deltas(
     module: &word::WordModule,
     regions: &crate::SynthesisRegionGraph,
     base: DesignRevisionId,
     published: &word::PublishedWave,
     signals: &[(word::FragmentKey, word::SignalId)],
-) -> Result<Vec<opto_ir::design::RewriteDelta<WordFragmentCell>>, crate::SynthError> {
+) -> Result<Vec<opto_ir::design::RewriteDelta>, crate::SynthError> {
     use opto_ir::design::{
         EquivalenceCertificate, EquivalenceRegime, RewriteDelta, RewriteDeltaId, SemanticBinding,
     };
@@ -1052,125 +1010,88 @@ pub(crate) fn coalesce_revision_deltas(
     let anchors = LogicalAnchors::new(module, regions)?;
     let connectivity = crate::word::bit_connectivity::BitConnectivity::new(module)?;
     let mut deltas = Vec::with_capacity(published.entries().len());
-    for (entry, &(_, signal)) in published.entries().iter().zip(signals) {
+    for (entry, &(key, signal)) in published.entries().iter().zip(signals) {
+        if entry.key() != key {
+            return Err(crate::SynthError::invariant(
+                "published coalescing fragment order changed",
+            ));
+        }
         let stored_signal = module
             .signal(signal)
             .ok_or_else(|| crate::SynthError::invariant("coalesced candidate wire disappeared"))?;
-        let width = stored_signal.ty.width();
-        let state = stored_signal.ty.state();
-        let signal_anchor = signal_anchor(module, signal)?;
-        let mut nets = FragmentNetTable::default();
-        let mut connection_cells = Vec::<Cell<WordFragmentCell>>::new();
-        let mut replaces = Vec::<EntityId>::new();
-        let mut outputs = Vec::with_capacity(width as usize);
-        for bit in 0..width {
-            let Some(source) = connectivity.signal_source(signal, bit)? else {
-                return Err(crate::SynthError::invariant(format!(
-                    "coalesced wire lost the driver for bit {bit}"
-                )));
-            };
-            let input_net = source_net(module, &anchors, source, state, &mut nets)?;
-            let cell = connection_cell_id(signal_anchor, bit);
-            let output = signal_net_id(signal_anchor, bit);
-            install_net(&mut nets, output, state, None)?;
-            install_driver(&mut nets, output, NetDriver::Cell { cell, output: 0 })?;
-            replaces.push(EntityId::NetBit(output));
-            outputs.push(output);
-            connection_cells.push(Cell {
-                id: cell,
-                kind: WordFragmentCell::Connection,
-                class: CellClass::Combinational,
-                inputs: Box::new([input_net]),
-                outputs: Box::new([output]),
-                source: stored_signal.source.clone(),
-            });
-        }
-        let mut operation_cells =
-            Vec::<Cell<WordFragmentCell>>::with_capacity(entry.operations().len());
+        let anchor = signal_anchor(module, signal)?;
+        let outputs = (0..stored_signal.ty.width())
+            .map(|bit| {
+                if connectivity.signal_source(signal, bit)?.is_none() {
+                    return Err(crate::SynthError::invariant(format!(
+                        "coalesced wire lost the driver for bit {bit}"
+                    )));
+                }
+                Ok(signal_net_id(anchor, bit))
+            })
+            .collect::<Result<Vec<_>, crate::SynthError>>()?;
+        let internal = entry
+            .operations()
+            .iter()
+            .map(|&operation| anchors.operation(operation))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut inputs = BTreeSet::new();
         for &operation in entry.operations() {
             let stored = module.operation(operation).ok_or_else(|| {
                 crate::SynthError::invariant("published coalescing operation disappeared")
             })?;
-            let cell = anchors.operation(operation)?;
-            let inputs = crate::word::operation_inputs(&stored.kind)
-                .into_iter()
-                .map(|value| {
-                    materialize_value_nets(module, &anchors, &connectivity, value, &mut nets)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect::<Box<[_]>>();
-            let outputs = operation_outputs(module, &anchors, operation)?;
-            for (output, &net) in outputs.iter().enumerate() {
-                let state = module
-                    .value(stored.result)
-                    .ok_or_else(|| {
-                        crate::SynthError::invariant(
-                            "published coalescing result value disappeared",
-                        )
-                    })?
-                    .ty
-                    .state();
-                install_net(&mut nets, net, state, None)?;
-                install_driver(
-                    &mut nets,
-                    net,
-                    NetDriver::Cell {
-                        cell,
-                        output: u32::try_from(output).map_err(|_| {
-                            crate::SynthError::capacity("logical output bit ordinal")
-                        })?,
-                    },
-                )?;
-            }
-            operation_cells.push(Cell {
-                id: cell,
-                kind: WordFragmentCell::Operation,
-                class: if matches!(
-                    stored.kind,
-                    word::OpKind::Register(_) | word::OpKind::Latch(_)
-                ) {
-                    CellClass::StateBoundary
-                } else {
-                    CellClass::Combinational
-                },
-                inputs,
-                outputs,
-                source: stored.source.clone(),
-            });
-        }
-        let nets = nets.into_nets();
-        let mut cells = operation_cells;
-        cells.extend(connection_cells);
-        let net_rows = nets
-            .iter()
-            .enumerate()
-            .map(|(row, net)| (net.id, row))
-            .collect::<BTreeMap<_, _>>();
-        let mut existing_inputs = BTreeSet::new();
-        for &input in cells.iter().flat_map(|cell| cell.inputs.iter()) {
-            let net = net_rows
-                .get(&input)
-                .and_then(|&row| nets.get(row))
-                .ok_or_else(|| crate::SynthError::invariant("fragment input net is absent"))?;
-            if net.driver.is_none() {
-                existing_inputs.insert(input);
+            for value in crate::word::operation_inputs(&stored.kind) {
+                let stored_value = module.value(value).ok_or_else(|| {
+                    crate::SynthError::invariant("published coalescing input disappeared")
+                })?;
+                for bit in 0..stored_value.ty.width() {
+                    let source = connectivity.source(value, bit)?;
+                    let crate::word::bit_connectivity::BitSource::Value {
+                        value: source_value,
+                        ..
+                    } = source
+                    else {
+                        continue;
+                    };
+                    let source_row = module.value(source_value).ok_or_else(|| {
+                        crate::SynthError::invariant("published coalescing source disappeared")
+                    })?;
+                    if let word::ValueKind::Operation(producer) = source_row.kind
+                        && internal.contains(&anchors.operation(producer)?)
+                    {
+                        continue;
+                    }
+                    inputs.insert(source_net_id(
+                        module,
+                        &anchors,
+                        source,
+                        stored_value.ty.state(),
+                    )?);
+                }
             }
         }
-        let mut reads = replaces.clone();
-        reads.extend(existing_inputs.iter().copied().map(EntityId::NetBit));
+        let replaces = EntitySet::new(outputs.iter().copied().map(EntityId::NetBit).collect())
+            .map_err(|error| design_error(&error))?;
+        let reads = EntitySet::new(
+            inputs
+                .iter()
+                .chain(&outputs)
+                .copied()
+                .map(EntityId::NetBit)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        )
+        .map_err(|error| design_error(&error))?;
         deltas.push(RewriteDelta {
             id: RewriteDeltaId::from_bytes(entry.key().bytes()),
             footprint: RevisionFootprint {
                 base,
-                reads: EntitySet::new(reads).map_err(|error| design_error(&error))?,
-                replaces: EntitySet::new(replaces).map_err(|error| design_error(&error))?,
+                reads,
+                replaces,
             },
-            cells: cells.into_boxed_slice(),
-            nets: nets.into_boxed_slice(),
             semantic: SemanticBinding {
-                inputs: existing_inputs.into_iter().collect::<Box<[_]>>(),
+                inputs: inputs.into_iter().collect(),
                 outputs: outputs.into_boxed_slice(),
             },
             proof: EquivalenceCertificate {
@@ -1182,91 +1103,14 @@ pub(crate) fn coalesce_revision_deltas(
     Ok(deltas)
 }
 
-/// Rejects any coalescing certificate that does not carry this layer's own
-/// construction-equivalence recipe.
-pub(crate) fn validate_coalesce_proof(
-    delta: &opto_ir::design::RewriteDelta<WordFragmentCell>,
-) -> Result<(), opto_ir::design::DesignError> {
-    use opto_ir::design::{DesignError, EquivalenceRegime};
+fn validate_coalesce_delta(delta: &opto_ir::design::RewriteDelta) -> Result<(), crate::SynthError> {
+    use opto_ir::design::EquivalenceRegime;
     if delta.proof.regime != EquivalenceRegime::ByConstruction
         || delta.proof.digest
             != coalesce_proof_digest(opto_ir::word::FragmentKey::from_bytes(delta.id.bytes()))
     {
-        return Err(DesignError::ProofRejected(
-            "static-wire coalescing requires its own by-construction certificate".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_coalesce_fragment(
-    delta: &opto_ir::design::RewriteDelta<WordFragmentCell>,
-) -> Result<(), crate::SynthError> {
-    let mut cells = BTreeMap::new();
-    for cell in &delta.cells {
-        if cells.insert(cell.id, cell).is_some() {
-            return Err(crate::SynthError::invariant(
-                "coalescing fragment repeats a cell identity",
-            ));
-        }
-    }
-    let mut nets = BTreeMap::new();
-    for net in &delta.nets {
-        if nets.insert(net.id, net).is_some() {
-            return Err(crate::SynthError::invariant(
-                "coalescing fragment repeats a net identity",
-            ));
-        }
-    }
-
-    let mut boundary_inputs = BTreeSet::new();
-    for cell in &delta.cells {
-        for &input in &cell.inputs {
-            let net = nets.get(&input).ok_or_else(|| {
-                crate::SynthError::invariant("coalescing cell input is absent from its fragment")
-            })?;
-            if net.driver.is_none() {
-                boundary_inputs.insert(input);
-            }
-        }
-        for (output, &net_id) in cell.outputs.iter().enumerate() {
-            let output = u32::try_from(output)
-                .map_err(|_| crate::SynthError::capacity("coalescing output ordinal"))?;
-            if nets.get(&net_id).and_then(|net| net.driver)
-                != Some(NetDriver::Cell {
-                    cell: cell.id,
-                    output,
-                })
-            {
-                return Err(crate::SynthError::invariant(
-                    "coalescing cell output has an inconsistent driver",
-                ));
-            }
-        }
-    }
-    for net in &delta.nets {
-        let Some(NetDriver::Cell { cell, output }) = net.driver else {
-            continue;
-        };
-        if cells
-            .get(&cell)
-            .and_then(|cell| cell.outputs.get(output as usize))
-            .copied()
-            != Some(net.id)
-        {
-            return Err(crate::SynthError::invariant(
-                "coalescing net driver is absent from its fragment",
-            ));
-        }
-    }
-
-    if !boundary_inputs
-        .iter()
-        .copied()
-        .eq(delta.semantic.inputs.iter().copied())
-    {
         return Err(crate::SynthError::invariant(
-            "coalescing fragment input boundary is not exact",
+            "static-wire coalescing has an invalid construction certificate",
         ));
     }
     let boundary_outputs = EntitySet::new(
@@ -1285,10 +1129,15 @@ fn validate_coalesce_fragment(
         ));
     }
     let expected_reads = EntitySet::new(
-        boundary_inputs
-            .into_iter()
+        delta
+            .semantic
+            .inputs
+            .iter()
+            .copied()
             .map(EntityId::NetBit)
             .chain(boundary_outputs.as_slice().iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect(),
     )
     .map_err(|error| design_error(&error))?;
@@ -1303,7 +1152,7 @@ fn validate_coalesce_fragment(
 pub(crate) fn commit_coalescing_revision(
     base: DesignRevisionId,
     next: WorkDesign,
-    deltas: &[opto_ir::design::RewriteDelta<WordFragmentCell>],
+    deltas: &[opto_ir::design::RewriteDelta],
 ) -> Result<WorkDesign, crate::SynthError> {
     let mut ids = std::collections::BTreeSet::new();
     let mut replacements = std::collections::BTreeSet::new();
@@ -1313,8 +1162,7 @@ pub(crate) fn commit_coalescing_revision(
                 "coalescing wave does not target one unique base revision",
             ));
         }
-        validate_coalesce_proof(delta).map_err(|error| design_error(&error))?;
-        validate_coalesce_fragment(delta)?;
+        validate_coalesce_delta(delta)?;
         for &entity in delta.footprint.replaces.as_slice() {
             if !replacements.insert(entity) {
                 return Err(crate::SynthError::invariant(
@@ -1332,30 +1180,6 @@ fn coalesce_proof_digest(key: opto_ir::word::FragmentKey) -> [u8; 32] {
         .update(&key.bytes())
         .finalize()
         .as_bytes()
-}
-
-fn operation_outputs(
-    module: &word::WordModule,
-    anchors: &LogicalAnchors,
-    operation: word::OpId,
-) -> Result<Box<[NetBitId]>, crate::SynthError> {
-    let operation = module
-        .operation(operation)
-        .ok_or_else(|| crate::SynthError::invariant("logical operation is unknown"))?;
-    let result = module
-        .value(operation.result)
-        .ok_or_else(|| crate::SynthError::invariant("logical operation result is unknown"))?;
-    let cell = match result.kind {
-        word::ValueKind::Operation(operation) => operation,
-        word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => {
-            return Err(crate::SynthError::invariant(
-                "logical operation result lost its operation identity",
-            ));
-        }
-    };
-    (0..result.ty.width())
-        .map(|bit| Ok(operation_net_id(anchors.operation(cell)?, bit)))
-        .collect()
 }
 
 fn region_entities(
@@ -1514,7 +1338,7 @@ fn append_value_spans(
             connectivity.source(value, bit)?,
             stored.ty.state(),
         )?;
-        append_adjacent_span(output, span)?;
+        output.push(span)?;
     }
     Ok(())
 }
@@ -1563,54 +1387,6 @@ fn source_entity_span(
     })
 }
 
-fn append_adjacent_span(
-    spans: &mut WorkEntitySetBuilder,
-    span: WorkEntitySpan,
-) -> Result<(), crate::SynthError> {
-    spans.push(span)
-}
-
-fn materialize_value_nets(
-    module: &word::WordModule,
-    anchors: &LogicalAnchors,
-    connectivity: &crate::word::bit_connectivity::BitConnectivity<'_>,
-    value: word::ValueId,
-    nets: &mut FragmentNetTable,
-) -> Result<Box<[NetBitId]>, crate::SynthError> {
-    let stored = module.value(value).ok_or_else(|| {
-        crate::SynthError::invariant("logical fragment references an unknown value")
-    })?;
-    (0..stored.ty.width())
-        .map(|bit| {
-            source_net(
-                module,
-                anchors,
-                connectivity.source(value, bit)?,
-                stored.ty.state(),
-                nets,
-            )
-        })
-        .collect()
-}
-
-fn source_net(
-    module: &word::WordModule,
-    anchors: &LogicalAnchors,
-    source: crate::word::bit_connectivity::BitSource,
-    state: word::LogicStateKind,
-    nets: &mut FragmentNetTable,
-) -> Result<NetBitId, crate::SynthError> {
-    let id = source_net_id(module, anchors, source, state)?;
-    let driver = match source {
-        crate::word::bit_connectivity::BitSource::Constant(constant) => {
-            Some(NetDriver::Constant(constant))
-        }
-        crate::word::bit_connectivity::BitSource::Value { .. } => None,
-    };
-    install_net(nets, id, state, driver)?;
-    Ok(id)
-}
-
 fn source_net_id(
     module: &word::WordModule,
     anchors: &LogicalAnchors,
@@ -1642,52 +1418,6 @@ fn source_net_id(
             }
         }
     }
-}
-
-fn install_net(
-    nets: &mut FragmentNetTable,
-    id: NetBitId,
-    state: word::LogicStateKind,
-    driver: Option<NetDriver>,
-) -> Result<(), crate::SynthError> {
-    if let Some(&row) = nets.rows.get(&id) {
-        let net = &mut nets.nets[row];
-        if net.state != state || (net.driver.is_some() && driver.is_some() && net.driver != driver)
-        {
-            return Err(crate::SynthError::invariant(
-                "stable logical net has conflicting definitions",
-            ));
-        }
-        if net.driver.is_none() {
-            net.driver = driver;
-        }
-    } else {
-        nets.rows.insert(id, nets.nets.len());
-        nets.nets.push(NetBit { id, state, driver });
-    }
-    Ok(())
-}
-
-fn install_driver(
-    nets: &mut FragmentNetTable,
-    id: NetBitId,
-    driver: NetDriver,
-) -> Result<(), crate::SynthError> {
-    let net = nets
-        .rows
-        .get(&id)
-        .and_then(|&row| nets.nets.get_mut(row))
-        .ok_or_else(|| crate::SynthError::invariant("logical driver net is absent"))?;
-    if net
-        .driver
-        .replace(driver)
-        .is_some_and(|current| current != driver)
-    {
-        return Err(crate::SynthError::invariant(
-            "stable logical net has multiple drivers",
-        ));
-    }
-    Ok(())
 }
 
 fn logical_revision_id(module: &word::WordModule) -> Result<DesignRevisionId, crate::SynthError> {
@@ -1760,7 +1490,7 @@ fn digest(domain: &[u8], parts: impl IntoIterator<Item = [u8; 32]>) -> [u8; 32] 
     *digest.finalize().as_bytes()
 }
 
-fn operation_cell_id(
+pub(crate) fn logical_operation_cell_id(
     regions: &crate::SynthesisRegionGraph,
     operation: word::OpId,
 ) -> Result<CellId, crate::SynthError> {
@@ -1771,13 +1501,6 @@ fn operation_cell_id(
         b"opto/logical-operation-cell/v1\0",
         [anchor.bytes()],
     )))
-}
-
-pub(crate) fn logical_operation_cell_id(
-    regions: &crate::SynthesisRegionGraph,
-    operation: word::OpId,
-) -> Result<CellId, crate::SynthError> {
-    operation_cell_id(regions, operation)
 }
 
 pub(crate) fn logical_memory_cell_id(
@@ -1794,14 +1517,6 @@ pub(crate) fn logical_memory_cell_id(
         b"opto/logical-memory-cell/v1\0",
         [identity.bytes()],
     )))
-}
-
-fn connection_cell_id(signal: [u8; 32], bit: u32) -> CellId {
-    let mut digest = blake3::Hasher::new();
-    digest.update(b"opto/logical-connection-cell/v1\0");
-    digest.update(&signal);
-    digest.update(&bit.to_le_bytes());
-    CellId::from_bytes(*digest.finalize().as_bytes())
 }
 
 fn memory_interface_id(
@@ -2103,7 +1818,7 @@ mod tests {
                 assert!(
                     work.items[index]
                         .core
-                        .contains_cell(operation_cell_id(&regions, operation).unwrap())
+                        .contains_cell(logical_operation_cell_id(&regions, operation).unwrap())
                 );
             }
         }
@@ -2598,12 +2313,7 @@ mod coalescing_publication_tests {
         let next = WorkDesign::seal(&module, &regions).unwrap();
         assert!(commit_coalescing_revision(base.revision(), next.clone(), &deltas).is_err());
         deltas[0].proof = proof;
-        let driven = deltas[0]
-            .nets
-            .iter_mut()
-            .find(|net| matches!(net.driver, Some(NetDriver::Cell { .. })))
-            .unwrap();
-        driven.driver = None;
+        deltas[0].semantic.outputs = Box::new([]);
         assert!(commit_coalescing_revision(base.revision(), next, &deltas).is_err());
         assert_eq!(base.revision(), before);
     }
