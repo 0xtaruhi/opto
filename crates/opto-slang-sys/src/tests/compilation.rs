@@ -243,7 +243,7 @@ fn native_source_units_preserve_independent_macro_scopes() {
 #[test]
 fn native_compile_keeps_synthesis_blackboxes_as_interfaces() {
     let source = NativeTestSource::new(
-        "(* blackbox = 1 *) module macro(input logic clk, input logic a, output logic y); logic state; always_ff @(posedge clk) state <= a; assign y = state; endmodule\nmodule top(input logic clk, input logic a, output logic y); macro u_macro(.clk(clk), .a(a), .y(y)); endmodule\n",
+        "(* black_box = 1 *) module macro(input logic clk, input logic a, output logic y); logic state; always_ff @(posedge clk) state <= a; assign y = state; endmodule\nmodule top(input logic clk, input logic a, output logic y); macro u_macro(.clk(clk), .a(a), .y(y)); endmodule\n",
     );
     let compilation = compile(
         std::slice::from_ref(&source.path),
@@ -257,7 +257,7 @@ fn native_compile_keeps_synthesis_blackboxes_as_interfaces() {
 
     let attributes = blackbox.attributes().collect::<Vec<_>>();
     assert_eq!(attributes.len(), 1);
-    assert_eq!(attributes[0].name().unwrap(), "blackbox");
+    assert_eq!(attributes[0].name().unwrap(), "black_box");
     assert!(attributes[0].is_true());
     assert_eq!(
         attributes[0].value().unwrap(),

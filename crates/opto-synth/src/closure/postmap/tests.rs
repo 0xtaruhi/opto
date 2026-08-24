@@ -161,6 +161,7 @@ fn run_postmap_observed(
         &port_bindings,
         &Arc::new(opto_timing::TimingObjectBindings::new()),
         &scenarios,
+        &crate::ReferencePortMap::new(),
         crate::test_runtime(),
     )
     .unwrap()
@@ -221,6 +222,7 @@ fn mmmc_power_uses_complete_explicit_input_activity() {
         &port_bindings(&mapped),
         &Arc::new(opto_timing::TimingObjectBindings::new()),
         &scenarios,
+        &crate::ReferencePortMap::new(),
         &runtime,
     )
     .unwrap()
@@ -269,6 +271,7 @@ fn mmmc_installs_internal_cell_exception_bindings() {
         &port_bindings(&mapped),
         &Arc::new(bindings),
         &scenarios,
+        &crate::ReferencePortMap::new(),
         &runtime,
     )
     .unwrap()

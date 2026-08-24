@@ -1301,7 +1301,7 @@ fn verilog_frontend_keeps_disjoint_continuous_slices_single_driver() {
 fn verilog_frontend_lowers_blackboxes_to_port_only_modules() {
     let source = TestSource::new(
         "blackbox.sv",
-        "(* blackbox *) module macro(input logic clk, input logic a, output logic y); logic state; always_ff @(posedge clk) state <= a; assign y = state; endmodule\nmodule top(input logic clk, input logic a, output logic y); macro u_macro(.clk(clk), .a(a), .y(y)); endmodule\n",
+        "(* black_box *) module macro(input logic clk, input logic a, output logic y); logic state; always_ff @(posedge clk) state <= a; assign y = state; endmodule\nmodule top(input logic clk, input logic a, output logic y); macro u_macro(.clk(clk), .a(a), .y(y)); endmodule\n",
     );
     let update = Frontend::read_verilog(
         std::slice::from_ref(&source.path),
@@ -1324,7 +1324,7 @@ fn verilog_frontend_lowers_blackboxes_to_port_only_modules() {
         opto_ir::word::DefinitionKind::BlackBox
     );
     assert_eq!(word.annotations().len(), 1);
-    assert_eq!(word.name_str(word.annotations()[0].name), "blackbox");
+    assert_eq!(word.name_str(word.annotations()[0].name), "black_box");
     assert_eq!(word.ports().len(), 3);
     assert_eq!(word.signals().len(), 3);
     assert!(word.values().is_empty());
@@ -1334,10 +1334,10 @@ fn verilog_frontend_lowers_blackboxes_to_port_only_modules() {
 }
 
 #[test]
-fn false_blackbox_attribute_preserves_synthesizable_body() {
+fn false_black_box_attribute_preserves_synthesizable_body() {
     let source = TestSource::new(
-        "false-blackbox.sv",
-        "(* blackbox = 0 *) module top(input logic a, output logic y); assign y = ~a; endmodule\n",
+        "false-black-box.sv",
+        "(* black_box = 0 *) module top(input logic a, output logic y); assign y = ~a; endmodule\n",
     );
     let update = Frontend::read_verilog(
         std::slice::from_ref(&source.path),

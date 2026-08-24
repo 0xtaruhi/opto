@@ -264,6 +264,7 @@ impl RegionalMapper<'_> {
             self.config.port_bindings,
             &self.config.object_bindings,
             self.config.scenarios,
+            self.config.reference_ports,
             self.runtime,
         )?;
         if let Some(timing) = &mapped.timing {

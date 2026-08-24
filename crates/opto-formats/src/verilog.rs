@@ -1311,7 +1311,7 @@ mod word_tests {
         module
             .add_annotation(
                 AnnotationTarget::Module,
-                "blackbox",
+                "black_box",
                 AnnotationValueSpec::Integer {
                     bits: ConstBits::from_bin_str("1").unwrap(),
                     signed: false,
@@ -1342,7 +1342,7 @@ mod word_tests {
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.starts_with(concat!(
-            "(* blackbox = 1'b1 *)\n",
+            "(* black_box = 1'b1 *)\n",
             r#"(* implementation = "memory \"macro\"" *)"#,
             "\nmodule macro(a);",
         )));

@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-timing"
-expected_tests = 121
+expected_tests = 122
 
 [[owners]]
 path = "src/tests.rs"
@@ -38,7 +38,7 @@ contract = "Canonical timing-model identity, topology digest, and dense position
 [[owners]]
 path = "src/model"
 owner = "timing-model"
-tests = 7
+tests = 8
 contract = "Canonical timing-model construction and mapped-netlist conversion invariants."
 
 [[owners]]

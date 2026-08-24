@@ -1294,7 +1294,7 @@ std::string module_name_for_body(const Context &design,
 bool is_blackbox(const InstanceBodySymbol &body) {
   for (auto *attribute :
        body.getCompilation().getAttributes(body.getDefinition())) {
-    if (attribute && attribute->name == "blackbox" &&
+    if (attribute && attribute->name == "black_box" &&
         attribute->getValue().isTrue()) {
       return true;
     }

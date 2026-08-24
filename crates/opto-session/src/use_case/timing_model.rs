@@ -147,12 +147,27 @@ pub(super) fn current_timing_model_with_parasitics(
         record.synthesis_binding.as_ref(),
     ) {
         (Some(synthesis), Some(_)) => {
+            let graph = session.definition_graph("timing")?;
+            let references = super::synthesis::reference_ports(session, &graph, "timing")?;
+            let design_ports = references
+                .iter()
+                .map(|(module, ports)| {
+                    (
+                        module.clone(),
+                        ports
+                            .iter()
+                            .map(|(port, contract)| (port.clone(), contract.direction))
+                            .collect(),
+                    )
+                })
+                .collect();
             let mut model = TimingModel::from_mapped_with_parasitics(
                 synthesis.mapped(),
                 design_uid,
                 &port_bindings,
                 library,
                 parasitics,
+                &design_ports,
             )?;
             model.set_object_bindings(object_bindings);
             model.compact()?;

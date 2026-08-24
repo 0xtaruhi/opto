@@ -28,6 +28,7 @@ pub use access::{TimingConnectionRef, TimingConnections, TimingInstanceRef};
 pub use bindings::{TimingObjectBindings, TimingObjectBindingsBuilder};
 pub use design::TimingDesignView;
 pub(crate) use design::{OwnedTimingInstance, SharedTimingDesign, TimingInstanceView};
+pub use mapped::MappedDesignPortDirections;
 pub(crate) use region::InstanceRegionModelEdit;
 
 /// Semantic identity of one sealed timing topology, before analysis inputs

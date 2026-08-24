@@ -320,6 +320,41 @@ fn publication_rejects_an_undriven_consumed_internal_net() {
 }
 
 #[test]
+fn retained_design_output_is_a_physical_producer() {
+    let mut builder = MappedBuilder::new("design_driver", opto_ir::RevisionId::INITIAL).unwrap();
+    let net = builder.add_net(Some("data")).unwrap();
+    builder
+        .add_port("y", PortDirection::Output, &[net])
+        .unwrap();
+    builder
+        .add_design_instance(
+            "memory",
+            "SRAM",
+            &[("Q".to_string(), vec![ConnectionSignal::Net(net)])],
+        )
+        .unwrap();
+    let mapped = builder.freeze().unwrap();
+    let references = crate::ReferencePortMap::from([(
+        "SRAM".to_string(),
+        BTreeMap::from([(
+            "Q".to_string(),
+            crate::ReferencePort {
+                direction: word::PortDirection::Output,
+                width: 1,
+                exact_width: true,
+            },
+        )]),
+    )]);
+
+    validate_observable_drivers(
+        &mapped,
+        &opto_library::TargetCellSet::default(),
+        &references,
+    )
+    .unwrap();
+}
+
+#[test]
 fn publication_rejects_a_multiply_driven_consumed_internal_net() {
     let mut sink = cell(
         "SINK",

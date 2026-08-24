@@ -361,6 +361,8 @@ pub(crate) struct FrozenObservableConnectivity {
     outputs: Box<[ObservableOutput]>,
     output_nets: BTreeSet<NetId>,
     static_driver_counts: Box<[u8]>,
+    source_design_drivers: BTreeMap<NetId, Vec<String>>,
+    source_design_sinks: BTreeSet<NetId>,
     source_driver_pins: BTreeSet<PinId>,
     source_sink_pins: BTreeSet<PinId>,
 }
@@ -455,6 +457,68 @@ impl FrozenObservableConnectivity {
         }
         let mut source_driver_pins = BTreeSet::new();
         let mut source_sink_pins = BTreeSet::new();
+        let mut source_design_drivers = BTreeMap::<NetId, Vec<String>>::new();
+        let mut source_design_sinks = BTreeSet::new();
+        for instance in mapped.design_instance_ids() {
+            let instance_name = mapped.design_instance_name(instance).ok_or_else(|| {
+                crate::SynthError::invariant("mapped source design instance has no name")
+            })?;
+            let module = mapped.design_instance_module(instance).ok_or_else(|| {
+                crate::SynthError::invariant("mapped source design instance has no definition")
+            })?;
+            for connection in mapped
+                .design_instance_connections(instance)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("mapped source design instance has no bindings")
+                })?
+            {
+                let port = mapped.design_connection_port(connection).ok_or_else(|| {
+                    crate::SynthError::invariant("mapped source design port has no name")
+                })?;
+                let direction = reference_ports
+                    .get(module)
+                    .and_then(|ports| ports.get(port))
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(format!(
+                            "mapped source design port '{module}.{port}' has no direction contract"
+                        ))
+                    })?
+                    .direction;
+                for &signal in mapped
+                    .design_connection_signals(connection)
+                    .ok_or_else(|| {
+                        crate::SynthError::invariant(
+                            "mapped source design port has no connected signals",
+                        )
+                    })?
+                {
+                    let ConnectionSignal::Net(net) = signal else {
+                        continue;
+                    };
+                    boundary_nets.insert(net);
+                    if matches!(
+                        direction,
+                        word::PortDirection::Output | word::PortDirection::Inout
+                    ) {
+                        static_driver_counts[net.index()] =
+                            static_driver_counts[net.index()].saturating_add(1);
+                        source_design_drivers
+                            .entry(net)
+                            .or_default()
+                            .push(format!("{instance_name}.{port}"));
+                    }
+                    if matches!(
+                        direction,
+                        word::PortDirection::Input | word::PortDirection::Inout
+                    ) {
+                        source_design_sinks.insert(net);
+                    }
+                    if direction == word::PortDirection::Inout {
+                        resolved_nets.insert(net);
+                    }
+                }
+            }
+        }
         for cell in mapped.cell_ids() {
             let stored = mapped
                 .cell(cell)
@@ -518,6 +582,8 @@ impl FrozenObservableConnectivity {
             outputs: outputs.into_boxed_slice(),
             output_nets,
             static_driver_counts: static_driver_counts.into_boxed_slice(),
+            source_design_drivers,
+            source_design_sinks,
             source_driver_pins,
             source_sink_pins,
         };
@@ -669,6 +735,9 @@ impl FrozenObservableConnectivity {
         if self.output_nets.contains(&net) {
             return Ok(true);
         }
+        if self.source_design_sinks.contains(&net) {
+            return Ok(true);
+        }
         for pin in mapped.pins_on_net(net).into_iter().flatten() {
             if self.source_sink_pins.contains(&pin) {
                 return Ok(true);
@@ -730,6 +799,13 @@ impl FrozenObservableConnectivity {
             .filter(|&&(candidate, _)| candidate == net)
             .map(|&(_, value)| format!("constant {}", u8::from(value)))
             .collect::<Vec<_>>();
+        sources.extend(
+            self.source_design_drivers
+                .get(&net)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
         for pin in mapped.pins_on_net(net).into_iter().flatten() {
             let cell = mapped.pin_owner(pin).ok_or_else(|| {
                 crate::SynthError::invariant("mapped boundary pin has no live owner")
