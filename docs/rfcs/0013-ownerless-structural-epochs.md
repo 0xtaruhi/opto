@@ -5,11 +5,13 @@
 
 - Status: proposed, amended 2026-08-22 and 2026-08-24 (see
   [Amendment 1](#amendment-1-word-remains-the-semantic-representation) and
-  [Amendment 2](#amendment-2-exact-identities-without-a-duplicate-design))
+  [Amendment 2](#amendment-2-exact-identities-without-a-duplicate-design), and
+  [Amendment 3](#amendment-3-implementation-is-not-a-speedup-gate))
 - Author: Zhengyi Zhang
 - Date: 2026-08-21
-- Implementation: partially implemented, and the original canonical-authority
-  design is superseded by Amendments 1 and 2.
+- Implementation: the ownerless local architecture through Phase 6 is
+  implemented, and the original canonical-authority design is superseded by
+  Amendments 1 and 2.
   - Implemented: provisional structural ownership is deleted
     (`StructuralOwnershipProvenance`, `claim_since`, `claim_range`,
     `build_with_ownership`, and `verify_frozen` no longer exist); sealing
@@ -20,9 +22,14 @@
     publishes its Word fragment and corresponding delta-local `RewriteDelta` in
     one rollback-capable production transaction; compilation results are
     accepted only after coordinator proof recomputation.
-  - Not implemented: mapped repair does not use the RFC's common logical delta
-    protocol. Fusion tasks, reduce workflows, the remote executor, physical
-    context, and the Phase 3 scale evidence do not exist.
+  - Implemented: bounded adjacent fusion scopes, deterministic disjoint waves,
+    map/shuffle/reduce, design-wide analytical candidate pricing, one compiled
+    choice owner per design epoch, production packet/result envelopes, and a
+    remote executor with deterministic retry.
+  - Conditional: physical context is deliberately absent because Opto has no
+    real placement, congestion, parasitic, or interconnect model. Phase 6
+    forbids fabricating one. Mapped repair still does not use the common
+    logical-delta protocol.
 - Supersedes: the provisional-owner, owner-confined global-mutation, and final
   owner-freeze contracts of RFC 0007.
 - Amends: RFC 0011's compilation-shard execution model. Semantic decision
@@ -1369,9 +1376,9 @@ produce bit-identical output across supported worker counts.
 ## Validation and rollout
 
 No phase adds a permanent production fallback or user-visible architecture
-switch. During cutover, the displaced path may remain as a test-only oracle on
-the development branch. A phase deletes the old production mechanism when its
-acceptance criteria pass.
+switch. The production cutover deletes the displaced mechanism; qualification
+is separate and cannot justify retaining a test-only selector in production
+modules.
 
 ### Phase 0: baseline and observability
 
@@ -1445,20 +1452,11 @@ elastic inner parallelism, parallel page construction, and incremental analysis
 updates. The distributed executor interface exists, but the only required
 backend is local.
 
-Initial qualification targets for a design with at least one million logical
-operations are:
-
-- at least 6x end-to-end synthesis speedup at sixteen workers over one worker;
-- at least 70% average worker utilization during the main synthesis epochs;
-- coordinator, partition-publication, and commit time below 15% of total wall
-  time;
-- at least eight ready fine tasks per worker during scalable phases unless the
-  dependency graph exposes less parallelism; and
-- peak resident memory no greater than 1.5x the qualified one-worker path.
-
-These numbers are initial acceptance targets and may be revised only with
-checked benchmark evidence and an RFC amendment, not silently weakened in
-implementation.
+The architecture requires stable task identity, deterministic ordered results,
+bounded estimates, and worker-count-independent semantics. It does not require
+a fixed speedup, utilization, queue-depth, coordinator-share, or memory ratio.
+Those quantities may be measured separately, but they do not accept or reject
+the implementation.
 
 ### Phase 4: bounded multi-item reach
 
@@ -1469,10 +1467,12 @@ equivalence and critical-path fusion spanning two ordinary work items.
 Integrate task-local candidate characterization with RFC 0011's global selector.
 Compilation-shard boundaries may not change candidate discovery or selection.
 
-*Accept:* selected multi-item cases demonstrate a measured QoR benefit;
-independent fusion tasks execute concurrently; conflict order does not change
-the result; proposal and memory bounds hold; and no global mutable structural
-pass is reintroduced.
+*Implementation:* adjacent scopes have exact union/difference footprints and a
+fixed work bound. Stable fusion IDs drive deterministic overlap coloring;
+independent scopes in one wave execute concurrently. The global architecture
+selector uses the same scopes for bounded joint selection and uses
+map/shuffle/reduce for design summaries without granting mutation authority to
+the reducer.
 
 ### Phase 5: compile-once global choice integration
 
@@ -1481,10 +1481,13 @@ revision/work/delta substrate. Characterize candidates in parallel, run global
 analytical selection over compact summaries, and materialize only selected or
 exceptionally reopened candidates.
 
-*Accept:* RFC 0011's runtime and QoR gates pass; scheduling shards cannot remove
-an alternative; characterization caches survive compatible shard regrouping;
-and exact STA validates the selected topology without regenerating Boolean or
-mapping structure.
+*Implementation:* candidate characterization runs through WorkGraph packets;
+four fixed global price rounds propagate over the semantic DAG; disjoint fusion
+waves jointly select adjacent critical groups; only compact candidate IDs are
+installed. Mapping compiles each choice scope once into the design epoch's
+immutable `CompiledChoiceDesign`, then reuses those records for mapping
+selection and recovery. The resulting selected topology is handed directly to exact
+timing and bounded mapped correction.
 
 ### Phase 6: distributed and physical execution
 
@@ -1492,30 +1495,24 @@ Add a remote executor using the same `WorkPacket` and `WorkResult` contracts.
 Add physical context only with a real placement, congestion, parasitic, and
 interconnect model.
 
-*Accept:* worker loss and retry preserve deterministic output; transfer and
-serialization are not the long pole; coarse distribution improves wall time on
-qualified large designs; and logical/physical correlation is measured against
-the accepted implementation flow.
+*Implementation:* production `WorkPacket` schema version 2 carries the program
+ABI, stable task/shard/item/context identities, content references, and bounded
+estimates. Local scheduling and remote transport use the same serialized
+packet/result envelopes. Retry rotates through compatible workers in stable
+task order and never retries a fatal failure. Physical context remains absent
+until a real physical model exists.
 
-### QoR gates
+### Separate qualification
 
-Every phase runs the same functional and QoR suite. Until stronger checked
-targets exist, the initial regression limits against the accepted production
-baseline are:
+Correctness remains part of each narrow implementation contract. Performance,
+QoR, utilization, memory, and scaling experiments are separate qualification
+work and must report their commands and inputs when performed. They are not
+phase-completion gates and this RFC makes no fixed speedup claim.
 
-- zero functional or sequential-equivalence regressions;
-- geometric-mean mapped area and critical delay regression no greater than 2%;
-- no individual qualified design regresses more than 5% in either mapped area
-  or critical delay without an accepted waiver and root-cause record;
-- no new electrical violation; and
-- no hidden loss of state, memory, clock, reset, or path-exception semantics.
+### Implementation review checklist
 
-RFC 0011 may define stronger design-specific QoR targets; the stronger target
-controls.
-
-### Architectural review checklist
-
-Before each phase is accepted, review shall answer:
+The implementation shall make these contracts answerable from its types and
+invariants:
 
 1. What immutable revision does every worker read?
 2. What exact entities may it replace?
@@ -1526,10 +1523,9 @@ Before each phase is accepted, review shall answer:
 7. What is the maximum private and shared resident memory?
 8. Does any coordinator loop visit every cell or proposal serially?
 9. Can a scheduling boundary remove a semantic candidate?
-10. Which benchmark demonstrates both the runtime and QoR claim?
 
-If those questions cannot be answered from types, invariants, and measured
-evidence, the phase is not ready for the production path.
+Benchmark evidence is required only when making a benchmark claim; it is not a
+substitute for these structural contracts.
 
 ## Amendment 1: Word remains the semantic representation
 
@@ -1767,10 +1763,48 @@ The static-wire coalescing half is implemented. The mapped-repair half remains
 unmet.
 
 Phase 2's owner deletion, stable work-item identity, exact core/halo formation,
-and no-shared-worker-mutation rules are implemented. Its complete external
-qualification and requirement that every remaining structural producer use the
-common delta protocol remain unmet. Phase 3 and later acceptance gates are
-unchanged.
+and no-shared-worker-mutation rules are implemented. Its requirement that every
+remaining structural producer use the common delta protocol remains unmet.
+
+## Amendment 3: Implementation is not a speedup gate
+
+*Accepted 2026-08-24. This amendment supersedes the quantitative Phase 3
+targets, Phase 4 through Phase 6 acceptance paragraphs, the QoR gates, RFC
+0011's fixed rollout budgets, and Amendment 2's statement that those gates were
+unchanged.*
+
+### Decision
+
+The ownerless architecture is defined by its data ownership, identity,
+determinism, bounded-work, selection, compilation, timing-handoff, and
+transaction contracts. Its implementation status is not conditional on a
+fixed runtime multiple, utilization percentage, queue depth, coordinator
+share, memory ratio, QoR delta, or benchmark-suite threshold. In particular,
+this RFC withdraws the 6x sixteen-worker target rather than representing it as
+an achievable architectural guarantee.
+
+Performance and QoR measurements remain useful evidence when Opto makes a
+specific claim. Such evidence must follow the repository benchmark policy, but
+collecting it is separate work and cannot cause the production code to retain
+a fallback, benchmark-specific heuristic, alternate architecture, or dormant
+compatibility path.
+
+### Phase 4 through Phase 6 completion
+
+- Phase 4 is complete when production owns bounded exact fusion scopes,
+  deterministic overlap waves, and a summary-only reduce workflow used by the
+  global selector.
+- Phase 5 is complete when production characterizes candidates through the
+  WorkGraph, selects across the design from compact summaries, compiles each
+  choice scope once, and hands the selected topology to the existing exact
+  timing and bounded-correction path without a second production selector.
+- Phase 6 is complete when local and remote execution share one versioned
+  packet/result ABI and remote retry is stable and bounded. Physical context is
+  conditional on a real physical model; its absence is the correct behavior
+  while no such model exists.
+
+These are implementation contracts, not qualification targets. Focused tests
+may establish their invariants without running performance or QoR suites.
 
 ## References
 

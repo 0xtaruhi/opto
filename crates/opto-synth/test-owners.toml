@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 509
+expected_tests = 510
 
 [[owners]]
 path = "src/api"
@@ -44,7 +44,7 @@ contract = "Bit lowering, canonical Boolean subject construction, rewriting, and
 [[owners]]
 path = "src/regional"
 owner = "regional"
-tests = 37
+tests = 38
 contract = "Stable region graph identity, boundary contracts, portable plans, and convergence policy."
 
 [[owners]]

@@ -2,6 +2,25 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+
+#[derive(Debug)]
+struct PacketWorker {
+    response: u8,
+    failure: Option<RemoteWorkerError>,
+    calls: AtomicUsize,
+}
+
+impl RemoteWorker for PacketWorker {
+    fn execute(&self, request: &[u8]) -> Result<Box<[u8]>, RemoteWorkerError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        let mut response = request.to_vec();
+        response.push(self.response);
+        Ok(response.into_boxed_slice())
+    }
+}
 use crate::indexed::range_tasks;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -479,4 +498,70 @@ fn duplicate_ordered_keys_are_rejected_before_execution() {
 
     assert!(error.to_string().contains("duplicate execution task key"));
     assert_eq!(runtime.metrics().completed_task_callbacks, 0);
+}
+
+#[test]
+fn remote_packets_retry_on_the_next_stable_worker_and_keep_key_order() {
+    let retrying = Arc::new(PacketWorker {
+        response: 0,
+        failure: Some(RemoteWorkerError::Retryable("worker unavailable".into())),
+        calls: AtomicUsize::new(0),
+    });
+    let serving = Arc::new(PacketWorker {
+        response: 9,
+        failure: None,
+        calls: AtomicUsize::new(0),
+    });
+    let executor = RemoteExecutor::new([
+        Arc::clone(&retrying) as Arc<dyn RemoteWorker>,
+        Arc::clone(&serving) as Arc<dyn RemoteWorker>,
+    ])
+    .unwrap();
+    let packets = vec![
+        RemotePacket::new(TaskKey::new(0, 1), [1]),
+        RemotePacket::new(TaskKey::new(0, 0), [0]),
+    ];
+
+    let results = executor.execute(packets).unwrap();
+
+    assert_eq!(
+        results.iter().map(RemoteResult::key).collect::<Vec<_>>(),
+        [TaskKey::new(0, 0), TaskKey::new(0, 1)]
+    );
+    assert_eq!(results[0].payload(), [0, 9]);
+    assert_eq!(results[1].payload(), [1, 9]);
+    assert_eq!(retrying.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(serving.calls.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn fatal_remote_failure_is_not_retried() {
+    let fatal = Arc::new(PacketWorker {
+        response: 0,
+        failure: Some(RemoteWorkerError::Fatal(
+            "incompatible algorithm ABI".into(),
+        )),
+        calls: AtomicUsize::new(0),
+    });
+    let unused = Arc::new(PacketWorker {
+        response: 1,
+        failure: None,
+        calls: AtomicUsize::new(0),
+    });
+    let executor = RemoteExecutor::new([
+        Arc::clone(&fatal) as Arc<dyn RemoteWorker>,
+        Arc::clone(&unused) as Arc<dyn RemoteWorker>,
+    ])
+    .unwrap();
+
+    let error = executor
+        .execute(vec![RemotePacket::new(TaskKey::new(0, 0), [7])])
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::RemoteTask { attempts: 1, .. }
+    ));
+    assert_eq!(fatal.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(unused.calls.load(Ordering::Relaxed), 0);
 }

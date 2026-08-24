@@ -33,7 +33,9 @@ impl<'a, R> DependencyRun<'a, R> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 /// Stable logical order key for deterministic parallel task publication.
 pub struct TaskKey {
     domain: u32,
@@ -45,6 +47,18 @@ impl TaskKey {
     /// Creates a key from a caller-defined domain and ordinal.
     pub const fn new(domain: u32, ordinal: u64) -> Self {
         Self { domain, ordinal }
+    }
+
+    /// Returns the caller-defined task domain.
+    #[must_use]
+    pub const fn domain(self) -> u32 {
+        self.domain
+    }
+
+    /// Returns the stable ordinal within the task domain.
+    #[must_use]
+    pub const fn ordinal(self) -> u64 {
+        self.ordinal
     }
 }
 

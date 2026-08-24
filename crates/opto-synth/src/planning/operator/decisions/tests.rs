@@ -271,7 +271,7 @@ fn multi_operand_fusion_exists_only_in_private_region_catalogs() {
     let shell = ArchitectureDecisions::for_regional_shell(&module);
     assert!(shell.operators().is_empty());
 
-    let mut private = ArchitectureDecisions::for_private_region(
+    let private = ArchitectureDecisions::for_private_region(
         &module,
         &[],
         crate::boolean::bitblast::implementation_providers().into(),
@@ -292,42 +292,6 @@ fn multi_operand_fusion_exists_only_in_private_region_catalogs() {
             .any(|recipe| recipe.starts_with("wallace-csa"))
     );
     assert!(recipes.iter().any(|recipe| recipe.starts_with("dadda-csa")));
-
-    let scenarios = opto_timing::ScenarioSet::single(
-        std::sync::Arc::new(opto_timing::TimingContext::default()),
-        std::sync::Arc::new(opto_timing::TimingLibrary::default()),
-        opto_timing::Parasitics::default(),
-    );
-    let target = crate::planning::regional::StructuralTargetModel::build(&scenarios, |_| {
-        Some(crate::planning::mapping_policy::CellCost {
-            area: 1.0,
-            delay: 1.0,
-            transition: 1.0,
-            input_capacitance: 1.0,
-        })
-    });
-    ArchitectureDecisions::select_design_for_budgets(
-        &mut [&mut private],
-        &target,
-        &[None],
-        &opto_runtime::ExecutionContext::default(),
-    )
-    .unwrap();
-    let selected = private.selected_candidate(operator.id()).unwrap();
-    let selected_score = target
-        .score_for_budget(private.candidate_estimate(selected).unwrap(), None)
-        .unwrap();
-    let best_score = private
-        .candidates(operator.id())
-        .iter()
-        .map(|candidate| {
-            target
-                .score_for_budget(private.candidate_estimate(*candidate).unwrap(), None)
-                .unwrap()
-        })
-        .min()
-        .unwrap();
-    assert_eq!(selected_score, best_score);
 }
 
 #[test]

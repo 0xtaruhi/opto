@@ -326,54 +326,8 @@ pub(crate) fn prepare_regional_architectures(
         source_cells: &source_cells,
     };
     let work = request.work;
-    let region_rows = regions
-        .regions()
-        .iter()
-        .map(|region| (region.id(), region.row()))
-        .collect::<BTreeMap<_, _>>();
     let profiling = request.mapping_context.config.diagnostics.timing;
-    let results =
-        crate::regional::SynthesisExecutor::execute(runtime, work, |item, regional_runtime| {
-            let region_row = region_rows
-                .get(&item.fixed_logic())
-                .copied()
-                .ok_or_else(|| {
-                    SynthError::invariant("regional work item has no fixed-logic scope")
-                })?;
-            let region_index = region_row.index();
-            let _region_profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-                format!("logic_lowering.region[{region_index}]")
-            });
-            let region = regions.regions()[region_index];
-            let decision = &request.decisions[region_index];
-            let memory_implementations = crate::planning::regional::decode_memory_implementations(
-                decision.memory_implementations(),
-            )?;
-            let restored_plan =
-                decision.restore_plan(region, request.contracts.contracts(region.row()))?;
-            let private = materializer.characterize_private_region(
-                &memory_implementations,
-                region,
-                regional_runtime,
-            )?;
-            Ok(crate::regional::WorkProduct::compiled_artifact(
-                characterization_proof(region, &private.decisions),
-                RegionalCharacterization {
-                    memory_implementations,
-                    restored_plan,
-                    context: decision.context(),
-                    private,
-                },
-            ))
-        })?;
-    let mut characterized = work
-        .accept_results(results, |item, result| {
-            characterization_result_proof(item.fixed_logic(), result, regions, &region_rows)
-        })?
-        .into_vec()
-        .into_iter()
-        .map(|result| result.output)
-        .collect::<Vec<_>>();
+    let mut characterized = characterize_regions(&materializer, work, runtime, profiling)?;
     let budgets = regions
         .regions()
         .iter()
@@ -383,10 +337,11 @@ pub(crate) fn prepare_regional_architectures(
         .iter_mut()
         .map(|candidate| &mut candidate.private.decisions)
         .collect::<Vec<_>>();
-    ArchitectureDecisions::select_design_for_budgets(
+    ArchitectureDecisions::select_design_for_work(
         &mut decisions,
         request.target_model,
         &budgets,
+        work,
         runtime,
     )?;
     let tasks = characterized
@@ -542,6 +497,68 @@ pub(crate) fn prepare_regional_architectures(
         prepared_regions.into_boxed_slice(),
         selected_memories.into_boxed_slice(),
     ))
+}
+
+fn characterize_regions(
+    materializer: &RegionArchitectureMaterializer<'_, '_>,
+    work: &crate::regional::WorkGraph,
+    runtime: &ExecutionContext,
+    profiling: bool,
+) -> Result<Vec<RegionalCharacterization>, SynthError> {
+    let request = materializer.request;
+    let regions = work.regions();
+    let region_rows = regions
+        .regions()
+        .iter()
+        .map(|region| (region.id(), region.row()))
+        .collect::<BTreeMap<_, _>>();
+    let results = crate::regional::SynthesisExecutor::execute(
+        runtime,
+        work,
+        crate::regional::WorkProgram::ArchitectureCharacterization,
+        |item, regional_runtime| {
+            let region_row = region_rows
+                .get(&item.fixed_logic())
+                .copied()
+                .ok_or_else(|| {
+                    SynthError::invariant("regional work item has no fixed-logic scope")
+                })?;
+            let region_index = region_row.index();
+            let _region_profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+                format!("logic_lowering.region[{region_index}]")
+            });
+            let region = regions.regions()[region_index];
+            let decision = &request.decisions[region_index];
+            let memory_implementations = crate::planning::regional::decode_memory_implementations(
+                decision.memory_implementations(),
+            )?;
+            let restored_plan =
+                decision.restore_plan(region, request.contracts.contracts(region.row()))?;
+            let private = materializer.characterize_private_region(
+                &memory_implementations,
+                region,
+                regional_runtime,
+            )?;
+            Ok(crate::regional::WorkProduct::compiled_artifact(
+                characterization_proof(region, &private.decisions),
+                RegionalCharacterization {
+                    memory_implementations,
+                    restored_plan,
+                    context: decision.context(),
+                    private,
+                },
+            ))
+        },
+    )?;
+    work.accept_results(
+        crate::regional::WorkProgram::ArchitectureCharacterization,
+        results,
+        |item, result| {
+            characterization_result_proof(item.fixed_logic(), result, regions, &region_rows)
+        },
+    )
+    .map(<[crate::regional::WorkProduct<RegionalCharacterization>]>::into_vec)
+    .map(|products| products.into_iter().map(|product| product.output).collect())
 }
 
 fn build_design_choices(

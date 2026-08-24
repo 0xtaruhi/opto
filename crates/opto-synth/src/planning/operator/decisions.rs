@@ -10,6 +10,28 @@ use crate::planning::provider::StructuralEstimate;
 use opto_ir::word;
 use std::sync::Arc;
 
+const GLOBAL_SELECTION_ROUNDS: usize = 4;
+
+#[derive(Clone)]
+struct CandidateSummary {
+    candidate: ImplementationCandidateId,
+    violation: u64,
+    physical: u64,
+    depth: u64,
+    stable: Box<str>,
+}
+
+struct RegionSummary {
+    row: usize,
+    groups: Vec<Vec<CandidateSummary>>,
+}
+
+#[derive(Clone, Copy)]
+struct FusionSelection {
+    left: (usize, usize, usize),
+    right: (usize, usize, usize),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ArchitectureDecisions {
     catalog: Arc<OperatorCatalog>,
@@ -214,10 +236,11 @@ impl ArchitectureDecisions {
         Ok(())
     }
 
-    pub(crate) fn select_design_for_budgets(
+    pub(crate) fn select_design_for_work(
         decisions: &mut [&mut Self],
         target: &crate::planning::regional::StructuralTargetModel,
         budgets: &[Option<f64>],
+        work: &crate::regional::WorkGraph,
         runtime: &opto_runtime::ExecutionContext,
     ) -> Result<(), crate::SynthError> {
         if decisions.len() != budgets.len() {
@@ -229,33 +252,120 @@ impl ArchitectureDecisions {
             .iter()
             .map(|decisions| &**decisions)
             .collect::<Vec<_>>();
-        let selections = runtime.analyze_indexed(views.len(), |region| {
-            let decisions = views[region];
-            let budget = budgets[region];
-            let mut selections = Vec::with_capacity(decisions.operators().len());
-            for operator in decisions.operators() {
-                let mut best = None;
-                for &candidate in decisions.candidates(operator.id()) {
-                    let key = target
-                        .score_for_budget(decisions.candidate_estimate(candidate)?, budget)?;
-                    let stable = decisions
-                        .candidate_recipe_name(candidate.id())
-                        .unwrap_or("");
-                    if best.as_ref().is_none_or(|(_, best_key, best_stable)| {
-                        (key, stable) < (*best_key, *best_stable)
-                    }) {
-                        best = Some((candidate.id(), key, stable));
-                    }
-                }
-                if let Some((candidate, _, _)) = best {
-                    selections.push(candidate);
+        let mut reduced = work.map_reduce(
+            runtime,
+            |row, _, _| {
+                let groups = views[row]
+                    .operators()
+                    .iter()
+                    .map(|operator| {
+                        views[row]
+                            .candidates(operator.id())
+                            .iter()
+                            .map(|&candidate| {
+                                let (violation, physical, depth) = target.score_for_budget(
+                                    views[row].candidate_estimate(candidate)?,
+                                    budgets[row],
+                                )?;
+                                Ok(CandidateSummary {
+                                    candidate: candidate.id(),
+                                    violation,
+                                    physical,
+                                    depth,
+                                    stable: views[row]
+                                        .candidate_recipe_name(candidate.id())
+                                        .unwrap_or("")
+                                        .into(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, crate::SynthError>>()
+                    })
+                    .collect::<Result<Vec<_>, crate::SynthError>>()?;
+                Ok((0_u8, RegionSummary { row, groups }))
+            },
+            |_, rows, _| {
+                let mut regions = rows
+                    .into_iter()
+                    .map(|(_, summary)| summary)
+                    .collect::<Vec<_>>();
+                regions.sort_by_key(|region| region.row);
+                Ok(regions)
+            },
+        )?;
+        let summaries = reduced
+            .pop()
+            .map(|(_, summaries)| summaries)
+            .unwrap_or_default();
+        if !reduced.is_empty()
+            || summaries.len() != decisions.len()
+            || summaries
+                .iter()
+                .enumerate()
+                .any(|(row, summary)| summary.row != row)
+        {
+            return Err(crate::SynthError::invariant(
+                "global architecture reduction does not cover every work item",
+            ));
+        }
+        let mut selected = summaries
+            .iter()
+            .map(|region| {
+                region
+                    .groups
+                    .iter()
+                    .map(|candidates| {
+                        best_candidate(candidates, 1).ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "architecture decision group has no candidate",
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut prices = vec![1; summaries.len()].into_boxed_slice();
+        for _ in 0..GLOBAL_SELECTION_ROUNDS {
+            let local = summaries
+                .iter()
+                .zip(&selected)
+                .map(|(region, selected)| {
+                    region
+                        .groups
+                        .iter()
+                        .zip(selected)
+                        .map(|(candidates, &candidate)| candidates[candidate].violation)
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1)
+                })
+                .collect::<Vec<_>>();
+            prices = work.backward_prices(&local)?;
+            for (row, region) in summaries.iter().enumerate() {
+                for (group, candidates) in region.groups.iter().enumerate() {
+                    selected[row][group] =
+                        best_candidate(candidates, prices[row]).ok_or_else(|| {
+                            crate::SynthError::invariant(
+                                "architecture decision group has no priced candidate",
+                            )
+                        })?;
                 }
             }
-            Ok::<_, crate::SynthError>(selections)
-        })?;
-        for (region, selections) in selections.into_iter().enumerate() {
-            for candidate in selections {
-                decisions[region].select_candidate(candidate)?;
+        }
+        let fusion = work.fusion_plan()?;
+        for wave in 0..fusion.wave_count() {
+            let proposals = fusion.execute_wave(wave, runtime, |item, _| {
+                let [left, right] = item.members();
+                Ok(joint_selection(&summaries, &selected, &prices, left, right))
+            })?;
+            for proposal in proposals.into_iter().flatten() {
+                selected[proposal.left.0][proposal.left.1] = proposal.left.2;
+                selected[proposal.right.0][proposal.right.1] = proposal.right.2;
+            }
+        }
+        for (row, groups) in selected.into_iter().enumerate() {
+            for (group, candidate) in groups.into_iter().enumerate() {
+                decisions[row]
+                    .select_candidate(summaries[row].groups[group][candidate].candidate)?;
             }
         }
         Ok(())
@@ -271,6 +381,75 @@ impl ArchitectureDecisions {
     pub(crate) fn is_operation_elided(&self, operation: word::OpId) -> bool {
         self.catalog.is_operation_elided(operation)
     }
+}
+
+fn best_candidate(candidates: &[CandidateSummary], price: u64) -> Option<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, candidate)| candidate_key(candidate, price))
+        .map(|(index, _)| index)
+}
+
+fn candidate_key(candidate: &CandidateSummary, price: u64) -> (u64, u128, u64, &str) {
+    (
+        candidate.violation,
+        u128::from(candidate.depth)
+            .saturating_mul(u128::from(price))
+            .saturating_add(u128::from(candidate.physical)),
+        candidate.physical,
+        &candidate.stable,
+    )
+}
+
+fn joint_selection(
+    summaries: &[RegionSummary],
+    selected: &[Vec<usize>],
+    prices: &[u64],
+    left: usize,
+    right: usize,
+) -> Option<FusionSelection> {
+    let critical_group = |row: usize| {
+        summaries[row]
+            .groups
+            .iter()
+            .zip(&selected[row])
+            .enumerate()
+            .max_by_key(|(_, (candidates, selected))| candidates[**selected].depth)
+            .map(|(group, _)| group)
+    };
+    let left_group = critical_group(left)?;
+    let right_group = critical_group(right)?;
+    let mut best = None;
+    for (left_candidate, left_summary) in summaries[left].groups[left_group].iter().enumerate() {
+        for (right_candidate, right_summary) in
+            summaries[right].groups[right_group].iter().enumerate()
+        {
+            let key = (
+                left_summary.violation.max(right_summary.violation),
+                left_summary
+                    .violation
+                    .saturating_add(right_summary.violation),
+                u128::from(left_summary.depth)
+                    .saturating_mul(u128::from(prices[left]))
+                    .saturating_add(
+                        u128::from(right_summary.depth).saturating_mul(u128::from(prices[right])),
+                    )
+                    .saturating_add(u128::from(left_summary.physical))
+                    .saturating_add(u128::from(right_summary.physical)),
+                left_summary.physical.saturating_add(right_summary.physical),
+                left_summary.stable.as_ref(),
+                right_summary.stable.as_ref(),
+            );
+            if best.as_ref().is_none_or(|(best_key, _, _)| key < *best_key) {
+                best = Some((key, left_candidate, right_candidate));
+            }
+        }
+    }
+    best.map(|(_, left_candidate, right_candidate)| FusionSelection {
+        left: (left, left_group, left_candidate),
+        right: (right, right_group, right_candidate),
+    })
 }
 
 #[cfg(test)]

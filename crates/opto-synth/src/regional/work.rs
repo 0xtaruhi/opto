@@ -3,6 +3,8 @@
 
 //! Stable revision and execution rows derived from one sealed region graph.
 
+mod workflow;
+
 use opto_ir::design::{
     Cell, CellClass, CellId, DesignRevisionId, EntityId, EntitySet, NetBit, NetBitId, NetDriver,
     RevisionFootprint,
@@ -128,6 +130,10 @@ digest_id!(
 digest_id!(
     WorkContextKey,
     "Versioned identity of one work item's complete analysis context."
+);
+digest_id!(
+    FusionTaskId,
+    "Stable identity of one admitted multi-item fusion task."
 );
 
 impl WorkContextKey {
@@ -365,25 +371,43 @@ struct WorkBoundaryContext {
     rows: Box<[crate::BoundaryContractRow]>,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkPacketItem {
     id: WorkItemId,
     kind: WorkItemKind,
-    core: WorkEntitySet,
-    halo: WorkEntitySet,
-    context: WorkContext,
+    context: WorkContextKey,
 }
 
-#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum WorkProgram {
+    ArchitectureSearch,
+    ArchitectureCharacterization,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkPacket {
     schema: u32,
+    key: TaskKey,
+    program: WorkProgram,
     design: DesignRevisionId,
+    content: [[u8; 32]; 2],
     shard: CompilationShardId,
     items: Box<[WorkPacketItem]>,
     estimated_work: u64,
     estimated_memory: u64,
+}
+
+impl TryFrom<WorkPacket> for opto_runtime::RemotePacket {
+    type Error = crate::SynthError;
+
+    fn try_from(packet: WorkPacket) -> Result<Self, Self::Error> {
+        let key = packet.key;
+        let work = packet.estimated_work;
+        let memory = packet.estimated_memory;
+        let payload = opto_archive::to_bytes(&packet)
+            .map_err(|error| crate::SynthError::invariant(error.to_string()))?;
+        Ok(Self::new(key, payload).with_estimates(work, memory))
+    }
 }
 
 pub(crate) struct WorkProduct<T> {
@@ -411,14 +435,43 @@ struct CompiledWorkArtifact<T> {
 pub(crate) struct WorkResult<T> {
     item: WorkItemId,
     shard: CompilationShardId,
+    program: WorkProgram,
     context: WorkContextKey,
     artifact: CompiledWorkArtifact<T>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkPacketResult<T> {
+    key: TaskKey,
+    program: WorkProgram,
+    shard: CompilationShardId,
+    items: Box<[WorkResult<T>]>,
+}
+
+impl<T> TryFrom<opto_runtime::RemoteResult> for WorkPacketResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    type Error = crate::SynthError;
+
+    fn try_from(result: opto_runtime::RemoteResult) -> Result<Self, Self::Error> {
+        let key = result.key();
+        let decoded: Self = opto_archive::from_bytes(&result.into_payload())
+            .map_err(|error| crate::SynthError::invariant(error.to_string()))?;
+        if decoded.key != key {
+            return Err(crate::SynthError::invariant(
+                "remote work result does not match its request key",
+            ));
+        }
+        Ok(decoded)
+    }
 }
 
 pub(crate) trait SynthesisExecutor {
     fn execute<T, F>(
         &self,
         work: &WorkGraph,
+        program: WorkProgram,
         operation: F,
     ) -> Result<Vec<WorkResult<T>>, crate::SynthError>
     where
@@ -612,37 +665,29 @@ impl WorkGraph {
         self.rebatch(self.items.len().div_ceil(target_shards).max(1))
     }
 
-    fn local_tasks(&self) -> Vec<Task<usize>> {
+    fn packets(&self, program: WorkProgram) -> Vec<WorkPacket> {
         self.shards
             .iter()
             .enumerate()
             .map(|(ordinal, shard)| {
-                Task::new(TaskKey::new(WORK_TASK_DOMAIN, ordinal as u64), ordinal)
-                    .with_estimated_work(shard.estimated_work)
-                    .with_estimated_memory(shard.estimated_memory)
-            })
-            .collect()
-    }
-
-    #[cfg(test)]
-    fn portable_packets(&self) -> Vec<WorkPacket> {
-        self.shards
-            .iter()
-            .map(|shard| {
                 let items: Box<[WorkPacketItem]> = shard
                     .items
                     .iter()
                     .map(|&row| WorkPacketItem {
                         id: self.items[row].id,
                         kind: self.items[row].kind,
-                        core: self.items[row].core.clone(),
-                        halo: self.items[row].halo.clone(),
-                        context: self.contexts[row].clone(),
+                        context: self.items[row].context,
                     })
                     .collect();
                 WorkPacket {
-                    schema: 1,
+                    schema: 2,
+                    key: TaskKey::new(WORK_TASK_DOMAIN, ordinal as u64),
+                    program,
                     design: self.design.revision,
+                    content: [
+                        self.design.revision.bytes(),
+                        self.regions.revision().bytes(),
+                    ],
                     shard: shard.id,
                     items,
                     estimated_work: shard.estimated_work,
@@ -662,6 +707,7 @@ impl WorkGraph {
 
     pub(crate) fn accept_results<T>(
         &self,
+        program: WorkProgram,
         results: Vec<WorkResult<T>>,
         expected_proof: impl Fn(
             &WorkItem,
@@ -686,7 +732,8 @@ impl WorkGraph {
             let shard = self.shard_for_item(row).ok_or_else(|| {
                 crate::SynthError::invariant("work result item has no compilation shard")
             })?;
-            if result.shard != shard || result.context != item.context {
+            if result.shard != shard || result.program != program || result.context != item.context
+            {
                 return Err(crate::SynthError::invariant(
                     "work result does not match its immutable revision, context, or footprint",
                 ));
@@ -832,6 +879,7 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
     fn execute<T, F>(
         &self,
         work: &WorkGraph,
+        program: WorkProgram,
         operation: F,
     ) -> Result<Vec<WorkResult<T>>, crate::SynthError>
     where
@@ -843,13 +891,49 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
             + Send
             + Sync,
     {
-        self.map_ordered_composite(work.local_tasks(), |shard, runtime| {
-            let shard = &work.shards[shard];
-            shard
+        let tasks = work
+            .packets(program)
+            .into_iter()
+            .map(|packet| {
+                let key = packet.key;
+                let work = packet.estimated_work;
+                let memory = packet.estimated_memory;
+                Task::new(key, packet)
+                    .with_estimated_work(work)
+                    .with_estimated_memory(memory)
+            })
+            .collect();
+        let batches = self.map_ordered_composite(tasks, |packet, runtime| {
+            if packet.schema != 2
+                || packet.program != program
+                || packet.design != work.design.revision
+                || packet.content
+                    != [
+                        work.design.revision.bytes(),
+                        work.regions.revision().bytes(),
+                    ]
+            {
+                return Err(crate::SynthError::invariant(
+                    "work packet does not match its algorithm or immutable content generation",
+                ));
+            }
+            let items = packet
                 .items
                 .iter()
-                .map(|&row| {
+                .map(|packet_item| {
+                    let row = work
+                        .item_rows
+                        .get(&packet_item.id)
+                        .copied()
+                        .ok_or_else(|| {
+                            crate::SynthError::invariant("work packet references an unknown item")
+                        })?;
                     let item = &work.items[row];
+                    if packet_item.kind != item.kind || packet_item.context != item.context {
+                        return Err(crate::SynthError::invariant(
+                            "work packet item does not match its sealed semantic row",
+                        ));
+                    }
                     let product = operation(item, runtime)?;
                     let artifact = CompiledWorkArtifact {
                         footprint: RevisionFootprint {
@@ -862,14 +946,34 @@ impl SynthesisExecutor for opto_runtime::ExecutionContext {
                     };
                     Ok(WorkResult {
                         item: item.id,
-                        shard: shard.id,
+                        shard: packet.shard,
+                        program,
                         context: item.context,
                         artifact,
                     })
                 })
-                .collect::<Result<Vec<_>, crate::SynthError>>()
-        })
-        .map(|rows| rows.into_iter().flatten().collect())
+                .collect::<Result<Box<[_]>, crate::SynthError>>()?;
+            Ok(WorkPacketResult {
+                key: packet.key,
+                program,
+                shard: packet.shard,
+                items,
+            })
+        })?;
+        let mut results = Vec::with_capacity(work.items.len());
+        for (ordinal, (shard, batch)) in work.shards.iter().zip(batches).enumerate() {
+            if batch.key != TaskKey::new(WORK_TASK_DOMAIN, ordinal as u64)
+                || batch.program != program
+                || batch.shard != shard.id
+                || batch.items.len() != shard.items.len()
+            {
+                return Err(crate::SynthError::invariant(
+                    "work packet result does not match its scheduled batch",
+                ));
+            }
+            results.extend(batch.items);
+        }
+        Ok(results)
     }
 }
 
@@ -2003,7 +2107,8 @@ mod tests {
                 );
             }
         }
-        for packet in work.portable_packets() {
+        let program = WorkProgram::ArchitectureSearch;
+        for packet in work.packets(program) {
             let bytes = opto_archive::to_bytes(&packet).unwrap();
             let restored: WorkPacket = opto_archive::from_bytes(&bytes).unwrap();
             assert_eq!(restored.design, packet.design);
@@ -2019,11 +2124,11 @@ mod tests {
             Ok(proof(item.id))
         };
         let execute = |work: &WorkGraph| {
-            let results = SynthesisExecutor::execute(&runtime, work, |item, _| {
+            let results = SynthesisExecutor::execute(&runtime, work, program, |item, _| {
                 Ok(WorkProduct::compiled_artifact(proof(item.id), item.id))
             })
             .unwrap();
-            work.accept_results(results, expected_proof)
+            work.accept_results(program, results, expected_proof)
                 .unwrap()
                 .into_vec()
                 .into_iter()
@@ -2031,7 +2136,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(execute(&work), semantic_items);
-        let mut invalid = SynthesisExecutor::execute(&runtime, &work, |item, _| {
+        let mut invalid = SynthesisExecutor::execute(&runtime, &work, program, |item, _| {
             Ok(WorkProduct::compiled_artifact(proof(item.id), item.id))
         })
         .unwrap();
@@ -2039,8 +2144,11 @@ mod tests {
         let restored: Vec<WorkResult<WorkItemId>> = opto_archive::from_bytes(&bytes).unwrap();
         assert_eq!(restored, invalid);
         invalid[0].artifact.footprint.replaces = WorkEntitySet::new(vec![]).unwrap();
-        assert!(work.accept_results(invalid, expected_proof).is_err());
-        let invalid_proof = SynthesisExecutor::execute(&runtime, &work, |item, _| {
+        assert!(
+            work.accept_results(program, invalid, expected_proof)
+                .is_err()
+        );
+        let invalid_proof = SynthesisExecutor::execute(&runtime, &work, program, |item, _| {
             Ok(WorkProduct::compiled_artifact(
                 opto_ir::design::EquivalenceCertificate {
                     regime: opto_ir::design::EquivalenceRegime::ByConstruction,
@@ -2050,7 +2158,10 @@ mod tests {
             ))
         })
         .unwrap();
-        assert!(work.accept_results(invalid_proof, expected_proof).is_err());
+        assert!(
+            work.accept_results(program, invalid_proof, expected_proof)
+                .is_err()
+        );
         let serial =
             opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 })
                 .unwrap();
@@ -2093,6 +2204,115 @@ mod tests {
                 WorkItemKind::FixedLogic(region.id())
             );
         }
+    }
+
+    #[test]
+    fn fusion_waves_and_reduce_groups_are_deterministic() {
+        let mut module = word::WordModule::new("multi_item_workflows");
+        let bit = word::WordType::bits(1).unwrap();
+        let source = word::SourceSpan::stable("multi-item workflow test");
+        let input = module
+            .add_port("a", word::PortDirection::Input, bit, source.clone())
+            .unwrap();
+        let mut value = module
+            .read_signal(module.port(input).unwrap().signal, source.clone())
+            .unwrap();
+        for _ in 0..8 {
+            value = module
+                .unary(word::UnaryOp::BitNot, value, source.clone())
+                .unwrap();
+        }
+        let output = module
+            .add_port("y", word::PortDirection::Output, bit, source.clone())
+            .unwrap();
+        module
+            .connect(
+                word::LValue::signal(module.port(output).unwrap().signal),
+                value,
+                source,
+            )
+            .unwrap();
+        let regions = Arc::new(
+            super::super::region_graph::partition::build(
+                &module,
+                super::super::region_graph::RegionPartitionPolicy::with_target_work(1),
+            )
+            .unwrap(),
+        );
+        assert!(regions.regions().len() > 2);
+        let design = Arc::new(WorkDesign::seal(&module, &regions).unwrap());
+        let scenarios = opto_timing::ScenarioSet::single(
+            Arc::new(opto_timing::TimingContext::default()),
+            Arc::new(opto_timing::TimingLibrary::default()),
+            opto_timing::Parasitics::default(),
+        )
+        .generation();
+        let contexts = regions
+            .regions()
+            .iter()
+            .enumerate()
+            .map(|(row, _)| {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&(row as u64).to_le_bytes());
+                WorkContext::logical(
+                    WorkContextKey::from(crate::RegionContextKey::from_bytes_for_test(bytes)),
+                    design.revision(),
+                    scenarios,
+                    [0; 32],
+                    &[],
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let runtime =
+            opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 4 })
+                .unwrap();
+        let work = WorkGraph::build(&module, regions, design, contexts, &runtime).unwrap();
+        let fusion = work.fusion_plan().unwrap();
+        assert!(fusion.wave_count() > 1);
+        let mut observed = Vec::new();
+        for wave in 0..fusion.wave_count() {
+            let rows = fusion
+                .execute_wave(wave, &runtime, |item, _| Ok((item.id(), item.members())))
+                .unwrap();
+            let mut members = BTreeSet::new();
+            for (_, pair) in &rows {
+                assert!(members.insert(pair[0]));
+                assert!(members.insert(pair[1]));
+            }
+            observed.push(rows);
+        }
+        let serial =
+            opto_runtime::ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads: 1 })
+                .unwrap();
+        let mut serial_observed = Vec::new();
+        for wave in 0..fusion.wave_count() {
+            serial_observed.push(
+                fusion
+                    .execute_wave(wave, &serial, |item, _| Ok((item.id(), item.members())))
+                    .unwrap(),
+            );
+        }
+        assert_eq!(observed, serial_observed);
+
+        let reduced = work
+            .map_reduce(
+                &runtime,
+                |row, _, _| Ok((row % 2, row)),
+                |key, rows, _| {
+                    Ok((
+                        key,
+                        rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(reduced.len(), 2);
+        assert!(
+            reduced.iter().all(|(key, (copy, rows))| {
+                key == copy && rows.iter().all(|row| row % 2 == *key)
+            })
+        );
     }
 
     #[test]

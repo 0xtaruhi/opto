@@ -10,6 +10,9 @@ pub enum RuntimeError {
     /// Execution was configured without a worker.
     #[error("execution context requires at least one worker thread")]
     NoWorkerThreads,
+    /// Remote execution was configured without an endpoint.
+    #[error("remote executor requires at least one worker endpoint")]
+    NoRemoteWorkers,
     /// Rayon could not create the worker pool.
     #[error("cannot create worker pool: {0}")]
     WorkerPool(#[source] rayon::ThreadPoolBuildError),
@@ -37,6 +40,16 @@ pub enum RuntimeError {
     SchedulerInvariant {
         /// Static diagnostic describing the violated invariant.
         detail: &'static str,
+    },
+    /// Every deterministic remote attempt failed for one packet.
+    #[error("remote execution task {task} failed after {attempts} attempt(s): {detail}")]
+    RemoteTask {
+        /// Stable packet key whose attempts failed.
+        task: TaskKey,
+        /// Number of worker attempts performed.
+        attempts: usize,
+        /// Last retryable failure or the first fatal failure.
+        detail: Box<str>,
     },
     /// Indexed chunking was requested with a zero grain.
     #[error("indexed analysis chunk size must be greater than zero")]

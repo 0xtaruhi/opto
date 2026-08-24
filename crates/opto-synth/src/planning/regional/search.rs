@@ -61,34 +61,43 @@ pub(crate) fn select_architectures(
                 .map(|index| &previous[index])
         })
         .collect::<Vec<_>>();
-    let results = crate::regional::SynthesisExecutor::execute(runtime, work, |item, _| {
-        let region_row = region_rows
-            .get(&item.fixed_logic())
-            .copied()
-            .ok_or_else(|| {
-                crate::SynthError::invariant("architecture work item has no fixed-logic scope")
-            })?;
-        let row = region_row.index();
-        let region = regions.regions()[row];
-        let record = if let Some(cached) = cached[row] {
-            validate_cached_region(module, regions.memories(region), target_cells, cached)?;
-            cached.clone()
-        } else {
-            let implementations =
-                search_region(module, regions.memories(region), target_cells, target_model)?;
-            let encoded = implementations
-                .iter()
-                .flat_map(|implementation| implementation.raw().to_le_bytes())
-                .collect::<Vec<_>>();
-            RegionalCacheRecord::new(contexts[row], &encoded)
-        };
-        Ok(crate::regional::WorkProduct::compiled_artifact(
-            decision_proof(&record),
-            record,
-        ))
-    })?;
+    let results = crate::regional::SynthesisExecutor::execute(
+        runtime,
+        work,
+        crate::regional::WorkProgram::ArchitectureSearch,
+        |item, _| {
+            let region_row = region_rows
+                .get(&item.fixed_logic())
+                .copied()
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("architecture work item has no fixed-logic scope")
+                })?;
+            let row = region_row.index();
+            let region = regions.regions()[row];
+            let record = if let Some(cached) = cached[row] {
+                validate_cached_region(module, regions.memories(region), target_cells, cached)?;
+                cached.clone()
+            } else {
+                let implementations =
+                    search_region(module, regions.memories(region), target_cells, target_model)?;
+                let encoded = implementations
+                    .iter()
+                    .flat_map(|implementation| implementation.raw().to_le_bytes())
+                    .collect::<Vec<_>>();
+                RegionalCacheRecord::new(contexts[row], &encoded)
+            };
+            Ok(crate::regional::WorkProduct::compiled_artifact(
+                decision_proof(&record),
+                record,
+            ))
+        },
+    )?;
     let records = work
-        .accept_results(results, |_, record| Ok(decision_proof(record)))?
+        .accept_results(
+            crate::regional::WorkProgram::ArchitectureSearch,
+            results,
+            |_, record| Ok(decision_proof(record)),
+        )?
         .into_vec()
         .into_iter()
         .map(|result| result.output)

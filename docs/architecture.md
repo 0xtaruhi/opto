@@ -781,7 +781,10 @@ artifact representative only when no source endpoint exists.
 Semantic partition policy and stable identities do not depend on worker count.
 Fusion and reduce tasks may span ordinary work items through explicit bounded
 footprints; scheduling boundaries therefore never prohibit a semantic
-candidate.
+candidate. Adjacent fusion scopes use the exact union of their writable cores,
+subtract that union from their combined halo, and execute in deterministic
+disjoint overlap waves. Summary-only map/shuffle/reduce drives global candidate
+pricing without creating a serial structural mutation owner.
 
 ### 3. Allocate Boundary Contracts
 
@@ -1670,10 +1673,13 @@ defect.
 | Structural-owner side columns and mutation APIs absent | Implemented |
 | Stable WorkGraph items with exact core/halo/context footprints | Implemented |
 | Rebatching independent of semantic identity and result | Implemented |
-| Serializable local `WorkPacket` / `WorkResult` contract | Test-only packet round trip; production results validate revision, exact footprint, context, shard, cardinality, and coordinator-recomputed proof |
+| Serializable `WorkPacket` / `WorkPacketResult` contract | Implemented in production; schema version 2 carries program ABI, design/content references, stable shard/item/context identities, and estimates. Local scheduling and remote transport use the same envelope; accepted item results validate exact footprints and coordinator-recomputed proofs |
 | Every structural worker publishes `RewriteDelta` and production validates the revision transition | Partial; static-wire coalescing publishes Word and its checked delta atomically, while read-only compilation workers publish checked artifacts |
-| Fusion tasks, overlap waves, and reduce tasks | Not yet implemented |
-| Remote executor with deterministic retry | Not yet implemented |
+| Fusion tasks, overlap waves, and reduce tasks | Implemented; bounded adjacent scopes, stable overlap coloring, parallel disjoint waves, and deterministic summary reduction |
+| Design-wide analytical architecture selection | Implemented; fixed backward price rounds and joint selection over disjoint adjacent fusion scopes replace the regional production selector |
+| Compile-once choice mapping | Implemented; one immutable `CompiledChoiceDesign` owns every scope's cut/truth/match records for mapping and recovery |
+| Remote executor with deterministic retry | Implemented; stable worker rotation, bounded replay, fatal-error termination, and TaskKey-ordered results |
+| Physical work context | Deliberately absent until Opto owns a real placement, congestion, parasitic, and interconnect model |
 | Stable typed region graph over the synthesis-root closure | Implemented |
 | Architecture-independent partition and budget estimates | Implemented |
 | Separate region anchors/revisions and boundary identities/revisions | Implemented |

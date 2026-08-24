@@ -13,6 +13,7 @@ mod context;
 mod dependency;
 mod error;
 mod indexed;
+mod remote;
 
 pub use config::ExecutionConfig;
 pub use context::{ExecutionContext, ExecutionMetrics};
@@ -23,5 +24,6 @@ pub use dependency::{
 };
 pub use error::RuntimeError;
 pub use indexed::{DependencyRun, Task, TaskKey, indexed_worker_count};
+pub use remote::{RemoteExecutor, RemotePacket, RemoteResult, RemoteWorker, RemoteWorkerError};
 #[cfg(test)]
 mod tests;

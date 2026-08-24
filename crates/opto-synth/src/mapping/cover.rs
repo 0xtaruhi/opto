@@ -241,6 +241,20 @@ pub(crate) struct DesignCoverScope<'a> {
     pub(crate) scope: ChoiceScopeId,
 }
 
+struct DesignCoverProblem {
+    scope: ChoiceScopeId,
+    outputs: Vec<AnalyzedRegionOutput>,
+    required_times: Vec<Option<f64>>,
+    output_loads: Vec<Option<f64>>,
+    input_transitions: Vec<Option<f64>>,
+    input_arrivals: Vec<Option<f64>>,
+}
+
+/// The single immutable cut/truth/match owner for one design choice epoch.
+struct CompiledChoiceDesign {
+    scopes: Box<[Option<search::CompiledMapping>]>,
+}
+
 pub(crate) fn analyze_design_cover(
     subject: &ChoiceDesign,
     scopes: &[DesignCoverScope<'_>],
@@ -256,10 +270,9 @@ pub(crate) fn analyze_design_cover(
         ));
     }
     let catalog = &mapping.combinational_catalog;
-    let tasks = scopes
+    let problems = scopes
         .iter()
-        .enumerate()
-        .map(|(row, scope)| {
+        .map(|scope| {
             let outputs = analyzed_outputs(scope.roots, subject, scope.scope)?
                 .map_or_else(Vec::new, <[AnalyzedRegionOutput]>::into_vec);
             let roots = merged_output_roots(scope.roots, &outputs)?;
@@ -296,32 +309,68 @@ pub(crate) fn analyze_design_cover(
                 );
                 input_arrivals.push(scope.regional_slice.search_input_arrival(value));
             }
-            let graph = subject.graph(scope.scope);
-            Ok(Task::new(
-                TaskKey::new(TASK_DOMAIN, row as u64),
-                (
-                    scope.scope,
-                    outputs,
-                    required_times,
-                    output_loads,
-                    input_transitions,
-                    input_arrivals,
-                ),
-            )
-            .with_estimated_work(graph.network().node_count().max(1) as u64)
-            .with_estimated_memory(graph.network().node_count().max(1) as u64))
+            Ok(DesignCoverProblem {
+                scope: scope.scope,
+                outputs,
+                required_times,
+                output_loads,
+                input_transitions,
+                input_arrivals,
+            })
         })
         .collect::<Result<Vec<_>, crate::SynthError>>()?;
-    runtime.map_ordered_composite(tasks, |task, regional_runtime| {
-        let (scope, outputs, required_times, output_loads, input_transitions, input_arrivals) =
-            task;
-        if outputs.is_empty() {
+    let compilation_tasks = problems
+        .iter()
+        .enumerate()
+        .map(|(row, problem)| {
+            let graph = subject.graph(problem.scope);
+            Task::new(TaskKey::new(TASK_DOMAIN, row as u64), problem)
+                .with_estimated_work(graph.network().node_count().max(1) as u64)
+                .with_estimated_memory(graph.network().node_count().max(1) as u64)
+        })
+        .collect();
+    let compiled = CompiledChoiceDesign {
+        scopes: runtime
+            .map_ordered_composite(compilation_tasks, |problem, regional_runtime| {
+                if problem.outputs.is_empty() {
+                    return Ok(None);
+                }
+                let graph = subject.graph(problem.scope);
+                let nodes = problem
+                    .outputs
+                    .iter()
+                    .map(|output| output.node)
+                    .collect::<Vec<_>>();
+                search::CompiledMapping::for_choices(graph, &nodes, catalog, regional_runtime)
+                    .map(Some)
+            })?
+            .into_boxed_slice(),
+    };
+    let selection_tasks = problems
+        .into_iter()
+        .zip(compiled.scopes)
+        .enumerate()
+        .map(|(row, problem)| {
+            let graph = subject.graph(problem.0.scope);
+            Task::new(TaskKey::new(TASK_DOMAIN + 1, row as u64), problem)
+                .with_estimated_work(graph.network().node_count().max(1) as u64)
+                .with_estimated_memory(graph.network().node_count().max(1) as u64)
+        })
+        .collect();
+    runtime.map_ordered_composite(selection_tasks, |(problem, compiled), regional_runtime| {
+        let DesignCoverProblem {
+            scope,
+            outputs,
+            required_times,
+            output_loads,
+            input_transitions,
+            input_arrivals,
+        } = problem;
+        let Some(compiled) = compiled else {
             return Ok(RegionCoverAnalysis::NoCombinationalLogic);
-        }
+        };
         let graph = subject.graph(scope);
         let nodes = outputs.iter().map(|output| output.node).collect::<Vec<_>>();
-        let compiled =
-            search::CompiledMapping::for_choices(graph, &nodes, catalog, regional_runtime)?;
         let cover = search::cover_choice_graph(
             graph,
             &compiled,
