@@ -384,6 +384,8 @@ impl AreaSummary {
             .buffer_inverter_cells
             .saturating_add(other.buffer_inverter_cells.saturating_mul(count));
         self.references.extend(other.references.iter().cloned());
+        self.uncharacterized
+            .extend(other.uncharacterized.iter().cloned());
         #[allow(
             clippy::cast_precision_loss,
             reason = "reported area is floating-point and occurrence counts scale that quantity"
@@ -631,7 +633,10 @@ fn disjoint_set_root(parent: &mut [usize], index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{AreaReportContext, civil_date_from_unix_days, report_mapped_area};
+    use super::{
+        AreaReportContext, civil_date_from_unix_days, report_hierarchical_mapped_area,
+        report_mapped_area,
+    };
     use opto_ir::{RevisionId, mapped::MappedBuilder};
 
     #[test]
@@ -655,10 +660,16 @@ mod tests {
             )
             .unwrap();
 
-        let report = report_mapped_area(&builder.freeze().unwrap(), &AreaReportContext::default())
-            .render_plain();
+        let mapped = builder.freeze().unwrap();
+        let context = AreaReportContext::default();
+        let report = report_mapped_area(&mapped, &context).render_plain();
         assert!(report.contains("Number of cells: 1"));
         assert!(report.contains("Number of macros/black boxes: 1"));
+        assert!(report.contains("sram"));
+
+        let report =
+            report_hierarchical_mapped_area(&mapped, &[(&mapped, 2)], &context).render_plain();
+        assert!(report.contains("1 reference(s) contribute no area"));
         assert!(report.contains("sram"));
     }
 }
