@@ -12,6 +12,9 @@ The normal upstream suite performs analysis, elaboration, linking, structural
 checks, and an area report for both configurations. Full Liberty mapping is
 deliberately opt-in because the large flat mapped netlist has substantially
 higher runtime and memory requirements than frontend qualification.
+Synthesis replaces HPDcache's behavioral SRAM models with the pinned upstream
+`black_box` definitions. The behavioral models remain exclusive to RTL
+simulation; synthesized netlists retain SRAM instances as hierarchy leaves.
 
 To run full synthesis without writing the large netlist:
 
@@ -47,6 +50,10 @@ qualification/upstream/cva6-core/run_smoke.sh gate /path/to/gate-results \
   /path/to/cva6.v
 ```
 
-The flat gate build needs substantially more memory than synthesis. Verilator
-5.048 exceeded 43 GiB RSS while still growing on the measured RV32 netlist, so
-gate simulation should run on a host with a larger memory budget.
+Gate simulation binds behavioral storage to the otherwise empty SRAM leaves;
+the synthesized netlist and its area/timing models continue to treat them as
+black boxes.
+
+The flat gate build is dominated by Verilator code generation rather than the
+short stimulus itself. The smoke script splits generated C++ and disables C++
+optimization to keep this correctness check bounded.

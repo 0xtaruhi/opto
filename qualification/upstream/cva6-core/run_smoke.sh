@@ -34,7 +34,7 @@ arguments=(
     -Wno-fatal
     -Wno-TIMESCALEMOD
     -Wno-UNOPTFLAT
-    -CFLAGS -fcoroutines
+    -CFLAGS "-fcoroutines -O0"
     -MAKEFLAGS "CXX=$CXX_COMMAND LINK=$CXX_COMMAND"
     --top-module cva6_gate_smoke_tb
     --Mdir "$OUTPUT_DIRECTORY/obj_dir"
@@ -73,7 +73,11 @@ else
         exit 2
     fi
     readonly NETLIST="$(cd -- "$(dirname -- "$NETLIST_ARGUMENT")" && pwd)/$(basename -- "$NETLIST_ARGUMENT")"
-    sources+=("$REPOSITORY_ROOT/qualification/libraries/opto_test_cells.v" "$NETLIST")
+    sources+=(
+        "$REPOSITORY_ROOT/qualification/libraries/opto_test_cells.v"
+        "$NETLIST"
+        "$CASE_DIRECTORY/gate_sram_models.sv"
+    )
     arguments+=(--output-split 20000 --output-split-cfuncs 20000)
 fi
 

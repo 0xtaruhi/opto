@@ -322,7 +322,7 @@ fn lower_module_annotations(
     let mut black_box = false;
     for annotation in source.attributes() {
         let name = annotation.name().map_err(frontend_error)?;
-        if name == "blackbox" {
+        if name == "black_box" {
             black_box |= annotation_boolean(annotation, name)?;
         }
         lower_synthesis_directive(

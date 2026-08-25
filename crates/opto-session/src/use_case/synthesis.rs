@@ -56,7 +56,7 @@ pub enum SynthesisEvent {
     },
 }
 
-fn reference_ports(
+pub(super) fn reference_ports(
     session: &Session,
     graph: &design_graph::LinkedHierarchy,
     command: &str,

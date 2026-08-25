@@ -221,7 +221,7 @@ pub fn report_mapped_area(
         netlist.name(),
         mapped_port_count(netlist),
         netlist.net_count(),
-        netlist.cell_count(),
+        netlist.cell_count() + netlist.design_instance_count(),
         &summary,
         context,
     )
@@ -264,7 +264,10 @@ pub fn report_hierarchical_mapped_area(
         let occurrences_usize = usize::try_from(occurrences).unwrap_or(usize::MAX);
         ports = ports.saturating_add(mapped_port_count(netlist).saturating_mul(occurrences_usize));
         nets = nets.saturating_add(netlist.net_count().saturating_mul(occurrences_usize));
-        cells = cells.saturating_add(netlist.cell_count().saturating_mul(occurrences_usize));
+        cells = cells.saturating_add(
+            (netlist.cell_count() + netlist.design_instance_count())
+                .saturating_mul(occurrences_usize),
+        );
         summary.add_scaled(&mapped_area_summary(netlist, context), occurrences);
     }
     format_area_report(root.name(), ports, nets, cells, &summary, context)
@@ -348,6 +351,20 @@ fn mapped_area_summary(
             }
         }
     }
+    for instance in netlist.design_instance_ids() {
+        let Some(reference) = netlist.design_instance_module(instance) else {
+            continue;
+        };
+        let area = context.library_cell_area.get(reference).copied();
+        if area.is_none() {
+            summary.uncharacterized.insert(reference.to_string());
+        }
+        let area = area.unwrap_or(0.0);
+        summary.references.insert(reference.to_string());
+        summary.macro_cells += 1;
+        summary.macro_area += area;
+        summary.total_area += area;
+    }
     summary
 }
 
@@ -367,6 +384,8 @@ impl AreaSummary {
             .buffer_inverter_cells
             .saturating_add(other.buffer_inverter_cells.saturating_mul(count));
         self.references.extend(other.references.iter().cloned());
+        self.uncharacterized
+            .extend(other.uncharacterized.iter().cloned());
         #[allow(
             clippy::cast_precision_loss,
             reason = "reported area is floating-point and occurrence counts scale that quantity"
@@ -614,11 +633,43 @@ fn disjoint_set_root(parent: &mut [usize], index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::civil_date_from_unix_days;
+    use super::{
+        AreaReportContext, civil_date_from_unix_days, report_hierarchical_mapped_area,
+        report_mapped_area,
+    };
+    use opto_ir::{RevisionId, mapped::MappedBuilder};
 
     #[test]
     fn unix_day_conversion_handles_epoch_and_leap_days() {
         assert_eq!(civil_date_from_unix_days(0), (1970, 1, 1));
         assert_eq!(civil_date_from_unix_days(11_016), (2000, 2, 29));
+    }
+
+    #[test]
+    fn retained_design_instances_are_reported_as_black_boxes() {
+        let mut builder = MappedBuilder::new("top", RevisionId::INITIAL).unwrap();
+        let net = builder.add_net(Some("data")).unwrap();
+        builder
+            .add_design_instance(
+                "memory",
+                "sram",
+                &[(
+                    "data".to_string(),
+                    vec![opto_ir::mapped::ConnectionSignal::Net(net)],
+                )],
+            )
+            .unwrap();
+
+        let mapped = builder.freeze().unwrap();
+        let context = AreaReportContext::default();
+        let report = report_mapped_area(&mapped, &context).render_plain();
+        assert!(report.contains("Number of cells: 1"));
+        assert!(report.contains("Number of macros/black boxes: 1"));
+        assert!(report.contains("sram"));
+
+        let report =
+            report_hierarchical_mapped_area(&mapped, &[(&mapped, 2)], &context).render_plain();
+        assert!(report.contains("1 reference(s) contribute no area"));
+        assert!(report.contains("sram"));
     }
 }

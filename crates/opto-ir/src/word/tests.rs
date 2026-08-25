@@ -41,7 +41,7 @@ fn module_annotations_are_interned_validated_and_serialized() {
     module
         .add_annotation(
             AnnotationTarget::Module,
-            "blackbox",
+            "black_box",
             AnnotationValueSpec::Integer {
                 bits: crate::ConstBits::from_bin_str("1").unwrap(),
                 signed: false,
@@ -67,7 +67,7 @@ fn module_annotations_are_interned_validated_and_serialized() {
     decoded.validate().unwrap();
     assert_eq!(decoded, module);
     assert_eq!(decoded.definition_kind(), DefinitionKind::BlackBox);
-    assert_eq!(decoded.name_str(decoded.annotations()[0].name), "blackbox");
+    assert_eq!(decoded.name_str(decoded.annotations()[0].name), "black_box");
 }
 
 #[test]

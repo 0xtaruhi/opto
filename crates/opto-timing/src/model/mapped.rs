@@ -3,15 +3,18 @@
 
 use super::design::CompactTimingDesignBuilder;
 use super::{
-    DesignId, MappedNetId, Parasitics, SealedTopology, SharedTimingDesign, TimingConnection,
-    TimingDesign, TimingInstance, TimingInstanceId, TimingLibrary, TimingModel, TimingNet,
-    TimingPort, TimingPortDirection, TimingRegionDelta,
+    DesignId, MappedNetId, Parasitics, PortId, SealedTopology, SharedTimingDesign,
+    TimingConnection, TimingDesign, TimingInstance, TimingInstanceId, TimingLibrary, TimingModel,
+    TimingNet, TimingPort, TimingPortDirection, TimingRegionDelta,
 };
 use crate::PortBindings;
 use opto_ir::mapped::ConnectionSignal;
 use std::borrow::Cow;
-#[cfg(test)]
 use std::collections::BTreeMap;
+
+/// Port directions for retained opaque design definitions.
+pub type MappedDesignPortDirections =
+    BTreeMap<String, BTreeMap<String, opto_ir::word::PortDirection>>;
 
 impl TimingModel {
     /// Builds a timing model from a flat mapped netlist without parasitics.
@@ -32,10 +35,12 @@ impl TimingModel {
             port_bindings,
             library,
             Parasitics::default(),
+            &MappedDesignPortDirections::new(),
         )
     }
 
-    /// Builds a timing model from a flat mapped netlist and parasitic view.
+    /// Builds a timing model from a mapped netlist and parasitic view.
+    /// Retained opaque design ports become timing cut boundaries.
     ///
     /// # Errors
     ///
@@ -47,8 +52,10 @@ impl TimingModel {
         port_bindings: &PortBindings,
         library: TimingLibrary,
         parasitics: Parasitics,
+        design_ports: &MappedDesignPortDirections,
     ) -> Result<Self, crate::TimingError> {
-        let (design, topology) = mapped_sealed_source(netlist, design_id, port_bindings)?;
+        let (design, topology) =
+            mapped_sealed_source(netlist, design_id, port_bindings, design_ports)?;
         let mut model = Self::from_sealed_source(
             design,
             topology,
@@ -90,17 +97,9 @@ fn mapped_sealed_source(
     netlist: &opto_ir::mapped::MappedNetlist,
     id: DesignId,
     port_bindings: &PortBindings,
+    design_ports: &MappedDesignPortDirections,
 ) -> Result<(SharedTimingDesign, SealedTopology), crate::TimingError> {
-    if netlist.design_instance_count() != 0 {
-        return Err(crate::TimingModelError::InvalidMappedHierarchy {
-            detail: format!(
-                "design '{}' contains child instances; a hierarchy resolver is required",
-                netlist.name()
-            ),
-        }
-        .into());
-    }
-    let ports = mapped_root_ports(netlist, port_bindings)?;
+    let ports = mapped_root_ports(netlist, port_bindings, design_ports)?;
     let mut names = crate::analysis::TimingNetNamesBuilder::new();
     let port_nets = ports
         .iter()
@@ -189,7 +188,7 @@ impl TimingDesign {
             }
             .into());
         }
-        let ports = mapped_root_ports(netlist, port_bindings)?;
+        let ports = mapped_root_ports(netlist, port_bindings, &MappedDesignPortDirections::new())?;
 
         let instances = netlist
             .cell_ids()
@@ -207,6 +206,7 @@ impl TimingDesign {
 fn mapped_root_ports(
     netlist: &opto_ir::mapped::MappedNetlist,
     port_bindings: &PortBindings,
+    design_ports: &MappedDesignPortDirections,
 ) -> Result<Vec<TimingPort>, crate::TimingError> {
     use opto_ir::mapped::{PortDirection, PortId as MappedPortId};
 
@@ -248,6 +248,89 @@ fn mapped_root_ports(
                     PortDirection::Inout => TimingPortDirection::Inout,
                 },
             });
+        }
+    }
+    let mut next_uid = ports
+        .iter()
+        .map(|port| port.id.uid().get().get())
+        .max()
+        .unwrap_or(0);
+    for instance in netlist.design_instance_ids() {
+        let instance_name = netlist.design_instance_name(instance).ok_or_else(|| {
+            crate::TimingModelError::InvalidMappedHierarchy {
+                detail: "retained design instance has no name".to_string(),
+            }
+        })?;
+        let module = netlist.design_instance_module(instance).ok_or_else(|| {
+            crate::TimingModelError::InvalidMappedHierarchy {
+                detail: format!("retained design instance '{instance_name}' has no definition"),
+            }
+        })?;
+        for connection in netlist
+            .design_instance_connections(instance)
+            .ok_or_else(|| crate::TimingModelError::InvalidMappedHierarchy {
+                detail: format!("retained design instance '{instance_name}' has no bindings"),
+            })?
+        {
+            let port = netlist.design_connection_port(connection).ok_or_else(|| {
+                crate::TimingModelError::InvalidMappedHierarchy {
+                    detail: format!(
+                        "retained design instance '{instance_name}' has an unnamed port"
+                    ),
+                }
+            })?;
+            let direction = design_ports
+                .get(module)
+                .and_then(|ports| ports.get(port))
+                .copied()
+                .ok_or_else(|| crate::TimingModelError::InvalidMappedHierarchy {
+                    detail: format!(
+                        "retained design port '{module}.{port}' has no direction contract"
+                    ),
+                })?;
+            let signals = netlist
+                .design_connection_signals(connection)
+                .ok_or_else(|| crate::TimingModelError::InvalidMappedHierarchy {
+                    detail: format!("retained design port '{instance_name}.{port}' has no signals"),
+                })?;
+            for (bit, &signal) in signals.iter().enumerate() {
+                let ConnectionSignal::Net(net) = signal else {
+                    continue;
+                };
+                next_uid = next_uid
+                    .checked_add(1)
+                    .ok_or(crate::TimingModelError::Capacity {
+                        resource: "opaque design timing-port ID",
+                    })?;
+                let uid = opto_core::ObjectUid::from_raw(next_uid).ok_or(
+                    crate::TimingModelError::Capacity {
+                        resource: "opaque design timing-port ID",
+                    },
+                )?;
+                let name = if signals.len() == 1 {
+                    format!("{instance_name}/{port}")
+                } else {
+                    format!("{instance_name}/{port}[{bit}]")
+                };
+                ports.push(TimingPort {
+                    id: PortId::from_uid(uid),
+                    name,
+                    net: TimingNet::mapped(mapped_net_name(netlist, net), net),
+                    direction: match direction {
+                        opto_ir::word::PortDirection::Input => TimingPortDirection::Output,
+                        opto_ir::word::PortDirection::Output => TimingPortDirection::Input,
+                        opto_ir::word::PortDirection::Inout => TimingPortDirection::Inout,
+                        opto_ir::word::PortDirection::Ref => {
+                            return Err(crate::TimingModelError::InvalidMappedHierarchy {
+                                detail: format!(
+                                    "retained design port '{module}.{port}' is a reference port"
+                                ),
+                            }
+                            .into());
+                        }
+                    },
+                });
+            }
         }
     }
     Ok(ports)
@@ -499,6 +582,38 @@ mod tests {
             ),
             Some(shared)
         );
+    }
+
+    #[test]
+    fn opaque_design_outputs_are_timing_cut_startpoints() {
+        let mut builder = MappedBuilder::new("top", opto_ir::RevisionId::INITIAL).unwrap();
+        let output = builder.add_net(Some("q")).unwrap();
+        builder
+            .add_port("q", PortDirection::Output, &[output])
+            .unwrap();
+        builder
+            .add_design_instance(
+                "memory",
+                "SRAM",
+                &[("Q".to_string(), vec![ConnectionSignal::Net(output)])],
+            )
+            .unwrap();
+        let mapped = builder.freeze().unwrap();
+        let bindings = crate::PortBindings::new([crate::test_port_id("q")]);
+        let design_ports = MappedDesignPortDirections::from([(
+            "SRAM".to_string(),
+            BTreeMap::from([("Q".to_string(), opto_ir::word::PortDirection::Output)]),
+        )]);
+
+        TimingModel::from_mapped_with_parasitics(
+            &mapped,
+            crate::test_design_id(),
+            &bindings,
+            timing_library(&["BUF"]),
+            Parasitics::default(),
+            &design_ports,
+        )
+        .unwrap();
     }
 
     #[test]

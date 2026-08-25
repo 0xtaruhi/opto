@@ -105,8 +105,21 @@ impl MmmcTiming {
         port_bindings: &opto_timing::PortBindings,
         object_bindings: &Arc<opto_timing::TimingObjectBindings>,
         scenarios: &ScenarioSet,
+        reference_ports: &crate::ReferencePortMap,
         runtime: &ExecutionContext,
     ) -> Result<Option<Self>, crate::SynthError> {
+        let design_ports = reference_ports
+            .iter()
+            .map(|(module, ports)| {
+                (
+                    module.clone(),
+                    ports
+                        .iter()
+                        .map(|(port, contract)| (port.clone(), contract.direction))
+                        .collect(),
+                )
+            })
+            .collect::<opto_timing::MappedDesignPortDirections>();
         let mut scenario_owners = Vec::with_capacity(scenarios.scenarios().len());
         let mut builds = Vec::with_capacity(scenarios.analysis_views().len());
         for scenario in scenarios.scenarios() {
@@ -206,6 +219,7 @@ impl MmmcTiming {
                 port_bindings,
                 materialize_view_library(build),
                 build.parasitics.clone(),
+                &design_ports,
             )?;
             model.set_object_bindings(Arc::clone(object_bindings));
             build_view_owner(build, model, nested, runtime.clone())

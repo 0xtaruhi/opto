@@ -183,7 +183,7 @@ repair are not implemented.
 
 ### Attributes and ECO
 
-Source attributes are preserved exactly. `blackbox`, `dont_touch`,
+Source attributes are preserved exactly. `black_box`, `dont_touch`,
 `keep_hierarchy`, `keep`, and `async_reg` have typed synthesis semantics, with
 typed pre-synthesis `.dont_touch` and `.ungroup` properties.
 

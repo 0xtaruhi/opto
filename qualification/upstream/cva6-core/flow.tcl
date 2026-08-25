@@ -7,6 +7,10 @@ foreach variable {CVA6_ROOT CVA6_MANIFEST CVA6_CONFIG_FILE CVA6_CHECK_REPORT} {
     }
 }
 
+set synthesis_requested [expr {
+    [info exists env(CVA6_SYNTHESIS)] && $env(CVA6_SYNTHESIS) eq "1"
+}]
+
 set manifest [open $env(CVA6_MANIFEST) r]
 set files {}
 while {[gets $manifest line] >= 0} {
@@ -16,6 +20,11 @@ while {[gets $manifest line] >= 0} {
         if {$relative_path eq "@CONFIG@"} {
             lappend files $env(CVA6_CONFIG_FILE)
         } else {
+            if {$synthesis_requested && [string match \
+                    "core/cache_subsystem/hpdcache/rtl/src/common/macros/behav/hpdcache_sram*_1rw.sv" \
+                    $relative_path]} {
+                set relative_path [string map {/behav/ /blackbox/} $relative_path]
+            }
             lappend files [file join $env(CVA6_ROOT) $relative_path]
         }
     }
@@ -37,9 +46,6 @@ read_hdl \
     -incdir $include_dirs \
     $files
 elaborate cva6
-set synthesis_requested [expr {
-    [info exists env(CVA6_SYNTHESIS)] && $env(CVA6_SYNTHESIS) eq "1"
-}]
 if {$synthesis_requested} {
     set target [file normalize [file join [file dirname [info script]] .. .. libraries opto_test.lib]]
     read_libs [list $target]

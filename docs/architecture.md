@@ -232,6 +232,13 @@ the static global substrate, one `RegionAnchorId`, or one
 `BoundaryEdgeId(driver_region -> sink_region)`. Source/link instances, memory
 macros, black boxes, ports, and clock infrastructure belong to the global
 substrate unless lowering gives a generated cell an explicit region owner.
+Definitions marked `black_box` contribute only their elaborated interface and
+remain opaque design instances throughout mapping and Verilog publication.
+Their port directions make connected nets immutable physical boundaries:
+outputs are producers, inputs are sinks, and inouts are resolved boundaries.
+Uncharacterized black-box outputs and inputs respectively form timing
+startpoints and endpoints, while area reporting counts every occurrence as a
+macro without inventing an area value.
 HFNS and cloning split a multi-region sink set into one segment per sink-region
 endpoint; `BoundaryEdgeId -> [CellId]` is the stable reverse footprint used by
 transactions, checkpoint validation, and publication remapping. Semantic
