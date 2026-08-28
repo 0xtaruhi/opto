@@ -66,12 +66,13 @@ jobs:
         if: needs.changes.outputs.docs-only != 'true' && matrix.language == 'rust'
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         env:
-          # Keep full Rust 1.98 extraction within a standard 16 GiB runner.
-          CODEQL_RAM: 6000
-          CODEQL_THREADS: 2
-          RAYON_NUM_THREADS: 2
-          CARGO_BUILD_JOBS: 2
-          CMAKE_BUILD_PARALLEL_LEVEL: 2
+          # Keep full Rust 1.98 extraction observable and within a standard 16 GiB runner.
+          CODEQL_RAM: 4000
+          CODEQL_THREADS: 1
+          CODEQL_EXTRACTOR_RUST_OPTION_LOGGING_VERBOSITY: progress+
+          RAYON_NUM_THREADS: 1
+          CARGO_BUILD_JOBS: 1
+          CMAKE_BUILD_PARALLEL_LEVEL: 1
 
   analyze-native:
     name: Analyze (c-cpp)
