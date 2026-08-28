@@ -674,6 +674,32 @@ fn rebuilds_area_transitions_in_the_compact_state_domain() {
 }
 
 #[test]
+fn reencoding_preserves_transition_hold_as_an_exact_enable() {
+    let (mut module, _) = sparse_fsm(true);
+
+    assert_eq!(
+        optimize_with_objective(&mut module, FsmObjective::Area).unwrap(),
+        1
+    );
+    let register = module
+        .operations()
+        .iter()
+        .find_map(|operation| match &operation.kind {
+            word::OpKind::Register(register) => Some(register),
+            _ => None,
+        })
+        .unwrap();
+    let enable = register.enable.expect("FSM hold path becomes an enable");
+    let word::ValueKind::Signal(reference) = module.value(enable.value).unwrap().kind else {
+        panic!("the exact transition enable should reuse the select value");
+    };
+    assert_eq!(
+        module.name_str(module.signal(reference.signal).unwrap().name.unwrap()),
+        "select"
+    );
+}
+
+#[test]
 fn selects_compact_and_one_hot_codes_from_the_synthesis_objective() {
     let states = ["00000000", "00010000", "00100000", "01000000"]
         .map(|text| ConstBits::from_bin_str(text).unwrap());

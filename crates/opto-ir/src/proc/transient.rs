@@ -2469,6 +2469,66 @@ mod tests {
     }
 
     #[test]
+    fn structured_loop_region_includes_header_dominated_early_exit_blocks() {
+        let mut word = WordModule::new("top");
+        let condition_port = word
+            .add_port("condition", PortDirection::Input, bit(), span())
+            .unwrap();
+        let stop_port = word
+            .add_port("stop", PortDirection::Input, bit(), span())
+            .unwrap();
+        let condition = word
+            .read_signal(word.port(condition_port).unwrap().signal, span())
+            .unwrap();
+        let stop = word
+            .read_signal(word.port(stop_port).unwrap().signal, span())
+            .unwrap();
+        let mut builder = TransientProcBuilder::new();
+        let condition = builder.add_module_value(condition, bit(), span()).unwrap();
+        let stop = builder.add_module_value(stop, bit(), span()).unwrap();
+        let procedure = builder
+            .add_combinational_procedure(ProcedureKind::Combinational, span())
+            .unwrap();
+        let header = builder.add_block(procedure, span()).unwrap();
+        let body = builder.add_block(procedure, span()).unwrap();
+        let early_exit = builder.add_block(procedure, span()).unwrap();
+        let latch = builder.add_block(procedure, span()).unwrap();
+        let exit = builder.add_block(procedure, span()).unwrap();
+        let shared_return = builder.add_block(procedure, span()).unwrap();
+        builder
+            .terminate_branch(header, condition, body, exit, span())
+            .unwrap();
+        builder
+            .terminate_branch(body, stop, early_exit, latch, span())
+            .unwrap();
+        builder
+            .terminate_jump(early_exit, shared_return, span())
+            .unwrap();
+        builder.terminate_jump(latch, header, span()).unwrap();
+        builder.terminate_jump(exit, shared_return, span()).unwrap();
+        builder.terminate_return(shared_return, span()).unwrap();
+        builder
+            .add_loop_region(LoopRegion {
+                procedure,
+                header,
+                body,
+                latch,
+                exit,
+                form: LoopForm::PreTest,
+                parent: None,
+                source: span(),
+            })
+            .unwrap();
+
+        let graph = builder.seal().unwrap();
+        let natural = graph.natural_loop_blocks(&graph.loop_regions()[0]).unwrap();
+
+        assert!(natural.contains(&early_exit.index()));
+        assert!(!natural.contains(&exit.index()));
+        assert!(!natural.contains(&shared_return.index()));
+    }
+
+    #[test]
     fn cyclic_graph_accepts_a_validated_natural_loop_but_final_materialization_rejects_it() {
         let mut word = WordModule::new("top");
         let input = word

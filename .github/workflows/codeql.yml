@@ -28,7 +28,7 @@ jobs:
     name: Analyze (${{ matrix.language }})
     needs: changes
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -36,10 +36,14 @@ jobs:
         include:
           - language: actions
             build-mode: none
+            os: ubuntu-24.04
           - language: python
             build-mode: none
+            os: ubuntu-24.04
           - language: rust
             build-mode: none
+            # Rust extraction uses the macOS runner's 13 GB CodeQL memory allowance.
+            os: macos-15-intel
     steps:
       - name: Accept documentation-only change
         if: needs.changes.outputs.docs-only == 'true'

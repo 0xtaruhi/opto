@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Deterministic root-closure partitioning and final owner-atom coarsening.
+//! Deterministic root-closure partitioning from canonical Word IR.
 //!
-//! Initial partitioning may claim operation cones under bounded structural work
-//! policy. Final partitioning instead consumes already frozen structural owner
-//! atoms and may merge but never split them. Stable anchors derive from source
-//! identity and semantic connectivity, never worker count or arena position.
+//! Every intermediate snapshot and the final graph use this same bounded-work
+//! kernel. Stable anchors derive from source identity and semantic connectivity,
+//! never worker count, arena position, or mutation-side ownership metadata.
 
 use super::graph::{
     BoundaryPortId, BoundaryValueRevision, OperationAnchorId, RegionAnchorId, RegionBitFlow,
@@ -202,23 +201,6 @@ pub(crate) fn build(
     module: &word::WordModule,
     policy: RegionPartitionPolicy,
 ) -> Result<SynthesisRegionGraph, crate::SynthError> {
-    build_inner(module, policy, None)
-}
-
-/// Builds the final graph while preserving every structural owner atom whole.
-pub(crate) fn build_with_ownership(
-    module: &word::WordModule,
-    policy: RegionPartitionPolicy,
-    ownership: &crate::regional::StructuralOwnershipProvenance,
-) -> Result<SynthesisRegionGraph, crate::SynthError> {
-    build_inner(module, policy, Some(ownership))
-}
-
-fn build_inner(
-    module: &word::WordModule,
-    policy: RegionPartitionPolicy,
-    ownership: Option<&crate::regional::StructuralOwnershipProvenance>,
-) -> Result<SynthesisRegionGraph, crate::SynthError> {
     if policy.partition_start == 0
         || policy.minimum == 0
         || policy.target == 0
@@ -232,11 +214,7 @@ fn build_inner(
     let drivers = SignalDriverIndex::new(module)?;
     let value_keys = semantic::value_keys(module)?;
     let anchors = operation_anchors(module)?;
-    let mut regions = if let Some(ownership) = ownership {
-        partition_owned_operations(module, &drivers, policy, ownership)?
-    } else {
-        partition_operations(module, &anchors, &drivers, policy)?
-    };
+    let mut regions = partition_operations(module, &anchors, &drivers, policy)?;
     append_memory_regions(module, &mut regions)?;
     let mut operation_owner = vec![None; module.operations().len()];
     let mut memory_owner = vec![None; module.memories().len()];
@@ -267,79 +245,6 @@ fn build_inner(
         anchors.into_vec(),
         bit_flows,
     )
-}
-
-fn partition_owned_operations(
-    module: &word::WordModule,
-    drivers: &SignalDriverIndex,
-    policy: RegionPartitionPolicy,
-    ownership: &crate::regional::StructuralOwnershipProvenance,
-) -> Result<Vec<TempRegion>, crate::SynthError> {
-    if ownership.len() != module.operations().len() {
-        return Err(crate::SynthError::invariant(
-            "final partition received incomplete structural ownership provenance",
-        ));
-    }
-    let mut input_operations = InputOperations::new(module, drivers);
-    let dependencies = operation_dependencies(module, &mut input_operations)?;
-    let reachable = synthesis_reachable_operations(module)?;
-    let estimates = StructuralEstimateIndex::build(module, &dependencies);
-    let criticality = estimates.criticality(&dependencies);
-    let mut owner_regions = BTreeMap::<RegionRowId, TempRegion>::new();
-    for (index, &reachable) in reachable.iter().enumerate() {
-        if !reachable {
-            continue;
-        }
-        let operation = word::OpId::from_index(index).map_err(crate::SynthError::from)?;
-        let owner = ownership.owner(operation).ok_or_else(|| {
-            crate::SynthError::invariant("live operation lost structural owner before final freeze")
-        })?;
-        let anchor = ownership.anchor(operation).ok_or_else(|| {
-            crate::SynthError::invariant("live operation lost structural owner anchor")
-        })?;
-        let stored = &module.operations()[index];
-        match owner_regions.entry(owner) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(TempRegion {
-                    anchor,
-                    kind: if is_state(&stored.kind) {
-                        SynthesisRegionKind::State
-                    } else {
-                        SynthesisRegionKind::Combinational
-                    },
-                    operations: vec![operation],
-                    memories: Vec::new(),
-                    work: operation_work(module, stored),
-                    delay: estimates.operations[index].delay,
-                    wiring: estimates.operations[index].wiring_units,
-                    id: RegionAnchorId::from_bytes([0; 32]),
-                    revision: RegionRevision::from_bytes([0; 32]),
-                });
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let target = entry.get_mut();
-                if target.anchor != anchor {
-                    return Err(crate::SynthError::invariant(
-                        "one structural owner has inconsistent stable anchors",
-                    ));
-                }
-                target.operations.push(operation);
-                target.work = target.work.saturating_add(operation_work(module, stored));
-                target.delay = target
-                    .delay
-                    .saturating_add(estimates.operations[index].delay);
-                target.wiring = target
-                    .wiring
-                    .saturating_add(estimates.operations[index].wiring_units);
-                if is_state(&stored.kind) {
-                    target.kind = SynthesisRegionKind::State;
-                }
-            }
-        }
-    }
-    let mut regions = owner_regions.into_values().collect::<Vec<_>>();
-    coarsen_regions(module, &dependencies, &criticality, policy, &mut regions)?;
-    Ok(regions)
 }
 
 fn partition_operations(
@@ -1536,7 +1441,6 @@ fn canonicalize(
         rows.push(SynthesisRegion {
             graph_owner,
             row,
-            partition_anchor: region.anchor,
             id: region.id,
             revision: region.revision,
             kind: region.kind,

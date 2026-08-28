@@ -2025,6 +2025,33 @@ impl TransientProcModule {
                 }
             }
         }
+
+        // A graph-theoretic natural loop contains only nodes that can reach
+        // the latch. Structured source loops additionally own exclusive
+        // early-exit paths: an effect followed by `break` or `return` cannot
+        // reach the backedge, but it must still be cloned with the iteration
+        // that enters it. Close the core forward only through blocks whose
+        // every predecessor is already owned. This excludes a shared return or
+        // disable continuation that is also entered from the canonical exit.
+        let mut pending = natural.iter().copied().collect::<Vec<_>>();
+        while let Some(block) = pending.pop() {
+            let mut successors = Vec::new();
+            self.blocks[block]
+                .terminator
+                .kind
+                .for_each_target(|target| successors.push(target));
+            for target in successors {
+                if target != region.header
+                    && target != region.exit
+                    && predecessors[&target.index()]
+                        .iter()
+                        .all(|predecessor| natural.contains(predecessor))
+                    && natural.insert(target.index())
+                {
+                    pending.push(target.index());
+                }
+            }
+        }
         if !natural.contains(&region.body.index()) || natural.contains(&region.exit.index()) {
             return Err(ProcError::new(
                 "loop metadata does not describe a canonical natural region",

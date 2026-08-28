@@ -3,32 +3,33 @@
 
 use super::FsmPlan;
 use hashbrown::HashMap;
-use opto_ir::word;
-use std::ops::Range;
+use opto_ir::{ConstBits, word};
 
-pub(super) struct FsmMaterialization {
-    pub(super) operations: Range<usize>,
-    pub(super) source: word::OpId,
+#[derive(Debug, Clone, Copy)]
+struct EncodedTransition {
+    data: word::ValueId,
+    activity: TransitionActivity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransitionActivity {
+    Never,
+    Always,
+    Value(word::ValueId),
 }
 
 pub(super) fn materialize_plans(
     module: &mut word::WordModule,
     plans: &[FsmPlan],
-) -> Result<Vec<FsmMaterialization>, crate::SynthError> {
+) -> Result<(), crate::SynthError> {
     if plans.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
-    let mut materialized = Vec::with_capacity(plans.len());
     for plan in plans {
-        let start = module.operations().len();
         rewrite_candidate(module, plan)?;
-        materialized.push(FsmMaterialization {
-            operations: start..module.operations().len(),
-            source: plan.machine.register_operation,
-        });
     }
     module.validate().map_err(crate::SynthError::from)?;
-    Ok(materialized)
+    Ok(())
 }
 
 fn rewrite_candidate(
@@ -74,12 +75,19 @@ fn rewrite_candidate(
             ..*reset
         });
     }
+    let (data, enable) = transition_register_inputs(
+        module,
+        encoded_state,
+        encoded_next,
+        candidate.register.enable,
+        &candidate.source,
+    )?;
     let implementation_register = word::RegisterOp {
         name: candidate.register.name,
-        d: encoded_next,
+        d: data,
         clock: candidate.register.clock,
         edge: candidate.register.edge,
-        enable: candidate.register.enable,
+        enable,
         resets,
     };
     let encoded_register = module
@@ -169,7 +177,7 @@ fn encode_transition(
     module: &mut word::WordModule,
     encoded_state: word::ValueId,
     plan: &FsmPlan,
-) -> Result<word::ValueId, crate::SynthError> {
+) -> Result<EncodedTransition, crate::SynthError> {
     let candidate = &plan.machine;
     let mut encoded_values = HashMap::with_capacity(candidate.transition_order.len());
     for &value_id in &candidate.transition_order {
@@ -188,13 +196,17 @@ fn encode_transition(
                 .iter()
                 .position(|state| state == bits)
                 .unwrap_or(0);
-            module
+            let data = module
                 .constant(
                     plan.codes[candidate.state_classes[state]].clone(),
                     plan.encoded_type,
                     candidate.source.clone(),
                 )
-                .map_err(crate::SynthError::from)?
+                .map_err(crate::SynthError::from)?;
+            EncodedTransition {
+                data,
+                activity: TransitionActivity::Always,
+            }
         } else if matches!(
             value.kind,
             word::ValueKind::Signal(reference)
@@ -202,7 +214,10 @@ fn encode_transition(
                     && reference.lsb == 0
                     && reference.width() == value.ty.width()
         ) {
-            encoded_state
+            EncodedTransition {
+                data: encoded_state,
+                activity: TransitionActivity::Never,
+            }
         } else {
             let word::ValueKind::Operation(operation_id) = value.kind else {
                 return Err(crate::SynthError::invariant(format!(
@@ -230,9 +245,7 @@ fn encode_transition(
                             "FSM transition plan is not in dependency order",
                         )
                     })?;
-                    module
-                        .mux(*cond, then_value, else_value, candidate.source.clone())
-                        .map_err(crate::SynthError::from)?
+                    select_transition(module, *cond, then_value, else_value, &candidate.source)?
                 }
                 word::OpKind::Cast { value, .. } => {
                     encoded_values.get(value).copied().ok_or_else(|| {
@@ -254,4 +267,184 @@ fn encode_transition(
         .get(&candidate.register.d)
         .copied()
         .ok_or_else(|| crate::SynthError::invariant("FSM transition plan has no root value"))
+}
+
+fn select_transition(
+    module: &mut word::WordModule,
+    condition: word::ValueId,
+    then_value: EncodedTransition,
+    else_value: EncodedTransition,
+    source: &word::SourceSpan,
+) -> Result<EncodedTransition, crate::SynthError> {
+    let activity = select_activity(
+        module,
+        condition,
+        then_value.activity,
+        else_value.activity,
+        source,
+    )?;
+    let data = match (then_value.activity, else_value.activity) {
+        (_, TransitionActivity::Never) => then_value.data,
+        (TransitionActivity::Never, _) => else_value.data,
+        _ if then_value.data == else_value.data => then_value.data,
+        _ => module
+            .mux(condition, then_value.data, else_value.data, source.clone())
+            .map_err(crate::SynthError::from)?,
+    };
+    Ok(EncodedTransition { data, activity })
+}
+
+fn select_activity(
+    module: &mut word::WordModule,
+    condition: word::ValueId,
+    then_value: TransitionActivity,
+    else_value: TransitionActivity,
+    source: &word::SourceSpan,
+) -> Result<TransitionActivity, crate::SynthError> {
+    if then_value == else_value {
+        return Ok(then_value);
+    }
+    match (then_value, else_value) {
+        (TransitionActivity::Always, TransitionActivity::Never) => {
+            Ok(TransitionActivity::Value(condition))
+        }
+        (TransitionActivity::Never, TransitionActivity::Always) => module
+            .unary(word::UnaryOp::BitNot, condition, source.clone())
+            .map(TransitionActivity::Value)
+            .map_err(crate::SynthError::from),
+        (TransitionActivity::Always, TransitionActivity::Value(value)) if value == condition => {
+            Ok(TransitionActivity::Value(condition))
+        }
+        (TransitionActivity::Value(value), TransitionActivity::Never) if value == condition => {
+            Ok(TransitionActivity::Value(condition))
+        }
+        (then_value, else_value) => {
+            let ((TransitionActivity::Value(reference), _)
+            | (_, TransitionActivity::Value(reference))) = (then_value, else_value)
+            else {
+                return Err(crate::SynthError::invariant(
+                    "materialized transition activity has no typed value",
+                ));
+            };
+            let ty = module
+                .value(reference)
+                .map(|value| value.ty)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "materialized transition activity references an unknown value",
+                    )
+                })?;
+            let then_value = materialize_activity(module, then_value, ty, source)?;
+            let else_value = materialize_activity(module, else_value, ty, source)?;
+            module
+                .mux(condition, then_value, else_value, source.clone())
+                .map(TransitionActivity::Value)
+                .map_err(crate::SynthError::from)
+        }
+    }
+}
+
+fn materialize_activity(
+    module: &mut word::WordModule,
+    activity: TransitionActivity,
+    ty: word::WordType,
+    source: &word::SourceSpan,
+) -> Result<word::ValueId, crate::SynthError> {
+    match activity {
+        TransitionActivity::Never | TransitionActivity::Always => {
+            let bit = if activity == TransitionActivity::Always {
+                "1"
+            } else {
+                "0"
+            };
+            module
+                .constant(
+                    ConstBits::from_bin_str(bit).map_err(crate::SynthError::from)?,
+                    ty,
+                    source.clone(),
+                )
+                .map_err(crate::SynthError::from)
+        }
+        TransitionActivity::Value(value) => Ok(value),
+    }
+}
+
+fn transition_register_inputs(
+    module: &mut word::WordModule,
+    encoded_state: word::ValueId,
+    transition: EncodedTransition,
+    existing_enable: Option<word::Enable>,
+    source: &word::SourceSpan,
+) -> Result<(word::ValueId, Option<word::Enable>), crate::SynthError> {
+    let derived_enable = match transition.activity {
+        TransitionActivity::Never => return Ok((encoded_state, existing_enable)),
+        TransitionActivity::Always => return Ok((transition.data, existing_enable)),
+        TransitionActivity::Value(value) => value,
+    };
+    let enable = if let Some(existing) = existing_enable {
+        let existing = if existing.active_high {
+            existing.value
+        } else {
+            module
+                .unary(word::UnaryOp::BitNot, existing.value, source.clone())
+                .map_err(crate::SynthError::from)?
+        };
+        module
+            .binary(
+                word::BinaryOp::BitAnd,
+                existing,
+                derived_enable,
+                source.clone(),
+            )
+            .map_err(crate::SynthError::from)?
+    } else {
+        derived_enable
+    };
+    Ok((
+        transition.data,
+        Some(word::Enable {
+            value: enable,
+            active_high: true,
+        }),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materializes_activity_constants_in_the_value_state_domain() {
+        let mut module = word::WordModule::new("top");
+        let source = word::SourceSpan::default();
+        let condition_signal = module
+            .add_wire(
+                "condition",
+                word::WordType::bits(1).unwrap(),
+                source.clone(),
+            )
+            .unwrap();
+        let activity_ty = word::WordType::new(1, false, word::LogicStateKind::TwoState).unwrap();
+        let activity_signal = module
+            .add_wire("activity", activity_ty, source.clone())
+            .unwrap();
+        let condition = module
+            .read_signal(condition_signal, source.clone())
+            .unwrap();
+        let activity = module.read_signal(activity_signal, source.clone()).unwrap();
+
+        let TransitionActivity::Value(selected) = select_activity(
+            &mut module,
+            condition,
+            TransitionActivity::Always,
+            TransitionActivity::Value(activity),
+            &source,
+        )
+        .unwrap() else {
+            panic!("mixed transition activity should materialize a value");
+        };
+
+        assert_eq!(module.value(selected).unwrap().ty, activity_ty);
+        module.validate().unwrap();
+    }
 }

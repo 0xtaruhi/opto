@@ -172,12 +172,7 @@ pub(crate) fn share_equivalent_sequential_values_by(
     let connects = module.take_connects();
     for mut connect in connects {
         if let Some(representative) = replacements.get(connect.value.index()).copied().flatten() {
-            let target = sequential_targets.get(&representative).ok_or_else(|| {
-                crate::SynthError::invariant(format!(
-                    "shared sequential value {representative:?} has no signal target"
-                ))
-            })?;
-            connect.value = read_static_target(module, target, &connect.source)?;
+            connect.value = representative;
         }
         if let Some(dynamic) = &mut connect.target.dynamic {
             dynamic.offset = replacements
@@ -215,26 +210,6 @@ pub(crate) fn share_equivalent_sequential_values_by(
     }
 
     DataflowChanges::from_aliases(module.values().len(), &aliases)
-}
-
-fn read_static_target(
-    module: &mut word::WordModule,
-    target: &word::LValue,
-    source: &word::SourceSpan,
-) -> Result<word::ValueId, crate::SynthError> {
-    if target.dynamic.is_some() {
-        return Err(crate::SynthError::invariant(
-            "shared sequential value has a dynamic signal target",
-        ));
-    }
-    match target.range {
-        Some(range) => module
-            .read_signal_slice(target.signal, range.lsb, range.width(), source.clone())
-            .map_err(Into::into),
-        None => module
-            .read_signal(target.signal, source.clone())
-            .map_err(Into::into),
-    }
 }
 
 #[cfg(test)]
@@ -318,10 +293,7 @@ mod tests {
         assert!(changes.has_equivalences());
         assert_eq!(changes.representatives()[q1.index()], q0);
         assert_eq!(module.connects()[0].value, q0);
-        assert!(matches!(
-            module.value(module.connects()[1].value).unwrap().kind,
-            word::ValueKind::Signal(reference) if reference.signal == q0_signal
-        ));
+        assert_eq!(module.connects()[1].value, q0);
         module.compact_netlist().unwrap();
         assert_eq!(
             module
@@ -473,7 +445,7 @@ mod tests {
 
         let regions = one_region(&module);
         let canonical =
-            super::super::optimize_owned_combinational_dataflow(&mut module, &regions).unwrap();
+            super::super::optimize_region_combinational_dataflow(&mut module, &regions).unwrap();
         let changes = share_equivalent_sequential_values_by(
             &mut module,
             crate::test_runtime(),

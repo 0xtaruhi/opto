@@ -236,23 +236,6 @@ fn synthesize_maps_semantic_clock_enable_to_an_enable_dff_pin() {
 }
 
 #[test]
-fn synthesize_recovers_a_lowered_feedback_mux_without_general_feedback_search() {
-    let mut module = module_with_lowered_feedback_mux_flop();
-    let options = SynthesisOptions {
-        target_cells: vec![simple_dff_target_cell(), enable_dff_target_cell()].into(),
-    };
-
-    let report = synthesize_test_module(&mut module, options).unwrap();
-    let text = report.mapped_verilog();
-
-    assert_eq!(report.report.cells, 1, "{text}");
-    assert!(
-        text.contains("EDFD1 q_reg(.D(d), .DE(en), .CP(clk), .Q(q));"),
-        "{text}"
-    );
-}
-
-#[test]
 fn synthesize_composes_sync_reset_with_a_retained_enable_pin() {
     let mut module = module_with_sync_reset_enable_flop_process();
     let options = SynthesisOptions {

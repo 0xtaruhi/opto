@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 491
+expected_tests = 483
 
 [[owners]]
 path = "src/api"
@@ -32,8 +32,8 @@ contract = "Reusable Word-IR dependency, driver, cycle, use, and instance analys
 [[owners]]
 path = "src/planning"
 owner = "planning"
-tests = 82
-contract = "Region-owned Word optimization, recognition, resource choice, and architecture recipes."
+tests = 84
+contract = "Snapshot-confined Word optimization, recognition, resource choice, and architecture recipes."
 
 [[owners]]
 path = "src/boolean"
@@ -44,7 +44,7 @@ contract = "Bit lowering, canonical Boolean subject construction, rewriting, and
 [[owners]]
 path = "src/regional"
 owner = "regional"
-tests = 34
+tests = 28
 contract = "Stable region graph identity, boundary contracts, portable plans, and convergence policy."
 
 [[owners]]
@@ -56,7 +56,7 @@ contract = "Fingerprints, recipe caches, source metrics, snapshots, and portable
 [[owners]]
 path = "src/mapping"
 owner = "mapping"
-tests = 106
+tests = 102
 contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and materialization."
 
 [[owners]]
@@ -80,8 +80,8 @@ contract = "Transactional candidate evaluation, mapped edits, rollback, and dete
 [[focused_contracts]]
 path = "src/regional/region_graph/tests.rs"
 owner = "region-graph"
-tests = 24
-contract = "Partition atoms, stable region and boundary identities, and deterministic graph construction."
+tests = 23
+contract = "Canonical partition snapshots, stable region and boundary identities, and deterministic graph construction."
 
 [[focused_contracts]]
 path = "src/mapping/cover/search/tests.rs"

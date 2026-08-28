@@ -6,7 +6,6 @@
 pub(crate) mod boundary;
 mod contract;
 mod epoch;
-mod ownership;
 mod plan;
 pub(crate) mod region_graph;
 pub use boundary::{
@@ -23,6 +22,5 @@ pub use region_graph::{
 
 pub(crate) use contract::RegionContractSet;
 pub(crate) use epoch::{EpochDecision, RegionalEpochCoordinator};
-pub(crate) use ownership::StructuralOwnershipProvenance;
 pub use plan::{BoundaryResponse, BoundaryResponseRow, RegionCoverPlan, RegionPlanCost};
 pub(crate) use plan::{RegionCoverPlanRecord, RegionImplementationCell, RegionalSharedAllocations};

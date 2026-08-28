@@ -10,11 +10,11 @@ violates this contract is removed rather than preserved behind a compatibility
 path.
 
 [RFC 0007](rfcs/0007-timing-driven-partitioning.md) replaced the global
-synthesis front half with timing-driven ownership and region-private mapping.
-The coordinator validates, establishes provisional ownership, commits only
-owner-confined structural transformations, seals the final region graph,
+synthesis front half with timing-driven partitioning and region-private mapping.
+The coordinator validates, rebuilds disposable region snapshots from canonical
+Word IR around structural transformations, seals the final region graph,
 propagates contracts, and publishes private artifacts. No semantic candidate
-may span owners.
+may span the rows of the snapshot that confines its phase.
 
 [RFC 0010](rfcs/0010-command-surface.md) defines the public command design: a
 flat Tcl surface with a coherent typed database model and one
@@ -186,7 +186,7 @@ boundaries, not a flat inventory of individual passes:
 | `engine` | synthesis stage ordering, immutable stage states, regional mapping epochs, and final publication | pass-local transformation algorithms |
 | `frontend` | procedural RTL normalization and the single validated Word-IR entry point | architecture selection or mapped-netlist mutation |
 | `word` | reusable Word-IR dependency, driver, cycle, use, and instance analyses | transformation policy or mapped artifacts |
-| `planning` | region-owned Word optimization, semantic recognition, mapping cost policy, resource choices, and regional architecture recipes | cross-owner semantic optimization, target-cell cover, or post-map repair |
+| `planning` | disposable snapshot-confined Word optimization, semantic recognition, mapping cost policy, resource choices, and regional architecture recipes | cross-snapshot semantic optimization, target-cell cover, or post-map repair |
 | `boolean` | bit lowering, canonical Boolean subject construction, rewriting, and graph analysis | target-library policy or mapped closure |
 | `regional` | stable region graph identities, boundary contracts, portable plans, and deterministic convergence policy | incremental persistence or MMMC measurement |
 | `incremental` | source/Word fingerprints, recipe caches, metrics, and portable regional cache records | architecture selection or live mapped state |
@@ -296,13 +296,13 @@ linked RTL + constraints + libraries
 process normalization and design validation
   |
   v
-stable structural anchoring and root-closure partitioning
+canonical root-closure partition snapshot
   |
   v
-owner-confined FSM / sharing / sequential preparation
+snapshot-confined FSM / sharing / sequential preparation
   |
   v
-final region-graph rebuild and identity seal
+final canonical partition and identity seal
   |
   v
 immutable SynthesisRegionGraph + monotone boundary contracts
@@ -750,20 +750,24 @@ Failures carry the structured diagnostic contract defined above, including the
 Tcl invocation that triggered the work when available. A raw failure string
 without a stable owning-domain code is not the diagnostic contract.
 
-### 2. Establish Ownership And Freeze The Region Graph
+### 2. Rebuild Region Snapshots And Freeze The Final Graph
 
-The coordinator first partitions the validated synthesis-root closure to give
-every live operation one provisional owner. FSM optimization, equivalent
-sequential sharing, and target sequential preparation may then analyze and
-rewrite only candidates whose complete footprint has one owner. Generated
-operations inherit that owner through stable source provenance, so the stages
-compose without renumbering the arena or rebuilding the partition between
-passes. One final build seals the post-rewrite graph.
+`WordModule` is the only mutable structural authority. Before a structural
+phase needs region confinement, the coordinator runs the canonical partition
+kernel over the complete current synthesis-root closure and gives the phase an
+immutable operation-to-region snapshot. The phase may analyze and rewrite only
+candidates whose complete footprint has one row in that snapshot. Any mutation
+invalidates the snapshot, which is discarded rather than repaired. FSM
+optimization, priority dataflow, equivalent sequential sharing, and clock
+gating therefore each consume a snapshot derived from the Word IR they actually
+see. The final graph is built from the post-rewrite Word IR through the same
+partition entry point.
 
-No opportunity discovered in this stage influences the initial ownership
-partition, and no candidate may span owners. Combinational canonicalization,
-muxed-arithmetic sharing, architecture selection, operator fusion, and cover do
-not run here. After the owned structural stage,
+No opportunity discovered by a phase can retroactively widen the snapshot that
+confines that phase, and no candidate may span its rows. A later phase sees a
+fresh partition of all changes already committed to Word IR. Combinational
+canonicalization, muxed-arithmetic sharing, architecture selection, operator
+fusion, and cover do not run here. After structural preparation,
 `SynthesisRegionGraph` is rebuilt and sealed with:
 
 - stable operation, region-anchor, and region-revision identities;
@@ -775,17 +779,14 @@ not run here. After the owned structural stage,
 - architecture-independent delay, logic, and wiring estimates;
 - local and contextual fingerprints.
 
-`StructuralOwnershipProvenance` is the write authority during structural
-preparation. Initial operations carry their frozen owner atom; every transform
-must claim each generated operation from an exact source set with one common
-atom. The final graph consumes the shared observability closure, rejects an
-unowned live operation, and verifies that every surviving
-frozen atom remains whole. Final partitioning may merge whole atoms but may not
-split one. Ownership is not a preparation-side lookup that later partitioning
-may discard: it survives operation replacement, final partition, private-IR
-construction, plan binding, and provenance. It is placement and write
-authority only; it is not a connectivity classifier and never decides whether
-a bit is external, live, or publishable.
+There is no mutable structural-owner side table and no claim, inherit, or
+repair API for generated operations. A structural transform publishes only
+Word IR. Its output receives rows when the next snapshot is rebuilt from
+canonical connectivity and liveness. This makes region placement a derived
+view instead of a second mutable truth that can become stale. Final graph rows,
+private-plan ownership, mapped-artifact ownership, and implementation lineage
+remain immutable publication identities; they are downstream records, not
+preparation-side mutation authority.
 Published objects use exactly three owner classes: global substrate, one
 region, or one directed boundary edge.
 
@@ -827,22 +828,13 @@ early when no admissible adjacent merge remains.
 
 Partition activation, minimum useful work, target work, and maximum merge work
 are separate deterministic limits. When the complete reachable operation
-closure fits the activation limit, the initial cone partitioner emits exactly
-one operation region before seed construction; this preserves all region-local
-sharing and amortizes regional scheduling and publication for small blocks.
-The final structural-owner path groups its already-frozen owner atoms directly
-and does not evaluate the activation limit. Larger initial closures use the
-bounded cone partitioner and never merge disconnected work merely to reduce
-region count. There is no global bin packing,
+closure fits the activation limit, every snapshot emits exactly one operation
+region before seed construction; this preserves all region-local sharing and
+amortizes regional scheduling and publication for small blocks. Larger closures
+use the bounded cone partitioner and never merge disconnected work merely to
+reduce region count. There is no global bin packing,
 resource-affinity proposer, cross-owner candidate analysis, or architecture
 candidate analysis before the final freeze.
-
-The final freeze contracts each provisional `StructuralOwnershipProvenance`
-owner into an indivisible atom before coarsening. Generated operations inherit
-both the owner and its stable partition anchor. The final partition may merge
-whole atoms but never repartitions individual operations and then repairs a
-split owner after the fact; therefore capacity accounting observes the actual
-atomic input to the final partition.
 
 Partition size does not depend on thread count. This preserves incremental
 identity and makes one-thread and many-thread output equivalent.
@@ -1738,12 +1730,12 @@ defect.
 | Word graph as the sole pre-cover connectivity and dataflow authority | Implemented |
 | Absolute locally dependent timing budgets | Implemented |
 | Region-private Word optimization and architecture selection | Implemented |
-| Private muxed arithmetic, CSA, Wallace/Dadda, and fused MAC; owner-confined FSM and sequential sharing | Implemented |
+| Private muxed arithmetic, CSA, Wallace/Dadda, and fused MAC; snapshot-confined FSM and sequential sharing | Implemented |
 | No memory admission mechanism | Implemented |
 | Parallel private technology-independent optimization and Liberty lowering/cover | Implemented |
 | Proof-backed AXM functional reduction before the optimization portfolio | Implemented; shard-parallel, deterministic across worker counts |
 | Unobservable mapped logic removed before closure evaluates it | Implemented |
-| Feedback-enable recovery guarded by a value-level equivalence proof | Implemented; reset registers are declined, see Known Architectural Gaps |
+| Register controls consumed only from exact `RegisterOp` enables | Implemented; connectivity-based feedback-enable recovery is absent |
 | Clock gating enabled by default | Implemented |
 | One closure-ranked mapped-resynthesis regime without area/timing search modes | Implemented |
 | Constant-register removal proved through a bounded influence cone | Implemented; one batched transaction per round |
@@ -1764,28 +1756,27 @@ defect.
 
 ## Register Control Ownership
 
-Each register control has exactly one owner. The frontend knows each register's
-enable exactly, because `always_ff` lowering emits
-`RegisterOp { d, enable, resets }` with the enable taken straight from the branch
-condition. Control lowering normalizes resets and composes a synchronous reset
-into that enable but never consumes it. Clock gating and enabled-cell selection
-consume exact enables. `expand_unsupported_enables` is the single, last site that
-turns a remaining enable into a next-state mux, so a register's held value is
-read through a wire with exactly one driver and denotes the register's output
-rather than whichever assignment ran last.
+Each register control has exactly one owner. The frontend emits
+`RegisterOp { d, enable, resets }` with an exact enable for a conditional
+`always_ff` assignment. A snapshot-confined FSM rewrite may also emit an exact
+enable while it rebuilds the closed transition DAG: state leaves are hold
+activity, constant state leaves are update activity, and muxes compose those
+activities under the same conditions as the encoded next state. This is part of
+FSM semantic materialization and does not search signal connectivity. Control
+lowering normalizes resets and composes a synchronous reset into the enable but
+never consumes it. Clock gating and enabled-cell selection consume exact
+enables. `expand_unsupported_enables` is the single, last site that turns a
+remaining enable into a next-state mux, so a register's held value is read
+through a wire with exactly one driver and denotes the register's output rather
+than whichever assignment ran last.
 
-The earlier pipeline discarded the exact enable in control lowering and then had
-feedback-enable recovery pattern-match it back out of the next state, with the
-expansion implemented twice. Recovery decided that a path holds by comparing it
-against a read of the register's target signal, and equated two reads of one
-signal even though a clocked process that assigns on a reset branch and on an
-enable branch produces reads that denote different values. On the Ibex SKY130
-case that inferred an enable narrower than the design's and co-simulation
-diverged from cycle 116. The value-level equivalence proof that guards recovery
-does not close that hole either: the CNF encoder gives one variable per signal
-bit for every read of that signal, so it cannot distinguish reads taken at
-different program points. Recovery is now reachable only for a register whose RTL
-writes its enable as a mux rather than as a branch.
+The earlier pipeline discarded an exact enable in control lowering and tried to
+pattern-match it back out of a next-state mux. It decided that a path held by
+comparing against a read of the register's target signal, even though reads at
+different procedural points need not denote the same state. That recovery path
+and its duplicate expression expansion no longer exist. Outside the bounded FSM
+rewrite, a mux already present in `RegisterOp::d` remains ordinary data logic;
+it is never reclassified as an enable from signal connectivity.
 
 Letting exact enables reach clock gating exposed a second defect, in owned
 combinational dataflow rather than in sequential mapping. `read_signal_bits`
@@ -1816,21 +1807,13 @@ rather than cover whole implementations against each other.
 
 ## Speculative Construction Rewinds
 
-Feedback-enable recovery has to build an expression before it can prove whether
-to keep it: the enable and data it extracts are only checkable once they exist
-as Word values. It used to build them in the production module and then walk
-away on a failed proof, leaving the reads, the expressions, the reconstructed
-mux, and their ownership entries resident. They were unreachable, so
-materialization dropped them, but every Word pass, ownership traversal, and
-partition build between then and there still walked them.
-
-The construction now takes a module checkpoint first and rewinds to it on every
-declining path. A rewind rejects any change to another arena and checks every
-retained annotation, directive, memory port, value, operation,
-connection, and instance for references into the suffix, then discards the
-suffix and rewinds interned names. Every rejection happens before mutation, so
-the public rollback operation is atomic without requiring the intermediate
-module to satisfy unrelated publication invariants.
+Transient procedural materialization takes a Word-module checkpoint before it
+publishes an acyclic expression graph and rewinds on failure. A rewind rejects
+any change to another arena and checks every retained annotation, directive,
+memory port, value, operation, connection, and instance for references into the
+suffix, then discards the suffix and rewinds interned names. Every rejection
+happens before mutation, so rollback is atomic without a mutable region-owner
+table or a partially valid publication record.
 
 ## The Initial-State Contract
 

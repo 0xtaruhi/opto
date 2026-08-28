@@ -72,12 +72,11 @@ impl TargetMappingContext {
         }
     }
 
-    pub(crate) fn publish_owned_preparation(
+    pub(crate) fn prepare_structure(
         &self,
         module: &mut word::WordModule,
         clock_gating: Option<ClockGatingStyle>,
         target_mapping: bool,
-        ownership: &mut crate::regional::StructuralOwnershipProvenance,
     ) -> Result<(), crate::SynthError> {
         let trace = crate::api::diagnostics::SynthTrace::new(self.config.diagnostics.timing);
         let mut stage_started = std::time::Instant::now();
@@ -90,33 +89,23 @@ impl TargetMappingContext {
             );
             stage_started = std::time::Instant::now();
         };
-        sequential::normalize_sequential_controls(module, ownership)?;
+        sequential::normalize_sequential_controls(module)?;
         finish_stage("normalize controls");
         if target_mapping {
-            sequential::lower_controls(module, ownership)?;
+            sequential::lower_controls(module)?;
             finish_stage("lower controls");
         }
-        let gating_edges = |edge: word::Edge| {
-            clock_gating.is_some_and(|style| {
-                self.clock_gating_catalog
-                    .gate_for(edge, style.latch_based)
-                    .is_some()
-            })
-        };
         if target_mapping {
-            sequential::recover_feedback_enables(
-                module,
-                &self.sequential_catalog,
-                &gating_edges,
-                ownership,
-            )?;
-            finish_stage("recover enables");
             if let Some(style) = clock_gating {
+                let partition = crate::regional::region_graph::partition::build(
+                    module,
+                    crate::regional::region_graph::RegionPartitionPolicy::default(),
+                )?;
                 clock_gating::gate_register_clocks_in_regions(
                     module,
                     &self.clock_gating_catalog,
                     style,
-                    ownership,
+                    partition.operation_owner_rows(),
                 )?;
                 finish_stage("gate clocks");
             }
@@ -124,7 +113,7 @@ impl TargetMappingContext {
             // enable. Everything before it either keeps the enable exact or
             // turns it into a gated clock; whatever the target cannot realize as
             // an enabled cell becomes a next-state mux here.
-            sequential::expand_unsupported_enables(module, &self.sequential_catalog, ownership)?;
+            sequential::expand_unsupported_enables(module, &self.sequential_catalog)?;
             finish_stage("expand enables");
         }
         Ok(())

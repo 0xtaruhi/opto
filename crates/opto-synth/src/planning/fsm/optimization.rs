@@ -89,12 +89,12 @@ pub(crate) enum FsmObjective {
 
 pub(crate) fn optimize_derived_fsms_in_regions(
     module: &mut word::WordModule,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
+    operation_regions: &[Option<crate::RegionRowId>],
     timing: &opto_timing::TimingContext,
     port_bindings: &opto_timing::PortBindings,
     runtime: &opto_runtime::ExecutionContext,
 ) -> Result<usize, crate::SynthError> {
-    if ownership.len() != module.operations().len() {
+    if operation_regions.len() != module.operations().len() {
         return Err(crate::SynthError::invariant(
             "regional FSM optimization has incomplete operation ownership",
         ));
@@ -104,33 +104,21 @@ pub(crate) fn optimize_derived_fsms_in_regions(
         .machines
         .into_vec()
         .into_iter()
-        .filter(|machine| machine_is_region_private(module, machine, ownership))
+        .filter(|machine| machine_is_region_private(module, machine, operation_regions))
         .collect();
     let plans = plan_catalog(catalog, |machine| {
         machine_objective(module, machine, timing, port_bindings)
     })?;
-    for materialized in materialize_plans(module, &plans)? {
-        if materialized.operations.start != ownership.len() {
-            return Err(crate::SynthError::invariant(
-                "FSM ownership does not align with generated operations",
-            ));
-        }
-        ownership.claim_range(
-            module,
-            materialized.operations.start,
-            materialized.operations.end,
-            &[materialized.source],
-        )?;
-    }
+    materialize_plans(module, &plans)?;
     Ok(plans.len())
 }
 
 fn machine_is_region_private(
     module: &word::WordModule,
     machine: &DerivedFsm,
-    ownership: &crate::regional::StructuralOwnershipProvenance,
+    operation_regions: &[Option<crate::RegionRowId>],
 ) -> bool {
-    let owner = ownership.owner(machine.register_operation);
+    let owner = operation_regions[machine.register_operation.index()];
     owner.is_some()
         && machine.transition_order.iter().all(|&value| {
             let Some(word::ValueKind::Operation(operation)) =
@@ -138,7 +126,7 @@ fn machine_is_region_private(
             else {
                 return true;
             };
-            ownership.owner(*operation) == owner
+            operation_regions[operation.index()] == owner
         })
 }
 
@@ -149,7 +137,7 @@ fn optimize_with_objective(
 ) -> Result<usize, crate::SynthError> {
     let catalog = derive_catalog(module, crate::test_runtime())?;
     let plans = plan_catalog(catalog, |_| objective)?;
-    let _ = materialize_plans(module, &plans)?;
+    materialize_plans(module, &plans)?;
     module.compact_netlist().map_err(crate::SynthError::from)?;
     module.validate().map_err(crate::SynthError::from)?;
     Ok(plans.len())
