@@ -56,16 +56,21 @@ pub(crate) fn gate_register_clocks(
     catalog: &ClockGatingCatalog,
     style: ClockGatingStyle,
 ) -> Result<ClockGatingSummary, crate::SynthError> {
-    let mut ownership = crate::regional::StructuralOwnershipProvenance::global(module);
-    gate_register_clocks_in_regions(module, catalog, style, &mut ownership)
+    let operation_regions = vec![None; module.operations().len()];
+    gate_register_clocks_in_regions(module, catalog, style, &operation_regions)
 }
 
 pub(super) fn gate_register_clocks_in_regions(
     module: &mut word::WordModule,
     catalog: &ClockGatingCatalog,
     style: ClockGatingStyle,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
+    operation_regions: &[Option<crate::RegionRowId>],
 ) -> Result<ClockGatingSummary, crate::SynthError> {
+    if operation_regions.len() != module.operations().len() {
+        return Err(crate::SynthError::invariant(
+            "clock-gating region snapshot does not cover the operation arena",
+        ));
+    }
     let mut summary = ClockGatingSummary::default();
     if !catalog.gates_any_edge() || style.minimum_bitwidth == 0 {
         return Ok(summary);
@@ -91,7 +96,7 @@ pub(super) fn gate_register_clocks_in_regions(
         };
         banks
             .entry(BankKey {
-                region: ownership.owner(operation_id),
+                region: operation_regions[operation_id.index()],
                 clock: register.clock,
                 enable: enable.value,
                 active_high: enable.active_high,
@@ -120,7 +125,6 @@ pub(super) fn gate_register_clocks_in_regions(
             continue;
         };
         let source = members[0].source.clone();
-        let start = ownership.start(module)?;
         let enable = if key.active_high {
             key.enable
         } else {
@@ -173,11 +177,6 @@ pub(super) fn gate_register_clocks_in_regions(
         module
             .add_instance(instance, cell.cell_name, connections, source.clone())
             .map_err(crate::SynthError::from)?;
-        let sources = members
-            .iter()
-            .map(|member| member.operation)
-            .collect::<Vec<_>>();
-        ownership.claim_since(module, start, &sources)?;
         for member in &members {
             let operation = module.operation_mut(member.operation).ok_or_else(|| {
                 crate::SynthError::invariant(format!(

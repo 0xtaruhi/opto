@@ -805,7 +805,7 @@ fn preserves_alias_chain_when_its_resolved_driver_follows_an_operation_use() {
 }
 
 #[test]
-fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
+fn priority_rebalancing_repartitions_generated_operations_from_word_ir() {
     let mut module = word::WordModule::new("priority_owner");
     let bit = word::WordType::bits(1).unwrap();
     let source = word::SourceSpan::stable("priority assignment");
@@ -839,12 +839,10 @@ fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
         })
         .collect::<Vec<_>>();
     let mut selected = zero;
-    let mut chain_nodes = Vec::new();
     for condition in &conditions {
         selected = module
             .mux(*condition, one, selected, source.clone())
             .unwrap();
-        chain_nodes.push(selected);
     }
     let output = module
         .add_port("selected", word::PortDirection::Output, bit, source.clone())
@@ -857,29 +855,22 @@ fn priority_rebalancing_assigns_generated_operations_to_the_chain_owner() {
         )
         .unwrap();
 
-    let boundary_owner = crate::RegionRowId::from_index(0).unwrap();
-    let chain_owner = crate::RegionRowId::from_index(1).unwrap();
-    let mut owners = vec![None; module.operations().len()];
-    for (values, owner) in [(&conditions, boundary_owner), (&chain_nodes, chain_owner)] {
-        for value in values {
-            let word::ValueKind::Operation(operation) = module.value(*value).unwrap().kind else {
-                panic!("test value must be operation-backed");
-            };
-            owners[operation.index()] = Some(owner);
-        }
-    }
-    let original_operations = owners.len();
+    let original_operations = module.operations().len();
 
-    let mut ownership =
-        crate::regional::StructuralOwnershipProvenance::from_owners_for_test(&module, owners)
-            .unwrap();
-    optimize_owned_priority_dataflow(&mut module, &mut ownership).unwrap();
-    assert_eq!(ownership.len(), module.operations().len());
-    assert!(ownership.len() > original_operations);
+    optimize_priority_dataflow_in_regions(&mut module).unwrap();
+    assert!(module.operations().len() > original_operations);
+    let graph = crate::regional::region_graph::partition::build(
+        &module,
+        crate::regional::region_graph::RegionPartitionPolicy::with_target_work(1),
+    )
+    .unwrap();
+    let reachable =
+        crate::regional::region_graph::partition::synthesis_reachable_operations(&module).unwrap();
     assert!(
-        ownership.owners()[original_operations..]
+        reachable[original_operations..]
             .iter()
-            .all(|owner| *owner == Some(chain_owner))
+            .zip(&graph.operation_owner_rows()[original_operations..])
+            .any(|(&reachable, owner)| reachable && owner.is_some())
     );
 }
 
@@ -916,7 +907,7 @@ fn keeps_a_driver_for_a_wire_read_only_by_an_instance() {
     };
     let mut owners = vec![None; module.operations().len()];
     owners[operation.index()] = Some(crate::RegionRowId::from_index(0).unwrap());
-    optimize_owned_combinational_dataflow(&mut module, &owners).unwrap();
+    optimize_region_combinational_dataflow(&mut module, &owners).unwrap();
 
     // The wire's only reader was the instance, so dropping its connect is
     // legitimate only if the instance was substituted onto the driver too.

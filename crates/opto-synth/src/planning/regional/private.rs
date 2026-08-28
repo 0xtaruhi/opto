@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Owner-confined structural preparation followed by one final region freeze.
+//! Structural preparation from disposable canonical region snapshots.
 
 use opto_ir::word;
 
@@ -16,25 +16,27 @@ pub(crate) fn optimize_structure(
 ) -> Result<crate::SynthesisRegionGraph, crate::SynthError> {
     crate::planning::dataflow::coalesce_static_wire_drivers(module)?;
     crate::planning::dataflow::resolve_static_connect_aliases(module)?;
-    let provisional = crate::regional::region_graph::partition::build(
+    let partition = crate::regional::region_graph::partition::build(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
     )?;
-    let mut ownership = crate::regional::StructuralOwnershipProvenance::new(module, &provisional)?;
-
     crate::planning::fsm::optimize_derived_fsms_in_regions(
         module,
-        &mut ownership,
+        partition.operation_owner_rows(),
         timing,
         port_bindings,
         runtime,
     )?;
     let canonical_values =
-        crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
+        crate::planning::dataflow::optimize_priority_dataflow_in_regions(module)?;
+    let partition = crate::regional::region_graph::partition::build(
+        module,
+        crate::regional::region_graph::RegionPartitionPolicy::default(),
+    )?;
     crate::planning::dataflow::share_equivalent_sequential_values_by(
         module,
         runtime,
-        ownership.owners(),
+        partition.operation_owner_rows(),
         |value| {
             canonical_values
                 .representatives()
@@ -43,14 +45,11 @@ pub(crate) fn optimize_structure(
                 .unwrap_or(value)
         },
     )?;
-    mapping.publish_owned_preparation(module, clock_gating, target_mapping, &mut ownership)?;
-    crate::planning::dataflow::optimize_owned_priority_dataflow(module, &mut ownership)?;
+    mapping.prepare_structure(module, clock_gating, target_mapping)?;
+    crate::planning::dataflow::optimize_priority_dataflow_in_regions(module)?;
 
-    let final_partition = crate::regional::region_graph::partition::build_with_ownership(
+    crate::regional::region_graph::partition::build(
         module,
         crate::regional::region_graph::RegionPartitionPolicy::default(),
-        &ownership,
-    )?;
-    ownership.verify_frozen(module, &final_partition)?;
-    Ok(final_partition)
+    )
 }

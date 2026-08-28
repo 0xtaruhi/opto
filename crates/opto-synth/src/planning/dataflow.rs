@@ -13,7 +13,7 @@ use opto_ir::word;
 use std::collections::BTreeMap;
 
 /// Reconstruct fully and uniquely driven wires as one canonical whole-signal
-/// connection before region ownership is frozen.
+/// connection before canonical region snapshots are built.
 ///
 /// A packed or flattened aggregate is commonly assembled by several static
 /// slice assignments. Keeping those assignments separate makes a whole-signal
@@ -264,13 +264,13 @@ pub(crate) fn resolve_static_connect_aliases(
     apply_representatives(module, &drivers, resolved_values, |_, _| true)
 }
 
-pub(crate) fn optimize_owned_combinational_dataflow(
+pub(crate) fn optimize_region_combinational_dataflow(
     module: &mut word::WordModule,
-    owners: &[Option<crate::RegionRowId>],
+    operation_regions: &[Option<crate::RegionRowId>],
 ) -> Result<DataflowChanges, crate::SynthError> {
-    if owners.len() != module.operations().len() {
+    if operation_regions.len() != module.operations().len() {
         return Err(crate::SynthError::invariant(
-            "owned dataflow ownership does not align with the operation arena",
+            "dataflow region snapshot does not align with the operation arena",
         ));
     }
     let drivers = DriverIndex::build(module)?;
@@ -283,7 +283,7 @@ pub(crate) fn optimize_owned_combinational_dataflow(
         .collect::<Result<Vec<_>, crate::SynthError>>()?;
     drop(resolver);
     canonicalize_values_by(module, &mut representatives, |operation| {
-        owners[operation.index()].map(|owner| u64::from(owner.raw()) + 1)
+        operation_regions[operation.index()].map(|region| u64::from(region.raw()) + 1)
     })?;
     close_representatives(&mut representatives)?;
 
@@ -292,9 +292,11 @@ pub(crate) fn optimize_owned_combinational_dataflow(
         let terminal = initial_representatives[value.index()];
         match module.value(terminal).map(|value| &value.kind) {
             Some(word::ValueKind::Constant(_)) => Some(None),
-            Some(word::ValueKind::Operation(operation)) => {
-                owners.get(operation.index()).copied().flatten().map(Some)
-            }
+            Some(word::ValueKind::Operation(operation)) => operation_regions
+                .get(operation.index())
+                .copied()
+                .flatten()
+                .map(Some),
             Some(word::ValueKind::Signal(_)) | None => None,
         }
     };
@@ -323,9 +325,11 @@ pub(crate) fn optimize_owned_combinational_dataflow(
         .iter()
         .map(|connect| {
             let owned = match module.value(connect.value).map(|value| &value.kind) {
-                Some(word::ValueKind::Operation(operation)) => {
-                    owners.get(operation.index()).copied().flatten().is_some()
-                }
+                Some(word::ValueKind::Operation(operation)) => operation_regions
+                    .get(operation.index())
+                    .copied()
+                    .flatten()
+                    .is_some(),
                 Some(word::ValueKind::Signal(_) | word::ValueKind::Constant(_)) | None => false,
             };
             Ok(owned && drivers.is_removable(module, connect, &read_bits)?)
@@ -341,18 +345,18 @@ pub(crate) fn optimize_owned_combinational_dataflow(
 
 pub(crate) fn rebalance_priority_muxes_in_regions(
     module: &mut word::WordModule,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
+    operation_regions: &[Option<crate::RegionRowId>],
 ) -> Result<bool, crate::SynthError> {
-    if ownership.len() != module.operations().len() {
+    if operation_regions.len() != module.operations().len() {
         return Err(crate::SynthError::invariant(
-            "priority-mux ownership does not align with the operation arena",
+            "priority-mux region snapshot does not align with the operation arena",
         ));
     }
     let value_owners = module
         .values()
         .iter()
         .map(|value| match value.kind {
-            word::ValueKind::Operation(operation) => ownership.owner(operation),
+            word::ValueKind::Operation(operation) => operation_regions[operation.index()],
             word::ValueKind::Signal(_) | word::ValueKind::Constant(_) => None,
         })
         .collect::<Vec<_>>();
@@ -365,31 +369,27 @@ pub(crate) fn rebalance_priority_muxes_in_regions(
             .all(|value| value_owners.get(value.index()).copied().flatten() == Some(owner))
             .then_some(owner)
     })?;
-    for generated in result.generated {
-        if generated.range.start != ownership.len()
-            || generated.range.end > module.operations().len()
-        {
-            return Err(crate::SynthError::invariant(
-                "priority-mux generated ownership does not align with the operation arena",
-            ));
-        }
-        ownership.claim_range(
-            module,
-            generated.range.start,
-            generated.range.end,
-            &generated.sources,
-        )?;
-    }
     Ok(result.changed)
 }
 
-pub(crate) fn optimize_owned_priority_dataflow(
+pub(crate) fn optimize_priority_dataflow_in_regions(
     module: &mut word::WordModule,
-    ownership: &mut crate::regional::StructuralOwnershipProvenance,
 ) -> Result<DataflowChanges, crate::SynthError> {
-    optimize_owned_combinational_dataflow(module, ownership.owners())?;
-    rebalance_priority_muxes_in_regions(module, ownership)?;
-    optimize_owned_combinational_dataflow(module, ownership.owners())
+    let partition = crate::regional::region_graph::partition::build(
+        module,
+        crate::regional::region_graph::RegionPartitionPolicy::default(),
+    )?;
+    optimize_region_combinational_dataflow(module, partition.operation_owner_rows())?;
+    let partition = crate::regional::region_graph::partition::build(
+        module,
+        crate::regional::region_graph::RegionPartitionPolicy::default(),
+    )?;
+    rebalance_priority_muxes_in_regions(module, partition.operation_owner_rows())?;
+    let partition = crate::regional::region_graph::partition::build(
+        module,
+        crate::regional::region_graph::RegionPartitionPolicy::default(),
+    )?;
+    optimize_region_combinational_dataflow(module, partition.operation_owner_rows())
 }
 
 pub(crate) fn optimize_combinational_dataflow_by(

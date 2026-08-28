@@ -12,7 +12,6 @@ pub(crate) use catalog::cells::{AsyncResetRequest, AsyncResetRequests};
 pub(crate) use catalog::*;
 pub(crate) use planning::{
     expand_unsupported_enables, lower_controls, normalize_sequential_controls,
-    recover_feedback_enables,
 };
 
 pub(crate) fn async_reset_requests(

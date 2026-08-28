@@ -498,45 +498,6 @@ pub(crate) fn module_with_enable_flop_process() -> TestModule {
     )
 }
 
-pub(crate) fn module_with_lowered_feedback_mux_flop() -> WordModule {
-    let mut module = WordModule::new("top");
-    let clk = module
-        .add_port("clk", PortDirection::Input, bit(), test_span())
-        .unwrap();
-    let enable = module
-        .add_port("en", PortDirection::Input, bit(), test_span())
-        .unwrap();
-    let data = module
-        .add_port("d", PortDirection::Input, bit(), test_span())
-        .unwrap();
-    let q = module
-        .add_port("q", PortDirection::Output, bit(), test_span())
-        .unwrap();
-    let clock = read_port(&mut module, clk);
-    let enable = read_port(&mut module, enable);
-    let data = read_port(&mut module, data);
-    let q_signal = module.port(q).unwrap().signal;
-    let feedback = module.read_signal(q_signal, test_span()).unwrap();
-    let next = module.mux(enable, data, feedback, test_span()).unwrap();
-    let register = module
-        .register(
-            word::RegisterOp {
-                name: None,
-                d: next,
-                clock,
-                edge: Edge::Pos,
-                enable: None,
-                resets: Vec::new(),
-            },
-            test_span(),
-        )
-        .unwrap();
-    module
-        .connect(LValue::signal(q_signal), register, test_span())
-        .unwrap();
-    module
-}
-
 pub(crate) fn module_with_sync_reset_flop_process() -> TestModule {
     module_with_sync_reset_control(false)
 }

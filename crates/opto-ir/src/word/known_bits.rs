@@ -92,7 +92,7 @@ impl KnownBits128 {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FactWord {
     zeros: u64,
     ones: u64,
@@ -242,8 +242,10 @@ impl KnownBitsAnalysis {
     /// Synchronizes this memoization state after append-only Word IR changes.
     ///
     /// Newly appended values and signals retain facts for the immutable prefix.
-    /// Appended connections or ports invalidate only the transitive dependents
-    /// of changed signals and update driver metadata incrementally.
+    /// Appended connections or ports refresh their signal facts and propagate
+    /// only when the proven bits actually change. This red/green update avoids
+    /// repeatedly invalidating a large unchanged cone during incremental RTL
+    /// normalization.
     pub fn sync_append_only(&mut self, module: &WordModule) {
         if module.values().len() < self.values.len()
             || module.signals().len() < self.signals.len()
@@ -269,13 +271,65 @@ impl KnownBitsAnalysis {
             }
         }
         self.observed_ports = module.ports().len();
-        self.invalidate(changed_signals.into_iter().map(FactNode::Signal));
+        self.refresh_changed(module, changed_signals.into_iter().map(FactNode::Signal));
     }
 
     fn record_dependency(&mut self, dependency: FactNode, dependent: FactNode) {
         let dependents = self.dependents.entry(dependency).or_default();
         if !dependents.contains(&dependent) {
             dependents.push(dependent);
+        }
+    }
+
+    fn refresh_changed(&mut self, module: &WordModule, roots: impl IntoIterator<Item = FactNode>) {
+        let roots = roots.into_iter().collect::<BTreeSet<_>>();
+        let mut old_roots = BTreeMap::new();
+        for &root in &roots {
+            old_roots.insert(root, node_state(self, root));
+            let _ = set_node_state(self, root, FactState::Uncomputed);
+        }
+
+        let mut pending = Vec::new();
+        for root in roots {
+            let old = old_roots.get(&root).copied().flatten();
+            let new = derive_node(module, root, self).map(FactState::Computed);
+            if !same_facts(old, new, &self.arena) {
+                pending.extend(self.dependents.get(&root).into_iter().flatten().copied());
+            }
+        }
+
+        if pending.is_empty() {
+            return;
+        }
+        let propagation_limit = self
+            .values
+            .len()
+            .saturating_add(self.signals.len())
+            .saturating_add(
+                self.dependents
+                    .values()
+                    .map(Vec::len)
+                    .fold(0usize, usize::saturating_add),
+            )
+            .max(1);
+        let mut propagated = 0usize;
+        while let Some(node) = pending.pop() {
+            // Acyclic Word dataflow normally changes each fact at most once.
+            // If overlapping roots or a conservative cycle revisit more than
+            // the complete node-and-edge budget, fall back to ordinary cone
+            // invalidation so incremental synchronization stays bounded.
+            if propagated == propagation_limit {
+                pending.push(node);
+                self.invalidate(pending);
+                break;
+            }
+            propagated += 1;
+            let old = node_state(self, node);
+            let _ = set_node_state(self, node, FactState::Uncomputed);
+            let new = derive_node(module, node, self).map(FactState::Computed);
+            if !same_facts(old, new, &self.arena) {
+                pending.extend(self.dependents.get(&node).into_iter().flatten().copied());
+            }
         }
     }
 
@@ -286,18 +340,7 @@ impl KnownBitsAnalysis {
             if !visited.insert(node) {
                 continue;
             }
-            match node {
-                FactNode::Value(value) => {
-                    if let Some(state) = self.values.get_mut(value.index()) {
-                        *state = FactState::Uncomputed;
-                    }
-                }
-                FactNode::Signal(signal) => {
-                    if let Some(state) = self.signals.get_mut(signal.index()) {
-                        *state = FactState::Uncomputed;
-                    }
-                }
-            }
+            let _ = set_node_state(self, node, FactState::Uncomputed);
             pending.extend(self.dependents.get(&node).into_iter().flatten().copied());
         }
     }
@@ -340,6 +383,15 @@ impl KnownBitsAnalysis {
         let ones = u128::from(low.ones) | (u128::from(high.ones) << u64::BITS);
         Some(KnownBits128 { width, zeros, ones })
     }
+}
+
+fn same_facts(left: Option<FactState>, right: Option<FactState>, arena: &[FactWord]) -> bool {
+    let (Some(FactState::Computed(left)), Some(FactState::Computed(right))) = (left, right) else {
+        return false;
+    };
+    left.width == right.width
+        && (0..word_count(left.width))
+            .all(|index| left.word(arena, index) == right.word(arena, index))
 }
 
 fn known_constant(width: u32, mut bit: impl FnMut(u32) -> KnownBit) -> Option<ConstBits> {
@@ -1478,11 +1530,116 @@ mod tests {
         ));
         assert!(matches!(
             facts.values[changed_read.index()],
-            FactState::Uncomputed
+            FactState::Computed(_)
         ));
-        assert_eq!(facts.arena.len(), arena_len);
+        assert!(facts.arena.len() > arena_len);
         assert_eq!(
             facts.constant(&module, changed_read),
+            Some(ConstBits::from_bin_str("1").unwrap())
+        );
+    }
+
+    #[test]
+    fn append_only_sync_stops_at_unchanged_facts() {
+        let mut module = WordModule::new("incremental_red_green");
+        let input = module
+            .add_port("input", PortDirection::Input, ty(1), SourceSpan::default())
+            .unwrap();
+        let input = module
+            .read_signal(module.port(input).unwrap().signal, SourceSpan::default())
+            .unwrap();
+        let signal = module
+            .add_wire("value", ty(1), SourceSpan::default())
+            .unwrap();
+        let mut value = module.read_signal(signal, SourceSpan::default()).unwrap();
+        for _ in 0..256 {
+            value = module
+                .binary(BinaryOp::BitXor, value, input, SourceSpan::default())
+                .unwrap();
+        }
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        assert_eq!(facts.constant(&module, value), None);
+        let arena_len = facts.arena.len();
+        module
+            .connect(LValue::signal(signal), input, SourceSpan::default())
+            .unwrap();
+        facts.sync_append_only(&module);
+
+        assert_eq!(facts.arena.len(), arena_len);
+        assert!(matches!(
+            facts.values[value.index()],
+            FactState::Computed(_)
+        ));
+        assert_eq!(facts.constant(&module, value), None);
+        assert_eq!(facts.arena.len(), arena_len);
+    }
+
+    #[test]
+    fn append_query_cycles_track_newly_driven_bits() {
+        let mut module = WordModule::new("append_query_loop");
+        let source = SourceSpan::default();
+        let width = 64;
+        let signal = module.add_wire("w", ty(width), source.clone()).unwrap();
+        let read = module.read_signal(signal, source.clone()).unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+
+        for step in 0..width {
+            let value = module
+                .constant(ConstBits::from_bin_str("1").unwrap(), ty(1), source.clone())
+                .unwrap();
+            module
+                .connect(
+                    LValue::signal(signal).with_range(BitRange {
+                        msb: step,
+                        lsb: step,
+                    }),
+                    value,
+                    source.clone(),
+                )
+                .unwrap();
+            facts.sync_append_only(&module);
+            for bit in 0..width {
+                let expected = if bit <= step {
+                    KnownBit::One
+                } else {
+                    KnownBit::Unknown
+                };
+                assert_eq!(
+                    facts.bit(&module, read, bit),
+                    expected,
+                    "bit {bit} after driving {step} slices"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn append_only_sync_refreshes_interdependent_changed_roots() {
+        let mut module = WordModule::new("incremental_root_dependencies");
+        let source = SourceSpan::default();
+        let upstream = module.add_wire("upstream", ty(1), source.clone()).unwrap();
+        let downstream = module
+            .add_wire("downstream", ty(1), source.clone())
+            .unwrap();
+        let upstream_read = module.read_signal(upstream, source.clone()).unwrap();
+        let downstream_read = module.read_signal(downstream, source.clone()).unwrap();
+        let mut facts = KnownBitsAnalysis::new(&module);
+        assert_eq!(facts.constant(&module, downstream_read), None);
+
+        let one = module
+            .constant(ConstBits::from_bin_str("1").unwrap(), ty(1), source.clone())
+            .unwrap();
+        module
+            .connect(LValue::signal(downstream), upstream_read, source.clone())
+            .unwrap();
+        module
+            .connect(LValue::signal(upstream), one, source)
+            .unwrap();
+        facts.sync_append_only(&module);
+
+        assert_eq!(
+            facts.constant(&module, downstream_read),
             Some(ConstBits::from_bin_str("1").unwrap())
         );
     }

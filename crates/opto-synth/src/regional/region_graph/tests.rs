@@ -603,39 +603,6 @@ fn inconsistent_work_policy_is_rejected() {
 }
 
 #[test]
-fn final_partition_treats_structural_owners_as_indivisible_atoms() {
-    let mut module = WordModule::new("owner_atoms");
-    let source = input(&mut module, "a");
-    let first = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
-    let middle = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
-    let last = module.unary(UnaryOp::BitNot, source, test_span()).unwrap();
-    output(&mut module, "x", first);
-    output(&mut module, "y", middle);
-    output(&mut module, "z", last);
-    let first_owner = RegionRowId::from_index(0).unwrap();
-    let middle_owner = RegionRowId::from_index(1).unwrap();
-    let ownership = crate::regional::StructuralOwnershipProvenance::from_owners_for_test(
-        &module,
-        vec![Some(first_owner), Some(middle_owner), Some(first_owner)],
-    )
-    .unwrap();
-
-    let graph = super::partition::build_with_ownership(
-        &module,
-        RegionPartitionPolicy::with_target_work(1),
-        &ownership,
-    )
-    .unwrap();
-
-    let first_region = graph.operation_owner(operation(&module, first)).unwrap();
-    let middle_region = graph.operation_owner(operation(&module, middle)).unwrap();
-    let last_region = graph.operation_owner(operation(&module, last)).unwrap();
-    assert_eq!(first_region, last_region);
-    assert_ne!(first_region, middle_region);
-    assert_eq!(graph.regions().len(), 2);
-}
-
-#[test]
 fn stable_identity_resolves_a_deep_forward_reference_chain() {
     let mut module = WordModule::new("forward");
     let source = input(&mut module, "a");
