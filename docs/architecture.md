@@ -186,7 +186,7 @@ boundaries, not a flat inventory of individual passes:
 | `engine` | synthesis stage ordering, immutable stage states, regional mapping epochs, and final publication | pass-local transformation algorithms |
 | `frontend` | procedural RTL normalization and the single validated Word-IR entry point | architecture selection or mapped-netlist mutation |
 | `word` | reusable Word-IR dependency, driver, cycle, use, and instance analyses | transformation policy or mapped artifacts |
-| `planning` | region-owned Word optimization, semantic recognition, mapping cost policy, resource choices, and regional architecture recipes | cross-owner semantic optimization, target-cell cover, or post-map repair |
+| `planning` | disposable snapshot-confined Word optimization, semantic recognition, mapping cost policy, resource choices, and regional architecture recipes | cross-snapshot semantic optimization, target-cell cover, or post-map repair |
 | `boolean` | bit lowering, canonical Boolean subject construction, rewriting, and graph analysis | target-library policy or mapped closure |
 | `regional` | stable region graph identities, boundary contracts, portable plans, and deterministic convergence policy | incremental persistence or MMMC measurement |
 | `incremental` | source/Word fingerprints, recipe caches, metrics, and portable regional cache records | architecture selection or live mapped state |

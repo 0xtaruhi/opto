@@ -319,8 +319,23 @@ fn select_activity(
             Ok(TransitionActivity::Value(condition))
         }
         (then_value, else_value) => {
-            let then_value = materialize_activity(module, then_value, source)?;
-            let else_value = materialize_activity(module, else_value, source)?;
+            let ((TransitionActivity::Value(reference), _)
+            | (_, TransitionActivity::Value(reference))) = (then_value, else_value)
+            else {
+                return Err(crate::SynthError::invariant(
+                    "materialized transition activity has no typed value",
+                ));
+            };
+            let ty = module
+                .value(reference)
+                .map(|value| value.ty)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant(
+                        "materialized transition activity references an unknown value",
+                    )
+                })?;
+            let then_value = materialize_activity(module, then_value, ty, source)?;
+            let else_value = materialize_activity(module, else_value, ty, source)?;
             module
                 .mux(condition, then_value, else_value, source.clone())
                 .map(TransitionActivity::Value)
@@ -332,6 +347,7 @@ fn select_activity(
 fn materialize_activity(
     module: &mut word::WordModule,
     activity: TransitionActivity,
+    ty: word::WordType,
     source: &word::SourceSpan,
 ) -> Result<word::ValueId, crate::SynthError> {
     match activity {
@@ -344,7 +360,7 @@ fn materialize_activity(
             module
                 .constant(
                     ConstBits::from_bin_str(bit).map_err(crate::SynthError::from)?,
-                    word::WordType::bits(1).map_err(crate::SynthError::from)?,
+                    ty,
                     source.clone(),
                 )
                 .map_err(crate::SynthError::from)
@@ -391,4 +407,44 @@ fn transition_register_inputs(
             active_high: true,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materializes_activity_constants_in_the_value_state_domain() {
+        let mut module = word::WordModule::new("top");
+        let source = word::SourceSpan::default();
+        let condition_signal = module
+            .add_wire(
+                "condition",
+                word::WordType::bits(1).unwrap(),
+                source.clone(),
+            )
+            .unwrap();
+        let activity_ty = word::WordType::new(1, false, word::LogicStateKind::TwoState).unwrap();
+        let activity_signal = module
+            .add_wire("activity", activity_ty, source.clone())
+            .unwrap();
+        let condition = module
+            .read_signal(condition_signal, source.clone())
+            .unwrap();
+        let activity = module.read_signal(activity_signal, source.clone()).unwrap();
+
+        let TransitionActivity::Value(selected) = select_activity(
+            &mut module,
+            condition,
+            TransitionActivity::Always,
+            TransitionActivity::Value(activity),
+            &source,
+        )
+        .unwrap() else {
+            panic!("mixed transition activity should materialize a value");
+        };
+
+        assert_eq!(module.value(selected).unwrap().ty, activity_ty);
+        module.validate().unwrap();
+    }
 }
