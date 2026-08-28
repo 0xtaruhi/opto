@@ -59,10 +59,19 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
 
       - name: Analyze
-        if: needs.changes.outputs.docs-only != 'true'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.language != 'rust'
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+
+      - name: Analyze Rust
+        if: needs.changes.outputs.docs-only != 'true' && matrix.language == 'rust'
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         env:
-          CODEQL_EXTRACTOR_RUST_OPTION_LOGGING_VERBOSITY: ${{ matrix.language == 'rust' && 'progress+' || 'progress' }}
+          # Keep full Rust 1.98 extraction within a standard 16 GiB runner.
+          CODEQL_RAM: 6000
+          CODEQL_THREADS: 2
+          RAYON_NUM_THREADS: 2
+          CARGO_BUILD_JOBS: 2
+          CMAKE_BUILD_PARALLEL_LEVEL: 2
 
   analyze-native:
     name: Analyze (c-cpp)
