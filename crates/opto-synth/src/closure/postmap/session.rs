@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::candidate::{CandidateDisposition, PostmapCandidate};
-use super::objective::{
-    PhysicalObjective, closure_improves, improves_physical, mapped_physical_objective,
-    physical_objective_after_edit,
-};
 use super::power::MmmcPower;
 use crate::closure::mapped_timing::MappedTimingTransaction;
 use crate::closure::mmmc::{MmmcMetrics, MmmcTiming, aggregate_timing_owners};
+use crate::closure::objective::{
+    PhysicalObjective, closure_improves, improves_physical, mapped_physical_objective,
+    physical_objective_after_edit,
+};
 use crate::{
     ImplementationDb, OptimizationPhase, SynthesisOptions, SynthesisProgress,
     api::types::SynthesisPolicy,
@@ -221,12 +221,12 @@ impl<'a> TimingOptimizationSession<'a> {
             CandidateDisposition::Accepted(accepted) => accepted,
             CandidateDisposition::Rejected => {
                 self.state.rejected += 1;
-                self.publish_progress(phase);
+                self.trace_progress(phase);
                 return Ok(CandidateDisposition::Rejected);
             }
             CandidateDisposition::Stale => {
                 self.state.stale += 1;
-                self.publish_progress(phase);
+                self.trace_progress(phase);
                 return Ok(CandidateDisposition::Stale);
             }
         };
@@ -243,11 +243,11 @@ impl<'a> TimingOptimizationSession<'a> {
                 crate::SynthError::invariant("post-map replacement count overflow")
             })?;
         self.timing.compact_every_view()?;
-        self.publish_progress(phase);
+        self.trace_progress(phase);
         Ok(CandidateDisposition::Accepted(()))
     }
 
-    fn publish_progress(&mut self, phase: OptimizationPhase) {
+    pub(super) fn publish_progress(&mut self, phase: OptimizationPhase) {
         (self.observer)(SynthesisProgress::timing_candidate(
             phase,
             self.state.physical.area,
@@ -255,6 +255,9 @@ impl<'a> TimingOptimizationSession<'a> {
             &self.state.analysis,
             self.state.evaluations,
         ));
+    }
+
+    fn trace_progress(&self, phase: OptimizationPhase) {
         crate::api::diagnostics::trace!(
             self.trace().and(self.state.evaluations.is_power_of_two()),
             "postmap.timing.progress",

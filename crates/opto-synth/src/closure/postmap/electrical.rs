@@ -3,7 +3,7 @@
 
 use super::TimingOptimizationSession;
 use super::buffering::{self, BufferBranchPlan};
-use super::forest::{self, EvaluationPolicy, RejectionPolicy};
+use super::forest::{self, EvaluationPolicy};
 use crate::OptimizationPhase;
 use opto_ir::mapped::{ConnectionSignal, NetId, PinId};
 use std::collections::BTreeMap;
@@ -60,8 +60,7 @@ pub(super) fn legalize(
             if forest::evaluate(
                 &plans,
                 OptimizationPhase::DesignRuleRepair,
-                RejectionPolicy::Bisect,
-                EvaluationPolicy::TopologyComplete,
+                EvaluationPolicy::Complete,
                 session,
                 |mapped, implementations, options, plans| {
                     buffering::buffer_branch_forest_delta(

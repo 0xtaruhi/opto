@@ -1142,13 +1142,25 @@ complete mapped MMMC owners, including the materialized sequential shell.
 Projected regional timing guides the first cover but never decides which mapped
 checkpoint is best and is never reported as committed-candidate slack.
 Measured boundary responses may reallocate contracts and mark dirty regions.
-An epoch updates the dirty plans' explicit contract and context rows, then
-replaces only those plans' owned footprints. It does not reopen private cover,
-repartition the scalar shell, rebuild binding identity, or change the frozen
-topology. Clean plans and footprints remain untouched. A future incremental
-re-cover feature must retain the complete frozen private IR and consume the
-same explicit ownership and binding provenance; reconstructing it from the
-global shell is forbidden.
+The initial mapping stage retains each region's optimized AXM subject, cuts,
+truth rows, stable catalog frontier, and owner bindings until the bounded epoch
+loop finishes. A dirty epoch reprojects exact boundary arrivals, transitions,
+required times, and loads onto those same local identities, selects a new cover
+without rerunning Word optimization, bit lowering, Boolean rewriting, cut
+enumeration, or truth computation, and transactionally replaces only a changed
+owned footprint. The construction vector, architecture decision, region graph,
+binding identity, and owner set remain frozen. Clean plans and footprints stay
+untouched, and the retained private records are discarded before artifact
+publication rather than becoming a cache or persistent format. Reconstructing
+a private subject from the global scalar shell remains forbidden.
+
+`RegionContractSet` is the epoch loop's sole mutable timing-contract owner.
+Region-local timing arrays are disposable projections rebuilt from it, never a
+second contract store. One `RegionalWorkingRow` likewise owns the active plan,
+its immutable source binding, and its transient compiler; plan and compiler are
+not maintained in parallel arrays. The best-epoch checkpoint stores compact
+plans only, because bindings and construction identity cannot change in this
+loop.
 
 One incremental region edit reuses the retained topological order, position
 index, and dependency plan whenever the edit adds no dependency edge and no
@@ -1169,22 +1181,19 @@ making it conditional keeps post-map candidate evaluation proportional to its
 actual changed frontier. Cell resizing and constant-register removal both reuse
 the retained topology.
 
-There is one MMMC fact source, but acceptance authority is deliberately scoped
-to its decision domain. Initial mapping has one total `MappedObjective` used
-only to retain or restore an epoch checkpoint. Its timing order comes from the
-complete mapped MMMC quality; boundary-contract metrics identify local response
-and break exact global timing ties rather than replacing full-design STA.
-Post-map has one transaction gate that first rejects any edit that removes a
-frozen boundary net or changes the unique driver of an affected observable
-output, then compares full-design STA/DRC and physical metrics before commit or
-rollback. The connectivity check is incremental over the transaction's exact
-affected-net set; the complete frozen contract is revalidated at publication.
-These are not competing global
-objectives: boundary legality is not full-design DRC, managed implementation
-cost is not the count of every live substrate cell, and an epoch tie requires a
-stable key while a no-change post-map candidate is rejected. Sharing a nominal
-objective type would erase those domains and change acceptance semantics; both
-authorities consume the same `MmmcTiming` owners instead.
+There is one MMMC fact source and one exact closure ordering. While timing is
+violated, `ClosureQuality` compares timing feasibility, WNS, TNS, and violating
+endpoint count in that order, followed by full-design electrical quality. Once
+timing is met, extra positive margin does not outrank physical recovery. Initial
+mapping wraps that shared quality only with regional plan legality and a stable
+checkpoint key; projected boundary metrics are a fallback only when exact MMMC
+analysis is unavailable. Post-map uses the same quality before physical cost at
+its transaction gate. The gate first rejects any edit that removes a frozen
+boundary net or changes the unique driver of an affected observable output,
+then commits or rolls back from the shared ordering. Connectivity validation is
+incremental over the transaction's exact affected-net set, and the complete
+frozen contract is revalidated at publication. Phase-local legality and stable
+tie breaking remain local wrappers, not second definitions of closure quality.
 
 Each effort has a deterministic epoch bound. The best structurally legal
 plan/binding checkpoint is retained by a total order. If the last epoch is not
@@ -1271,6 +1280,17 @@ admits a bounded set of structural alternatives, including region-owned cells,
 and the shared transaction objective decides whether design rules, timing,
 power, and area justify each edit.
 
+All post-map forest domains use one deterministic executor. A complete forest
+is tried first; rejection bisects only at stable plan boundaries, and every
+subforest still passes through the same exact transaction gate. Timing search
+charges those evaluations to its fixed QoR budget. Cleanup sizing replaces the
+former per-cell commit loop with one forest generation at medium effort and at
+most two generations at high effort. User progress is emitted once after each
+top-level generation, including a tried generation that makes no change;
+internal bisection remains available in diagnostic traces. When MMMC is active,
+cleanup rows carry the exact WNS, TNS, violation count, and cumulative
+evaluation count rather than presenting missing timing columns.
+
 The power evaluator owns the decision that a scenario has complete usable
 activity. Timing supplies its compact electrical snapshot through a lazy
 provider, so an unmeasurable scenario cannot trigger a full-net snapshot before
@@ -1295,11 +1315,10 @@ evaluation normally performs one STA for the complete violating-net set. If a
 forest is rejected, stable net order is bisected deterministically; a net's
 sink set and tree are never split. Residual cloning follows the same
 whole-batch-then-bisect rule instead of rediscovering one branch after every
-STA. A rejected sizing forest advances the semantic frontier instead of
-enumerating binary subsets until the global evaluation budget is exhausted.
-Pin swapping likewise evaluates one stable permutation per eligible critical
-cell in a single transaction. Every accepted transaction updates mapped
-topology, timing, power, and provenance together.
+STA. A rejected sizing or pin-swap forest is bisected at stable cell boundaries
+under the same fixed global evaluation budget; no independent per-cell control
+path exists. Every accepted transaction updates mapped topology, timing, power,
+and provenance together.
 
 Topology synthesis and electrical legalization finish their finite forests
 independently of the deterministic QoR-search evaluation budget. That budget
@@ -1338,8 +1357,11 @@ regional cache records
 canonical Boolean subject
   = one compact mixed-node graph for the selected target construction
 
+CompiledRegionCover
+  = synthesis-transient AXM subject + cuts + truth rows for bounded re-selection
+
 AnalyzedRegionCover
-  = task-owned cuts, bindings, and selected cover for one immutable slice
+  = one selected cover + stable input/output bindings for one immutable slice
 
 RegionCoverPlan
   = compact portable selected topology + boundary response + stable keys
@@ -1750,6 +1772,7 @@ defect.
 | Direct transactional region artifact commit | Implemented |
 | Single-atom mapped ownership and edge-owned boundary repair | Implemented |
 | Sparse boundary measurement and bounded feedback | Implemented |
+| Exact boundary-driven cover re-selection on one frozen regional construction | Implemented; architecture candidate switching is absent |
 | Selected sequential clock-to-Q/setup projection plus exact mapped checkpoint timing | Implemented |
 | One shared sparse MMMC owner service | Implemented |
 | Transactional mapped optimization and exact STA | Implemented |

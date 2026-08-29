@@ -118,6 +118,58 @@ fn timed_dff() -> opto_library::TargetCell {
     }
 }
 
+fn timed_and(name: &str, area: f64, delay: f64) -> opto_library::TargetCell {
+    let input = |name: &str| opto_library::TargetPin {
+        name: name.to_string(),
+        direction: opto_library::TargetPinDirection::Input,
+        function: None,
+        three_state: None,
+        capacitance: Some(0.1),
+        rise_capacitance: None,
+        fall_capacitance: None,
+        receiver_capacitance: None,
+        fanout_load: None,
+        next_state_type: None,
+        timing_arcs: Vec::new(),
+        clock_gate_role: None,
+    };
+    let arc = |related_pin: &str| opto_library::TargetTimingArc {
+        related_pin: related_pin.to_string(),
+        timing_type: opto_library::TargetTimingType::Combinational,
+        timing_sense: opto_library::TimingSense::PositiveUnate,
+        delay_model: Some(opto_library::ArcDelayModel::Nldm(
+            opto_library::NldmTimingModel::new(
+                Some(opto_library::LookupTable::scalar(delay)),
+                Some(opto_library::LookupTable::scalar(delay)),
+                Some(opto_library::LookupTable::scalar(0.04)),
+                Some(opto_library::LookupTable::scalar(0.04)),
+            ),
+        )),
+        rise_constraint: None,
+        fall_constraint: None,
+    };
+    let mut cell = cell(name, area);
+    cell.pins = vec![
+        input("A"),
+        input("B"),
+        opto_library::TargetPin {
+            name: "Y".to_string(),
+            direction: opto_library::TargetPinDirection::Output,
+            function: Some(opto_library::BooleanFunction::parse("A&B").unwrap()),
+            three_state: None,
+            capacitance: None,
+            rise_capacitance: None,
+            fall_capacitance: None,
+            receiver_capacitance: None,
+            fanout_load: None,
+            next_state_type: None,
+            timing_arcs: vec![arc("A"), arc("B")],
+            clock_gate_role: None,
+        },
+    ];
+    cell
+}
+
 #[test]
 fn technology_mapping_progress_uses_final_register_to_register_timing() {
     let mut module = word::WordModule::new("registered_path");
@@ -228,6 +280,195 @@ fn technology_mapping_progress_uses_final_register_to_register_timing() {
         final_timing.tns.to_bits()
     );
     assert_eq!(timing.violations, final_timing.violating_paths);
+}
+
+fn exact_feedback_mapping_request(effort: SynthesisEffort) -> SynthesisRequest<'static> {
+    let mut module = word::WordModule::new("exact_feedback");
+    let bit = word::WordType::bits(1).unwrap();
+    let clock_port = module
+        .add_port("clk", word::PortDirection::Input, bit, test_span())
+        .unwrap();
+    let a_port = module
+        .add_port("a", word::PortDirection::Input, bit, test_span())
+        .unwrap();
+    let b_port = module
+        .add_port("b", word::PortDirection::Input, bit, test_span())
+        .unwrap();
+    let c_port = module
+        .add_port("c", word::PortDirection::Input, bit, test_span())
+        .unwrap();
+    let output_port = module
+        .add_port("q", word::PortDirection::Output, bit, test_span())
+        .unwrap();
+    let clock = module
+        .read_signal(module.port(clock_port).unwrap().signal, test_span())
+        .unwrap();
+    let a = module
+        .read_signal(module.port(a_port).unwrap().signal, test_span())
+        .unwrap();
+    let b = module
+        .read_signal(module.port(b_port).unwrap().signal, test_span())
+        .unwrap();
+    let c = module
+        .read_signal(module.port(c_port).unwrap().signal, test_span())
+        .unwrap();
+    let first_state = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: a,
+                clock,
+                edge: word::Edge::Pos,
+                enable: None,
+                resets: Vec::new(),
+            },
+            test_span(),
+        )
+        .unwrap();
+    let first = module
+        .binary(word::BinaryOp::BitAnd, first_state, b, test_span())
+        .unwrap();
+    let second = module
+        .binary(word::BinaryOp::BitAnd, first, c, test_span())
+        .unwrap();
+    let second_state = module
+        .register(
+            word::RegisterOp {
+                name: None,
+                d: second,
+                clock,
+                edge: word::Edge::Pos,
+                enable: None,
+                resets: Vec::new(),
+            },
+            test_span(),
+        )
+        .unwrap();
+    module
+        .connect(
+            word::LValue::signal(module.port(output_port).unwrap().signal),
+            second_state,
+            test_span(),
+        )
+        .unwrap();
+
+    let mut dff = timed_dff();
+    dff.pins[0].capacitance = Some(0.1);
+    let mapping_cells = vec![
+        dff.clone(),
+        timed_and("SMALL_AND", 1.0, 1.0),
+        timed_and("FAST_AND", 10.0, 0.2),
+    ];
+    let mut request = SynthesisRequest::unconstrained(
+        structural(module),
+        SynthesisOptions {
+            target_cells: mapping_cells.clone().into(),
+        },
+    );
+    request.effort = effort;
+    let clock_id = opto_timing::PortId::from_uid(opto_core::ObjectUid::from_raw(2).unwrap());
+    let mut timing = opto_timing::TimingContext::new();
+    timing
+        .create_clock(
+            opto_timing::ClockId::from_uid(opto_core::ObjectUid::from_raw(7).unwrap()),
+            opto_timing::ClockSpec::new("clk", 6.0, vec![clock_id], None).unwrap(),
+        )
+        .unwrap();
+    let exact_cells = vec![
+        dff,
+        timed_and("SMALL_AND", 1.0, 5.0),
+        mapping_cells[2].clone(),
+    ];
+    request.scenarios = ScenarioSet::single(
+        Arc::new(timing),
+        Arc::new(opto_timing::TimingLibrary {
+            cells: exact_cells.into(),
+            ..opto_timing::TimingLibrary::default()
+        }),
+        opto_timing::Parasitics::default(),
+    );
+    request
+}
+
+fn initial_mapping_cell_types(
+    request: SynthesisRequest<'static>,
+) -> (usize, usize, Option<f64>, Vec<String>) {
+    let engine = SynthesisEngine::new();
+    let runtime = crate::test_runtime();
+    let mut observer = |_| {};
+    let input = SynthesisInput::new(request).unwrap();
+    let design_id = input.environment.design_id;
+    let mut execution = SynthesisExecution {
+        engine: &engine,
+        runtime,
+        observer: &mut observer,
+        design_id,
+    };
+    let normalized = normalize(&mut execution, input).unwrap();
+    let planned = plan_regions_with_partition_policy(
+        &execution,
+        normalized,
+        crate::regional::region_graph::RegionPartitionPolicy::with_target_work(1),
+    )
+    .unwrap();
+    let lowered = lowering::lower_logic(&execution, planned).unwrap();
+    let mut mapped = map_initial_logic(&mut execution, lowered).unwrap();
+    let mut cells = mapped
+        .mapped
+        .netlist
+        .cell_ids()
+        .map(|cell| mapped.mapped.netlist.cell_type(cell).unwrap().to_string())
+        .collect::<Vec<_>>();
+    cells.sort();
+    let wns = mapped
+        .timing
+        .as_mut()
+        .and_then(|timing| timing.metrics().unwrap().analysis.wns());
+    (
+        mapped.ledger.regional_epochs,
+        mapped.regions.regions().len(),
+        wns,
+        cells,
+    )
+}
+
+#[test]
+fn exact_boundary_feedback_reselects_a_compiled_regional_cover() {
+    let (single_epoch, initial_regions, initial_wns, initial) =
+        initial_mapping_cell_types(exact_feedback_mapping_request(SynthesisEffort::Low));
+    let (corrected_epochs, corrected_regions, corrected_wns, corrected) =
+        initial_mapping_cell_types(exact_feedback_mapping_request(SynthesisEffort::Medium));
+
+    assert_eq!(single_epoch, 1);
+    assert_eq!(
+        initial.iter().filter(|cell| *cell == "SMALL_AND").count(),
+        2,
+        "single-epoch regions={initial_regions} wns={initial_wns:?} cells={initial:?}"
+    );
+    assert!(!initial.iter().any(|cell| cell == "FAST_AND"));
+    assert!(initial_wns.is_some_and(|wns| wns < 0.0));
+    assert!(
+        corrected_epochs > 1,
+        "corrected regions={corrected_regions} wns={corrected_wns:?} cells={corrected:?}"
+    );
+    assert_eq!(
+        corrected.iter().filter(|cell| *cell == "FAST_AND").count(),
+        1,
+        "corrected regions={corrected_regions} epochs={corrected_epochs} \
+         wns={corrected_wns:?} cells={corrected:?}"
+    );
+    assert_eq!(
+        corrected.iter().filter(|cell| *cell == "SMALL_AND").count(),
+        1,
+        "corrected regions={corrected_regions} epochs={corrected_epochs} \
+         wns={corrected_wns:?} cells={corrected:?}"
+    );
+    assert!(
+        corrected_wns.is_some_and(|wns| wns >= 0.0),
+        "initial regions={initial_regions} wns={initial_wns:?} cells={initial:?}; \
+         corrected regions={corrected_regions} epochs={corrected_epochs} \
+         wns={corrected_wns:?} cells={corrected:?}"
+    );
 }
 
 fn target_options() -> SynthesisOptions {

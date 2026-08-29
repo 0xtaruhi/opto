@@ -430,7 +430,7 @@ impl CoverPlanner<'_> {
             {
                 continue;
             }
-            let (timing_driven, current_arrival) =
+            let (timing_driven, current_meets_timing, current_arrival) =
                 self.joint_current_arrival(first, first_current, second, second_current)?;
             let freed = self.choice_cell_area(first, first_current)
                 + self.choice_cell_area(second, second_current)
@@ -457,6 +457,7 @@ impl CoverPlanner<'_> {
             )?;
             let take = super::super::joint_replacement_is_preferred(
                 timing_driven,
+                !current_meets_timing,
                 added,
                 joint_arrival,
                 freed,
@@ -528,7 +529,7 @@ impl CoverPlanner<'_> {
         {
             return Ok(None);
         }
-        let (timing_driven, current_arrival) =
+        let (timing_driven, current_meets_timing, current_arrival) =
             self.joint_current_arrival(first, first_current, second, second_current)?;
         let freed = self.choice_cell_area(first, first_current)
             + self.choice_cell_area(second, second_current)
@@ -562,6 +563,7 @@ impl CoverPlanner<'_> {
         )?;
         Ok(super::super::joint_replacement_is_preferred(
             timing_driven,
+            !current_meets_timing,
             added,
             joint_arrival,
             freed,
@@ -576,14 +578,17 @@ impl CoverPlanner<'_> {
         first_choice: SlotChoice,
         second: usize,
         second_choice: SlotChoice,
-    ) -> Result<(bool, f64), crate::SynthError> {
+    ) -> Result<(bool, bool, f64), crate::SynthError> {
         let mut timing_driven = false;
+        let mut meets_timing = true;
         let mut arrival = 0.0f64;
         for (slot, choice) in [(first, first_choice), (second, second_choice)] {
+            let selected_arrival = self.selected_choice_arrival(slot, choice)?;
             timing_driven |= self.required_arrivals[slot].is_finite();
-            arrival = arrival.max(self.selected_choice_arrival(slot, choice)?);
+            meets_timing &= self.recovery_meets_required(slot, selected_arrival);
+            arrival = arrival.max(selected_arrival);
         }
-        Ok((timing_driven, arrival))
+        Ok((timing_driven, meets_timing, arrival))
     }
 
     fn selected_choice_arrival(

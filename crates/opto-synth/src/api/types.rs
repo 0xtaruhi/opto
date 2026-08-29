@@ -139,10 +139,10 @@ impl StageId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-/// One lifecycle or candidate-observation event from synthesis.
+/// One lifecycle or optimization-observation event from synthesis.
 ///
 /// The variants make the two event shapes explicit: stage lifecycle events
-/// cannot accidentally carry candidate metrics, and candidate observations
+/// cannot accidentally carry candidate metrics, and optimization observations
 /// always carry their phase, area, and cell count together.
 pub enum SynthesisProgress {
     /// A stage entered or left one lifecycle state.
@@ -152,21 +152,21 @@ pub enum SynthesisProgress {
         /// Lifecycle state represented by this event.
         status: SynthesisProgressStatus,
     },
-    /// An optimization phase committed a candidate artifact.
+    /// An optimization phase completed one user-visible generation.
     Candidate {
-        /// Optimization phase responsible for the candidate.
+        /// Optimization phase responsible for the generation.
         phase: OptimizationPhase,
         /// Total mapped cell area in target-library area units.
         area: f64,
-        /// Number of mapped cells after the commit.
+        /// Number of mapped cells after the generation.
         cells: usize,
-        /// Timing measurements, when timing was evaluated for this candidate.
+        /// Timing measurements, when timing was evaluated for this generation.
         timing: Option<SynthesisTimingProgress>,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-/// Timing measurements attached to a committed synthesis candidate.
+/// Timing measurements attached to a completed optimization generation.
 pub struct SynthesisTimingProgress {
     /// Worst slack in the timing library's time unit, if an endpoint exists.
     pub worst_slack: Option<f64>,
@@ -174,13 +174,13 @@ pub struct SynthesisTimingProgress {
     pub total_negative_slack: f64,
     /// Number of endpoints with negative slack.
     pub violations: usize,
-    /// Number of candidates evaluated by the phase so far.
+    /// Number of exact candidates evaluated by the phase so far.
     pub evaluations: usize,
 }
 
 /// The terminal state of one synthesis-stage progress event.
 ///
-/// Every started stage emits exactly one completed or failed event. Candidate
+/// Every started stage emits exactly one completed or failed event. Optimization
 /// updates are completed observations rather than stage-lifecycle events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SynthesisProgressStatus {
@@ -193,7 +193,7 @@ pub enum SynthesisProgressStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Optimization phase responsible for a committed candidate observation.
+/// Optimization phase responsible for a completed generation observation.
 pub enum OptimizationPhase {
     /// Initial covering of Boolean logic with target-library cells.
     TechnologyMapping,

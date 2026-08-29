@@ -395,20 +395,20 @@ boundary. One sparse MMMC owner service analyzes the complete first generation;
 later region deltas update those same owners incrementally and return exact
 measured boundary responses.
 
-MMMC view construction, early/late ownership, lane projection, and aggregation
-have one definition. Decision policy remains phase-local: the regional epoch
-coordinator owns its boundary-contract checkpoint order, while the post-map
-transaction boundary owns full-design STA/DRC acceptance. They consume the same
-analysis owners but do not pretend that regional boundary legality and
-full-design closure are interchangeable metric domains.
+MMMC view construction, early/late ownership, lane projection, aggregation, and
+exact closure ordering have one definition. The regional epoch coordinator and
+the post-map transaction boundary both compare full-design closure through that
+definition. Phase-local boundary legality, connectivity validation, and stable
+tie breaking wrap it without redefining timing or electrical quality.
 
 The epoch coordinator marks contracts that violate timing/electrical
 expectations and propagates a deterministic dirty set. For target mode:
 
 - clean region plans are retained;
 - dirty contracts and context keys are rebuilt;
-- the region's canonical `AnalyzedRegionCover` is reused or refreshed;
-- the cover is selected again under the new context;
+- the region's transient AXM subject, cuts, and truth rows are retained;
+- the cover is selected again under the new context without repeating Boolean
+  rewriting, cut enumeration, or truth computation;
 - the construction vector remains unchanged.
 
 The coordinator keeps one best legal plan/binding checkpoint by a total global
@@ -469,12 +469,10 @@ provenance update atomically or roll back together. The legalized topology is
 globally refreshed before residual local optimization begins.
 
 Compatible sizing similarly reduces one semantic timing frontier to one atomic
-replacement forest. A rejected forest advances to the next documented
-frontier; it is not recursively split into per-cell exact-STA trials. Candidate
-model quality is improved at the estimator rather than hidden behind an
-unbounded subset search. Eligible critical pin permutations are also reduced
-into one atomic pin-swap forest and evaluated once; pin swapping cannot consume
-the remaining budget through serial exact-STA trials.
+replacement forest. A rejected forest is bisected only at stable cell
+boundaries and only within the fixed QoR evaluation budget; there is no second
+per-cell optimization loop. Eligible critical pin permutations use the same
+forest executor and bounded rejection splitting.
 
 ## Memory Model
 

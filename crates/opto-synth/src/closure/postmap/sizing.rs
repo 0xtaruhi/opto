@@ -3,7 +3,7 @@
 
 use super::candidate::PostmapCandidate;
 use super::candidates::{self, PostmapCellCatalog, sizing_regions};
-use super::forest::{self, EvaluationPolicy, RejectionPolicy};
+use super::forest::{self, EvaluationPolicy};
 use super::{TimingOptimizationPolicy, TimingOptimizationSession};
 use crate::OptimizationPhase;
 use opto_ir::mapped::{CellId, ConnectionRef, ConnectionSignal, MappedNetlist, PinId, RegionDelta};
@@ -196,7 +196,6 @@ pub(super) fn evaluate_pin_swaps(
     forest::evaluate(
         &plans,
         OptimizationPhase::PinSwap,
-        RejectionPolicy::KeepWhole,
         EvaluationPolicy::QorBudgeted,
         session,
         |mapped, _, _, plans| pin_swap_forest_delta(mapped, plans).map(Some),
@@ -225,7 +224,6 @@ fn evaluate_forest(
     forest::evaluate(
         &choices,
         kind.phase(),
-        RejectionPolicy::KeepWhole,
         EvaluationPolicy::QorBudgeted,
         session,
         |mapped, _, options, choices| {
@@ -320,38 +318,6 @@ pub(super) fn pin_swap_forest_delta(
             .reconnect_pin(plan.second, connection_ref(first_signal))
             .map_err(crate::SynthError::from)?;
     }
-    Ok(PostmapCandidate::new(delta))
-}
-
-pub(super) fn sizing_delta(
-    mapped: &MappedNetlist,
-    cell: CellId,
-    cell_type: &str,
-    library_cell: usize,
-) -> Result<PostmapCandidate, crate::SynthError> {
-    let nets = mapped
-        .connections(cell)
-        .ok_or_else(|| crate::SynthError::invariant(format!("sizing cell {cell:?} disappeared")))?
-        .iter()
-        .filter_map(|connection| match connection.signal {
-            ConnectionSignal::Net(net) => Some(net),
-            ConnectionSignal::Constant(_) => None,
-        });
-    let snapshot = mapped
-        .snapshot_region([cell], nets)
-        .map_err(crate::SynthError::from)?;
-    let mut delta = RegionDelta::new(snapshot);
-    delta
-        .replace_cell(
-            cell,
-            cell_type,
-            Some(
-                u32::try_from(library_cell).map_err(|_| {
-                    crate::SynthError::capacity("library cell index exceeds capacity")
-                })?,
-            ),
-        )
-        .map_err(crate::SynthError::from)?;
     Ok(PostmapCandidate::new(delta))
 }
 

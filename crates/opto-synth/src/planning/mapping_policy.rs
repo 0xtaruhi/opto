@@ -182,15 +182,10 @@ mod tests {
         let large_met = cost(4.0, 1.0);
         assert!(compare_mapping_cost_with_required_time(2.0, small_met, large_met).is_lt());
 
-        let smaller_but_worse_product = cost(9.0, 1.2);
-        let larger_but_better_product = cost(10.0, 1.0);
+        let smaller_slower = cost(9.0, 1.2);
+        let larger_faster = cost(10.0, 1.0);
         assert!(
-            compare_mapping_cost_with_required_time(
-                2.0,
-                larger_but_better_product,
-                smaller_but_worse_product,
-            )
-            .is_lt()
+            compare_mapping_cost_with_required_time(2.0, larger_faster, smaller_slower).is_lt()
         );
     }
 

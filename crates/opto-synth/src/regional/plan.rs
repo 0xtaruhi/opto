@@ -203,16 +203,6 @@ impl RegionCoverPlan {
         self
     }
 
-    pub(crate) fn with_context_and_contracts(
-        mut self,
-        context: RegionContextKey,
-        contracts: Vec<BoundaryContract>,
-    ) -> Self {
-        self.context_key = context;
-        self.boundary_response = contracts.into();
-        self
-    }
-
     pub(crate) fn with_implementation_cells(
         mut self,
         cells: Vec<RegionImplementationCell>,

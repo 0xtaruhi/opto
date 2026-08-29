@@ -3,22 +3,21 @@
 
 //! Ordered global objective and retained ownership for regional epochs.
 
+use crate::closure::objective::{ClosureQuality, PhysicalObjective, compare_physical};
+
 pub(super) struct BestMapping {
     pub(super) objective: MappedObjective,
-    pub(super) rows: Box<[super::RegionalPlanRow]>,
+    pub(super) plans: Box<[crate::RegionCoverPlan]>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MappedObjective {
     legal: bool,
-    timing_violations: usize,
-    worst_normalized_violation: crate::FiniteValue,
-    minimum_slack: crate::FiniteValue,
-    total_negative_slack: crate::FiniteValue,
-    pub(super) area: crate::FiniteValue,
-    leakage_power: Option<crate::FiniteValue>,
-    dynamic_power: Option<crate::FiniteValue>,
-    cell_count: u64,
+    closure: Option<ClosureQuality>,
+    projected_worst_normalized_violation: crate::FiniteValue,
+    projected_minimum_slack: crate::FiniteValue,
+    projected_total_negative_slack: crate::FiniteValue,
+    physical: PhysicalObjective,
     stable_key: [u8; 32],
 }
 
@@ -30,7 +29,7 @@ impl MappedObjective {
         implementation_leakage: Option<f64>,
         implementation_cell_count: u64,
         static_implementation_key: [u8; 32],
-        timing_quality: Option<opto_timing::TimingQualitySummary>,
+        closure: Option<ClosureQuality>,
     ) -> Result<Self, crate::SynthError> {
         let costs = plans
             .iter()
@@ -41,7 +40,7 @@ impl MappedObjective {
                 .map_err(|error| crate::SynthError::invariant(error.to_string()))
         };
         let mut digest = blake3::Hasher::new();
-        digest.update(b"opto/regional/mapped-objective/v2\0");
+        digest.update(b"opto/regional/mapped-objective/v3\0");
         for cost in &costs {
             digest.update(&cost.stable_plan_key);
         }
@@ -53,57 +52,68 @@ impl MappedObjective {
             .unwrap_or(0.0);
         let projected_total_negative_slack =
             saturated_sum(costs.iter().map(|cost| cost.total_negative_slack.get()));
-        let (timing_violations, minimum_slack, total_negative_slack) = timing_quality.map_or_else(
-            || (0, projected_minimum_slack, projected_total_negative_slack),
-            |quality| {
-                (
-                    quality.violating_paths(),
-                    quality.wns().unwrap_or(0.0),
-                    -quality.tns(),
-                )
-            },
-        );
+        let leakage = implementation_leakage
+            .or_else(|| complete_optional_sum(costs.iter().map(|cost| cost.leakage_power)))
+            .map(finite)
+            .transpose()?
+            .map(crate::FiniteValue::get);
+        let dynamic = global_dynamic_power
+            .or_else(|| complete_optional_sum(costs.iter().map(|cost| cost.dynamic_power)))
+            .map(finite)
+            .transpose()?
+            .map(crate::FiniteValue::get);
         Ok(Self {
             legal: costs.iter().all(|cost| cost.legal),
-            timing_violations,
-            worst_normalized_violation: finite(
+            closure,
+            projected_worst_normalized_violation: finite(
                 costs
                     .iter()
                     .map(|cost| cost.worst_normalized_violation.get())
                     .max_by(f64::total_cmp)
                     .unwrap_or(0.0),
             )?,
-            minimum_slack: finite(minimum_slack)?,
-            total_negative_slack: finite(total_negative_slack)?,
-            area: finite(implementation_area)?,
-            leakage_power: implementation_leakage
-                .or_else(|| complete_optional_sum(costs.iter().map(|cost| cost.leakage_power)))
-                .map(finite)
-                .transpose()?,
-            dynamic_power: global_dynamic_power
-                .or_else(|| complete_optional_sum(costs.iter().map(|cost| cost.dynamic_power)))
-                .map(finite)
-                .transpose()?,
-            cell_count: implementation_cell_count,
+            projected_minimum_slack: finite(projected_minimum_slack)?,
+            projected_total_negative_slack: finite(projected_total_negative_slack)?,
+            physical: PhysicalObjective {
+                area: finite(implementation_area)?.get(),
+                leakage,
+                dynamic,
+                cells: usize::try_from(implementation_cell_count).map_err(|_| {
+                    crate::SynthError::invariant(
+                        "mapped implementation cell count does not fit this host",
+                    )
+                })?,
+            },
             stable_key: *digest.finalize().as_bytes(),
         })
+    }
+
+    pub(super) fn area(self) -> f64 {
+        self.physical.area
     }
 
     pub(super) fn better_than(&self, other: &Self) -> bool {
         other
             .legal
             .cmp(&self.legal)
-            .then_with(|| self.timing_violations.cmp(&other.timing_violations))
-            .then_with(|| self.total_negative_slack.cmp(&other.total_negative_slack))
-            .then_with(|| other.minimum_slack.cmp(&self.minimum_slack))
-            .then_with(|| {
-                self.worst_normalized_violation
-                    .cmp(&other.worst_normalized_violation)
+            .then_with(|| match (self.closure, other.closure) {
+                (Some(candidate), Some(current)) => candidate.compare(current),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => self
+                    .projected_worst_normalized_violation
+                    .cmp(&other.projected_worst_normalized_violation)
+                    .then_with(|| {
+                        other
+                            .projected_minimum_slack
+                            .cmp(&self.projected_minimum_slack)
+                    })
+                    .then_with(|| {
+                        self.projected_total_negative_slack
+                            .cmp(&other.projected_total_negative_slack)
+                    }),
             })
-            .then_with(|| self.area.cmp(&other.area))
-            .then_with(|| compare_optional_finite(self.leakage_power, other.leakage_power))
-            .then_with(|| compare_optional_finite(self.dynamic_power, other.dynamic_power))
-            .then_with(|| self.cell_count.cmp(&other.cell_count))
+            .then_with(|| compare_physical(self.physical, other.physical))
             .then_with(|| self.stable_key.cmp(&other.stable_key))
             .is_lt()
     }
@@ -123,12 +133,32 @@ fn complete_optional_sum(
     })
 }
 
-fn compare_optional_finite(
-    left: Option<crate::FiniteValue>,
-    right: Option<crate::FiniteValue>,
-) -> std::cmp::Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left.cmp(&right),
-        _ => std::cmp::Ordering::Equal,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn objective(wns: f64, tns: f64, paths: usize, area: f64) -> MappedObjective {
+        MappedObjective::from_plans(
+            &[],
+            None,
+            area,
+            None,
+            0,
+            [0; 32],
+            Some(ClosureQuality::new(
+                opto_timing::TimingQualitySummary::aggregate(0.0, Some(wns), tns, paths),
+                opto_timing::DesignRuleSummary::aggregate(0.0, 0.0, 0),
+            )),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn exact_checkpoint_orders_wns_before_tns_paths_and_area() {
+        let better_wns = objective(-0.1, -100.0, 100, 20.0);
+        let fewer_violations = objective(-1.0, -1.0, 1, 10.0);
+
+        assert!(better_wns.better_than(&fewer_violations));
+        assert!(!fewer_violations.better_than(&better_wns));
     }
 }

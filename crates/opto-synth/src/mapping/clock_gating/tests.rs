@@ -52,9 +52,12 @@ fn catalog(cells: TargetCellSet) -> ClockGatingCatalog {
 }
 
 fn enable_register_module(width: u32, active_high: bool) -> word::WordModule {
+    enable_registers_module(&[width], active_high)
+}
+
+fn enable_registers_module(widths: &[u32], active_high: bool) -> word::WordModule {
     let mut module = word::WordModule::new("top");
-    let source = word::SourceSpan::default();
-    let bits = word::WordType::bits(width).unwrap();
+    let source = word::SourceSpan::stable("clock-gating-test");
     let scalar = word::WordType::bits(1).unwrap();
     let clock = module
         .add_port("clk", word::PortDirection::Input, scalar, source.clone())
@@ -62,47 +65,61 @@ fn enable_register_module(width: u32, active_high: bool) -> word::WordModule {
     let enable = module
         .add_port("en", word::PortDirection::Input, scalar, source.clone())
         .unwrap();
-    let data = module
-        .add_port("d", word::PortDirection::Input, bits, source.clone())
-        .unwrap();
-    let output = module
-        .add_port("q", word::PortDirection::Output, bits, source.clone())
-        .unwrap();
     let mut read = |port| {
         let signal = module.port(port).unwrap().signal;
         module.read_signal(signal, source.clone()).unwrap()
     };
     let clock_value = read(clock);
     let enable_value = read(enable);
-    let data_value = read(data);
-    let target = module.port(output).unwrap().signal;
-    let register = module
-        .register(
-            word::RegisterOp {
-                name: None,
-                d: data_value,
-                clock: clock_value,
-                edge: word::Edge::Pos,
-                enable: Some(word::Enable {
-                    value: enable_value,
-                    active_high,
-                }),
-                resets: Vec::new(),
-            },
-            source.clone(),
-        )
-        .unwrap();
-    module
-        .connect(
-            word::LValue {
-                signal: target,
-                range: None,
-                dynamic: None,
-            },
-            register,
-            source,
-        )
-        .unwrap();
+    for (index, width) in widths.iter().copied().enumerate() {
+        let bits = word::WordType::bits(width).unwrap();
+        let data = module
+            .add_port(
+                format!("d{index}"),
+                word::PortDirection::Input,
+                bits,
+                source.clone(),
+            )
+            .unwrap();
+        let output = module
+            .add_port(
+                format!("q{index}"),
+                word::PortDirection::Output,
+                bits,
+                source.clone(),
+            )
+            .unwrap();
+        let data_value = module
+            .read_signal(module.port(data).unwrap().signal, source.clone())
+            .unwrap();
+        let register = module
+            .register(
+                word::RegisterOp {
+                    name: None,
+                    d: data_value,
+                    clock: clock_value,
+                    edge: word::Edge::Pos,
+                    enable: Some(word::Enable {
+                        value: enable_value,
+                        active_high,
+                    }),
+                    resets: Vec::new(),
+                },
+                source.clone(),
+            )
+            .unwrap();
+        module
+            .connect(
+                word::LValue {
+                    signal: module.port(output).unwrap().signal,
+                    range: None,
+                    dynamic: None,
+                },
+                register,
+                source.clone(),
+            )
+            .unwrap();
+    }
     module
 }
 
@@ -211,5 +228,26 @@ fn latch_free_style_rejects_latch_based_gates() {
     };
     let summary = gate_register_clocks(&mut module, &catalog, style).unwrap();
     assert_eq!(summary, ClockGatingSummary::default());
+    assert_eq!(gate_instances(&module), 0);
+}
+
+#[test]
+fn structural_preparation_preserves_the_requested_partition_scope() {
+    let mut module = enable_registers_module(&[2, 2], true);
+    let options = crate::SynthesisOptions {
+        target_cells: library(),
+    };
+    let mapping =
+        super::super::TargetMappingContext::new(&options, crate::SynthesisConfig::default());
+
+    mapping
+        .prepare_structure(
+            &mut module,
+            Some(ClockGatingStyle::default()),
+            true,
+            crate::regional::region_graph::RegionPartitionPolicy::with_target_work(1),
+        )
+        .unwrap();
+
     assert_eq!(gate_instances(&module), 0);
 }

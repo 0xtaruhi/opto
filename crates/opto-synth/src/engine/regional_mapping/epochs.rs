@@ -39,14 +39,17 @@ impl RegionalMapper<'_> {
         let mut best = None::<BestMapping>;
         loop {
             let epoch = coordinator.epoch();
-            let rows = {
+            let plans = {
                 let _profile = self
                     .trace
                     .span(|| format!("initial_mapping.epoch[{epoch}].snapshot"));
-                state.rows.clone()
+                state
+                    .rows
+                    .iter()
+                    .map(|row| row.plan.clone())
+                    .collect::<Vec<_>>()
             };
-            let plans = rows.iter().map(|row| row.plan.clone()).collect::<Vec<_>>();
-            let (measured_plans, global_dynamic_power, timing_quality) =
+            let (measured_plans, global_dynamic_power, closure) =
                 self.measure_epoch(state, &mut mapped, &plans, epoch)?;
             let census = mapped.implementation_census.as_ref().ok_or_else(|| {
                 crate::SynthError::invariant("mapped implementation census was not initialized")
@@ -58,21 +61,15 @@ impl RegionalMapper<'_> {
                 census.managed_leakage(),
                 census.managed_cell_count,
                 census.static_key,
-                timing_quality,
+                closure,
             )?;
             let current_is_best = best
                 .as_ref()
                 .is_none_or(|best| objective.better_than(&best.objective));
             if current_is_best {
-                let checkpoint_rows = measured_plans
-                    .iter()
-                    .cloned()
-                    .zip(rows.iter().map(|row| row.binding.clone()))
-                    .map(|(plan, binding)| super::RegionalPlanRow { plan, binding })
-                    .collect();
                 best = Some(BestMapping {
                     objective,
-                    rows: checkpoint_rows,
+                    plans: measured_plans.clone().into_boxed_slice(),
                 });
             }
             let decision = coordinator.evaluate(&measured_plans);
@@ -91,20 +88,14 @@ impl RegionalMapper<'_> {
                             .iter()
                             .map(|row| {
                                 let index = row.index();
-                                (
-                                    index,
-                                    state.rows[index].plan.payload().to_vec(),
-                                    state.rows[index].binding.clone(),
-                                )
+                                (index, state.rows[index].plan.payload().to_vec())
                             })
                             .collect::<Vec<_>>();
                         self.refresh_contracts(state, &changed)?;
                         let topology_changed = previous
                             .into_iter()
-                            .filter_map(|(index, payload, binding)| {
-                                (state.rows[index].plan.payload() != payload
-                                    || state.rows[index].binding != binding)
-                                    .then_some(index)
+                            .filter_map(|(index, payload)| {
+                                (state.rows[index].plan.payload() != payload).then_some(index)
                             })
                             .collect::<Vec<_>>();
                         self.replace_regions(state, &mut mapped, &topology_changed)?;
@@ -121,38 +112,37 @@ impl RegionalMapper<'_> {
                             "regional epoch completion has no legal mapped candidate",
                         )
                     })?;
-                    let best_rows = best.rows;
+                    let best_plans = best.plans;
                     if current_is_best {
-                        state.rows = best_rows.to_vec();
+                        for (row, checkpoint) in state.rows.iter_mut().zip(&best_plans) {
+                            row.plan = checkpoint.clone();
+                        }
                     } else {
-                        let changed = rows
+                        let changed = plans
                             .iter()
-                            .zip(&best_rows)
+                            .zip(&best_plans)
                             .enumerate()
                             .filter_map(|(index, (current, checkpoint))| {
-                                (current.plan.payload() != checkpoint.plan.payload()
-                                    || current.binding != checkpoint.binding)
-                                    .then_some(index)
+                                (current.payload() != checkpoint.payload()).then_some(index)
                             })
                             .collect::<Vec<_>>();
-                        state.rows = best_rows.to_vec();
+                        for (row, checkpoint) in state.rows.iter_mut().zip(&best_plans) {
+                            row.plan = checkpoint.clone();
+                        }
                         self.replace_regions(state, &mut mapped, &changed)?;
                     }
-                    let selected_plans = best_rows
-                        .into_iter()
-                        .map(|row| row.plan)
-                        .collect::<Box<[_]>>();
+                    let selected_plans = best_plans;
                     match mapped.timing.as_mut() {
                         Some(timing) => observer(SynthesisProgress::timing_candidate(
                             crate::OptimizationPhase::TechnologyMapping,
-                            best.objective.area.get(),
+                            best.objective.area(),
                             mapped.netlist.cell_count(),
                             &timing.metrics()?.analysis,
                             coordinator.completed_epochs(),
                         )),
                         None => observer(SynthesisProgress::candidate(
                             crate::OptimizationPhase::TechnologyMapping,
-                            best.objective.area.get(),
+                            best.objective.area(),
                             mapped.netlist.cell_count(),
                         )),
                     }
@@ -296,7 +286,7 @@ impl RegionalMapper<'_> {
         (
             Vec<crate::RegionCoverPlan>,
             Option<f64>,
-            Option<opto_timing::TimingQualitySummary>,
+            Option<crate::closure::objective::ClosureQuality>,
         ),
         crate::SynthError,
     > {
@@ -319,12 +309,19 @@ impl RegionalMapper<'_> {
                 None => (plans.to_vec(), None),
             }
         };
-        let timing_quality = mapped
+        let closure = mapped
             .timing
             .as_mut()
-            .map(|timing| timing.metrics().map(|metrics| metrics.analysis))
+            .map(|timing| {
+                timing.metrics().map(|metrics| {
+                    crate::closure::objective::ClosureQuality::new(
+                        metrics.analysis,
+                        metrics.design_rule_summary,
+                    )
+                })
+            })
             .transpose()?;
-        Ok((plans, global_dynamic_power, timing_quality))
+        Ok((plans, global_dynamic_power, closure))
     }
 
     fn replace_regions(
@@ -626,7 +623,11 @@ impl RegionalMapper<'_> {
             .reallocate_dirty(dirty, state.rows.iter().map(|row| &row.plan), epoch)
     }
 
-    /// Rebinds measured contracts without reopening frozen regional topology.
+    /// Reprices the frozen regional cover records under measured contracts.
+    ///
+    /// The compiler may select a different cut or catalog binding from the
+    /// frozen logic records, but it cannot rebuild Boolean structure, change
+    /// bindings, or cross ownership.
     fn refresh_contracts(
         &self,
         state: &mut RegionalMappingState<'_>,
@@ -636,16 +637,26 @@ impl RegionalMapper<'_> {
             .iter()
             .copied()
             .map(|row| {
+                let region = self.regions.region(row).ok_or_else(|| {
+                    crate::SynthError::invariant("dirty regional row is out of range")
+                })?;
                 self.region_context(state, row)
-                    .map(|context| (row, context))
+                    .map(|context| (row, region, context))
             })
             .collect::<Result<Vec<_>, crate::SynthError>>()?;
-        for (row, context) in contexts {
+        for (row, region, context) in contexts {
             let index = row.index();
-            let plan = state.rows[index]
-                .plan
-                .clone()
-                .with_context_and_contracts(context, state.contracts.contracts(row).to_vec());
+            let working = state.rows.get_mut(index).ok_or_else(|| {
+                crate::SynthError::invariant("dirty regional mapping row is out of range")
+            })?;
+            let plan = working.cover_compiler.reselect(
+                region,
+                context,
+                state.contracts.contracts(row),
+                state.contracts.timing_tags(),
+                &self.config,
+                self.runtime,
+            )?;
             state.journal_compacted_plan(index, &plan)?;
             state.rows[index].plan = plan;
         }

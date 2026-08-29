@@ -20,7 +20,6 @@ mod electrical;
 mod fanout;
 mod forest;
 mod mfs;
-mod objective;
 mod power;
 mod region;
 mod registers;

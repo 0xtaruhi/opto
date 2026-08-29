@@ -1,20 +1,46 @@
 // SPDX-FileCopyrightText: 2026 Zhengyi Zhang
 // SPDX-License-Identifier: GPL-3.0-only
 
+//! The single exact MMMC and physical-quality ordering used by synthesis.
+
 use opto_ir::mapped::{AppliedRegionDelta, MappedCell, MappedNetlist};
 use opto_library::TargetCellSet;
 use opto_library::normalized_cell_area;
 use opto_timing::{DesignRuleSummary, TimingQualitySummary};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct PhysicalObjective {
-    pub(super) area: f64,
-    pub(super) leakage: Option<f64>,
-    pub(super) dynamic: Option<f64>,
-    pub(super) cells: usize,
+pub(crate) struct ClosureQuality {
+    timing: TimingQualitySummary,
+    design_rules: DesignRuleSummary,
 }
 
-pub(super) fn mapped_physical_objective(
+impl ClosureQuality {
+    pub(crate) const fn new(timing: TimingQualitySummary, design_rules: DesignRuleSummary) -> Self {
+        Self {
+            timing,
+            design_rules,
+        }
+    }
+
+    /// Returns the canonical synthesis ordering. Lower is better.
+    ///
+    /// Violated timing is ordered by WNS, TNS, then path count. Once timing is
+    /// met, extra margin is deliberately ignored so physical recovery can run.
+    pub(crate) fn compare(self, other: Self) -> std::cmp::Ordering {
+        compare_timing(self.timing, other.timing)
+            .then_with(|| compare_design_rules(self.design_rules, other.design_rules))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PhysicalObjective {
+    pub(crate) area: f64,
+    pub(crate) leakage: Option<f64>,
+    pub(crate) dynamic: Option<f64>,
+    pub(crate) cells: usize,
+}
+
+pub(crate) fn mapped_physical_objective(
     mapped: &MappedNetlist,
     library: &TargetCellSet,
     scenarios: &opto_timing::ScenarioSet,
@@ -48,7 +74,7 @@ pub(super) fn mapped_physical_objective(
     })
 }
 
-pub(super) fn physical_objective_after_edit(
+pub(crate) fn physical_objective_after_edit(
     mapped: &MappedNetlist,
     edit: &AppliedRegionDelta,
     current: PhysicalObjective,
@@ -143,7 +169,7 @@ fn mapped_cell_area(cell: &MappedCell, library: &TargetCellSet) -> Result<f64, c
     })
 }
 
-pub(super) fn closure_improves(
+pub(crate) fn closure_improves(
     candidate: &TimingQualitySummary,
     candidate_rules: DesignRuleSummary,
     candidate_physical: PhysicalObjective,
@@ -151,54 +177,30 @@ pub(super) fn closure_improves(
     current_rules: DesignRuleSummary,
     current_physical: PhysicalObjective,
 ) -> bool {
-    match compare_design_rules(candidate_rules, current_rules) {
-        std::cmp::Ordering::Less => return true,
-        std::cmp::Ordering::Greater => return false,
-        std::cmp::Ordering::Equal => {}
-    }
-    improves_timing_or_physical(
-        candidate.wns(),
-        candidate.tns(),
-        candidate_physical,
-        current.wns(),
-        current.tns(),
-        current_physical,
-    )
+    ClosureQuality::new(*candidate, candidate_rules)
+        .compare(ClosureQuality::new(*current, current_rules))
+        .then_with(|| compare_physical(candidate_physical, current_physical))
+        .is_lt()
 }
 
-fn improves_timing_or_physical(
-    candidate_wns: Option<f64>,
-    candidate_total_negative_slack: f64,
-    candidate_physical: PhysicalObjective,
-    current_wns: Option<f64>,
-    current_total_negative_slack: f64,
-    current_physical: PhysicalObjective,
-) -> bool {
-    match (candidate_wns, current_wns) {
-        (Some(candidate), Some(current)) => {
-            let candidate_violates = candidate < 0.0;
-            let current_violates = current < 0.0;
-            match (candidate_violates, current_violates) {
-                (false, true) => return true,
-                (true, false) => return false,
-                (true, true) => match candidate.total_cmp(&current) {
-                    std::cmp::Ordering::Greater => return true,
-                    std::cmp::Ordering::Less => return false,
-                    std::cmp::Ordering::Equal => match candidate_total_negative_slack
-                        .total_cmp(&current_total_negative_slack)
-                    {
-                        std::cmp::Ordering::Greater => return true,
-                        std::cmp::Ordering::Less => return false,
-                        std::cmp::Ordering::Equal => {}
-                    },
-                },
-                (false, false) => {}
-            }
-        }
-        (None, None) => {}
-        (Some(_), None) | (None, Some(_)) => return false,
+fn compare_timing(
+    candidate: TimingQualitySummary,
+    current: TimingQualitySummary,
+) -> std::cmp::Ordering {
+    let candidate_violates = candidate.wns().is_some_and(|slack| slack < 0.0);
+    let current_violates = current.wns().is_some_and(|slack| slack < 0.0);
+    match (candidate_violates, current_violates) {
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, false) => std::cmp::Ordering::Equal,
+        (true, true) => match (candidate.wns(), current.wns()) {
+            (Some(candidate_wns), Some(current_wns)) => current_wns
+                .total_cmp(&candidate_wns)
+                .then_with(|| current.tns().total_cmp(&candidate.tns()))
+                .then_with(|| candidate.violating_paths().cmp(&current.violating_paths())),
+            _ => std::cmp::Ordering::Equal,
+        },
     }
-    improves_physical(candidate_physical, current_physical)
 }
 
 fn compare_design_rules(
@@ -212,34 +214,27 @@ fn compare_design_rules(
         .then_with(|| candidate.violations().cmp(&current.violations()))
 }
 
-pub(super) fn improves_physical(candidate: PhysicalObjective, current: PhysicalObjective) -> bool {
-    match candidate.area.total_cmp(&current.area) {
-        std::cmp::Ordering::Less => true,
-        std::cmp::Ordering::Greater => false,
-        std::cmp::Ordering::Equal => match (candidate.leakage, current.leakage) {
-            (Some(candidate_leakage), Some(current_leakage)) => {
-                match candidate_leakage.total_cmp(&current_leakage) {
-                    std::cmp::Ordering::Less => true,
-                    std::cmp::Ordering::Greater => false,
-                    std::cmp::Ordering::Equal => compare_dynamic_then_cells(candidate, current),
-                }
-            }
-            _ => compare_dynamic_then_cells(candidate, current),
-        },
-    }
+pub(crate) fn improves_physical(candidate: PhysicalObjective, current: PhysicalObjective) -> bool {
+    compare_physical(candidate, current).is_lt()
 }
 
-fn compare_dynamic_then_cells(candidate: PhysicalObjective, current: PhysicalObjective) -> bool {
-    match (candidate.dynamic, current.dynamic) {
-        (Some(candidate_dynamic), Some(current_dynamic)) => {
-            match candidate_dynamic.total_cmp(&current_dynamic) {
-                std::cmp::Ordering::Less => true,
-                std::cmp::Ordering::Greater => false,
-                std::cmp::Ordering::Equal => candidate.cells < current.cells,
-            }
-        }
-        _ => candidate.cells < current.cells,
-    }
+/// Returns the canonical implementation-cost ordering. Lower is better.
+pub(crate) fn compare_physical(
+    candidate: PhysicalObjective,
+    current: PhysicalObjective,
+) -> std::cmp::Ordering {
+    candidate
+        .area
+        .total_cmp(&current.area)
+        .then_with(|| match (candidate.leakage, current.leakage) {
+            (Some(candidate), Some(current)) => candidate.total_cmp(&current),
+            _ => std::cmp::Ordering::Equal,
+        })
+        .then_with(|| match (candidate.dynamic, current.dynamic) {
+            (Some(candidate), Some(current)) => candidate.total_cmp(&current),
+            _ => std::cmp::Ordering::Equal,
+        })
+        .then_with(|| candidate.cells.cmp(&current.cells))
 }
 
 #[cfg(test)]
@@ -257,6 +252,14 @@ mod tests {
         }
     }
 
+    fn timing(wns: Option<f64>, tns: f64, paths: usize) -> TimingQualitySummary {
+        TimingQualitySummary::aggregate(0.0, wns, tns, paths)
+    }
+
+    fn rules() -> DesignRuleSummary {
+        DesignRuleSummary::aggregate(0.0, 0.0, 0)
+    }
+
     fn scenarios() -> opto_timing::ScenarioSet {
         opto_timing::ScenarioSet::single(
             std::sync::Arc::new(opto_timing::TimingContext::default()),
@@ -267,48 +270,60 @@ mod tests {
 
     #[test]
     fn violated_timing_is_repaired_before_physical_recovery() {
-        assert!(improves_timing_or_physical(
-            Some(0.0),
-            0.0,
+        assert!(closure_improves(
+            &timing(Some(0.0), 0.0, 0),
+            rules(),
             physical(20.0, 20),
-            Some(-0.1),
-            -0.1,
+            &timing(Some(-0.1), -0.1, 1),
+            rules(),
             physical(10.0, 10),
         ));
-        assert!(!improves_timing_or_physical(
-            Some(-0.01),
-            -0.01,
+        assert!(!closure_improves(
+            &timing(Some(-0.01), -0.01, 1),
+            rules(),
             physical(1.0, 1),
-            Some(0.0),
-            0.0,
+            &timing(Some(0.0), 0.0, 0),
+            rules(),
+            physical(10.0, 10),
+        ));
+    }
+
+    #[test]
+    fn violated_timing_orders_wns_before_tns_and_path_count() {
+        assert!(closure_improves(
+            &timing(Some(-0.1), -100.0, 100),
+            rules(),
+            physical(20.0, 20),
+            &timing(Some(-1.0), -1.0, 1),
+            rules(),
             physical(10.0, 10),
         ));
     }
 
     #[test]
     fn met_timing_recovers_area_then_cell_count_without_chasing_margin() {
-        assert!(improves_timing_or_physical(
-            Some(0.1),
-            0.0,
+        assert!(closure_improves(
+            &timing(Some(0.1), 0.0, 0),
+            rules(),
             physical(9.0, 20),
-            Some(1.0),
-            0.0,
+            &timing(Some(1.0), 0.0, 0),
+            rules(),
             physical(10.0, 10),
         ));
-        assert!(improves_timing_or_physical(
-            None,
-            0.0,
+        assert!(closure_improves(
+            &timing(None, 0.0, 0),
+            rules(),
             physical(10.0, 9),
-            None,
-            0.0,
+            &timing(None, 0.0, 0),
+            rules(),
             physical(10.0, 10),
         ));
-        assert!(!improves_timing_or_physical(
-            Some(1.0),
-            0.0,
+        assert!(!closure_improves(
+            &timing(Some(1.0), 0.0, 0),
+            rules(),
             physical(11.0, 1),
-            Some(0.1),
-            0.0,
+            &timing(Some(0.1), 0.0, 0),
+            rules(),
             physical(10.0, 10),
         ));
     }

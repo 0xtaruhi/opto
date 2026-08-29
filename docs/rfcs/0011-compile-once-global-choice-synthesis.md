@@ -6,13 +6,17 @@
 - Status: proposed
 - Author: Zhengyi Zhang
 - Date: 2026-08-14
-- Revised: 2026-08-14, after the measured QoR decomposition recorded under
-  Motivation
+- Revised: 2026-08-29, after the first bounded exact-feedback cover
+  re-selection landed
 - Implementation: Phase 1a (functional reduction) and Phase 1b (sequential
   excess) are implemented and measured, the unconditional post-map area MFS
   sweep is removed, and the independently optimized AXM implementation named in
-  Phase 3 is deleted. The choice graph and compiled mapping arena are
-  unimplemented, as is every later phase.
+  Phase 3 is deleted. One bounded part of exact-model correction is also
+  implemented: regional AXM subjects retain cuts and truth rows through initial
+  mapping epochs, and dirty regions may reselect a cover under exact boundary
+  feedback without recompiling that structure. The design-wide choice graph,
+  global compiled mapping arena, architecture decision groups, and exceptional
+  structural correction remain unimplemented.
 
 ## Summary
 

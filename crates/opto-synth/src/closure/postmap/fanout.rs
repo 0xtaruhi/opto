@@ -3,7 +3,7 @@
 
 use super::TimingOptimizationSession;
 use super::buffering::{self, FanoutTreePlan};
-use super::forest::{self, EvaluationPolicy, RejectionPolicy};
+use super::forest::{self, EvaluationPolicy};
 use crate::OptimizationPhase;
 use opto_ir::mapped::{MappedGenerationId, MappedNetlist, NetId};
 use opto_library::{TargetCellSet, TargetPinDirection};
@@ -203,8 +203,7 @@ pub(super) fn synthesize(
     forest::evaluate(
         &plans,
         OptimizationPhase::FanoutTreeSynthesis,
-        RejectionPolicy::Bisect,
-        EvaluationPolicy::TopologyComplete,
+        EvaluationPolicy::Complete,
         session,
         |mapped, implementations, options, plans| {
             buffering::fanout_forest_delta(mapped, implementations, &options.target_cells, plans)

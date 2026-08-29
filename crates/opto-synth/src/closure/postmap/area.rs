@@ -3,10 +3,11 @@
 
 use super::candidate::{CandidateDisposition, PostmapCandidate};
 use super::candidates::sizing_regions;
-use super::objective::{PhysicalObjective, mapped_physical_objective};
+use super::forest::{self, EvaluationPolicy, ForestSession};
 use super::session::{AcceptedCandidate, CandidateEvaluation, ClosureBaseline, evaluate_candidate};
-use super::sizing::sizing_delta;
+use super::sizing::sizing_forest_delta;
 use super::{PostmapOutcome, PostmapRequest};
+use crate::closure::objective::{PhysicalObjective, mapped_physical_objective};
 use crate::{ImplementationDb, OptimizationPhase, SynthesisProgress};
 use opto_ir::mapped::MappedNetlist;
 
@@ -51,9 +52,10 @@ pub(super) fn optimize(
         timing,
         closure,
         power,
-        library: &options.target_cells,
+        options,
         scenarios,
         physical,
+        evaluations: 0,
         replacements: 0,
         observer,
         connectivity,
@@ -63,7 +65,9 @@ pub(super) fn optimize(
     let optimization_boundary =
         super::mfs::optimization_boundary_nets(session.mapped, session.implementations)?;
     remove_dead_cells(&mut session, catalog, &optimization_boundary)?;
+    session.publish_progress(OptimizationPhase::RegisterOptimization);
     remove_constant_registers(&mut session, options, runtime, &optimization_boundary)?;
+    session.publish_progress(OptimizationPhase::RegisterOptimization);
 
     crate::api::diagnostics::trace!(
         trace,
@@ -80,31 +84,41 @@ pub(super) fn optimize(
             &optimization_boundary,
             diagnostics.mfs,
         )?;
+        session.publish_progress(OptimizationPhase::BooleanResynthesis);
     }
     let phase_started = std::time::Instant::now();
-    let cells = session.mapped.cell_ids().collect::<Vec<_>>();
-    let regions = sizing_regions(
-        runtime,
-        cells.into_iter().rev(),
-        session.mapped,
-        options,
-        catalog,
-        true,
-        None,
-    )?;
-    for sizing in regions {
-        for candidate_index in sizing.tradeoff_candidates {
-            let target = options.target_cells.get(candidate_index).ok_or_else(|| {
-                crate::SynthError::invariant(format!(
-                    "sizing candidate references unknown library index {candidate_index}"
-                ))
-            })?;
-            let candidate =
-                sizing_delta(session.mapped, sizing.cell, target.name(), candidate_index)?;
-            match session.evaluate(candidate, OptimizationPhase::TradeoffSizing)? {
-                CandidateDisposition::Accepted(_) | CandidateDisposition::Stale => break,
-                CandidateDisposition::Rejected => {}
-            }
+    let generations = 1 + usize::from(policy.repeated_timing_passes);
+    for _ in 0..generations {
+        let cells = session.mapped.cell_ids().collect::<Vec<_>>();
+        let regions = sizing_regions(
+            runtime,
+            cells.into_iter().rev(),
+            session.mapped,
+            options,
+            catalog,
+            true,
+            None,
+        )?;
+        let choices = regions
+            .into_iter()
+            .filter_map(|region| {
+                region
+                    .tradeoff_candidates
+                    .first()
+                    .copied()
+                    .map(|candidate| (region.cell, candidate))
+            })
+            .collect::<Vec<_>>();
+        if !forest::evaluate(
+            &choices,
+            OptimizationPhase::TradeoffSizing,
+            EvaluationPolicy::Complete,
+            &mut session,
+            |mapped, _, options, choices| {
+                sizing_forest_delta(mapped, &options.target_cells, choices).map(Some)
+            },
+        )? {
+            break;
         }
     }
 
@@ -173,9 +187,7 @@ fn resynthesize(
                 break;
             }
             evaluations = increment_count(evaluations, "post-map resynthesis evaluation")?;
-            if let CandidateDisposition::Accepted(edit) =
-                session.evaluate(candidate, OptimizationPhase::BooleanResynthesis)?
-            {
+            if let CandidateDisposition::Accepted(edit) = session.evaluate(candidate)? {
                 drivers.refresh(
                     session.mapped,
                     functions,
@@ -203,9 +215,7 @@ fn remove_dead_cells(
         else {
             return Ok(());
         };
-        let CandidateDisposition::Accepted(_) =
-            session.evaluate(candidate, OptimizationPhase::RegisterOptimization)?
-        else {
+        let CandidateDisposition::Accepted(_) = session.evaluate(candidate)? else {
             return Ok(());
         };
     }
@@ -232,9 +242,7 @@ fn remove_constant_registers(
         else {
             return Ok(());
         };
-        let CandidateDisposition::Accepted(edit) =
-            session.evaluate(candidate, OptimizationPhase::RegisterOptimization)?
-        else {
+        let CandidateDisposition::Accepted(edit) = session.evaluate(candidate)? else {
             return Ok(());
         };
         let mut reached = std::collections::HashSet::new();
@@ -257,15 +265,16 @@ fn extend_cleanup_frontier(
 }
 
 /// Owns post-map state and the running closure objective.
-struct AreaOptimizationSession<'a> {
+pub(super) struct AreaOptimizationSession<'a> {
     mapped: &'a mut MappedNetlist,
     implementations: &'a mut ImplementationDb,
     timing: Option<super::MmmcTiming>,
     closure: Option<crate::closure::mmmc::MmmcMetrics>,
     power: Option<super::MmmcPower>,
-    library: &'a opto_library::TargetCellSet,
+    options: &'a crate::SynthesisOptions,
     scenarios: &'a opto_timing::ScenarioSet,
     physical: PhysicalObjective,
+    evaluations: usize,
     replacements: usize,
     observer: &'a mut dyn FnMut(SynthesisProgress),
     connectivity: &'a crate::mapping::materialize::FrozenObservableConnectivity,
@@ -286,15 +295,15 @@ impl AreaOptimizationSession<'_> {
     fn evaluate(
         &mut self,
         candidate: PostmapCandidate,
-        phase: OptimizationPhase,
     ) -> Result<CandidateDisposition<AcceptedCandidate>, crate::SynthError> {
+        self.evaluations = increment_count(self.evaluations, "post-map cleanup evaluation")?;
         let mut disposition = evaluate_candidate(
             CandidateEvaluation {
                 mapped: self.mapped,
                 implementations: self.implementations,
                 timing: self.timing.as_mut(),
                 power: self.power.as_mut(),
-                library: self.library,
+                library: &self.options.target_cells,
                 scenarios: self.scenarios,
                 physical: self.physical,
                 closure: self.closure.as_ref().map(|closure| ClosureBaseline {
@@ -312,13 +321,66 @@ impl AreaOptimizationSession<'_> {
                 self.closure = Some(timing);
             }
             self.replacements = increment_count(self.replacements, "post-map replacement")?;
-            (self.observer)(SynthesisProgress::candidate(
+        }
+        Ok(disposition)
+    }
+
+    fn publish_progress(&mut self, phase: OptimizationPhase) {
+        match &self.closure {
+            Some(closure) => (self.observer)(SynthesisProgress::timing_candidate(
                 phase,
                 self.physical.area,
                 self.physical.cells,
+                &closure.analysis,
+                self.evaluations,
+            )),
+            None => (self.observer)(SynthesisProgress::candidate(
+                phase,
+                self.physical.area,
+                self.physical.cells,
+            )),
+        }
+    }
+}
+
+impl ForestSession for AreaOptimizationSession<'_> {
+    fn mapped(&self) -> &MappedNetlist {
+        self.mapped
+    }
+
+    fn implementations(&self) -> &ImplementationDb {
+        self.implementations
+    }
+
+    fn options(&self) -> &crate::SynthesisOptions {
+        self.options
+    }
+
+    fn qor_budget_exhausted(&self) -> bool {
+        false
+    }
+
+    fn evaluate_forest_candidate(
+        &mut self,
+        candidate: PostmapCandidate,
+        _phase: OptimizationPhase,
+        policy: EvaluationPolicy,
+    ) -> Result<CandidateDisposition<()>, crate::SynthError> {
+        if policy != EvaluationPolicy::Complete {
+            return Err(crate::SynthError::invariant(
+                "cleanup forest unexpectedly requested a QoR-budgeted evaluation",
             ));
         }
-        Ok(disposition)
+        self.evaluate(candidate)
+            .map(|disposition| match disposition {
+                CandidateDisposition::Accepted(_) => CandidateDisposition::Accepted(()),
+                CandidateDisposition::Rejected => CandidateDisposition::Rejected,
+                CandidateDisposition::Stale => CandidateDisposition::Stale,
+            })
+    }
+
+    fn publish_forest_progress(&mut self, phase: OptimizationPhase) {
+        self.publish_progress(phase);
     }
 }
 

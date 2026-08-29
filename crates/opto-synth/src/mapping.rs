@@ -27,7 +27,7 @@ mod sequential_integration_tests;
 pub use clock_gating::ClockGatingStyle;
 
 pub(crate) use architecture::{
-    RegionalArchitectureMapping, RegionalArchitectureRequest,
+    RegionalArchitectureMapping, RegionalArchitectureRequest, RegionalCoverCompiler,
     extend_operation_regions_for_memories, prepare_regional_architectures,
 };
 pub(crate) use cell::{MappedCell, MappedInputConnection, MappedOutputConnection};
@@ -77,6 +77,7 @@ impl TargetMappingContext {
         module: &mut word::WordModule,
         clock_gating: Option<ClockGatingStyle>,
         target_mapping: bool,
+        partition_policy: crate::regional::region_graph::RegionPartitionPolicy,
     ) -> Result<(), crate::SynthError> {
         let trace = crate::api::diagnostics::SynthTrace::new(self.config.diagnostics.timing);
         let mut stage_started = std::time::Instant::now();
@@ -97,10 +98,8 @@ impl TargetMappingContext {
         }
         if target_mapping {
             if let Some(style) = clock_gating {
-                let partition = crate::regional::region_graph::partition::build(
-                    module,
-                    crate::regional::region_graph::RegionPartitionPolicy::default(),
-                )?;
+                let partition =
+                    crate::regional::region_graph::partition::build(module, partition_policy)?;
                 clock_gating::gate_register_clocks_in_regions(
                     module,
                     &self.clock_gating_catalog,

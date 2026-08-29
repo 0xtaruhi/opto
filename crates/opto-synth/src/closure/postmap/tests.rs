@@ -9,12 +9,12 @@
 
 use super::candidate::{CandidateDisposition, PostmapCandidate};
 use super::candidates::sizing_regions;
-use super::objective::mapped_physical_objective;
 use super::session::{CandidateEvaluation, ClosureBaseline, evaluate_candidate};
 use super::sizing::SizingFrontier;
 use super::*;
 use crate::artifact::implementation::{InitialCellOwner, OriginSetId};
 use crate::closure::mapped_timing::MappedTimingTransaction;
+use crate::closure::objective::mapped_physical_objective;
 use crate::{
     BooleanFunction, OptimizationPhase, SynthesisEffort, TargetCell, TargetPin, TargetPinDirection,
     TargetTimingArc, TargetTimingType,
@@ -453,6 +453,73 @@ fn timing_preparation_and_area_recovery_share_one_postmap_flow() {
     assert_eq!(
         mapped.cell_type(opto_ir::mapped::CellId::from_index(0).unwrap()),
         Some("AND_SMALL")
+    );
+}
+
+#[test]
+fn cleanup_sizing_commits_independent_gates_as_one_forest() {
+    let cells = vec![
+        and_cell("AND_SMALL", 1.0, [1.0, 3.0]),
+        and_cell("AND_FAST", 3.0, [0.8, 1.0]),
+    ];
+    let options = SynthesisOptions {
+        target_cells: cells.clone().into(),
+    };
+    let timing_library = TimingLibrary {
+        cells: cells.into(),
+        ..TimingLibrary::default()
+    };
+    let module = parallel_and_module("AND_FAST", 3);
+    let (mut mapped, mut implementations) = mapped_design(&module, &options);
+    let mut timing = TimingContext::new();
+    timing
+        .set_max_delay(
+            0.5,
+            Vec::new(),
+            vec![opto_timing::TimingEndpoint::Port(named_port_id(
+                &mapped, "y2",
+            ))],
+        )
+        .unwrap();
+    let mut cleanup_updates = 0usize;
+    let mut cleanup_updates_with_timing = 0usize;
+    let mut cleanup_started = false;
+
+    let outcome = run_postmap_observed(
+        PostmapRun {
+            mapped: &mut mapped,
+            implementations: &mut implementations,
+            options: &options,
+            scenarios: single_scenario(&timing, timing_library),
+        },
+        &mut |progress| {
+            if let SynthesisProgress::Candidate { phase, timing, .. } = progress {
+                match phase {
+                    OptimizationPhase::RegisterOptimization => cleanup_started = true,
+                    OptimizationPhase::TradeoffSizing if cleanup_started => {
+                        cleanup_updates += 1;
+                        cleanup_updates_with_timing += usize::from(timing.is_some());
+                    }
+                    _ => {}
+                }
+            }
+        },
+    );
+
+    assert_eq!(outcome.replacements, 1);
+    assert_eq!(cleanup_updates, 2);
+    assert_eq!(cleanup_updates_with_timing, cleanup_updates);
+    assert_eq!(
+        mapped.cell_type(mapped_cell_by_name(&mapped, "U0")),
+        Some("AND_SMALL")
+    );
+    assert_eq!(
+        mapped.cell_type(mapped_cell_by_name(&mapped, "U1")),
+        Some("AND_SMALL")
+    );
+    assert_eq!(
+        mapped.cell_type(mapped_cell_by_name(&mapped, "U2")),
+        Some("AND_FAST")
     );
 }
 
@@ -1557,7 +1624,7 @@ fn pin_swap_forest_rewires_multiple_cells_atomically() {
     let options = SynthesisOptions {
         target_cells: vec![cell].into(),
     };
-    let (mut mapped, _) = mapped_design(&two_and_module("AND2"), &options);
+    let (mut mapped, _) = mapped_design(&parallel_and_module("AND2", 2), &options);
     let cells = (0..2)
         .map(|index| mapped_cell_by_name(&mapped, &format!("U{index}")))
         .collect::<Vec<_>>();
@@ -1721,10 +1788,10 @@ fn mapped_and_module(cell: &str) -> WordModule {
     module
 }
 
-fn two_and_module(cell: &str) -> WordModule {
+fn parallel_and_module(cell: &str, instances: usize) -> WordModule {
     let mut module = WordModule::new("top");
     let ty = WordType::bits(1).unwrap();
-    for index in 0..2 {
+    for index in 0..instances {
         let a = module
             .add_port(format!("a{index}"), PortDirection::Input, ty, test_span())
             .unwrap();

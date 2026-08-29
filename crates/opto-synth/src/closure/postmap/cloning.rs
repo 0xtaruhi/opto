@@ -3,7 +3,7 @@
 
 use super::buffering::{self, library_pin, net_sink_pins};
 use super::candidate::PostmapCandidate;
-use super::forest::{self, EvaluationPolicy, RejectionPolicy};
+use super::forest::{self, EvaluationPolicy};
 use super::{TimingOptimizationSession, sizing};
 use crate::{ImplementationDb, OptimizationPhase};
 use opto_ir::mapped::{
@@ -69,7 +69,6 @@ pub(super) fn optimize(
     forest::evaluate(
         &plans,
         OptimizationPhase::CriticalFanoutCloning,
-        RejectionPolicy::Bisect,
         EvaluationPolicy::QorBudgeted,
         session,
         |mapped, implementations, options, plans| {

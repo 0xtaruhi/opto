@@ -116,23 +116,28 @@ pub(super) fn lower_logic(
     let operator_manifest = crate::OperatorManifest::capture(
         prepared_regions.iter().map(|prepared| &prepared.operators),
     )?;
-    let (provenance, region_ownership, mut regional_plans) = {
+    let (provenance, region_ownership, mut regional_rows) = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.global_bitblast".to_string()
         });
         let shell = crate::planning::operator::ArchitectureDecisions::for_regional_shell(&source);
         let mut provenance = ProvenanceBuilder::new(&source, &shell)?;
-        let mut regional_plans = Vec::with_capacity(prepared_regions.len());
+        let mut regional_rows = Vec::with_capacity(prepared_regions.len());
         for prepared in prepared_regions {
             let crate::mapping::RegionalArchitectureMapping {
                 plan,
                 binding,
+                cover_compiler,
                 architecture,
                 operators: _,
                 publication: _,
             } = prepared;
             provenance.import_private_architecture(architecture, &source)?;
-            regional_plans.push(super::regional_mapping::RegionalPlanRow { plan, binding });
+            regional_rows.push(super::regional_mapping::RegionalWorkingRow {
+                plan,
+                binding,
+                cover_compiler,
+            });
         }
         let ownership = crate::boolean::bitblast::bitblast_module_with_regions(
             &mut source,
@@ -143,7 +148,7 @@ pub(super) fn lower_logic(
             &regional_publication,
             crate::boolean::bitblast::GlobalBitblastScope::RegionalShell,
         )?;
-        Ok::<_, crate::SynthError>((provenance, ownership, regional_plans))
+        Ok::<_, crate::SynthError>((provenance, ownership, regional_rows))
     }?;
     let sequential_operations = crate::mapping::materialize::lowered_sequential_operations(
         &source,
@@ -154,7 +159,7 @@ pub(super) fn lower_logic(
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "logic_lowering.binding_materialization".to_string()
         });
-        for row in &mut regional_plans {
+        for row in &mut regional_rows {
             row.binding
                 .materialize_source_bits(&source, &region_ownership, &memory_ownership)?;
         }
@@ -169,7 +174,7 @@ pub(super) fn lower_logic(
         regions,
         region_ownership,
         contracts,
-        regional_plans: regional_plans.into_boxed_slice(),
+        regional_rows: regional_rows.into_boxed_slice(),
         sequential_operations,
         synthesized: source,
         provenance,
