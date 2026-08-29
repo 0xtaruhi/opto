@@ -65,63 +65,34 @@ fn tcl_does_not_reuse_a_typed_error_after_catch_handles_it() {
 
 #[test]
 fn synthesize_events_render_structured_progress() {
-    let started = synthesis_event_text(&SynthesisEvent::Started {
-        design: "top".to_string(),
-        effort: SynthesisEffort::High,
-        parallelism: 4,
-    });
     assert_eq!(
-        started,
-        "Beginning technology mapping for 'top' with 4 workers (high effort).\n"
-    );
-
-    assert_eq!(
-        synthesis_event_text(&SynthesisEvent::ArtifactCompleted {
-            design: "top".to_string(),
-            metrics: Box::new(opto_session::SynthesisMetrics {
-                source_change: opto_session::SourceChangeMetrics {
-                    operations: 4,
-                    changed_operations: 1,
-                    boundaries: 3,
-                    changed_boundaries: 2,
-                    ..opto_session::SourceChangeMetrics::default()
-                },
-                mapped_cells: 2,
-                mapped_nets: 3,
-                regional_decision_hits: 1,
-                regional_decision_misses: 2,
-                synthesis_regions: 3,
-                regional_cover_plans: 3,
-                regional_epochs: 4,
-                ..opto_session::SynthesisMetrics::default()
-            }),
-        }),
-        concat!(
-            "Synthesis artifact for 'top' is complete; preparing the mapped object ",
-            "index.\n",
-            "Regional synthesis: regions=3 rebuilt=2 reused=1 plans=3 epochs=4.\n"
-        )
-    );
-    assert_eq!(
-        synthesis_event_text(&SynthesisEvent::DesignInformationUpdateStarted {
+        synthesis_event_text(&SynthesisEvent::Started {
             design: "top".to_string(),
             effort: SynthesisEffort::High,
+            parallelism: 4,
         }),
-        "Publishing mapped design information for 'top'.\n"
+        "Info    : Synthesizing 'top' using 'high' effort with 4 workers. [OPT-SYN-001]\n"
     );
-    let completed = synthesis_event_text(&SynthesisEvent::Completed {
-        design: "top".to_string(),
-        synthesized: true,
-    });
-    assert_eq!(completed, "Optimization complete.\n");
 
-    let reused = synthesis_event_text(&SynthesisEvent::Completed {
+    let mapped = synthesis_event_text(&SynthesisEvent::ArtifactCompleted {
         design: "top".to_string(),
-        synthesized: false,
+        metrics: Box::new(opto_session::SynthesisMetrics {
+            mapped_cells: 2,
+            mapped_nets: 3,
+            synthesis_regions: 1,
+            regional_decision_misses: 1,
+            regional_decision_hits: 0,
+            ..opto_session::SynthesisMetrics::default()
+        }),
     });
+    assert!(mapped.contains("cells=2 nets=3 regions=1 rebuilt=1 reused=0"));
+
     assert_eq!(
-        reused,
-        "Information: Design 'top' is unchanged; reusing synthesized root artifact.\n"
+        synthesis_event_text(&SynthesisEvent::Completed {
+            design: "top".to_string(),
+            synthesized: true,
+        }),
+        "Info    : Done synthesizing 'top'. [OPT-SYN-002]\n"
     );
 }
 

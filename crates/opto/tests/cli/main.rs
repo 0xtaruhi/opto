@@ -514,14 +514,21 @@ fn a_removed_override_never_appears_in_a_report() {
 }
 
 fn strip_volatile_report_fields(report: &str) -> String {
+    let mut synthesis_progress = false;
     report
         .lines()
         .filter(|line| {
-            !line.starts_with("Date:")
-                && !line.starts_with("Design:")
-                && !line.starts_with("Synthesis stage: elapsed=")
-                && !line.starts_with("Synthesis heartbeat: elapsed=")
-                && !line.starts_with("Optimization: elapsed=")
+            if line.starts_with("Info    : Synthesizing '") && line.ends_with("[OPT-SYN-001]") {
+                synthesis_progress = true;
+                return false;
+            }
+            if synthesis_progress {
+                if line.ends_with("[OPT-SYN-002]") || line.ends_with("[OPT-SYN-003]") {
+                    synthesis_progress = false;
+                }
+                return false;
+            }
+            !line.starts_with("Date:") && !line.starts_with("Design:")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -529,11 +536,13 @@ fn strip_volatile_report_fields(report: &str) -> String {
 
 #[test]
 fn volatile_synthesis_progress_is_excluded_from_report_comparisons() {
-    let stable = "Beginning synthesis.\nCombinational cells: 60\n";
+    let stable = "Combinational cells: 60\n";
     let with_progress = concat!(
-        "Beginning synthesis.\n",
-        "Synthesis heartbeat: elapsed=00:00:30 design=\"top\" ",
-        "stage=\"Logic Lowering\" stage_elapsed=00:00:29\n",
+        "Info    : Synthesizing 'top' using 'medium' effort with 8 workers. [OPT-SYN-001]\n",
+        "\nOptimization Summary: top\n",
+        "Step  Elapsed  Area  Cells  WNS  TNS  Paths  Eval\n",
+        "Technology Mapping  00:00:31  40.0  8  -0.10  -0.5  1  7\n",
+        "Info    : Done synthesizing 'top'. [OPT-SYN-002]\n",
         "Combinational cells: 60\n",
     );
 
@@ -541,6 +550,43 @@ fn volatile_synthesis_progress_is_excluded_from_report_comparisons() {
         strip_volatile_report_fields(with_progress),
         strip_volatile_report_fields(stable)
     );
+}
+
+#[test]
+fn redirected_synthesis_uses_the_shared_progress_layout() {
+    let source = temp_sv(
+        "cli-shared-synthesis-progress.v",
+        "module top(input [3:0] a, input [3:0] b, output [4:0] y); assign y = a + b; endmodule\n",
+    );
+    let output = opto()
+        .arg("--no-init")
+        .arg("-x")
+        .arg(format!(
+            "{} read_hdl {}; elaborate top; synth",
+            test_target_setup(),
+            tcl_path_word(&source)
+        ))
+        .output()
+        .unwrap();
+    std::fs::remove_file(source).unwrap();
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let stdout = normalized_stdout(&output);
+    assert!(stdout.contains("Info    : Synthesizing 'top'"), "{stdout}");
+    assert!(
+        stdout.contains("Info    : Running Linked Hierarchy Elaboration"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Optimization Summary: top"), "{stdout}");
+    assert!(
+        stdout.contains("Step") && stdout.contains("Area") && stdout.contains("WNS"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Technology Mapping"), "{stdout}");
+    assert!(stdout.contains("Info    : Mapped 'top'"), "{stdout}");
+    assert!(stdout.contains("Done synthesizing 'top'"), "{stdout}");
+    assert!(!stdout.contains("heartbeat"), "{stdout}");
+    assert!(!stdout.contains("Optimization: elapsed="), "{stdout}");
 }
 
 #[test]
