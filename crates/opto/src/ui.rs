@@ -236,46 +236,31 @@ fn print_banner(palette: Palette, colors: bool) {
     }
 }
 
-pub(crate) fn print_progress(text: &str, options: UiOptions, interactive: bool) {
-    if !interactive || !colors_enabled(options.color) {
+pub(crate) fn print_progress(text: &str, options: UiOptions) {
+    if !colors_enabled(options.color) {
         print!("{text}");
         return;
     }
     let palette = options.theme.palette();
     for line in text.split_inclusive('\n') {
-        let (display, color, bold) =
-            if line.contains("Optimization complete") || line.contains("unchanged") {
-                (
-                    line.trim_end_matches('\n').to_string(),
-                    palette.success,
-                    true,
-                )
-            } else if line.contains("Warning") {
-                (
-                    line.trim_end_matches('\n').to_string(),
-                    palette.warning,
-                    true,
-                )
-            } else if line.contains("Information:") {
-                (line.trim_end_matches('\n').to_string(), palette.info, false)
-            } else if line.contains("Beginning ") {
-                (
-                    line.trim_end_matches('\n').to_string(),
-                    palette.primary,
-                    true,
-                )
-            } else if line.contains("Processing")
-                || line.contains("Structuring")
-                || line.contains("Mapping")
-            {
-                (
-                    line.trim_end_matches('\n').to_string(),
-                    palette.accent,
-                    false,
-                )
-            } else {
-                (line.trim_end_matches('\n').to_string(), palette.text, false)
-            };
+        let display = line.trim_end_matches('\n');
+        let (color, bold) = if line.contains("[OPT-SYN-002]") || line.contains("[OPT-SYN-003]") {
+            (palette.success, true)
+        } else if line.starts_with("Error   :") {
+            (palette.error, true)
+        } else if line.contains("Warning") {
+            (palette.warning, true)
+        } else if line.starts_with("Optimization Summary") {
+            (palette.primary, true)
+        } else if line.starts_with("Step ") {
+            (palette.accent, true)
+        } else if line.starts_with("Info    :") {
+            (palette.info, false)
+        } else if line.starts_with("---") {
+            (palette.muted, false)
+        } else {
+            (palette.text, false)
+        };
         let mut style = Palette::terminal(color);
         if bold {
             style = style.bold();

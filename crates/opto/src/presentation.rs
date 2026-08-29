@@ -4,12 +4,18 @@
 use crate::ui::Palette;
 use comfy_table::presets::{NOTHING, UTF8_HORIZONTAL_ONLY};
 use comfy_table::{
-    Attribute, Cell, CellAlignment, Color, ColumnConstraint, ContentArrangement, Row, Table,
+    Attribute, Cell, CellAlignment, Color, ColumnConstraint, ContentArrangement, Row, Table, Width,
 };
+use comfy_table::{ContentLineStyle, LineStyle, TableStyle};
 use opto_formats::{MessageKind, ReportBlock, ReportDocument, ReportField, ReportTable};
 use std::fmt::Write;
 
 const MIN_REPORT_WIDTH: u16 = 48;
+const ASCII_PROGRESS_TABLE_START: TableStyle = TableStyle::new()
+    .top_border(LineStyle::none().fill('-').junction('-'))
+    .header_separator(LineStyle::none().fill('-').junction('-'));
+const ASCII_PROGRESS_TABLE_ROW: TableStyle =
+    TableStyle::new().content_lines(ContentLineStyle::none().junction(' '));
 
 pub(crate) fn is_report(text: &str) -> bool {
     ReportDocument::parse(text).is_some()
@@ -115,6 +121,43 @@ fn render_table(
         }
     }
     preserve_numeric_columns(&mut table, report);
+    table.trim_fmt()
+}
+
+pub(crate) fn render_live_table(
+    headers: Option<&[&str]>,
+    row: &[String],
+    column_widths: &[u16],
+) -> String {
+    let mut table = Table::new();
+    table
+        .load_style(if headers.is_some() {
+            ASCII_PROGRESS_TABLE_START
+        } else {
+            ASCII_PROGRESS_TABLE_ROW
+        })
+        .set_content_arrangement(ContentArrangement::Disabled);
+    if let Some(headers) = headers {
+        table.set_header(headers.iter().map(Cell::new));
+    }
+    table.add_row(Row::from(
+        row.iter()
+            .map(|value| {
+                Cell::new(value).set_alignment(if is_numeric_cell(value) {
+                    CellAlignment::Right
+                } else {
+                    CellAlignment::Left
+                })
+            })
+            .collect::<Vec<_>>(),
+    ));
+    for (column_index, width) in column_widths.iter().copied().enumerate() {
+        if let Some(column) = table.column_mut(column_index) {
+            column
+                .set_constraint(ColumnConstraint::Absolute(Width::Fixed(width)))
+                .set_padding((0, 1));
+        }
+    }
     table.trim_fmt()
 }
 
@@ -229,6 +272,26 @@ mod tests {
         assert!(output.contains("DW01_add"), "{output}");
         assert!(output.contains('─'), "{output}");
         assert!(!output.contains('|'), "{output}");
+    }
+
+    #[test]
+    fn live_table_rows_keep_library_managed_column_alignment() {
+        let headers = ["Step", "Elapsed", "Area"];
+        let widths = [13, 9, 9];
+        let first = render_live_table(
+            Some(&headers),
+            &["Mapping".into(), "00:00:01".into(), "100.0".into()],
+            &widths,
+        );
+        let next = render_live_table(
+            None,
+            &["Sizing".into(), "00:00:02".into(), "90.0".into()],
+            &widths,
+        );
+        let first_row = first.lines().find(|line| line.contains("Mapping")).unwrap();
+        let next_row = next.lines().find(|line| line.contains("Sizing")).unwrap();
+        assert_eq!(first_row.find("00:00:01"), next_row.find("00:00:02"));
+        assert_eq!(first_row.find(".0"), next_row.find(".0"));
     }
 
     #[test]

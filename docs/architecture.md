@@ -175,6 +175,13 @@ from the same declarative schema as validation and includes a summary, usage,
 typed arguments and options, preconditions, and an example. Unsupported options
 remain listed explicitly and fail when used.
 
+Synthesis lifecycle and candidate events are presentation-independent. The
+`opto` executable renders them identically in terminals and redirected logs,
+apart from optional ANSI color. QoR observations use the shared table
+renderer to show elapsed time, area, cells, WNS, TNS, violating paths, and
+evaluation count. Every candidate event is retained, including evaluations
+whose QoR values do not change.
+
 ### `opto-synth` Internal Domains
 
 `opto-synth` has eleven top-level domains. Top-level modules are architectural
