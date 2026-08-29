@@ -103,6 +103,7 @@ impl std::ops::Deref for GraphArcRef<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GraphArcKind {
     Combinational,
+    ClockGate,
     LatchData {
         enable_net: crate::TimingNetId,
         open_edge: TimingEdge,
@@ -325,7 +326,7 @@ impl TimingGraph {
             .flat_map(|source| self.port_nets.get(source).into_iter().flatten().copied())
             .map(crate::TimingNetId::index)
             .collect::<Vec<_>>();
-        let clock_nets = self.reachable_nets(clock_seeds);
+        let clock_nets = self.reachable_clock_nets(clock_seeds);
         if scope == DesignRuleScope::ClockPath {
             return clock_nets;
         }
@@ -346,7 +347,42 @@ impl TimingGraph {
         clock_nets.union(&data_nets).copied().collect()
     }
 
+    /// Returns whether one clock source reaches `net` through integrated clock gates.
+    pub(crate) fn clock_reaches_net(&self, sources: &[PortId], net: usize) -> bool {
+        let mut worklist = SmallVec::<[usize; 8]>::from_slice(&[net]);
+        let mut visited = SmallVec::<[usize; 8]>::new();
+        while let Some(candidate) = worklist.pop() {
+            if visited.contains(&candidate) {
+                continue;
+            }
+            visited.push(candidate);
+            if sources
+                .iter()
+                .any(|&source| self.net_has_port(candidate, source))
+            {
+                return true;
+            }
+            worklist.extend(self.incoming[candidate].iter().filter_map(|&arc| {
+                let arc = self.arc(arc);
+                (arc.kind == GraphArcKind::ClockGate).then_some(arc.from.index())
+            }));
+        }
+        false
+    }
+
+    fn reachable_clock_nets(&self, seeds: Vec<usize>) -> BTreeSet<usize> {
+        self.reachable_nets_by(seeds, |arc| arc.kind == GraphArcKind::ClockGate)
+    }
+
     fn reachable_nets(&self, seeds: Vec<usize>) -> BTreeSet<usize> {
+        self.reachable_nets_by(seeds, |_| true)
+    }
+
+    fn reachable_nets_by(
+        &self,
+        seeds: Vec<usize>,
+        include: impl Fn(GraphArcRef<'_>) -> bool,
+    ) -> BTreeSet<usize> {
         let mut reachable = BTreeSet::new();
         let mut worklist = VecDeque::from(seeds);
         while let Some(net) = worklist.pop_front() {
@@ -354,7 +390,10 @@ impl TimingGraph {
                 continue;
             }
             for &arc in &self.outgoing[net] {
-                worklist.push_back(self.arc(arc).to.index());
+                let arc = self.arc(arc);
+                if include(arc) {
+                    worklist.push_back(arc.to.index());
+                }
             }
         }
         reachable
@@ -540,7 +579,7 @@ impl TimingGraph {
         arcs.iter().flat_map(move |&arc| {
             let arc = self.arc(arc);
             let enable = match arc.kind {
-                GraphArcKind::Combinational => None,
+                GraphArcKind::Combinational | GraphArcKind::ClockGate => None,
                 GraphArcKind::LatchData { enable_net, .. } => Some(enable_net.index()),
             };
             [Some(arc.from.index()), enable].into_iter().flatten()

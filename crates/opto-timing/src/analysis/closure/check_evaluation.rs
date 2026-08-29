@@ -74,10 +74,9 @@ pub(super) fn evaluate_check(
         let Some(clock_net) = connections.get(constraint.related_pin()) else {
             continue;
         };
-        if !clock
-            .sources
-            .iter()
-            .any(|source| model.graph.net_has_port(clock_net.index(), *source))
+        if !model
+            .graph
+            .clock_reaches_net(&clock.sources, clock_net.index())
         {
             continue;
         }

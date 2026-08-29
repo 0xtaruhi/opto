@@ -40,6 +40,11 @@ pub(super) fn legalize(
     }
     let mut generation = 0usize;
     while session.has_design_rule_violations() {
+        let namespace = super::generated_name_namespace(
+            session.mapped,
+            "U_electrical_buffer_",
+            "_electrical_net_",
+        )?;
         let branches = repair_generation(session)?;
         if branches.is_empty() {
             break;
@@ -53,8 +58,10 @@ pub(super) fn legalize(
                     net: branch.net,
                     sinks: branch.sinks.clone(),
                     buffer_index,
-                    instance_name: format!("U_electrical_buffer_{generation}_{ordinal}"),
-                    net_name: format!("_electrical_net_{generation}_{ordinal}"),
+                    instance_name: format!(
+                        "U_electrical_buffer_{namespace}_{generation}_{ordinal}"
+                    ),
+                    net_name: format!("_electrical_net_{namespace}_{generation}_{ordinal}"),
                 })
                 .collect::<Vec<_>>();
             if forest::evaluate(

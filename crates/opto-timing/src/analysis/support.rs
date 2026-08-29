@@ -199,12 +199,9 @@ pub(super) fn clocks_on_net<'a>(
     graph: &'a TimingGraph,
     net: usize,
 ) -> impl Iterator<Item = (ClockSlot, &'a Clock)> {
-    timing.clock_entries().filter(move |(_, clock)| {
-        clock
-            .sources
-            .iter()
-            .any(|source| graph.net_has_port(net, *source))
-    })
+    timing
+        .clock_entries()
+        .filter(move |(_, clock)| graph.clock_reaches_net(&clock.sources, net))
 }
 
 pub(super) fn explicit_transition(

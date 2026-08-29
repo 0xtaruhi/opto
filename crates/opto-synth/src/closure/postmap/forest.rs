@@ -86,6 +86,26 @@ where
         &[T],
     ) -> Result<Option<PostmapCandidate>, crate::SynthError>,
 {
+    evaluate_observed(plans, phase, evaluation, session, materialize, |_| {})
+}
+
+pub(super) fn evaluate_observed<T, F, S>(
+    plans: &[T],
+    phase: OptimizationPhase,
+    evaluation: EvaluationPolicy,
+    session: &mut S,
+    materialize: F,
+    mut observe_accepted: impl FnMut(&[T]),
+) -> Result<bool, crate::SynthError>
+where
+    S: ForestSession,
+    F: Fn(
+        &MappedNetlist,
+        &crate::ImplementationDb,
+        &SynthesisOptions,
+        &[T],
+    ) -> Result<Option<PostmapCandidate>, crate::SynthError>,
+{
     if plans.is_empty() {
         return Ok(false);
     }
@@ -106,7 +126,10 @@ where
         };
         let disposition = session.evaluate_forest_candidate(candidate, phase, evaluation)?;
         match disposition {
-            CandidateDisposition::Accepted(()) => accepted = true,
+            CandidateDisposition::Accepted(()) => {
+                accepted = true;
+                observe_accepted(&plans[start..end]);
+            }
             CandidateDisposition::Rejected if end - start > 1 => {
                 let middle = start + (end - start) / 2;
                 pending.push((middle, end));
