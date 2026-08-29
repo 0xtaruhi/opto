@@ -702,6 +702,70 @@ fn rejects_multiple_continuous_drivers_before_netlist_aliasing() {
 }
 
 #[test]
+fn rejects_mixed_continuous_and_procedural_drivers() {
+    let source = temp_sv(
+        "cli-mixed-continuous-procedural-drivers.sv",
+        concat!(
+            "module top(output logic y);\n",
+            "  wire clk = 0;\n",
+            "  int v;\n",
+            "  assign v = 12;\n",
+            "  always @(posedge clk) v <= ~v;\n",
+            "  assign y = v[0];\n",
+            "endmodule\n",
+        ),
+    );
+    let target_setup = test_target_setup();
+    for command in ["check_design", "synth"] {
+        let output = opto()
+            .arg("--no-init")
+            .arg("-x")
+            .arg(format!(
+                "{target_setup} read_hdl {}; elaborate top; {command}",
+                tcl_path_word(&source)
+            ))
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{}", output_text(&output));
+        assert!(
+            output_text(&output).contains("signal 'v' bit 0 has multiple drivers"),
+            "{}",
+            output_text(&output)
+        );
+    }
+    std::fs::remove_file(source).unwrap();
+}
+
+#[test]
+fn accepts_disjoint_mixed_unpacked_array_drivers() {
+    let source = temp_sv(
+        "cli-disjoint-mixed-unpacked-array-drivers.sv",
+        concat!(
+            "module top(input logic [7:0] a, b, output logic [7:0] y);\n",
+            "  logic [7:0] values [0:1];\n",
+            "  assign values[0] = a;\n",
+            "  always_comb values[1] = b;\n",
+            "  assign y = values[0] ^ values[1];\n",
+            "endmodule\n",
+        ),
+    );
+    let target_setup = test_target_setup();
+    for command in ["check_design", "synth"] {
+        let output = opto()
+            .arg("--no-init")
+            .arg("-x")
+            .arg(format!(
+                "{target_setup} read_hdl {}; elaborate top; {command}",
+                tcl_path_word(&source)
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+    }
+    std::fs::remove_file(source).unwrap();
+}
+
+#[test]
 fn combinational_cycle_reports_hdl_before_the_synthesis_invocation() {
     let source = temp_sv(
         "cli-combinational-cycle.sv",
