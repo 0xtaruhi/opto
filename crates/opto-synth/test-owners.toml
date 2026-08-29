@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 491
+expected_tests = 492
 
 [[owners]]
 path = "src/api"
@@ -56,7 +56,7 @@ contract = "Fingerprints, recipe caches, source metrics, snapshots, and portable
 [[owners]]
 path = "src/mapping"
 owner = "mapping"
-tests = 104
+tests = 105
 contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and materialization."
 
 [[owners]]

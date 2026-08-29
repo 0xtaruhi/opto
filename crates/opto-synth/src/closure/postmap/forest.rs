@@ -43,7 +43,7 @@ impl ForestSession for TimingOptimizationSession<'_> {
     }
 
     fn qor_budget_exhausted(&self) -> bool {
-        self.qor_budget_exhausted()
+        TimingOptimizationSession::qor_budget_exhausted(self)
     }
 
     fn evaluate_forest_candidate(

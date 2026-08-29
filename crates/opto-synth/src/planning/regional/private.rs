@@ -55,7 +55,7 @@ pub(crate) fn optimize_structure(
                 .unwrap_or(value)
         },
     )?;
-    mapping.prepare_structure(module, clock_gating, target_mapping)?;
+    mapping.prepare_structure(module, clock_gating, target_mapping, partition_policy)?;
     crate::planning::dataflow::optimize_priority_dataflow_in_regions(module)?;
 
     crate::regional::region_graph::partition::build(module, partition_policy)

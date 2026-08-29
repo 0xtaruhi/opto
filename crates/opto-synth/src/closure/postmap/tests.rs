@@ -483,6 +483,7 @@ fn cleanup_sizing_commits_independent_gates_as_one_forest() {
         .unwrap();
     let mut cleanup_updates = 0usize;
     let mut cleanup_updates_with_timing = 0usize;
+    let mut cleanup_started = false;
 
     let outcome = run_postmap_observed(
         PostmapRun {
@@ -492,14 +493,15 @@ fn cleanup_sizing_commits_independent_gates_as_one_forest() {
             scenarios: single_scenario(&timing, timing_library),
         },
         &mut |progress| {
-            if let SynthesisProgress::Candidate {
-                phase: OptimizationPhase::TradeoffSizing,
-                timing,
-                ..
-            } = progress
-            {
-                cleanup_updates += 1;
-                cleanup_updates_with_timing += usize::from(timing.is_some());
+            if let SynthesisProgress::Candidate { phase, timing, .. } = progress {
+                match phase {
+                    OptimizationPhase::RegisterOptimization => cleanup_started = true,
+                    OptimizationPhase::TradeoffSizing if cleanup_started => {
+                        cleanup_updates += 1;
+                        cleanup_updates_with_timing += usize::from(timing.is_some());
+                    }
+                    _ => {}
+                }
             }
         },
     );
