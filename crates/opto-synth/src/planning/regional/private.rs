@@ -5,21 +5,34 @@
 
 use opto_ir::word;
 
+/// Borrowed configuration for one canonical structural-preparation pass.
+#[derive(Clone, Copy)]
+pub(crate) struct StructureOptimizationRequest<'a> {
+    pub(crate) mapping: &'a crate::mapping::TargetMappingContext,
+    pub(crate) clock_gating: Option<crate::ClockGatingStyle>,
+    pub(crate) target_mapping: bool,
+    pub(crate) timing: &'a opto_timing::TimingContext,
+    pub(crate) port_bindings: &'a opto_timing::PortBindings,
+    pub(crate) runtime: &'a opto_runtime::ExecutionContext,
+    pub(crate) partition_policy: crate::regional::region_graph::RegionPartitionPolicy,
+}
+
 pub(crate) fn optimize_structure(
     module: &mut word::WordModule,
-    mapping: &crate::mapping::TargetMappingContext,
-    clock_gating: Option<crate::ClockGatingStyle>,
-    target_mapping: bool,
-    timing: &opto_timing::TimingContext,
-    port_bindings: &opto_timing::PortBindings,
-    runtime: &opto_runtime::ExecutionContext,
+    request: StructureOptimizationRequest<'_>,
 ) -> Result<crate::SynthesisRegionGraph, crate::SynthError> {
+    let StructureOptimizationRequest {
+        mapping,
+        clock_gating,
+        target_mapping,
+        timing,
+        port_bindings,
+        runtime,
+        partition_policy,
+    } = request;
     crate::planning::dataflow::coalesce_static_wire_drivers(module)?;
     crate::planning::dataflow::resolve_static_connect_aliases(module)?;
-    let partition = crate::regional::region_graph::partition::build(
-        module,
-        crate::regional::region_graph::RegionPartitionPolicy::default(),
-    )?;
+    let partition = crate::regional::region_graph::partition::build(module, partition_policy)?;
     crate::planning::fsm::optimize_derived_fsms_in_regions(
         module,
         partition.operation_owner_rows(),
@@ -29,10 +42,7 @@ pub(crate) fn optimize_structure(
     )?;
     let canonical_values =
         crate::planning::dataflow::optimize_priority_dataflow_in_regions(module)?;
-    let partition = crate::regional::region_graph::partition::build(
-        module,
-        crate::regional::region_graph::RegionPartitionPolicy::default(),
-    )?;
+    let partition = crate::regional::region_graph::partition::build(module, partition_policy)?;
     crate::planning::dataflow::share_equivalent_sequential_values_by(
         module,
         runtime,
@@ -48,8 +58,5 @@ pub(crate) fn optimize_structure(
     mapping.prepare_structure(module, clock_gating, target_mapping)?;
     crate::planning::dataflow::optimize_priority_dataflow_in_regions(module)?;
 
-    crate::regional::region_graph::partition::build(
-        module,
-        crate::regional::region_graph::RegionPartitionPolicy::default(),
-    )
+    crate::regional::region_graph::partition::build(module, partition_policy)
 }

@@ -71,7 +71,7 @@ path-exception arbitration rule.
 | Boundary identity | Complete | Whole protected equivalence classes and ownership rules survive canonicalization |
 | Regional mapping | Complete | Canonical regional slices are analyzed and covered against Liberty in keyed parallel tasks |
 | Worker allocation | Complete | Deterministic weighted allocation gives inner lanes only to dominating regions |
-| Feedback | Complete | Dirty regions rebind explicit contracts and replace frozen owned footprints without reopening cover |
+| Feedback | Complete | Dirty regions reproject exact contracts, reselect from frozen AXM/cut/truth records, and replace only changed owned footprints |
 | Mapped commit | Complete | Direct artifacts replace stable footprints transactionally |
 | Mapped ownership | Complete | Global, single-region, or exact driver-to-sink boundary-edge atoms with stable reverse footprints |
 | Post-map | Complete | Design-rule, fanout, sizing, and MFS changes use measured transactional evaluation |
@@ -154,8 +154,10 @@ Target regions independently perform:
 - exact sparse boundary response measurement;
 - compact portable plan serialization.
 
-`AnalyzedRegionCover` is task-local. `RegionCoverPlan` owns only the selected
-portable topology, costs, stable identity, boundary response, and
+`CompiledRegionCover` retains one region's optimized AXM subject, cuts, truth
+rows, and stable catalog frontier only through the initial mapping epochs.
+`AnalyzedRegionCover` is one current selection. `RegionCoverPlan` owns only the
+selected portable topology, costs, stable identity, boundary response, and
 implementation-cell summary. Input and owner-output bindings are frozen beside
 the plan and survive global lowering as explicit provenance. A cache hit is
 accepted only when current private source semantics reconstruct the same
@@ -163,8 +165,16 @@ topology and binding obligations; a cached payload is never connectivity or
 ownership evidence.
 
 Feedback does not reopen architecture search. When contracts change, only
-dirty regions refresh or reuse their analysis and compact a new selected cover
-from that same canonical construction.
+dirty regions reproject exact timing onto the retained local identities,
+reselect a cover from the same canonical construction, and compact the result.
+They do not rerun lowering, Boolean rewriting, cut enumeration, or truth
+computation. The retained compilation is discarded when the epoch loop ends;
+it is neither a second mapped plan nor persistent cache state.
+
+The coordinator owns one moved `RegionContractSet`, not an input copy plus a
+mutable working copy. Each region has one `RegionalWorkingRow` containing its
+active plan, immutable binding, and transient compiler. Best-epoch rollback
+stores compact plans only; it does not duplicate bindings or compiler state.
 
 ### Deterministic Parallelism
 
@@ -232,12 +242,11 @@ net and one generation-wide forest; accepted generations refresh exact STA and
 continue to a fixed point. Topology and legalization evaluations are accounted
 separately from the later QoR search budget.
 
-Sizing candidate generation remains parallel and estimate-driven, but exact
-evaluation is one atomic replacement forest per timing frontier. Rejection
-moves from the worst-path frontier to the all-violations frontier; it does not
-launch a per-cell or binary-subset STA search. Pin permutation follows the same
-rule: one stable swap per eligible critical cell is reduced into one atomic
-forest and globally evaluated once.
+Sizing candidate generation remains parallel and estimate-driven, and exact
+evaluation first tries one atomic replacement forest per timing frontier.
+Rejection bisects only at stable cell boundaries under the fixed QoR budget;
+there is no independent per-cell control path. Pin permutation uses the same
+forest executor and transaction objective.
 
 Timing paths carry typed contributions. Diagnostics and `report_timing`
 separate cell arcs, interconnect, and boundary effects; an interconnect step

@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 485
+expected_tests = 491
 
 [[owners]]
 path = "src/api"
@@ -14,7 +14,7 @@ contract = "Library-facing request validation, reference contracts, and structur
 [[owners]]
 path = "src/engine"
 owner = "engine"
-tests = 11
+tests = 13
 contract = "Stage ordering, immutable states, publication, determinism, and report boundaries."
 
 [[owners]]
@@ -56,13 +56,13 @@ contract = "Fingerprints, recipe caches, source metrics, snapshots, and portable
 [[owners]]
 path = "src/mapping"
 owner = "mapping"
-tests = 102
+tests = 104
 contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and materialization."
 
 [[owners]]
 path = "src/closure"
 owner = "closure"
-tests = 60
+tests = 62
 contract = "MMMC measurement, power objectives, mapped boundaries, and transactional post-map repair."
 
 [[owners]]
@@ -74,7 +74,7 @@ contract = "Durable implementation ownership, publication identity, and source p
 [[focused_contracts]]
 path = "src/closure/postmap/tests.rs"
 owner = "postmap"
-tests = 27
+tests = 28
 contract = "Transactional candidate evaluation, mapped edits, rollback, and deterministic closure ordering."
 
 [[focused_contracts]]
@@ -86,5 +86,5 @@ contract = "Canonical partition snapshots, stable region and boundary identities
 [[focused_contracts]]
 path = "src/mapping/cover/search/tests.rs"
 owner = "mapping-cover"
-tests = 20
+tests = 21
 contract = "Library matching, candidate cost, observability care, and deterministic joint cover selection."

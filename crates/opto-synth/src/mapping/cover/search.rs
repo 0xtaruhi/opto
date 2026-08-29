@@ -455,19 +455,21 @@ impl ExactChoice {
 
 fn joint_replacement_is_preferred(
     timing_driven: bool,
+    restores_timing: bool,
     candidate_area: f64,
     candidate_arrival: f64,
     current_area: f64,
     current_arrival: f64,
 ) -> bool {
-    crate::planning::mapping_policy::compare_area_arrival_objective(
-        timing_driven,
-        candidate_area,
-        candidate_arrival,
-        current_area,
-        current_arrival,
-    )
-    .is_lt()
+    restores_timing
+        || crate::planning::mapping_policy::compare_area_arrival_objective(
+            timing_driven,
+            candidate_area,
+            candidate_arrival,
+            current_area,
+            current_arrival,
+        )
+        .is_lt()
 }
 
 #[cfg(test)]

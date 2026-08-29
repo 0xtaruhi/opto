@@ -9,6 +9,7 @@
 mod boundary_measurement;
 pub(crate) mod mapped_timing;
 pub(crate) mod mmmc;
+pub(crate) mod objective;
 pub(crate) mod postmap;
 pub(crate) mod power;
 

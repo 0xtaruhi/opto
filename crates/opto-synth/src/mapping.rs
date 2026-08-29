@@ -27,7 +27,7 @@ mod sequential_integration_tests;
 pub use clock_gating::ClockGatingStyle;
 
 pub(crate) use architecture::{
-    RegionalArchitectureMapping, RegionalArchitectureRequest,
+    RegionalArchitectureMapping, RegionalArchitectureRequest, RegionalCoverCompiler,
     extend_operation_regions_for_memories, prepare_regional_architectures,
 };
 pub(crate) use cell::{MappedCell, MappedInputConnection, MappedOutputConnection};

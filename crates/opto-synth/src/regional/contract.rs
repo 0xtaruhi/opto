@@ -154,8 +154,9 @@ impl RegionContractSet {
         &self.timing_tags
     }
 
-    /// Folds the measured boundary responses back into every contract and
-    /// widens the required time of the rows the coordinator marked dirty.
+    /// Folds measured boundary responses back into every contract and moves
+    /// slack across internal boundaries of rows the coordinator marked dirty.
+    /// Design-root requirements remain fixed synthesis constraints.
     ///
     /// Updates in place and returns the rows whose contracts actually changed;
     /// unchanged rows keep their frozen plan and footprint.
@@ -228,7 +229,7 @@ impl RegionContractSet {
                             contract_row.input = Some(input);
                         }
                         if let Some(mut output) = contract_row.output {
-                            if extra.get() > 0.0 {
+                            if extra.get() > 0.0 && contract.port().peer().is_some() {
                                 for value in [
                                     &mut output.required.late.rise,
                                     &mut output.required.late.fall,

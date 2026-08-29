@@ -555,7 +555,7 @@ struct LoweredState {
     regions: SynthesisRegionGraph,
     region_ownership: crate::boolean::bitblast::LoweredRegionOwnership,
     contracts: crate::regional::RegionContractSet,
-    regional_plans: Box<[regional_mapping::RegionalPlanRow]>,
+    regional_rows: Box<[regional_mapping::RegionalWorkingRow]>,
     sequential_operations: Box<[crate::mapping::materialize::FrozenSequentialOperation]>,
     synthesized: word::WordModule,
     provenance: ProvenanceBuilder,
@@ -563,7 +563,12 @@ struct LoweredState {
 }
 
 struct InitiallyMappedState {
-    lowered: LoweredState,
+    environment: SynthesisEnvironment,
+    ledger: SynthesisLedger,
+    regions: SynthesisRegionGraph,
+    synthesized: word::WordModule,
+    provenance: ProvenanceBuilder,
+    operator_manifest: crate::OperatorManifest,
     mapped: crate::mapping::MappedOutput,
     timing: Option<crate::closure::mmmc::MmmcTiming>,
 }
@@ -620,7 +625,19 @@ fn normalize(
 
 fn plan_regions(
     execution: &SynthesisExecution<'_>,
+    normalized: NormalizedState,
+) -> Result<PlannedState, crate::SynthError> {
+    plan_regions_with_partition_policy(
+        execution,
+        normalized,
+        crate::regional::region_graph::RegionPartitionPolicy::default(),
+    )
+}
+
+fn plan_regions_with_partition_policy(
+    execution: &SynthesisExecution<'_>,
     mut normalized: NormalizedState,
+    partition_policy: crate::regional::region_graph::RegionPartitionPolicy,
 ) -> Result<PlannedState, crate::SynthError> {
     crate::boolean::bitblast::validate_synthesizable_constants(&normalized.synthesized)?;
     let mapping_context = execution
@@ -628,12 +645,15 @@ fn plan_regions(
         .mapping_context(&normalized.environment.options);
     let regions = crate::planning::regional::optimize_private_structure(
         &mut normalized.synthesized,
-        &mapping_context,
-        normalized.environment.clock_gating,
-        true,
-        normalized.environment.primary_scenario().constraints(),
-        &normalized.environment.port_bindings,
-        execution.runtime,
+        crate::planning::regional::StructureOptimizationRequest {
+            mapping: &mapping_context,
+            clock_gating: normalized.environment.clock_gating,
+            target_mapping: true,
+            timing: normalized.environment.primary_scenario().constraints(),
+            port_bindings: &normalized.environment.port_bindings,
+            runtime: execution.runtime,
+            partition_policy,
+        },
     )?;
     normalized.ledger.normalized_values = normalized.synthesized.values().len();
     normalized.ledger.normalized_operations = normalized.synthesized.operations().len();
@@ -705,8 +725,22 @@ fn plan_regions(
 
 fn map_initial_logic(
     execution: &mut SynthesisExecution<'_>,
-    mut lowered: LoweredState,
+    lowered: LoweredState,
 ) -> Result<InitiallyMappedState, crate::SynthError> {
+    let LoweredState {
+        environment,
+        mut ledger,
+        source_instances,
+        mapping_context,
+        regions,
+        region_ownership,
+        contracts,
+        mut regional_rows,
+        sequential_operations,
+        synthesized,
+        mut provenance,
+        operator_manifest,
+    } = lowered;
     let regional_mapping::RegionalMappingOutcome {
         plans: selected_plans,
         plan_journal,
@@ -715,39 +749,44 @@ fn map_initial_logic(
         timing,
     } = regional_mapping::map_mapping_library_cells(
         regional_mapping::RegionalMappingRequest {
-            module: &lowered.synthesized,
-            provenance: &mut lowered.provenance,
-            regions: &lowered.regions,
-            region_ownership: &lowered.region_ownership,
-            contracts: &lowered.contracts,
-            regional_plans: &lowered.regional_plans,
-            sequential_operations: &lowered.sequential_operations,
+            module: &synthesized,
+            provenance: &mut provenance,
+            regions: &regions,
+            region_ownership: &region_ownership,
+            contracts,
+            regional_rows: &mut regional_rows,
+            sequential_operations: &sequential_operations,
             config: MappingConfig {
-                options: &lowered.environment.options,
-                port_bindings: &lowered.environment.port_bindings,
-                mapping_context: &lowered.mapping_context,
-                scenarios: &lowered.environment.scenarios,
-                object_bindings: Arc::clone(&lowered.environment.object_bindings),
-                effort: lowered.environment.effort,
-                design_id: lowered.environment.design_id,
-                design_references: &lowered.environment.design_references,
-                reference_ports: &lowered.environment.reference_ports,
-                source_instances: &lowered.source_instances,
-                base_revision: lowered.environment.base_revision,
-                power_evaluator: lowered.environment.power_evaluator.as_ref(),
+                options: &environment.options,
+                port_bindings: &environment.port_bindings,
+                mapping_context: &mapping_context,
+                scenarios: &environment.scenarios,
+                object_bindings: Arc::clone(&environment.object_bindings),
+                effort: environment.effort,
+                design_id: environment.design_id,
+                design_references: &environment.design_references,
+                reference_ports: &environment.reference_ports,
+                source_instances: &source_instances,
+                base_revision: environment.base_revision,
+                power_evaluator: environment.power_evaluator.as_ref(),
             },
         },
         execution.runtime,
         &mut *execution.observer,
     )?;
-    lowered.ledger.regional_epochs = epochs;
+    ledger.regional_epochs = epochs;
     regional_cache::publish(
-        &mut lowered.ledger.regional_cache_records,
+        &mut ledger.regional_cache_records,
         &selected_plans,
         plan_journal,
     )?;
     Ok(InitiallyMappedState {
-        lowered,
+        environment,
+        ledger,
+        regions,
+        synthesized,
+        provenance,
+        operator_manifest,
         mapped,
         timing,
     })
@@ -757,7 +796,12 @@ fn build_mapped_artifact(
     initially_mapped: InitiallyMappedState,
 ) -> Result<MappedState, crate::SynthError> {
     let InitiallyMappedState {
-        lowered,
+        environment,
+        ledger,
+        regions,
+        synthesized,
+        provenance,
+        operator_manifest,
         mapped,
         timing,
     } = initially_mapped;
@@ -767,37 +811,32 @@ fn build_mapped_artifact(
     } = mapped;
     let connectivity = crate::mapping::materialize::FrozenObservableConnectivity::capture(
         &netlist,
-        &lowered.environment.options.target_cells,
-        &lowered.environment.reference_ports,
+        &environment.options.target_cells,
+        &environment.reference_ports,
     )?;
-    let implementations = lowered.provenance.finish(
-        &lowered.regions,
-        &lowered.synthesized,
-        &netlist,
-        &cell_sources,
-    )?;
+    let implementations = provenance.finish(&regions, &synthesized, &netlist, &cell_sources)?;
     let fanout_load_profile = crate::closure::postmap::MappedFanoutLoadProfile::build(
         &netlist,
-        &lowered.environment.options.target_cells,
+        &environment.options.target_cells,
     )?;
     #[cfg_attr(
         not(test),
         expect(unused_mut, reason = "the word module is retained only by tests")
     )]
-    let mut ledger = lowered.ledger;
+    let mut ledger = ledger;
     #[cfg(test)]
     {
-        ledger.synthesized = Some(lowered.synthesized);
+        ledger.synthesized = Some(synthesized);
     }
     Ok(MappedState {
-        environment: lowered.environment,
+        environment,
         ledger,
         mapped: netlist,
         connectivity,
         fanout_load_profile,
         implementations,
         timing,
-        operator_manifest: lowered.operator_manifest,
+        operator_manifest,
     })
 }
 

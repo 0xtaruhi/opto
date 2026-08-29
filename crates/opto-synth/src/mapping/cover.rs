@@ -25,7 +25,22 @@ pub(crate) struct AnalyzedRegionCover {
 
 pub(crate) enum RegionCoverAnalysis {
     NoCombinationalLogic,
-    Covered(Box<AnalyzedRegionCover>),
+    Covered {
+        selected: Box<AnalyzedRegionCover>,
+        compiled: Box<CompiledRegionCover>,
+    },
+}
+
+/// Immutable Boolean subject, cuts, and truths retained for bounded re-cover.
+///
+/// Exact timing feedback may change only the selected cover. The optimized
+/// subject, cut rows, truth rows, and output identities stay frozen so a
+/// regional epoch cannot reopen lowering, ownership, or candidate discovery.
+pub(crate) struct CompiledRegionCover {
+    subject: RegionLogicGraph,
+    cuts: CutDatabase,
+    truths: CutTruthDatabase,
+    outputs: Box<[AnalyzedRegionOutput]>,
 }
 
 #[derive(Clone)]
@@ -33,8 +48,6 @@ pub(crate) struct AnalyzedRegionOutput {
     node: LogicNodeId,
     values: Box<[word::ValueId]>,
 }
-
-type SelectedSubjectCover = (Box<[AnalyzedRegionOutput]>, LibraryCover);
 
 /// Borrowed closure domain used to evaluate and seal one regional cover.
 #[derive(Clone, Copy)]
@@ -51,7 +64,7 @@ impl AnalyzedRegionCover {
         &mut self,
         domain: crate::mapping::CandidateBindingDomain<'_>,
         catalog: &CombinationalCellCatalog,
-    ) -> Result<RegionPlanBinding, crate::SynthError> {
+    ) -> Result<(RegionPlanBinding, Box<[usize]>), crate::SynthError> {
         let candidate = crate::mapping::build_candidate_binding(
             domain,
             &self.inputs,
@@ -65,15 +78,33 @@ impl AnalyzedRegionCover {
                 "regional owner bindings and cover metadata do not align with cover outputs",
             ));
         }
-        let mut outputs = Vec::with_capacity(candidate.binding.outputs.len());
-        let mut cover_outputs = Vec::with_capacity(candidate.binding.outputs.len());
-        let mut output_costs = Vec::with_capacity(candidate.binding.outputs.len());
+        self.apply_output_widths(&candidate.output_widths, catalog)?;
+        Ok((candidate.binding, candidate.output_widths))
+    }
+
+    pub(crate) fn apply_output_widths(
+        &mut self,
+        output_widths: &[usize],
+        catalog: &CombinationalCellCatalog,
+    ) -> Result<(), crate::SynthError> {
+        if output_widths.len() != self.outputs.len()
+            || self.cover.outputs.len() != self.outputs.len()
+            || self.cover.output_costs.len() != self.outputs.len()
+        {
+            return Err(crate::SynthError::invariant(
+                "regional retained binding widths do not align with cover outputs",
+            ));
+        }
+        let expanded_len = output_widths.iter().sum();
+        let mut outputs = Vec::with_capacity(expanded_len);
+        let mut cover_outputs = Vec::with_capacity(expanded_len);
+        let mut output_costs = Vec::with_capacity(expanded_len);
         for (((output, &source), &cost), &width) in self
             .outputs
             .iter()
             .zip(self.cover.outputs.iter())
             .zip(self.cover.output_costs.iter())
-            .zip(candidate.output_widths.iter())
+            .zip(output_widths)
         {
             outputs.extend(std::iter::repeat_n(output.clone(), width));
             cover_outputs.extend(std::iter::repeat_n(source, width));
@@ -83,7 +114,7 @@ impl AnalyzedRegionCover {
         self.cover.outputs = cover_outputs.into_boxed_slice();
         self.cover.output_costs = output_costs.into_boxed_slice();
         self.cover.isolate_outputs(catalog)?;
-        Ok(candidate.binding)
+        Ok(())
     }
 
     pub(crate) fn compact_plan(
@@ -276,7 +307,6 @@ pub(crate) fn analyze_region_cover(
             request.options,
         )?
     };
-    let inputs = subject.inputs().to_vec().into_boxed_slice();
     let cuts = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
             "cover.cut_enumeration".to_string()
@@ -289,52 +319,56 @@ pub(crate) fn analyze_region_cover(
         });
         CutTruthDatabase::build_parallel(subject.network(), &cuts, request.options.runtime)?
     };
-    let Some((outputs, cover)) = ({
-        let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
-            "cover.library_selection".to_string()
-        });
-        select_subject_cover(&subject, &cuts, &truths, &inputs, module, &request)?
-    }) else {
+    let Some(outputs) = analyzed_outputs(request.roots, &subject)? else {
         return Ok(RegionCoverAnalysis::NoCombinationalLogic);
     };
-    Ok(RegionCoverAnalysis::Covered(Box::new(
-        AnalyzedRegionCover {
-            inputs,
-            outputs,
-            cover,
-        },
-    )))
-}
-
-fn select_subject_cover(
-    subject: &RegionLogicGraph,
-    cuts: &CutDatabase,
-    truths: &CutTruthDatabase,
-    inputs: &[word::ValueId],
-    module: &word::WordModule,
-    request: &RegionCoverRequest<'_>,
-) -> Result<Option<SelectedSubjectCover>, crate::SynthError> {
-    let selector = CoverSelector {
+    let compiled = Box::new(CompiledRegionCover {
         subject,
         cuts,
         truths,
-        inputs,
-        module,
-        request,
-    };
-    let Some(outputs) = analyzed_outputs(request.roots, subject)? else {
-        return Ok(None);
-    };
-    let cover = selector
-        .select(&outputs, request.options.runtime)?
-        .ok_or_else(|| crate::SynthError::mapping("regional Boolean network cannot be covered"))?;
-    crate::api::diagnostics::trace!(
-        crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
-        "cover.logic",
-        "area={:.3}",
-        cover.total_area
-    );
-    Ok(Some((outputs, cover)))
+        outputs,
+    });
+    let selected = Box::new(compiled.select(module, &request)?);
+    Ok(RegionCoverAnalysis::Covered { selected, compiled })
+}
+
+impl CompiledRegionCover {
+    /// Reselects a cover from frozen logic records for one updated contract.
+    pub(crate) fn select(
+        &self,
+        module: &word::WordModule,
+        request: &RegionCoverRequest<'_>,
+    ) -> Result<AnalyzedRegionCover, crate::SynthError> {
+        let profiling = request.options.config.diagnostics.timing;
+        let cover = {
+            let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
+                "cover.library_selection".to_string()
+            });
+            CoverSelector {
+                subject: &self.subject,
+                cuts: &self.cuts,
+                truths: &self.truths,
+                inputs: self.subject.inputs(),
+                module,
+                request,
+            }
+            .select(&self.outputs, request.options.runtime)?
+            .ok_or_else(|| {
+                crate::SynthError::mapping("regional Boolean network cannot be covered")
+            })?
+        };
+        crate::api::diagnostics::trace!(
+            crate::api::diagnostics::SynthTrace::timing(request.options.config.diagnostics),
+            "cover.logic",
+            "area={:.3}",
+            cover.total_area
+        );
+        Ok(AnalyzedRegionCover {
+            inputs: self.subject.inputs().into(),
+            outputs: self.outputs.clone(),
+            cover,
+        })
+    }
 }
 
 fn analyzed_outputs(

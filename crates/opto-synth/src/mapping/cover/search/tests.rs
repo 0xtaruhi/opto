@@ -99,6 +99,40 @@ fn in_pin(name: &str) -> (&str, TargetPinDirection, Option<&str>) {
     (name, TargetPinDirection::Input, None)
 }
 
+fn timed_and_cell(name: &str, area: f64, delay: f64) -> TargetCell {
+    let mut cell = target_cell(
+        name,
+        area,
+        &[
+            in_pin("A"),
+            in_pin("B"),
+            ("Y", TargetPinDirection::Output, Some("A&B")),
+        ],
+    );
+    for pin in &mut cell.pins[..2] {
+        pin.capacitance = Some(0.1);
+    }
+    cell.pins[2].timing_arcs = ["A", "B"]
+        .into_iter()
+        .map(|related_pin| opto_library::TargetTimingArc {
+            related_pin: related_pin.to_string(),
+            timing_type: opto_library::TargetTimingType::Combinational,
+            timing_sense: opto_library::TimingSense::PositiveUnate,
+            delay_model: Some(opto_library::ArcDelayModel::Nldm(
+                opto_library::NldmTimingModel::new(
+                    Some(opto_library::LookupTable::scalar(delay)),
+                    Some(opto_library::LookupTable::scalar(delay)),
+                    Some(opto_library::LookupTable::scalar(0.1)),
+                    Some(opto_library::LookupTable::scalar(0.1)),
+                ),
+            )),
+            rise_constraint: None,
+            fall_constraint: None,
+        })
+        .collect();
+    cell
+}
+
 fn cover_area(cover: &LibraryCover, catalog: &CombinationalCellCatalog) -> f64 {
     cover
         .cells
@@ -172,6 +206,49 @@ fn exact_recovery_uses_area_delay_only_for_timing_driven_logic() {
 }
 
 #[test]
+fn compiled_records_reselect_a_faster_cover_when_required_time_tightens() {
+    let mut network = LogicGraph::new();
+    let a = network.variable(0).unwrap();
+    let b = network.variable(1).unwrap();
+    let output = network.and(a, b);
+    network.freeze();
+    let cuts = CutDatabase::build(&network, MAX_MATCH_INPUTS);
+    let truths = CutTruthDatabase::build_parallel(&network, &cuts, crate::test_runtime()).unwrap();
+    let catalog = matcher(vec![
+        timed_and_cell("SMALL_AND", 1.0, 2.0),
+        timed_and_cell("FAST_AND", 2.0, 1.0),
+    ]);
+    let select = |required_time| {
+        cover_logic_network_with_truths(
+            &network,
+            &cuts,
+            &truths,
+            &[output],
+            &catalog,
+            CoverTiming {
+                required_times: &[Some(required_time)],
+                output_loads: &[Some(0.1)],
+                input_transitions: &[Some(0.1), Some(0.1)],
+                input_arrivals: &[Some(0.0), Some(0.0)],
+            },
+            crate::test_runtime(),
+        )
+        .unwrap()
+        .unwrap()
+    };
+
+    let loose = select(10.0);
+    let tight = select(1.5);
+    let selected_name = |cover: &LibraryCover| match cover.cells[0].binding {
+        LibraryCoverBinding::Single(binding) => catalog.binding_cell_name(binding),
+        LibraryCoverBinding::Joint(_) => panic!("single-output AND must not select a joint cell"),
+    };
+
+    assert_eq!(selected_name(&loose), "SMALL_AND");
+    assert_eq!(selected_name(&tight), "FAST_AND");
+}
+
+#[test]
 fn recovery_limit_rejects_a_changing_final_round() {
     assert!(!recovery_converged(RECOVERY_ROUND_LIMIT - 1, 1, 0).unwrap());
     assert!(recovery_converged(RECOVERY_ROUND_LIMIT, 0, 0).unwrap());
@@ -184,10 +261,16 @@ fn recovery_limit_rejects_a_changing_final_round() {
 }
 
 #[test]
-fn joint_recovery_uses_the_shared_area_arrival_objective() {
-    assert!(!joint_replacement_is_preferred(false, 12.0, 0.8, 10.0, 1.2,));
-    assert!(joint_replacement_is_preferred(true, 12.0, 0.8, 10.0, 1.2,));
-    assert!(joint_replacement_is_preferred(false, 10.0, 0.8, 10.0, 1.2,));
+fn joint_recovery_restores_timing_before_recovering_area() {
+    assert!(!joint_replacement_is_preferred(
+        false, false, 12.0, 0.8, 10.0, 1.2,
+    ));
+    assert!(joint_replacement_is_preferred(
+        true, false, 12.0, 0.8, 10.0, 1.2,
+    ));
+    assert!(joint_replacement_is_preferred(
+        true, true, 12.0, 0.8, 10.0, 1.2,
+    ));
 }
 
 #[test]

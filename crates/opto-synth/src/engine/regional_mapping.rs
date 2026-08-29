@@ -34,8 +34,8 @@ pub(crate) struct RegionalMappingRequest<'a> {
     pub(crate) provenance: &'a mut ProvenanceBuilder,
     pub(crate) regions: &'a crate::SynthesisRegionGraph,
     pub(crate) region_ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
-    pub(crate) contracts: &'a crate::regional::RegionContractSet,
-    pub(crate) regional_plans: &'a [RegionalPlanRow],
+    pub(crate) contracts: crate::regional::RegionContractSet,
+    pub(crate) regional_rows: &'a mut [RegionalWorkingRow],
     pub(crate) sequential_operations: &'a [materialize::FrozenSequentialOperation],
     pub(crate) config: MappingConfig<'a>,
 }
@@ -60,16 +60,16 @@ struct RegionalMappingState<'a> {
     region_ownership: &'a crate::boolean::bitblast::LoweredRegionOwnership,
     sequential_operations: &'a [materialize::FrozenSequentialOperation],
     contracts: crate::regional::RegionContractSet,
-    rows: Vec<RegionalPlanRow>,
+    rows: &'a mut [RegionalWorkingRow],
     plan_journal:
         std::collections::BTreeMap<(usize, crate::RegionContextKey), crate::RegionCoverPlan>,
 }
 
-/// One compact plan and its generation-local source binding.
-#[derive(Clone)]
-pub(super) struct RegionalPlanRow {
+/// The sole mutable owner of one region's selected plan and epoch compiler.
+pub(super) struct RegionalWorkingRow {
     pub(super) plan: crate::RegionCoverPlan,
     pub(super) binding: RegionPlanBinding,
+    pub(super) cover_compiler: crate::mapping::RegionalCoverCompiler,
 }
 
 impl RegionalMappingState<'_> {
@@ -146,12 +146,12 @@ pub(crate) fn map_mapping_library_cells(
         regions,
         region_ownership,
         contracts,
-        regional_plans,
+        regional_rows,
         sequential_operations,
         config,
     } = request;
-    if regional_plans.len() != regions.regions().len()
-        || regional_plans
+    if regional_rows.len() != regions.regions().len()
+        || regional_rows
             .iter()
             .zip(regions.regions())
             .any(|(mapping, region)| mapping.plan.region() != region.id())
@@ -165,8 +165,8 @@ pub(crate) fn map_mapping_library_cells(
         provenance,
         region_ownership,
         sequential_operations,
-        contracts: contracts.clone(),
-        rows: regional_plans.to_vec(),
+        contracts,
+        rows: regional_rows,
         plan_journal: std::collections::BTreeMap::new(),
     };
     let trace =

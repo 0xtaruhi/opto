@@ -52,6 +52,7 @@ pub(crate) struct RegionalArchitectureRequest<'a> {
 pub(crate) struct RegionalArchitectureMapping {
     pub(crate) plan: RegionCoverPlan,
     pub(crate) binding: RegionPlanBinding,
+    pub(crate) cover_compiler: RegionalCoverCompiler,
     pub(crate) architecture: PrivateArchitecturePublication,
     pub(crate) operators: DurableOperatorArena,
     pub(crate) publication: Box<[crate::boolean::bitblast::RegionalPublicationBit]>,
@@ -86,6 +87,26 @@ struct PreparedRegionCover {
     slice: super::logic_partition::RegionLogicSlice,
     decision_key: [u8; 32],
     publication: Box<[crate::boolean::bitblast::RegionalPublicationBit]>,
+}
+
+/// Frozen region-private records retained only through initial timing epochs.
+///
+/// Re-selection reuses the optimized Boolean subject, cuts, truths, stable
+/// bindings, private Word identities, and catalog frontier. It cannot change
+/// architecture, ownership, partitioning, or candidate eligibility.
+pub(crate) struct RegionalCoverCompiler {
+    decision_key: [u8; 32],
+    slice: super::logic_partition::RegionLogicSlice,
+    implementation: RegionalCoverImplementation,
+}
+
+enum RegionalCoverImplementation {
+    Empty,
+    Compiled {
+        module: Box<word::WordModule>,
+        cover: Box<super::cover::CompiledRegionCover>,
+        output_widths: Box<[usize]>,
+    },
 }
 
 fn remap_private_values(
@@ -440,13 +461,22 @@ impl RegionArchitectureMaterializer<'_, '_> {
             )?
         };
         let response_models = super::cover::CoverResponseModels::new(self.request.scenarios);
-        let (rematerialized, binding) = match analysis {
+        let (rematerialized, binding, implementation) = match analysis {
             super::cover::RegionCoverAnalysis::NoCombinationalLogic => (
-                empty_target_plan(region, context, self.request.contracts, decision_key)?,
+                empty_target_plan(
+                    region,
+                    context,
+                    self.request.contracts.contracts(region.row()),
+                    decision_key,
+                )?,
                 RegionPlanBinding::empty(),
+                RegionalCoverImplementation::Empty,
             ),
-            super::cover::RegionCoverAnalysis::Covered(mut analysis) => {
-                let binding = analysis.candidate_binding(
+            super::cover::RegionCoverAnalysis::Covered {
+                mut selected,
+                compiled,
+            } => {
+                let (binding, output_widths) = selected.candidate_binding(
                     CandidateBindingDomain {
                         source_module: self.request.source,
                         local_module: &module,
@@ -460,7 +490,7 @@ impl RegionArchitectureMaterializer<'_, '_> {
                     },
                     &self.request.mapping_context.combinational_catalog,
                 )?;
-                let plan = analysis.compact_plan(
+                let plan = selected.compact_plan(
                     region,
                     context,
                     decision_key,
@@ -472,7 +502,15 @@ impl RegionArchitectureMaterializer<'_, '_> {
                         regional_slice: &slice,
                     },
                 )?;
-                (plan, binding)
+                (
+                    plan,
+                    binding,
+                    RegionalCoverImplementation::Compiled {
+                        module: Box::new(module),
+                        cover: compiled,
+                        output_widths,
+                    },
+                )
             }
         };
         let plan = match restored_plan {
@@ -487,6 +525,11 @@ impl RegionArchitectureMaterializer<'_, '_> {
         Ok(RegionalArchitectureMapping {
             plan,
             binding,
+            cover_compiler: RegionalCoverCompiler {
+                decision_key,
+                slice,
+                implementation,
+            },
             architecture,
             operators,
             publication,
@@ -860,6 +903,67 @@ impl RegionArchitectureMaterializer<'_, '_> {
     }
 }
 
+impl RegionalCoverCompiler {
+    /// Selects one new cover from frozen logic records and updated contracts.
+    pub(crate) fn reselect(
+        &mut self,
+        region: SynthesisRegion,
+        context: RegionContextKey,
+        contracts: &[crate::BoundaryContract],
+        timing_tags: &crate::TimingTagInterner,
+        config: &super::MappingConfig<'_>,
+        runtime: &ExecutionContext,
+    ) -> Result<RegionCoverPlan, SynthError> {
+        self.slice.reproject_contracts(contracts)?;
+        let RegionalCoverImplementation::Compiled {
+            module,
+            cover,
+            output_widths,
+        } = &self.implementation
+        else {
+            return empty_target_plan(region, context, contracts, self.decision_key);
+        };
+        let timing = config
+            .scenarios
+            .scenarios()
+            .first()
+            .expect("ScenarioSet construction rejects empty sets")
+            .constraints();
+        let empty_port_bindings = opto_timing::PortBindings::new([]);
+        let mut selected = cover.select(
+            module,
+            &super::cover::RegionCoverRequest {
+                roots: self.slice.roots(),
+                timing,
+                port_bindings: &empty_port_bindings,
+                catalog: &config.mapping_context.combinational_catalog,
+                options: RegionLogicOptions {
+                    optimize: config.mapping_context.combinational_catalog.can_invert(),
+                    config: config.mapping_context.config,
+                    runtime,
+                    incremental: None,
+                },
+                regional_slice: &self.slice,
+            },
+        )?;
+        selected
+            .apply_output_widths(output_widths, &config.mapping_context.combinational_catalog)?;
+        let response_models = super::cover::CoverResponseModels::new(config.scenarios);
+        selected.compact_plan(
+            region,
+            context,
+            self.decision_key,
+            super::cover::CoverClosureDomain {
+                contracts,
+                catalog: &config.mapping_context.combinational_catalog,
+                response_models: &response_models,
+                timing_tags,
+                regional_slice: &self.slice,
+            },
+        )
+    }
+}
+
 fn collect_local_boundary_inputs(
     module: &word::WordModule,
 ) -> Result<Vec<word::ValueId>, SynthError> {
@@ -1158,7 +1262,7 @@ fn target_output_artifact_keys(
 fn empty_target_plan(
     region: SynthesisRegion,
     context: RegionContextKey,
-    contracts: &RegionContractSet,
+    contracts: &[crate::BoundaryContract],
     decision_key: [u8; 32],
 ) -> Result<RegionCoverPlan, SynthError> {
     let zero =
@@ -1179,7 +1283,7 @@ fn empty_target_plan(
         },
         0,
         0,
-        contracts.contracts(region.row()).to_vec(),
+        contracts.to_vec(),
         Vec::new(),
     ))
 }

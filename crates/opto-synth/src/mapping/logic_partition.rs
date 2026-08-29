@@ -8,6 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 type BoundaryBits = ([u8; 32], Box<[word::ValueId]>);
 type BoundaryBit = ([u8; 32], u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LogicInputIdentity {
+    Signal(word::SignalId, u32, u32),
+    Value(word::ValueId),
+}
+
 const INPUT_BINDING_DOMAIN: &[u8] = b"opto/regional/input-binding/v1\0";
 const ROOT_BINDING_DOMAIN: &[u8] = b"opto/regional/root-binding/v1\0";
 const LOCAL_VALUE_BINDING_DOMAIN: &[u8] = b"opto/regional/local-value-binding/v1\0";
@@ -15,7 +21,10 @@ const LOCAL_VALUE_BINDING_DOMAIN: &[u8] = b"opto/regional/local-value-binding/v1
 #[derive(Debug)]
 pub(crate) struct RegionLogicSlice {
     inputs: Box<[word::ValueId]>,
+    topology_roots: Box<[MappingRoot]>,
     roots: Box<[MappingRoot]>,
+    fixed_input_arrivals: Box<[(word::ValueId, f64)]>,
+    fixed_input_transitions: Box<[(word::ValueId, f64)]>,
     search_input_arrivals: Box<[(word::ValueId, f64)]>,
     search_input_transitions: Box<[(word::ValueId, f64)]>,
     boundary_inputs: Box<[BoundaryBits]>,
@@ -156,10 +165,15 @@ impl RegionLogicSlice {
             }
         }
         let mut topology_roots = super::roots::merge_by_value(topology_roots);
+        let input_representatives = subject_inputs
+            .iter()
+            .copied()
+            .map(|value| Ok((logic_input_identity(module, value)?, value)))
+            .collect::<Result<BTreeMap<_, _>, crate::SynthError>>()?;
         let resolved = contracts
             .iter()
             .map(|contract| {
-                let bits = match source_to_local.get(&contract.port().value()).copied() {
+                let mut bits = match source_to_local.get(&contract.port().value()).copied() {
                     Some(local) => ownership
                         .lowered_bits(local)
                         .map_or_else(|| vec![local], <[word::ValueId]>::to_vec),
@@ -168,9 +182,18 @@ impl RegionLogicSlice {
                     // key remains present and cannot be confused with corruption.
                     None => Vec::new(),
                 };
-                (contract, bits.into_boxed_slice())
+                if contract.port().direction() == crate::RegionPortDirection::Input {
+                    for bit in &mut bits {
+                        if let Some(&representative) =
+                            input_representatives.get(&logic_input_identity(module, *bit)?)
+                        {
+                            *bit = representative;
+                        }
+                    }
+                }
+                Ok((contract, bits.into_boxed_slice()))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, crate::SynthError>>()?;
         for (_, bits) in resolved.iter().filter(|(contract, _)| {
             contract.port().direction() == crate::RegionPortDirection::Input
         }) {
@@ -205,22 +228,68 @@ impl RegionLogicSlice {
         &mut self,
         sequential_timing: &super::sequential::SequentialTimingProjection,
     ) {
-        merge_max_timing(
-            &mut self.search_input_arrivals,
-            self.inputs.iter().filter_map(|&input| {
+        let arrivals = self
+            .inputs
+            .iter()
+            .filter_map(|&input| {
                 sequential_timing
                     .clock_to_q(input)
                     .map(|timing| (input, timing))
-            }),
-        );
-        merge_max_timing(
-            &mut self.search_input_transitions,
-            self.inputs.iter().filter_map(|&input| {
+            })
+            .collect::<Vec<_>>();
+        let transitions = self
+            .inputs
+            .iter()
+            .filter_map(|&input| {
                 sequential_timing
                     .output_transition(input)
                     .map(|timing| (input, timing))
-            }),
+            })
+            .collect::<Vec<_>>();
+        merge_max_timing(&mut self.fixed_input_arrivals, arrivals.iter().copied());
+        merge_max_timing(
+            &mut self.fixed_input_transitions,
+            transitions.iter().copied(),
         );
+        merge_max_timing(&mut self.search_input_arrivals, arrivals);
+        merge_max_timing(&mut self.search_input_transitions, transitions);
+    }
+
+    /// Reprojects updated boundary timing onto the same frozen logic identities.
+    pub(crate) fn reproject_contracts(
+        &mut self,
+        contracts: &[crate::BoundaryContract],
+    ) -> Result<(), crate::SynthError> {
+        let resolved = contracts
+            .iter()
+            .map(|contract| {
+                let key = contract.port().semantic_key();
+                let rows = match contract.port().direction() {
+                    crate::RegionPortDirection::Input => &self.boundary_inputs,
+                    crate::RegionPortDirection::Output => &self.boundary_outputs,
+                };
+                rows.binary_search_by_key(&key, |(candidate, _)| *candidate)
+                    .map(|index| (contract, rows[index].1.as_ref()))
+                    .map_err(|_| {
+                        crate::SynthError::invariant(
+                            "updated regional contract is absent from the frozen logic slice",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let projection = ContractProjection::build(&self.topology_roots, resolved);
+        self.roots = projection.roots;
+        self.search_input_arrivals = self.fixed_input_arrivals.clone();
+        self.search_input_transitions = self.fixed_input_transitions.clone();
+        merge_max_timing(
+            &mut self.search_input_arrivals,
+            projection.input_arrivals.iter().copied(),
+        );
+        merge_max_timing(
+            &mut self.search_input_transitions,
+            projection.input_transitions.iter().copied(),
+        );
+        Ok(())
     }
 
     fn from_resolved(
@@ -317,7 +386,10 @@ impl RegionLogicSlice {
         );
         Ok(Self {
             inputs,
+            topology_roots,
             roots: projection.roots,
+            fixed_input_arrivals: Box::new([]),
+            fixed_input_transitions: Box::new([]),
             search_input_arrivals: projection.input_arrivals,
             search_input_transitions: projection.input_transitions,
             boundary_inputs: boundary_inputs.into_boxed_slice(),
@@ -374,6 +446,23 @@ impl RegionLogicSlice {
                 )
             })
     }
+}
+
+fn logic_input_identity(
+    module: &word::WordModule,
+    value: word::ValueId,
+) -> Result<LogicInputIdentity, crate::SynthError> {
+    let stored = module.value(value).ok_or_else(|| {
+        crate::SynthError::invariant("regional logic input references an unknown local value")
+    })?;
+    Ok(match stored.kind {
+        word::ValueKind::Signal(reference) => {
+            LogicInputIdentity::Signal(reference.signal, reference.lsb, reference.width())
+        }
+        word::ValueKind::Operation(_) | word::ValueKind::Constant(_) => {
+            LogicInputIdentity::Value(value)
+        }
+    })
 }
 
 fn retain_topology_root(
@@ -522,5 +611,31 @@ mod tests {
             &inputs,
             &outputs,
         ));
+    }
+
+    #[test]
+    fn signal_reads_share_one_logic_input_identity() {
+        let mut module = word::WordModule::new("input_alias");
+        let port = module
+            .add_port(
+                "a",
+                word::PortDirection::Input,
+                word::WordType::bits(1).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let signal = module.port(port).unwrap().signal;
+        let first = module
+            .read_signal(signal, word::SourceSpan::default())
+            .unwrap();
+        let second = module
+            .read_signal(signal, word::SourceSpan::default())
+            .unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(
+            logic_input_identity(&module, first).unwrap(),
+            logic_input_identity(&module, second).unwrap()
+        );
     }
 }

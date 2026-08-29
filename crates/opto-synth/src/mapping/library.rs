@@ -332,23 +332,11 @@ impl CombinationalCellCatalog {
             return Ok(());
         };
         let bindings = &self.bindings[range.start..range.start + range.len];
-        let mut best = [None::<(usize, CellBinding)>; MAX_MATCH_INPUTS + 1];
         for (offset, &binding) in bindings.iter().enumerate() {
-            let group = binding.inverted_input().map_or(0, |input| input + 1);
-            let slot = &mut best[group];
-            if slot.is_none_or(|(_, current)| {
-                compare_cell_cost(
-                    self.cost_for_binding(binding),
-                    self.cost_for_binding(current),
-                )
-                .then_with(|| binding.cmp(&current))
-                .is_lt()
-            }) {
-                *slot = Some((range.start + offset, binding));
-            }
-        }
-        for (index, binding) in best.into_iter().flatten() {
-            visit(CellBindingId::try_from_index(index)?, binding);
+            visit(
+                CellBindingId::try_from_index(range.start + offset)?,
+                binding,
+            );
         }
         Ok(())
     }
