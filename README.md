@@ -178,8 +178,10 @@ Synthesis internally consumes an explicit sparse scenario set with correlated
 early/min and late/max views; the Tcl shell currently constructs one active
 scenario.
 
-Gated-clock analysis, path groups, AOCV/POCV derating, useful skew, and hold
-repair are not implemented.
+Ideal clock identity propagates through Liberty-declared integrated clock
+gates, so gated-domain launch/capture paths and clock-scoped design rules are
+analyzed. Propagated gated-clock latency, path groups, AOCV/POCV derating,
+useful skew, and hold repair are not implemented.
 
 ### Attributes and ECO
 

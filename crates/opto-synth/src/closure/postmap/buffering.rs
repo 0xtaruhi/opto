@@ -38,6 +38,7 @@ pub(super) struct FanoutTreePlan {
     pub(super) net: NetId,
     pub(super) leaf_groups: Vec<Vec<PinId>>,
     pub(super) strategy: FanoutTreeStrategy,
+    pub(super) namespace: u64,
     pub(super) ordinal: usize,
 }
 
@@ -907,8 +908,8 @@ fn append_fanout_tree(
         let index = nodes.len();
         let output = delta
             .add_net(Some(format!(
-                "_buffer_tree_{}_{}_{index}",
-                plan.ordinal, segment
+                "_buffer_tree_{}_{}_{}_{index}",
+                plan.namespace, plan.ordinal, segment
             )))
             .map_err(crate::SynthError::from)?;
         nodes.push(FanoutTreeNode {
@@ -924,8 +925,8 @@ fn append_fanout_tree(
             let index = nodes.len();
             let output = delta
                 .add_net(Some(format!(
-                    "_buffer_tree_{}_{}_{index}",
-                    plan.ordinal, segment
+                    "_buffer_tree_{}_{}_{}_{index}",
+                    plan.namespace, plan.ordinal, segment
                 )))
                 .map_err(crate::SynthError::from)?;
             for &child in children {
@@ -952,7 +953,10 @@ fn append_fanout_tree(
         let added = delta
             .add_cell(
                 CellSpec::new(
-                    format!("U_buffer_tree_{}_{}_{index}", plan.ordinal, segment),
+                    format!(
+                        "U_buffer_tree_{}_{}_{}_{index}",
+                        plan.namespace, plan.ordinal, segment
+                    ),
                     buffer.name(),
                     Some(descriptor.library_cell),
                 )

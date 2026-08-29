@@ -1226,11 +1226,12 @@ The direct regional commits form one flat `MappedNetlist` with
 typed cells, nets, ports, pins, target bindings, and interned names.
 `ImplementationDb` stores many-to-many provenance separately.
 
-The mapped-generation handoff also builds one compact, generation-stamped
-fanout/load profile. Each multi-sink mapped net has its complete sink count,
-abstract fanout load, and summed mapped-pin capacitance. This is a property of
-the committed topology, not something inferred later from whichever path happens
-to be worst.
+The mapped-generation handoff, and each bounded recovery generation that
+changes it, derives one compact, revision-stamped fanout/load profile from the
+current canonical netlist. Each multi-sink mapped net has its complete sink
+count, abstract fanout load, and summed mapped-pin capacitance. The profile is a
+validated property of that exact committed revision, not an independently
+mutable fact or something inferred from whichever path happens to be worst.
 
 Post-map is one large stage, but its internal topology order is mandatory:
 
@@ -1244,13 +1245,23 @@ Post-map is one large stage, but its internal topology order is mandatory:
    eligible trees into one atomic fanout forest; every active view must provide
    complete cell-arc and wire evidence, leaf groups are load-balanced, and
    branching search follows distinct topology depths instead of scanning every
-   possible fanout;
+   possible fanout. When enough noncritical sinks remain to require a tree, the
+   current worst-path branch stays on the source net so the following cloning
+   stage can still reach the original logic driver. Otherwise HFNS defers that
+   net to driver cloning; a real electrical violation remains the sole
+   responsibility of the following legalization stage;
 4. residual electrical violations are planned once per violating source net
    and committed as generation-wide forests until exact STA reaches a fixed
    point or no legal improvement exists;
 5. global STA is rerun on the legalized topology;
 6. only residual critical branches may use driver cloning, and those branches
-   are committed as one atomic clone forest;
+   are committed as one atomic clone forest; HFNS must not bury a reserved
+   branch behind a leaf buffer and thereby turn driver cloning into buffer
+   cloning when the original driver remains reachable. Every accepted source
+   driver and every cell added by its clone forest are recorded by stable cell
+   identity: a later refinement may clone an HFNS or electrical repair driver
+   once when it becomes critical, but cannot clone the same source again or
+   build a clone-of-clone chain;
 7. bounded MFS, compatible sizing, and pin swapping run on that topology;
    each sizing frontier is one atomic replacement forest and critical pin
    permutations are one atomic pin-swap forest, not per-cell STA searches.
@@ -1270,7 +1281,20 @@ the scenario has explicit optimization constraints. Constraints add
 feasibility measurements to the shared transaction objective; they do not
 select a second post-map flow. Physical recovery follows legalization and
 timing preparation and preserves any measured closure through the same commit
-gate.
+gate. High effort runs at most three recovery/refinement generations on the
+same mapped netlist and MMMC owner. A generation stops the loop when recovery
+makes no edit; an edited revision rebuilds its derived fanout/load profile
+before the same timing optimizer runs again. The shared forest executor records
+which source drivers actually committed a clone; every source driver may commit
+once, including a later HFNS or electrical repair driver. A rejected candidate
+remains eligible after the critical cone changes. This bounded feedback is one
+pipeline, not alternate timing and area implementations.
+
+Names for closure-created buffers, trees, and clones use a deterministic
+namespace derived from the current mapped revision. The namespace search checks
+live cell, retained-instance, and net names and is bounded by the canonical
+object count, so a later recovery generation cannot reuse an earlier synthetic
+name or depend on a process-global counter.
 
 Mapped resynthesis has one candidate catalog, one effort gate, and one bounded
 pass over the committed topology. It does not classify the search as area or
@@ -1383,6 +1407,15 @@ An uncommitted region owns only its appended names and a compact u32 ordering;
 rollback truncates that append layer and compaction seals it into the next
 shared base. A parallel `Vec<String>` or name-sorted full-net index is not part
 of the resident timing topology.
+
+The graph arc kind is also the sole clock-network topology authority. A
+Liberty-declared integrated clock gate marks only its characterized clock-input
+to gated-output arc as a clock-network edge. Clock identity, sequential
+launch/capture discovery, timing checks, and clock-scoped design rules all
+traverse that same edge classification; ordinary combinational reachability is
+never a second definition of clock scope. Incremental graph edits replace the
+classification transactionally with the arc, so no parallel gated-clock index
+can become stale.
 
 The retained timing design follows the same boundary. Public
 `TimingDesign`/`TimingInstance` values are owned construction and regional

@@ -28,30 +28,38 @@ pub(super) struct CloneBranchPlan {
 pub(super) fn optimize(
     session: &mut TimingOptimizationSession<'_>,
     enabled: bool,
+    cloned_drivers: &mut std::collections::BTreeSet<CellId>,
 ) -> Result<(), crate::SynthError> {
     if !enabled || session.qor_budget_exhausted() {
         return Ok(());
     }
 
     let mut branches = std::collections::BTreeMap::new();
-    if enabled {
-        for fanout in timing_critical_fanouts(session)? {
+    for fanout in timing_critical_fanouts(session)? {
+        let Some(driver) =
+            qualified_driver(session.mapped, &session.options.target_cells, fanout.net)?
+        else {
+            continue;
+        };
+        if !cloned_drivers.contains(&driver.cell) {
             branches.insert(fanout.net, fanout.clone_branch);
         }
     }
+    let namespace = super::generated_name_namespace(session.mapped, "U_clone_", "_clone_net_")?;
     let plans = branches
         .into_iter()
         .enumerate()
         .map(|(ordinal, (net, branch))| CloneBranchPlan {
             net,
             branch,
-            instance_name: format!("U_clone_{ordinal}"),
-            net_name: format!("_clone_net_{ordinal}"),
+            instance_name: format!("U_clone_{namespace}_{ordinal}"),
+            net_name: format!("_clone_net_{namespace}_{ordinal}"),
         })
         .collect::<Vec<_>>();
     if plans.is_empty() {
         return Ok(());
     }
+    let clone_addition_start = session.mapped.cell_slot_count();
     let trace = session.trace();
     if trace.is_enabled() {
         let sinks = plans.iter().try_fold(0usize, |total, plan| {
@@ -66,7 +74,8 @@ pub(super) fn optimize(
             plans.len()
         );
     }
-    forest::evaluate(
+    let mut accepted_nets = Vec::new();
+    forest::evaluate_observed(
         &plans,
         OptimizationPhase::CriticalFanoutCloning,
         EvaluationPolicy::QorBudgeted,
@@ -74,8 +83,36 @@ pub(super) fn optimize(
         |mapped, implementations, options, plans| {
             clone_driver_forest_delta(mapped, implementations, &options.target_cells, plans)
         },
+        |accepted| accepted_nets.extend(accepted.iter().map(|plan| plan.net)),
     )?;
+    let mut accepted_sources = Vec::new();
+    for net in accepted_nets {
+        if let Some(driver) = qualified_driver(session.mapped, &session.options.target_cells, net)?
+        {
+            accepted_sources.push(driver.cell);
+        }
+    }
+    record_clone_history(
+        session.mapped,
+        clone_addition_start,
+        accepted_sources,
+        cloned_drivers,
+    );
     Ok(())
+}
+
+pub(super) fn record_clone_history(
+    mapped: &MappedNetlist,
+    clone_addition_start: usize,
+    accepted_sources: impl IntoIterator<Item = CellId>,
+    cloned_drivers: &mut std::collections::BTreeSet<CellId>,
+) {
+    cloned_drivers.extend(accepted_sources);
+    cloned_drivers.extend(
+        mapped
+            .cell_ids()
+            .filter(|cell| cell.index() >= clone_addition_start),
+    );
 }
 
 fn timing_critical_fanouts(

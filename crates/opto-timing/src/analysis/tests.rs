@@ -8,17 +8,17 @@
 
 use super::*;
 use crate::test_library::{
-    ClockToQArc, TimingArc, TimingCell, TimingConstraintArc, test_cells, test_instance,
-    test_target_cells,
+    ClockToQArc, TimingArc, TimingCell, TimingConstraintArc, test_instance, test_target_cells,
 };
 use crate::{
-    ClockSpec, CornerSelection, EdgeQualifier, EdgeSelection, ExceptionCorner, ExceptionFilter,
-    LatencySide, LookupTable, PathException, TargetCell, TargetSequential, TargetSequentialKind,
-    TargetTimingType, TimingConnection, TimingInstance, TimingInstanceId, TimingObjectBindings,
-    TimingSense, assert_path_summary, test_clock_id, test_design_id, test_port, test_port_id,
+    ClockSpec, CornerSelection, DesignRuleScope, EdgeQualifier, EdgeSelection, ExceptionCorner,
+    ExceptionFilter, LatencySide, LookupTable, PathException, TargetCell, TargetSequential,
+    TargetSequentialKind, TargetTimingType, TimingConnection, TimingInstance, TimingInstanceId,
+    TimingObjectBindings, TimingSense, assert_path_summary, test_clock_id, test_design_id,
+    test_port, test_port_id,
 };
 use opto_core::ObjectUid;
-use opto_library::BooleanFunction;
+use opto_library::{BooleanFunction, TargetClockGateKind, TargetClockGateRole};
 
 #[test]
 fn analyzes_register_to_register_setup_path() {
@@ -49,6 +49,71 @@ fn analyzes_register_to_register_setup_path() {
         analysis.requirement(),
         Some(TimingRequirement::Setup { .. })
     ));
+}
+
+#[test]
+fn integrated_clock_gate_preserves_clock_domain_and_path_coverage() {
+    let mut gate = test_target_cells(vec![TimingCell {
+        name: "ICG".to_string(),
+        arcs: vec![TimingArc::scalar("CLK", "GCLK", 0.03)],
+        pin_capacitance: BTreeMap::from([("E".to_string(), 0.01)]),
+        ..TimingCell::default()
+    }])
+    .pop()
+    .unwrap();
+    gate.clock_gate = Some(TargetClockGateKind::LatchPosedge);
+    for pin in &mut gate.pins {
+        pin.clock_gate_role = match pin.name.as_str() {
+            "CLK" => Some(TargetClockGateRole::Clock),
+            "E" => Some(TargetClockGateRole::Enable),
+            "GCLK" => Some(TargetClockGateRole::Output),
+            _ => None,
+        };
+    }
+    let (timing, mut design, library) = sequential_fixture_with_target_cells(vec![gate]);
+    design
+        .ports
+        .push(test_port("enable", TimingPortDirection::Input));
+    for index in [0, 2] {
+        let instance = &mut design.instances[index];
+        instance
+            .connections
+            .iter_mut()
+            .find(|connection| connection.pin == "CP")
+            .unwrap()
+            .net = "gated_clk".to_string();
+    }
+    design.instances.push(test_instance(
+        3,
+        "U_ICG",
+        "ICG",
+        [("CLK", "clk"), ("E", "enable"), ("GCLK", "gated_clk")],
+    ));
+    let model = crate::test_timing_model(&design, &library);
+
+    let gated_clock = model.graph.net_id("gated_clk").unwrap();
+    let data = model.graph.net_id("launch_q").unwrap();
+    assert!(
+        model
+            .graph
+            .clock_reaches_net(&[test_port_id("clk")], gated_clock)
+    );
+    assert!(
+        model
+            .graph
+            .clock_scope_nets(&[test_port_id("clk")], DesignRuleScope::ClockPath)
+            .contains(&gated_clock)
+    );
+    assert!(
+        !model
+            .graph
+            .clock_scope_nets(&[test_port_id("clk")], DesignRuleScope::ClockPath)
+            .contains(&data)
+    );
+
+    let analysis = analyze_timing(&timing, &model, &ReportTimingOptions::default()).unwrap();
+    assert_path_summary(&analysis, "launch_reg", "capture_reg", 0.07, 0.98, 0.91);
+    assert_eq!(analysis.path_group(), Some("clk"));
 }
 
 #[test]
@@ -592,7 +657,13 @@ fn sequential_fixture() -> (TimingContext, TimingDesign, TimingLibrary) {
 }
 
 fn sequential_fixture_with(
-    mut extra_cells: Vec<TimingCell>,
+    extra_cells: Vec<TimingCell>,
+) -> (TimingContext, TimingDesign, TimingLibrary) {
+    sequential_fixture_with_target_cells(test_target_cells(extra_cells))
+}
+
+fn sequential_fixture_with_target_cells(
+    mut extra_cells: Vec<TargetCell>,
 ) -> (TimingContext, TimingDesign, TimingLibrary) {
     let mut timing = TimingContext::new();
     timing
@@ -669,7 +740,7 @@ fn sequential_fixture_with(
             dff_instance(2, "capture_reg", "capture_d", "q"),
         ],
     };
-    let mut cells = vec![dff, inverter];
+    let mut cells = test_target_cells(vec![dff, inverter]);
     cells.append(&mut extra_cells);
     let library = TimingLibrary {
         name: Some("demo".to_string()),
@@ -679,7 +750,7 @@ fn sequential_fixture_with(
         wire_load_model: None,
         units: crate::TimingLibraryUnits::default(),
         power: opto_library::PowerLibrary::default(),
-        cells: test_cells(cells),
+        cells: cells.into(),
     };
     (timing, design, library)
 }

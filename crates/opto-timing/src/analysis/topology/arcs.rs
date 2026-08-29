@@ -6,6 +6,7 @@ use crate::{
     TargetCellRef, TargetPinRef, TargetSequentialKind, TargetTimingArcRef, TargetTimingType,
     TimingEdge,
 };
+use opto_library::TargetClockGateRole;
 
 pub(super) fn sink_response(
     net: Option<crate::parasitics::ParasiticNetRef<'_>>,
@@ -64,6 +65,14 @@ pub(super) fn graph_arc_kind(
     constant_values: &[Option<bool>],
     instance: &str,
 ) -> Result<Option<GraphArcKind>, crate::TimingError> {
+    if cell.clock_gate().is_some()
+        && output_pin.clock_gate_role() == Some(TargetClockGateRole::Output)
+        && cell
+            .clock_gate_pin(TargetClockGateRole::Clock)
+            .is_some_and(|clock| clock.name() == arc.related_pin())
+    {
+        return Ok(Some(GraphArcKind::ClockGate));
+    }
     let Some((enable_pin, open_edge, close_edge)) =
         latch_data_control(cell, output_pin, arc.related_pin())
     else {

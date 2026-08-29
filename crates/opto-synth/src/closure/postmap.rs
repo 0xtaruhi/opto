@@ -34,6 +34,47 @@ pub(crate) use fanout::MappedFanoutLoadProfile;
 use power::MmmcPower;
 use session::{TimingOptimizationPolicy, TimingOptimizationRequest, TimingOptimizationSession};
 
+const HIGH_EFFORT_POSTMAP_GENERATIONS: usize = 3;
+
+fn generated_name_namespace(
+    mapped: &MappedNetlist,
+    cell_prefix: &str,
+    net_prefix: &str,
+) -> Result<u64, crate::SynthError> {
+    let object_count = mapped
+        .cell_count()
+        .checked_add(mapped.design_instance_count())
+        .and_then(|count| count.checked_add(mapped.net_count()))
+        .ok_or_else(|| crate::SynthError::capacity("mapped object count overflow"))?;
+    for offset in 0..=object_count {
+        let namespace = mapped
+            .edit_revision()
+            .checked_add(offset as u64)
+            .ok_or_else(|| crate::SynthError::capacity("generated name namespace overflow"))?;
+        let cell_stem = format!("{cell_prefix}{namespace}_");
+        let net_stem = format!("{net_prefix}{namespace}_");
+        let cell_conflict = mapped
+            .cell_ids()
+            .filter_map(|cell| mapped.cell_name(cell))
+            .chain(
+                mapped
+                    .design_instance_ids()
+                    .filter_map(|instance| mapped.design_instance_name(instance)),
+            )
+            .any(|name| name.starts_with(&cell_stem));
+        let net_conflict = mapped
+            .net_ids()
+            .filter_map(|net| mapped.net_name(net))
+            .any(|name| name.starts_with(&net_stem));
+        if !cell_conflict && !net_conflict {
+            return Ok(namespace);
+        }
+    }
+    Err(crate::SynthError::invariant(
+        "mapped object names exhaust the generated namespace search",
+    ))
+}
+
 fn mapped_cell_nets(
     mapped: &MappedNetlist,
     cells: impl IntoIterator<Item = CellId>,
@@ -94,6 +135,7 @@ pub(crate) fn optimize_mapped_netlist(
         power_evaluator,
         connectivity,
     } = request;
+    let mut cloned_drivers = std::collections::BTreeSet::new();
     let preparation = match timing {
         Some(timing) => optimize_timing(
             PostmapRequest {
@@ -111,6 +153,7 @@ pub(crate) fn optimize_mapped_netlist(
             },
             config,
             observer,
+            &mut cloned_drivers,
         )?,
         None => PostmapOutcome {
             timing: None,
@@ -119,38 +162,91 @@ pub(crate) fn optimize_mapped_netlist(
             replacements: 0,
         },
     };
-    let mut outcome = area::optimize(
-        PostmapRequest {
-            mapped,
-            implementations,
-            timing: preparation.timing,
-            options,
-            catalog,
-            scenarios,
-            fanout_load_profile,
-            policy,
-            runtime,
-            power_evaluator,
-            connectivity,
-        },
-        config,
-        observer,
-    )?;
-    outcome.changed |= preparation.changed;
+    let mut timing = preparation.timing;
+    let mut changed = preparation.changed;
     #[cfg(test)]
-    {
-        outcome.replacements = outcome
-            .replacements
-            .checked_add(preparation.replacements)
-            .ok_or_else(|| crate::SynthError::invariant("post-map replacement count overflow"))?;
+    let mut replacements = preparation.replacements;
+    let generation_limit = if policy.repeated_timing_passes {
+        HIGH_EFFORT_POSTMAP_GENERATIONS
+    } else {
+        1
+    };
+    for _ in 0..generation_limit {
+        let recovery = area::optimize(
+            PostmapRequest {
+                mapped,
+                implementations,
+                timing,
+                options,
+                catalog,
+                scenarios,
+                fanout_load_profile,
+                policy,
+                runtime,
+                power_evaluator: power_evaluator.clone(),
+                connectivity,
+            },
+            config,
+            observer,
+        )?;
+        let recovery_changed = recovery.changed;
+        timing = recovery.timing;
+        changed |= recovery_changed;
+        #[cfg(test)]
+        {
+            replacements = replacements
+                .checked_add(recovery.replacements)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("post-map replacement count overflow")
+                })?;
+        }
+        if !policy.repeated_timing_passes || !recovery_changed {
+            break;
+        }
+        let refinement_fanout_load_profile =
+            MappedFanoutLoadProfile::build(mapped, &options.target_cells)?;
+        let refinement = optimize_timing(
+            PostmapRequest {
+                mapped,
+                implementations,
+                timing,
+                options,
+                catalog,
+                scenarios,
+                fanout_load_profile: &refinement_fanout_load_profile,
+                policy,
+                runtime,
+                power_evaluator: power_evaluator.clone(),
+                connectivity,
+            },
+            config,
+            observer,
+            &mut cloned_drivers,
+        )?;
+        timing = refinement.timing;
+        changed |= refinement.changed;
+        #[cfg(test)]
+        {
+            replacements = replacements
+                .checked_add(refinement.replacements)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("post-map replacement count overflow")
+                })?;
+        }
     }
-    Ok(outcome)
+    Ok(PostmapOutcome {
+        timing,
+        changed,
+        #[cfg(test)]
+        replacements,
+    })
 }
 
 fn optimize_timing(
     request: PostmapRequest<'_>,
     config: crate::SynthesisConfig,
     observer: &mut dyn FnMut(SynthesisProgress),
+    cloned_drivers: &mut std::collections::BTreeSet<CellId>,
 ) -> Result<PostmapOutcome, crate::SynthError> {
     let optimization_started = std::time::Instant::now();
     let diagnostics = config.diagnostics;
@@ -235,7 +331,7 @@ fn optimize_timing(
     if trace.is_enabled() {
         diagnostics::report_timing_paths(trace, "after_electrical_legalization", &session.timing)?;
     }
-    cloning::optimize(&mut session, policy.critical_fanout_cloning)?;
+    cloning::optimize(&mut session, policy.critical_fanout_cloning, cloned_drivers)?;
     sizing::optimize(&mut session, catalog, runtime, &timing_policy)?;
     sizing::evaluate_pin_swaps(&mut session, catalog)?;
     session.report_completion(optimization_started.elapsed());

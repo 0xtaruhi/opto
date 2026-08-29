@@ -507,7 +507,7 @@ fn cleanup_sizing_commits_independent_gates_as_one_forest() {
     );
 
     assert_eq!(outcome.replacements, 1);
-    assert_eq!(cleanup_updates, 2);
+    assert_eq!(cleanup_updates, 3);
     assert_eq!(cleanup_updates_with_timing, cleanup_updates);
     assert_eq!(
         mapped.cell_type(mapped_cell_by_name(&mapped, "U0")),
@@ -653,7 +653,14 @@ fn electrical_legalization_buffers_before_residual_cloning() {
 
     assert_eq!(outcome.replacements, 2);
     assert_eq!(mapped.cell_count(), 4);
-    let buffer = mapped_cell_by_name(&mapped, "U_electrical_buffer_0_0");
+    let buffer = mapped
+        .cell_ids()
+        .find(|&cell| {
+            mapped
+                .cell_name(cell)
+                .is_some_and(|name| name.starts_with("U_electrical_buffer_"))
+        })
+        .unwrap();
     assert_eq!(mapped.cell_type(buffer), Some("DRV"));
     assert!(
         mapped
@@ -676,7 +683,7 @@ fn electrical_legalization_buffers_before_residual_cloning() {
 }
 
 #[test]
-fn fanout_tree_synthesis_precedes_residual_branch_optimization() {
+fn small_critical_fanout_defers_to_driver_cloning() {
     let mut cells = fanout_cells();
     cells.push(unary_cell("BUF", "A", "Y", 1.0, 0.1, [0.1, 1.0]));
     let options = SynthesisOptions {
@@ -731,12 +738,17 @@ fn fanout_tree_synthesis_precedes_residual_branch_optimization() {
     assert!(outcome.replacements >= 1);
     assert_eq!(
         phases.first(),
-        Some(&OptimizationPhase::FanoutTreeSynthesis)
+        Some(&OptimizationPhase::CriticalFanoutCloning)
     );
     assert!(
         mapped
             .cell_ids()
-            .any(|cell| mapped.cell_name(cell).unwrap().starts_with("U_buffer_tree"))
+            .any(|cell| mapped.cell_name(cell).unwrap().starts_with("U_clone"))
+    );
+    assert!(
+        mapped
+            .cell_ids()
+            .all(|cell| !mapped.cell_name(cell).unwrap().starts_with("U_buffer_tree"))
     );
 }
 
@@ -812,7 +824,7 @@ fn fanout_tree_search_never_crosses_the_characterized_load_domain() {
 }
 
 #[test]
-fn violating_fanout_nets_commit_as_one_forest_transaction() {
+fn independent_small_critical_fanouts_commit_as_one_clone_forest_transaction() {
     let mut cells = fanout_cells();
     cells.push(unary_cell("BUF", "A", "Y", 1.0, 0.1, [0.1, 1.0]));
     let options = SynthesisOptions {
@@ -868,7 +880,7 @@ fn violating_fanout_nets_commit_as_one_forest_transaction() {
     assert_eq!(
         phases
             .iter()
-            .filter(|&&phase| phase == OptimizationPhase::FanoutTreeSynthesis)
+            .filter(|&&phase| phase == OptimizationPhase::CriticalFanoutCloning)
             .count(),
         1
     );
@@ -877,7 +889,7 @@ fn violating_fanout_nets_commit_as_one_forest_transaction() {
             mapped
                 .cell_name(cell)
                 .unwrap()
-                .starts_with(&format!("U_buffer_tree_{ordinal}_"))
+                .starts_with(&format!("U_clone_0_{ordinal}"))
         }));
     }
 }
@@ -928,6 +940,50 @@ fn fanout_load_profile_is_complete_and_generation_stamped() {
     edit.rename_cell(driver, "U0_renamed").unwrap();
     mapped.apply_region_delta(edit).unwrap();
     assert!(profile.validate(&mapped).is_err());
+}
+
+#[test]
+fn fanout_tree_reserves_the_critical_branch_for_driver_cloning() {
+    let pins = (0..6)
+        .map(|index| opto_ir::mapped::PinId::from_index(index).unwrap())
+        .collect::<Vec<_>>();
+    let selection = buffering::FanoutTreeSelection {
+        strategy: buffering::FanoutTreeStrategy {
+            buffer_index: 0,
+            branching_factor: 2,
+        },
+        leaf_groups: vec![pins[..2].to_vec(), pins[2..4].to_vec(), pins[4..].to_vec()],
+    };
+
+    let reserved = fanout::reserve_critical_branch(selection, &[pins[0], pins[3]]).unwrap();
+
+    assert_eq!(
+        reserved.leaf_groups,
+        vec![vec![pins[1]], vec![pins[2]], vec![pins[4], pins[5]]]
+    );
+    assert!(
+        reserved
+            .leaf_groups
+            .iter()
+            .flatten()
+            .all(|pin| ![pins[0], pins[3]].contains(pin))
+    );
+}
+
+#[test]
+fn fanout_tree_defers_a_small_critical_net_to_driver_cloning() {
+    let pins = (0..3)
+        .map(|index| opto_ir::mapped::PinId::from_index(index).unwrap())
+        .collect::<Vec<_>>();
+    let selection = buffering::FanoutTreeSelection {
+        strategy: buffering::FanoutTreeStrategy {
+            buffer_index: 0,
+            branching_factor: 2,
+        },
+        leaf_groups: vec![pins[..2].to_vec(), pins[2..].to_vec()],
+    };
+
+    assert!(fanout::reserve_critical_branch(selection, &[pins[0]]).is_none());
 }
 
 #[test]
@@ -1016,6 +1072,7 @@ fn fanout_forest_is_one_atomic_balanced_edit() {
             net: shared,
             leaf_groups: selection.leaf_groups,
             strategy: selection.strategy,
+            namespace: 0,
             ordinal: 0,
         }],
     )
@@ -1070,6 +1127,51 @@ fn clone_candidates_are_deterministic() {
 
     assert!(first.is_some());
     assert_eq!(first, second);
+}
+
+#[test]
+fn clone_history_blocks_committed_sources_and_clone_products_only() {
+    let cells = fanout_cells();
+    let options = SynthesisOptions {
+        target_cells: cells.into(),
+    };
+    let (mut mapped, _) = mapped_design(&fanout_module(), &options);
+    let net = mapped_net_by_name(&mapped, "n1");
+    let source = mapped
+        .pins_on_net(net)
+        .unwrap()
+        .find_map(|pin| {
+            let owner = mapped.pin_owner(pin)?;
+            (mapped.cell_type(owner) == Some("DRV")).then_some(owner)
+        })
+        .unwrap();
+    let unrelated = mapped.cell_ids().find(|&cell| cell != source).unwrap();
+    let branch = buffering::net_sink_pins(&mapped, &options.target_cells, net)
+        .unwrap()
+        .into_iter()
+        .take(2)
+        .map(|(pin, _)| pin)
+        .collect::<Vec<_>>();
+    let clone_addition_start = mapped.cell_slot_count();
+    let candidate = cloning::clone_driver_delta(
+        &mapped,
+        &options.target_cells,
+        net,
+        &branch,
+        "U_clone_test",
+        "_clone_net_test",
+    )
+    .unwrap()
+    .unwrap();
+    let applied = mapped.apply_region_delta(candidate.delta).unwrap();
+    let clone = applied.added_cells().next().unwrap().1;
+    let mut history = std::collections::BTreeSet::new();
+
+    cloning::record_clone_history(&mapped, clone_addition_start, [source], &mut history);
+
+    assert!(history.contains(&source));
+    assert!(history.contains(&clone));
+    assert!(!history.contains(&unrelated));
 }
 
 #[test]
