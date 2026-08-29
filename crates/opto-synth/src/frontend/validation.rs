@@ -22,7 +22,7 @@ pub(crate) fn lower_to_validated_word(
     scalarize_instance_connections(&mut module)?;
     super::seal_observable_dont_cares(&mut module, reference_ports)?;
     crate::word::cycle::validate_combinational_acyclic(&module)?;
-    crate::api::check::check_design_with_references(&module, reference_ports)
+    crate::api::check::check_word_design_with_references(&module, reference_ports)
         .map_err(|error| crate::SynthError::invalid(error.to_string()))?;
     validate_operation_identities(&module)?;
     Ok(module)

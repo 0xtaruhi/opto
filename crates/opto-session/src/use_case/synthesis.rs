@@ -165,12 +165,9 @@ impl Session {
             })?;
             design.source.validate()?;
             if name == current_name {
-                opto_synth::check_design_with_references(design.source.word(), &reference_ports)?;
+                opto_synth::check_design_with_references(&design.source, &reference_ports)?;
             } else {
-                opto_synth::check_definition_with_references(
-                    design.source.word(),
-                    &reference_ports,
-                )?;
+                opto_synth::check_definition_with_references(&design.source, &reference_ports)?;
             }
         }
         Ok("1".to_string())

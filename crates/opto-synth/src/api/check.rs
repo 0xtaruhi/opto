@@ -4,10 +4,10 @@
 //! Structural checks performed before synthesis transforms begin.
 //!
 //! These checks reject malformed cross-references and ambiguous drivers at the
-//! Word IR boundary. Later passes may therefore use typed IDs directly without
-//! repeatedly defending against invalid source graphs.
+//! source RTL and Word IR boundaries. Later passes may therefore use typed IDs
+//! directly without repeatedly defending against invalid source graphs.
 
-use opto_ir::word;
+use opto_ir::{proc, rtl::RtlModule, word};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -180,7 +180,7 @@ pub enum CheckDesignError {
 
 #[cfg(test)]
 pub(crate) fn check_design(module: &word::WordModule) -> Result<(), CheckDesignError> {
-    check_design_with_references(module, &BTreeMap::new())
+    check_word_design_with_references(module, &BTreeMap::new())
 }
 
 #[must_use]
@@ -214,22 +214,28 @@ pub(crate) fn target_cell_reference_ports(cells: &opto_library::TargetCellSet) -
     references
 }
 
-/// Validate a Word IR module against known design-unit and target-cell ports.
+/// Validate a source RTL module against known design-unit and target-cell ports.
 ///
 /// The check covers names, typed-ID references, exact-width instance ports,
-/// output l-values, and single-driver ownership for resolved signal bits.
+/// output l-values, and structural/procedural single-driver ownership for
+/// resolved signal bits.
 ///
 /// # Errors
 ///
 /// Returns the first structural inconsistency in deterministic arena order.
 pub fn check_design_with_references(
-    module: &word::WordModule,
+    module: &RtlModule,
     reference_ports: &ReferencePortMap,
 ) -> Result<(), CheckDesignError> {
-    check_module_with_references(module, reference_ports, true)
+    check_module_with_references(
+        module.word(),
+        module.procedures().effects(),
+        reference_ports,
+        true,
+    )
 }
 
-/// Validate a reachable design definition against known design-unit and
+/// Validate a reachable source RTL definition against known design-unit and
 /// target-cell ports.
 ///
 /// Unlike [`check_design_with_references`], this permits an empty external
@@ -241,14 +247,28 @@ pub fn check_design_with_references(
 ///
 /// Returns the first structural inconsistency in deterministic arena order.
 pub fn check_definition_with_references(
+    module: &RtlModule,
+    reference_ports: &ReferencePortMap,
+) -> Result<(), CheckDesignError> {
+    check_module_with_references(
+        module.word(),
+        module.procedures().effects(),
+        reference_ports,
+        false,
+    )
+}
+
+/// Revalidate the normalized Word IR before it leaves the synthesis frontend.
+pub(crate) fn check_word_design_with_references(
     module: &word::WordModule,
     reference_ports: &ReferencePortMap,
 ) -> Result<(), CheckDesignError> {
-    check_module_with_references(module, reference_ports, false)
+    check_module_with_references(module, &[], reference_ports, true)
 }
 
 fn check_module_with_references(
     module: &word::WordModule,
+    procedural_effects: &[proc::Effect],
     reference_ports: &ReferencePortMap,
     require_ports: bool,
 ) -> Result<(), CheckDesignError> {
@@ -292,6 +312,34 @@ fn check_module_with_references(
         .iter()
         .map(|signal| vec![false; signal.ty.width() as usize])
         .collect::<Vec<_>>();
+    // RtlModule validation has already proved that overlapping effects share
+    // one procedure owner. Seed that owner before testing structural claims.
+    for effect in procedural_effects {
+        let proc::ProcTarget::Signal { signal, select } = effect.target else {
+            continue;
+        };
+        let stored = module
+            .signal(signal)
+            .ok_or(CheckDesignError::MissingConnectSignal { signal })?;
+        if stored.kind == word::SignalKind::ProcessLocal {
+            continue;
+        }
+        let (lsb, width) = match select {
+            proc::TargetSelect::Whole | proc::TargetSelect::Dynamic { .. } => {
+                (0, stored.ty.width())
+            }
+            proc::TargetSelect::Static(range) => (range.lsb.min(range.msb), range.width()),
+        };
+        for offset in 0..width {
+            mark_driven_bit(
+                module,
+                &mut driven_bits,
+                signal,
+                lsb.saturating_add(offset),
+                false,
+            )?;
+        }
+    }
     for port in module.ports().iter().filter(|port| {
         matches!(
             port.direction,
@@ -304,7 +352,7 @@ fn check_module_with_references(
                 signal: port.signal,
             })?;
         for bit in 0..signal.ty.width() {
-            mark_driven_bit(module, &mut driven_bits, port.signal, bit, false)?;
+            mark_driven_bit(module, &mut driven_bits, port.signal, bit, true)?;
         }
     }
     let mut instance_names = BTreeSet::new();
@@ -396,7 +444,7 @@ fn check_module_with_references(
                             &mut driven_bits,
                             fragment.reference.signal,
                             bit,
-                            false,
+                            true,
                         )?;
                     }
                 }
@@ -434,7 +482,7 @@ fn check_module_with_references(
             });
         for offset in 0..width {
             let bit = lsb.saturating_add(offset);
-            mark_driven_bit(module, &mut driven_bits, connect.target.signal, bit, false)?;
+            mark_driven_bit(module, &mut driven_bits, connect.target.signal, bit, true)?;
         }
     }
     Ok(())
@@ -445,7 +493,7 @@ fn mark_driven_bit(
     driven_bits: &mut [Vec<bool>],
     signal_id: word::SignalId,
     bit: u32,
-    allow_multiple: bool,
+    duplicate_is_error: bool,
 ) -> Result<(), CheckDesignError> {
     let signal = module
         .signal(signal_id)
@@ -465,7 +513,7 @@ fn mark_driven_bit(
         });
     };
     if std::mem::replace(driven, true)
-        && !allow_multiple
+        && duplicate_is_error
         && signal.resolution == word::SignalResolution::SingleDriver
     {
         return Err(CheckDesignError::MultipleDrivers {
@@ -486,6 +534,7 @@ fn signal_name(module: &word::WordModule, signal: &word::Signal) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opto_ir::proc::{AssignmentMode, ProcBuilder, ProcTarget, ProcedureKind, TargetSelect};
 
     fn bit() -> word::WordType {
         word::WordType::new(1, false, word::LogicStateKind::FourState).unwrap()
@@ -512,7 +561,7 @@ mod tests {
 
     #[test]
     fn accepts_a_portless_reachable_definition() {
-        let module = word::WordModule::new("leaf");
+        let module = RtlModule::structural(word::WordModule::new("leaf")).unwrap();
 
         check_definition_with_references(&module, &ReferencePortMap::new()).unwrap();
     }
@@ -614,5 +663,81 @@ mod tests {
             .unwrap();
 
         check_design(&module).unwrap();
+    }
+
+    fn mixed_driver_module(procedural_bit: u32) -> RtlModule {
+        let mut module = word::WordModule::new("top");
+        let a = module
+            .add_port(
+                "a",
+                word::PortDirection::Input,
+                bit(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let y = module
+            .add_port(
+                "y",
+                word::PortDirection::Output,
+                bits(2),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let a = module.port(a).unwrap().signal;
+        let value = module.read_signal(a, word::SourceSpan::default()).unwrap();
+        let y = module.port(y).unwrap().signal;
+        module
+            .connect(
+                word::LValue::signal(y).with_range(word::BitRange { msb: 0, lsb: 0 }),
+                value,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+
+        let mut procedures = ProcBuilder::new();
+        let procedure = procedures
+            .add_combinational_procedure(ProcedureKind::Combinational, word::SourceSpan::default())
+            .unwrap();
+        let block = procedures
+            .add_block(procedure, word::SourceSpan::default())
+            .unwrap();
+        procedures
+            .assign(
+                block,
+                AssignmentMode::Blocking,
+                ProcTarget::signal(y).with_select(TargetSelect::Static(word::BitRange {
+                    msb: procedural_bit,
+                    lsb: procedural_bit,
+                })),
+                value,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        procedures
+            .terminate_return(block, word::SourceSpan::default())
+            .unwrap();
+        RtlModule::new(module, procedures.seal().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn rejects_overlapping_continuous_and_procedural_drivers() {
+        let module = mixed_driver_module(0);
+
+        let error = check_design_with_references(&module, &ReferencePortMap::new()).unwrap_err();
+
+        assert_eq!(
+            error,
+            CheckDesignError::MultipleDrivers {
+                signal: "y".to_string(),
+                bit: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_disjoint_continuous_and_procedural_drivers() {
+        let module = mixed_driver_module(1);
+
+        check_design_with_references(&module, &ReferencePortMap::new()).unwrap();
     }
 }

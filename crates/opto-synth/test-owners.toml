@@ -3,12 +3,12 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 483
+expected_tests = 485
 
 [[owners]]
 path = "src/api"
 owner = "api"
-tests = 4
+tests = 6
 contract = "Library-facing request validation, reference contracts, and structured diagnostics."
 
 [[owners]]
