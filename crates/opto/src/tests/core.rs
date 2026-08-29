@@ -71,7 +71,7 @@ fn synthesize_events_render_structured_progress() {
             effort: SynthesisEffort::High,
             parallelism: 4,
         }),
-        "Info    : Synthesizing 'top' using 'high' effort with 4 workers. [OPT-SYN-001]\n"
+        "Info    : Synthesizing 'top' using 'high' effort with 4 workers.\n"
     );
 
     let mapped = synthesis_event_text(&SynthesisEvent::ArtifactCompleted {
@@ -92,7 +92,7 @@ fn synthesize_events_render_structured_progress() {
             design: "top".to_string(),
             synthesized: true,
         }),
-        "Info    : Done synthesizing 'top'. [OPT-SYN-002]\n"
+        "Info    : Done synthesizing 'top'.\n"
     );
 }
 

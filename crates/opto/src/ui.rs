@@ -244,7 +244,9 @@ pub(crate) fn print_progress(text: &str, options: UiOptions) {
     let palette = options.theme.palette();
     for line in text.split_inclusive('\n') {
         let display = line.trim_end_matches('\n');
-        let (color, bold) = if line.contains("[OPT-SYN-002]") || line.contains("[OPT-SYN-003]") {
+        let (color, bold) = if line.starts_with("Info    : Done synthesizing '")
+            || line.starts_with("Info    : Reused synthesized artifact for '")
+        {
             (palette.success, true)
         } else if line.starts_with("Error   :") {
             (palette.error, true)
