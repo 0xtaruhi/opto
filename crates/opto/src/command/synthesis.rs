@@ -100,17 +100,13 @@ impl OptimizationTrace {
                 {
                     return;
                 }
-                let (level, action, code) = match status {
-                    opto_session::SynthesisProgressStatus::Started => {
-                        ("Info", "Running", "OPT-SYN-010")
-                    }
-                    opto_session::SynthesisProgressStatus::Failed => {
-                        ("Error", "Failed", "OPT-SYN-012")
-                    }
+                let (level, action) = match status {
+                    opto_session::SynthesisProgressStatus::Started => ("Info", "Running"),
+                    opto_session::SynthesisProgressStatus::Failed => ("Error", "Failed"),
                     opto_session::SynthesisProgressStatus::Completed => unreachable!(),
                 };
                 self.print(&format!(
-                    "{level:<8}: {action} {} for '{}' (elapsed {}). [{code}]\n",
+                    "{level:<8}: {action} {} for '{}' (elapsed {}).\n",
                     stage_title(stage),
                     event.design,
                     format_elapsed(self.started.elapsed()),
@@ -250,11 +246,11 @@ pub(crate) fn synthesis_event_text(event: &SynthesisEvent) -> String {
                 "workers"
             };
             format!(
-                "Info    : Synthesizing '{design}' using '{effort}' effort with {parallelism} {workers}. [OPT-SYN-001]\n"
+                "Info    : Synthesizing '{design}' using '{effort}' effort with {parallelism} {workers}.\n"
             )
         }
         SynthesisEvent::ArtifactCompleted { design, metrics } => format!(
-            "Info    : Mapped '{design}': cells={} nets={} regions={} rebuilt={} reused={}. [OPT-SYN-020]\n",
+            "Info    : Mapped '{design}': cells={} nets={} regions={} rebuilt={} reused={}.\n",
             metrics.mapped_cells,
             metrics.mapped_nets,
             metrics.synthesis_regions,
@@ -267,11 +263,11 @@ pub(crate) fn synthesis_event_text(event: &SynthesisEvent) -> String {
         SynthesisEvent::Completed {
             design,
             synthesized: false,
-        } => format!("Info    : Reused synthesized artifact for '{design}'. [OPT-SYN-003]\n"),
+        } => format!("Info    : Reused synthesized artifact for '{design}'.\n"),
         SynthesisEvent::Completed {
             design,
             synthesized: true,
-        } => format!("Info    : Done synthesizing '{design}'. [OPT-SYN-002]\n"),
+        } => format!("Info    : Done synthesizing '{design}'.\n"),
     }
 }
 

@@ -518,12 +518,14 @@ fn strip_volatile_report_fields(report: &str) -> String {
     report
         .lines()
         .filter(|line| {
-            if line.starts_with("Info    : Synthesizing '") && line.ends_with("[OPT-SYN-001]") {
+            if line.starts_with("Info    : Synthesizing '") {
                 synthesis_progress = true;
                 return false;
             }
             if synthesis_progress {
-                if line.ends_with("[OPT-SYN-002]") || line.ends_with("[OPT-SYN-003]") {
+                if line.starts_with("Info    : Done synthesizing '")
+                    || line.starts_with("Info    : Reused synthesized artifact for '")
+                {
                     synthesis_progress = false;
                 }
                 return false;
@@ -538,11 +540,11 @@ fn strip_volatile_report_fields(report: &str) -> String {
 fn volatile_synthesis_progress_is_excluded_from_report_comparisons() {
     let stable = "Combinational cells: 60\n";
     let with_progress = concat!(
-        "Info    : Synthesizing 'top' using 'medium' effort with 8 workers. [OPT-SYN-001]\n",
+        "Info    : Synthesizing 'top' using 'medium' effort with 8 workers.\n",
         "\nOptimization Summary: top\n",
         "Step  Elapsed  Area  Cells  WNS  TNS  Paths  Eval\n",
         "Technology Mapping  00:00:31  40.0  8  -0.10  -0.5  1  7\n",
-        "Info    : Done synthesizing 'top'. [OPT-SYN-002]\n",
+        "Info    : Done synthesizing 'top'.\n",
         "Combinational cells: 60\n",
     );
 
@@ -585,6 +587,7 @@ fn redirected_synthesis_uses_the_shared_progress_layout() {
     assert!(stdout.contains("Technology Mapping"), "{stdout}");
     assert!(stdout.contains("Info    : Mapped 'top'"), "{stdout}");
     assert!(stdout.contains("Done synthesizing 'top'"), "{stdout}");
+    assert!(!stdout.contains("[OPT-SYN-"), "{stdout}");
     assert!(!stdout.contains("heartbeat"), "{stdout}");
     assert!(!stdout.contains("Optimization: elapsed="), "{stdout}");
 }
