@@ -100,13 +100,15 @@ impl OptimizationTrace {
                 {
                     return;
                 }
-                let (level, action) = match status {
-                    opto_session::SynthesisProgressStatus::Started => ("Info", "Running"),
-                    opto_session::SynthesisProgressStatus::Failed => ("Error", "Failed"),
+                let (level, action, diagnostic) = match status {
+                    opto_session::SynthesisProgressStatus::Started => ("Info", "Running", ""),
+                    opto_session::SynthesisProgressStatus::Failed => {
+                        ("Error", "Failed", " [OPT-SYN-012]")
+                    }
                     opto_session::SynthesisProgressStatus::Completed => unreachable!(),
                 };
                 self.print(&format!(
-                    "{level:<8}: {action} {} for '{}' (elapsed {}).\n",
+                    "{level:<8}: {action} {} for '{}' (elapsed {}).{diagnostic}\n",
                     stage_title(stage),
                     event.design,
                     format_elapsed(self.started.elapsed()),

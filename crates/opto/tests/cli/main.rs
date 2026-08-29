@@ -728,6 +728,14 @@ fn combinational_cycle_reports_hdl_before_the_synthesis_invocation() {
     std::fs::remove_file(&script).unwrap();
 
     assert!(!output.status.success(), "{}", output_text(&output));
+    let stdout = normalized_stdout(&output);
+    assert!(
+        stdout.lines().any(|line| {
+            line.starts_with("Error   : Failed ") && line.ends_with("[OPT-SYN-012]")
+        }),
+        "{}",
+        output_text(&output)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("error[OPT-SYN-001]: combinational loop detected in module 'top'"),
