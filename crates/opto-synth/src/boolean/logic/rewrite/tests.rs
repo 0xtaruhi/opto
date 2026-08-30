@@ -62,6 +62,38 @@ fn six_input_plain_and_timing_plans_are_exact() {
 }
 
 #[test]
+fn structural_budget_includes_absolute_input_arrival() {
+    let mut network = LogicGraph::new();
+    let a = network.variable(0).unwrap();
+    let b = network.variable(1).unwrap();
+    let root = network.and(a, b);
+    network.freeze();
+
+    let requirements = [Some(2.0)];
+    let early_inputs = [Some(0.0), Some(0.0)];
+    let late_inputs = [Some(1.2), Some(0.0)];
+    let early = TimingBudget::for_roots(
+        &network,
+        &[root],
+        StructuralTiming::new(&requirements, &early_inputs, Some(1.0)),
+    )
+    .unwrap()
+    .unwrap();
+    let late = TimingBudget::for_roots(
+        &network,
+        &[root],
+        StructuralTiming::new(&requirements, &late_inputs, Some(1.0)),
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(early.arrival(root), 1);
+    assert_eq!(early.violation(root), 0);
+    assert_eq!(late.arrival(root), 3);
+    assert_eq!(late.violation(root), 1);
+}
+
+#[test]
 fn compact_recipe_proof_substitutes_divisors_and_honors_care() {
     let plan = Plan::Xor(
         Arc::new(Plan::Literal {
@@ -311,6 +343,47 @@ fn resubstitutes_xor_from_existing_divisors() {
         network_size(&outcome.network).0 < before_weight,
         "xor should reuse the union and overlap divisors"
     );
+}
+
+#[test]
+fn absolute_budget_selects_distinct_equivalent_structures() {
+    let mut network = LogicGraph::new();
+    let inputs = (0..6)
+        .map(|origin| network.variable(origin).unwrap())
+        .collect::<Vec<_>>();
+    let root = inputs[1..]
+        .iter()
+        .fold(inputs[0], |root, &input| network.and(root, input));
+    network.freeze();
+
+    let run = |requirement| {
+        optimize_network(
+            &network,
+            &[root],
+            &[Some(requirement)],
+            crate::SynthesisDiagnostics::default(),
+            crate::test_runtime(),
+        )
+        .unwrap()
+    };
+    let tight = run(3.0);
+    let relaxed = run(10.0);
+    let tight_root = remap_literal(&tight.remap, root).unwrap();
+    let relaxed_root = remap_literal(&relaxed.remap, root).unwrap();
+
+    assert_eq!(tight.network.level(tight_root), 3);
+    assert_eq!(relaxed.network.level(relaxed_root), 5);
+    assert_eq!(network_size(&relaxed.network), network_size(&tight.network));
+    for (outcome, mapped) in [(&tight, tight_root), (&relaxed, relaxed_root)] {
+        let proof = opto_formal::prove_logic_network_equivalence(
+            network.storage_network(),
+            &[root.lit()],
+            outcome.network.storage_network(),
+            &[mapped.lit()],
+        )
+        .unwrap();
+        assert!(proof.require_proved().is_ok());
+    }
 }
 
 #[test]

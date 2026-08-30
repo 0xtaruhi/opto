@@ -21,6 +21,16 @@ pub(crate) struct CanonicalRegionLogic {
     pub(crate) inputs: Box<[word::ValueId]>,
 }
 
+/// Target-derived timing coordinates for one canonical AXM subject.
+///
+/// The stage delay normalizes absolute constraints for structural search;
+/// load-aware Liberty cover and STA remain the electrical timing authorities.
+#[derive(Clone, Copy)]
+pub(crate) struct RegionLogicTiming<'a> {
+    pub(crate) input_arrivals: &'a [Option<f64>],
+    pub(crate) reference_stage_delay: Option<f64>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct RegionLogicOptions<'a> {
     pub(crate) optimize: bool,
@@ -34,6 +44,7 @@ impl RegionLogicGraph {
         mut subject: CanonicalRegionLogic,
         roots: &[word::ValueId],
         requirements: &[Option<f64>],
+        timing: RegionLogicTiming<'_>,
         options: RegionLogicOptions<'_>,
     ) -> Result<Self, crate::SynthError> {
         if roots.len() != requirements.len() {
@@ -75,7 +86,11 @@ impl RegionLogicGraph {
         let optimized = super::pipeline::optimize(
             std::mem::replace(&mut subject.network, LogicGraph::new()),
             &root_nodes,
-            &root_requirements,
+            super::rewrite::StructuralTiming::new(
+                &root_requirements,
+                timing.input_arrivals,
+                timing.reference_stage_delay,
+            ),
             optimize,
             config.diagnostics,
             runtime,

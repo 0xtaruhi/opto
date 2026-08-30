@@ -975,6 +975,20 @@ NAND/NOR sharing to Liberty cover without recognizing an RTL pattern or
 creating another synthesis pipeline. Cover still selects MUX cells, because it
 matches cut truth tables against the target library rather than AXM node kinds.
 
+AXM rewrite retains the numeric value of each projected required time. The
+active combinational catalog supplies one deterministic reference-stage delay,
+and regional input arrivals and root requirements are conservatively rounded
+into those structural coordinates. Rewrite compares normalized timing
+violation first: an implementation that misses its budget may make bounded
+monotone progress without closing the complete deficit in one window when the
+replacement does not grow local primitive weight or gate count, while an
+implementation that already beats its requirement retains its current
+structural arrival as the local budget instead of consuming positive margin.
+This guide ranks equivalent AXM forms in the ordinary rewrite path; load-aware
+Liberty cover and global STA remain the electrical timing authorities. Missing
+or non-positive target characterization leaves the structural guide absent
+rather than inventing a delay.
+
 Optimizing an un-expanded implementation beside the expanded one is not part of
 the flow. It doubled every rewrite, cut, truth, and cover pass to produce an
 alternative that mapping then discarded, and the retained subject arena carried
@@ -1791,6 +1805,7 @@ defect.
 | Separate region anchors/revisions and boundary identities/revisions | Implemented |
 | Word graph as the sole pre-cover connectivity and dataflow authority | Implemented |
 | Absolute locally dependent timing budgets | Implemented |
+| Constraint-sensitive AXM rewrite from absolute projected timing | Implemented; normalized structural stages guide equivalent rewrites while Liberty cover and global STA remain authoritative |
 | Region-private Word optimization and architecture selection | Implemented |
 | Private muxed arithmetic, CSA, Wallace/Dadda, and fused MAC; snapshot-confined FSM and sequential sharing | Implemented |
 | No memory admission mechanism | Implemented |
