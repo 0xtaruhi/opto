@@ -52,6 +52,19 @@ pub(super) fn decide_node(
         return Ok(None);
     }
     let cares = window_cares(network, cuts, node);
+    let violating = timing.is_some_and(|timing| timing.violation(node) > 0);
+    let level = |node| {
+        timing.map_or_else(
+            || network.level(node),
+            |timing| {
+                if violating {
+                    timing.arrival(node)
+                } else {
+                    timing.planning_level(network, node)
+                }
+            },
+        )
+    };
     let mut best_score = None;
     let mut best = None;
     for (cut_index, cut) in cuts.cuts(node).iter().copied().enumerate() {
@@ -65,8 +78,7 @@ pub(super) fn decide_node(
         let care = cares.as_ref().map_or(u64::MAX, |cares| cares[cut_index]);
         let mut levels = [0; WINDOW_CUT_LEAVES + DIVISOR_CAP];
         for (slot, &leaf) in cut.leaves().iter().enumerate() {
-            levels[slot] =
-                timing.map_or_else(|| network.level(leaf), |timing| timing.limit(network, leaf));
+            levels[slot] = level(leaf);
         }
         let plain_key = match timing {
             Some(_) => RewriteRecipeKey::timing(truth, &levels[..cut.len()]),
@@ -103,7 +115,7 @@ pub(super) fn decide_node(
                 network,
                 timing,
                 node,
-                RegionCost::removed(network, node, available, dying.len()),
+                RegionCost::removed(network, timing, node, available, dying.len()),
                 RegionCost::replacement_recipe(
                     added_cost(
                         &recipe,
@@ -138,18 +150,9 @@ pub(super) fn decide_node(
         let cached_divisor = recipe_cache.lookup(divisor_key, incremental_metrics)?;
         for (slot, &(divisor, _)) in divisors.iter().enumerate() {
             levels[cut.len() + slot] = match divisor {
-                DivisorRef::Node(divisor) => timing.map_or_else(
-                    || network.level(divisor),
-                    |timing| timing.limit(network, divisor),
-                ),
+                DivisorRef::Node(divisor) => level(divisor),
                 DivisorRef::Virtual(id) => {
                     let (left, right, _) = virtuals.definitions[id as usize];
-                    let level = |node| {
-                        timing.map_or_else(
-                            || network.level(node),
-                            |timing| timing.limit(network, node),
-                        )
-                    };
                     level(left).max(level(right)).saturating_add(1)
                 }
             };
@@ -181,7 +184,7 @@ pub(super) fn decide_node(
                 network,
                 timing,
                 node,
-                RegionCost::removed(network, node, available, dying.len()),
+                RegionCost::removed(network, timing, node, available, dying.len()),
                 RegionCost::replacement_recipe(
                     divisor_leaves(cut, &divisors).map_or(
                         (recipe_ops(&recipe), cost),
@@ -315,13 +318,22 @@ pub(super) fn added_cost(
 }
 
 impl RegionCost {
-    fn removed(network: &LogicGraph, node: LogicNodeId, weight: u32, gates: usize) -> Self {
+    fn removed(
+        network: &LogicGraph,
+        timing: Option<&TimingBudget>,
+        node: LogicNodeId,
+        weight: u32,
+        gates: usize,
+    ) -> Self {
         Self {
             weight,
             gates: gates
                 .try_into()
                 .expect("MFFC region budget fits the compact gate count"),
-            depth: network.level(node),
+            depth: timing.map_or_else(
+                || network.level(node),
+                |timing| timing.current(network, node),
+            ),
         }
     }
 
@@ -393,18 +405,37 @@ pub(super) fn proposal_score(
     let area_gain = i64::from(removed.weight) - i64::from(replacement.weight);
     let gate_gain = i64::from(removed.gates) - i64::from(replacement.gates);
     let critical_depth_gain = if let Some(timing) = timing {
-        let limit = timing.limit(network, node);
-        if replacement.depth > limit {
-            return None;
-        }
-        if limit == removed.depth {
-            i64::from(removed.depth) - i64::from(replacement.depth)
+        let removed_violation = timing.violation(node);
+        if removed_violation > 0 {
+            let required = timing
+                .required(node)
+                .expect("a timing violation has a finite structural requirement");
+            let removed_violation = removed.depth.saturating_sub(required);
+            let replacement_violation = replacement.depth.saturating_sub(required);
+            if replacement_violation > removed_violation {
+                return None;
+            }
+            i64::from(removed_violation) - i64::from(replacement_violation)
         } else {
-            0
+            let current = timing.current(network, node);
+            if replacement.depth > current {
+                return None;
+            }
+            if timing.planning_level(network, node) == removed.depth {
+                i64::from(removed.depth) - i64::from(replacement.depth)
+            } else {
+                0
+            }
         }
     } else {
         0
     };
+    if timing.is_some_and(|timing| timing.violation(node) > 0)
+        && critical_depth_gain > 0
+        && (area_gain < 0 || gate_gain < 0)
+    {
+        return None;
+    }
     let score = ProposalScore {
         critical_depth: critical_depth_gain,
         area: area_gain,
@@ -609,4 +640,100 @@ pub(super) fn mffc_weight<'scratch>(
         }
     }
     Some((weight, &scratch.dying))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_can_reduce_a_multi_stage_timing_deficit() {
+        let node = LogicNodeId::from_index(1);
+        let timing = TimingBudget {
+            arrivals: Box::new([0, 5]),
+            required: Box::new([u32::MAX, 1]),
+        };
+        let network = LogicGraph::new();
+        let score = proposal_score(
+            &network,
+            Some(&timing),
+            node,
+            RegionCost {
+                weight: 4,
+                gates: 1,
+                depth: 5,
+            },
+            RegionCost {
+                weight: 4,
+                gates: 1,
+                depth: 3,
+            },
+        )
+        .expect("a rewrite that reduces violation is useful before full closure");
+
+        assert_eq!(score.critical_depth, 2);
+    }
+
+    #[test]
+    fn timing_progress_does_not_expand_a_local_region() {
+        let node = LogicNodeId::from_index(1);
+        let timing = TimingBudget {
+            arrivals: Box::new([0, 5]),
+            required: Box::new([u32::MAX, 1]),
+        };
+        let network = LogicGraph::new();
+
+        assert!(
+            proposal_score(
+                &network,
+                Some(&timing),
+                node,
+                RegionCost {
+                    weight: 4,
+                    gates: 1,
+                    depth: 5,
+                },
+                RegionCost {
+                    weight: 6,
+                    gates: 2,
+                    depth: 3,
+                },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn feasible_rewrite_does_not_consume_structural_margin() {
+        let mut network = LogicGraph::new();
+        let left = network.variable(0).unwrap();
+        let right = network.variable(1).unwrap();
+        let node = network.and(left, right);
+        network.freeze();
+        let mut arrivals = vec![0; network.node_count()];
+        arrivals[node.index()] = 2;
+        let mut required = vec![u32::MAX; network.node_count()];
+        required[node.index()] = 5;
+        let timing = TimingBudget {
+            arrivals: arrivals.into_boxed_slice(),
+            required: required.into_boxed_slice(),
+        };
+        let removed = RegionCost::removed(&network, Some(&timing), node, 4, 2);
+
+        assert_eq!(removed.depth, 2);
+        assert!(
+            proposal_score(
+                &network,
+                Some(&timing),
+                node,
+                removed,
+                RegionCost {
+                    weight: 2,
+                    gates: 1,
+                    depth: 3,
+                },
+            )
+            .is_none()
+        );
+    }
 }

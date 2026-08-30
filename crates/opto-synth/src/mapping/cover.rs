@@ -7,7 +7,7 @@ use super::roots::MappingRoot;
 use super::{CombinationalCellCatalog, word};
 use crate::boolean::logic::cuts::{CutDatabase, CutTruthDatabase};
 use crate::boolean::logic::network::LogicNodeId;
-use crate::boolean::logic::{MAX_MATCH_INPUTS, RegionLogicGraph};
+use crate::boolean::logic::{MAX_MATCH_INPUTS, RegionLogicGraph, RegionLogicTiming};
 
 mod portable;
 mod response;
@@ -295,6 +295,8 @@ pub(crate) fn analyze_region_cover(
         .iter()
         .map(|root| root.required_time)
         .collect::<Vec<_>>();
+    let input_arrivals = regional_input_arrivals(&request, &canonical.inputs);
+    let reference_stage_delay = request.catalog.representative_cost().map(|cost| cost.delay);
     let profiling = request.options.config.diagnostics.timing;
     let subject = {
         let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
@@ -304,6 +306,10 @@ pub(crate) fn analyze_region_cover(
             canonical,
             &root_values,
             &root_requirements,
+            RegionLogicTiming {
+                input_arrivals: &input_arrivals,
+                reference_stage_delay,
+            },
             request.options,
         )?
     };
@@ -485,10 +491,7 @@ impl CoverSelector<'_, '_> {
                     .and_then(|port| request.timing.input_transition_on(port))
             })
             .collect::<Vec<_>>();
-        let input_arrivals = inputs
-            .iter()
-            .map(|&value| request.regional_slice.search_input_arrival(value))
-            .collect::<Vec<_>>();
+        let input_arrivals = regional_input_arrivals(request, inputs);
         let nodes = outputs.iter().map(|output| output.node).collect::<Vec<_>>();
         let timing = CoverTiming {
             required_times: &required_times,
@@ -515,6 +518,16 @@ impl CoverSelector<'_, '_> {
         }
         Ok(cover)
     }
+}
+
+fn regional_input_arrivals(
+    request: &RegionCoverRequest<'_>,
+    inputs: &[word::ValueId],
+) -> Vec<Option<f64>> {
+    inputs
+        .iter()
+        .map(|&value| request.regional_slice.search_input_arrival(value))
+        .collect()
 }
 
 fn merge_root_constraints(merged: &mut MappingRoot, root: MappingRoot) {

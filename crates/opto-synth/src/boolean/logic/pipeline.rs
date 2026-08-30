@@ -4,7 +4,7 @@
 //! Static AXM pass scheduling.
 
 use super::network::{LogicGraph, LogicNode, LogicNodeId};
-use super::rewrite::{RewriteIncremental, remap_literal};
+use super::rewrite::{RewriteIncremental, StructuralTiming, remap_literal};
 use hashbrown::HashMap;
 use opto_runtime::ExecutionContext;
 
@@ -76,13 +76,13 @@ impl TransformState {
 pub(super) fn optimize(
     source: LogicGraph,
     roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
+    timing: StructuralTiming<'_>,
     enabled: bool,
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
     incremental: Option<RewriteIncremental<'_>>,
 ) -> Result<LogicPipelineOutcome, crate::SynthError> {
-    if roots.len() != requirements.len() {
+    if roots.len() != timing.requirement_count() {
         return Err(crate::SynthError::invariant(
             "AXM pipeline requirements do not align with roots",
         ));
@@ -107,7 +107,7 @@ pub(super) fn optimize(
         optimize_canonical(
             &state.network,
             &state.roots,
-            requirements,
+            timing,
             diagnostics,
             runtime,
             incremental,
@@ -154,7 +154,7 @@ fn reduce_functionally(
 fn optimize_canonical(
     source: &LogicGraph,
     roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
+    timing: StructuralTiming<'_>,
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
     incremental: Option<RewriteIncremental<'_>>,
@@ -186,7 +186,7 @@ fn optimize_canonical(
         let optimized = optimize_with(
             &state.network,
             &state.roots,
-            requirements,
+            timing,
             diagnostics,
             runtime,
             None,
@@ -207,7 +207,7 @@ fn optimize_canonical(
     optimize_with(
         source,
         roots,
-        requirements,
+        timing,
         diagnostics,
         runtime,
         incremental,
@@ -257,7 +257,7 @@ pub(super) enum OptimizationPolicy {
 pub(super) fn optimize_with(
     network: &LogicGraph,
     roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
+    timing: StructuralTiming<'_>,
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
     incremental: Option<RewriteIncremental<'_>>,
@@ -266,7 +266,7 @@ pub(super) fn optimize_with(
     let cache = super::rewrite::RewriteRecipeCache::default();
     let metrics = crate::incremental::IncrementalRunMetrics::default();
     let incremental = incremental.unwrap_or_else(|| RewriteIncremental::new(&cache, &metrics));
-    if roots.len() != requirements.len() {
+    if roots.len() != timing.requirement_count() {
         return Err(crate::SynthError::invariant(
             "AXM pass requirements do not align with roots",
         ));
@@ -276,7 +276,7 @@ pub(super) fn optimize_with(
         OptimizationPolicy::Baseline => super::rewrite::resynthesize,
         OptimizationPolicy::Factored => super::rewrite::normalize,
     };
-    rewrite(&mut state, requirements, diagnostics, runtime, incremental)?;
+    rewrite(&mut state, timing, diagnostics, runtime, incremental)?;
     state.network.freeze();
     state.analyses = TransformAnalyses::default();
 
@@ -284,18 +284,16 @@ pub(super) fn optimize_with(
     let balanced = super::balance::balance(&state.network, &state.roots);
     let balanced_roots = map_roots(&balanced.remap, &state.roots)?;
     let profile = |network: &LogicGraph, roots: &[LogicNodeId]| {
-        if matches!(policy, OptimizationPolicy::Baseline)
-            || requirements.iter().any(Option::is_some)
-        {
-            return super::rewrite::timing_profile(network, roots, requirements);
+        if matches!(policy, OptimizationPolicy::Baseline) || timing.has_budget() {
+            return super::rewrite::timing_profile(network, roots, timing);
         }
-        roots.iter().fold((0, 0), |(maximum, total), &root| {
+        Ok(roots.iter().fold((0, 0), |(maximum, total), &root| {
             let depth = network.level(root);
             (maximum.max(depth), total + u64::from(depth))
-        })
+        }))
     };
     let accepted =
-        profile(&balanced.network, &balanced_roots) < profile(&state.network, &state.roots);
+        profile(&balanced.network, &balanced_roots)? < profile(&state.network, &state.roots)?;
     if accepted {
         state.apply(balanced)?;
     }
@@ -492,10 +490,11 @@ mod tests {
             let (source, root) = build();
             let runtime = ExecutionContext::new(&opto_runtime::ExecutionConfig { max_threads })
                 .expect("test runtime is valid");
+            let requirements = [None];
             optimize(
                 source,
                 &[root],
-                &[None],
+                StructuralTiming::new(&requirements, &[], Some(1.0)),
                 true,
                 crate::SynthesisDiagnostics::default(),
                 &runtime,

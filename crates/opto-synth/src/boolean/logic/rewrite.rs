@@ -114,26 +114,91 @@ impl MffcScratch {
 }
 
 struct TimingBudget {
+    arrivals: Box<[u32]>,
     required: Box<[u32]>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct StructuralTiming<'a> {
+    requirements: &'a [Option<f64>],
+    input_arrivals: &'a [Option<f64>],
+    reference_stage_delay: Option<f64>,
+}
+
+impl<'a> StructuralTiming<'a> {
+    pub(super) const fn new(
+        requirements: &'a [Option<f64>],
+        input_arrivals: &'a [Option<f64>],
+        reference_stage_delay: Option<f64>,
+    ) -> Self {
+        Self {
+            requirements,
+            input_arrivals,
+            reference_stage_delay,
+        }
+    }
+
+    pub(super) const fn requirement_count(self) -> usize {
+        self.requirements.len()
+    }
+
+    pub(super) fn has_budget(self) -> bool {
+        self.reference_stage_delay
+            .is_some_and(|delay| delay.is_finite() && delay > 0.0)
+            && self.requirements.iter().any(Option::is_some)
+    }
 }
 
 impl TimingBudget {
     fn for_roots(
         network: &LogicGraph,
         roots: &[LogicNodeId],
-        requirements: &[Option<f64>],
-    ) -> Option<Self> {
+        timing: StructuralTiming<'_>,
+    ) -> Result<Option<Self>, crate::SynthError> {
+        let Some(stage_delay) = timing
+            .reference_stage_delay
+            .filter(|delay| delay.is_finite() && *delay > 0.0)
+        else {
+            return Ok(None);
+        };
+        let mut arrivals = vec![0; network.node_count()];
+        for index in 0..network.node_count() {
+            let node = network.node(LogicNodeId::from_index(index));
+            arrivals[index] = match node {
+                LogicNode::Const(_) => 0,
+                LogicNode::Var(origin) => timing
+                    .input_arrivals
+                    .get(origin as usize)
+                    .copied()
+                    .flatten()
+                    .map_or(Ok(0), |arrival| normalize_stage(arrival, stage_delay, true))?,
+                LogicNode::And(left, right) | LogicNode::Xor(left, right) => arrivals[left.index()]
+                    .max(arrivals[right.index()])
+                    .saturating_add(1),
+                LogicNode::Mux {
+                    cond,
+                    then_value,
+                    else_value,
+                } => arrivals[cond.index()]
+                    .max(arrivals[then_value.index()])
+                    .max(arrivals[else_value.index()])
+                    .saturating_add(1),
+            };
+        }
         let mut required = vec![u32::MAX; network.node_count()];
         let mut constrained = false;
-        for (&root, requirement) in roots.iter().zip(requirements) {
-            if requirement.is_none() {
+        for (&root, requirement) in roots.iter().zip(timing.requirements) {
+            let Some(requirement) = requirement else {
                 continue;
-            }
+            };
             constrained = true;
-            required[root.index()] = required[root.index()].min(network.level(root));
+            let requirement = normalize_stage(*requirement, stage_delay, false)?;
+            required[root.index()] = required[root.index()]
+                .min(requirement)
+                .min(arrivals[root.index()]);
         }
         if !constrained {
-            return None;
+            return Ok(None);
         }
         for index in (0..network.node_count()).rev() {
             let limit = required[index];
@@ -144,17 +209,56 @@ impl TimingBudget {
                 required[fanin.index()] = required[fanin.index()].min(limit.saturating_sub(1));
             }
         }
-        Some(Self {
+        Ok(Some(Self {
+            arrivals: arrivals.into_boxed_slice(),
             required: required.into_boxed_slice(),
-        })
+        }))
     }
 
-    fn limit(&self, network: &LogicGraph, node: LogicNodeId) -> u32 {
-        match self.required[node.index()] {
-            u32::MAX => network.level(node),
-            required => required,
-        }
+    fn arrival(&self, node: LogicNodeId) -> u32 {
+        self.arrivals[node.index()]
     }
+
+    fn required(&self, node: LogicNodeId) -> Option<u32> {
+        (self.required[node.index()] != u32::MAX).then_some(self.required[node.index()])
+    }
+
+    fn planning_level(&self, network: &LogicGraph, node: LogicNodeId) -> u32 {
+        self.required(node).unwrap_or_else(|| network.level(node))
+    }
+
+    fn current(&self, network: &LogicGraph, node: LogicNodeId) -> u32 {
+        self.required(node)
+            .map_or_else(|| network.level(node), |_| self.arrival(node))
+    }
+
+    fn violation(&self, node: LogicNodeId) -> u32 {
+        self.required(node)
+            .map_or(0, |required| self.arrival(node).saturating_sub(required))
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "finite normalized timing stages are range-checked before conversion"
+)]
+fn normalize_stage(
+    time: f64,
+    reference_stage_delay: f64,
+    round_up: bool,
+) -> Result<u32, crate::SynthError> {
+    if !time.is_finite() {
+        return Err(crate::SynthError::invariant(
+            "structural timing projection contains a non-finite time",
+        ));
+    }
+    let stages = (time.max(0.0) / reference_stage_delay).min(f64::from(u32::MAX));
+    Ok(if round_up {
+        stages.ceil() as u32
+    } else {
+        stages.floor() as u32
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -191,10 +295,11 @@ pub(crate) fn optimize_network(
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
 ) -> Result<TransformProduct, crate::SynthError> {
+    let timing = StructuralTiming::new(requirements, &[], Some(1.0));
     super::pipeline::optimize_with(
         network,
         roots,
-        requirements,
+        timing,
         diagnostics,
         runtime,
         None,
@@ -211,10 +316,11 @@ pub(crate) fn optimize_network_cached(
     runtime: &ExecutionContext,
     incremental: RewriteIncremental<'_>,
 ) -> Result<TransformProduct, crate::SynthError> {
+    let timing = StructuralTiming::new(requirements, &[], Some(1.0));
     super::pipeline::optimize_with(
         network,
         roots,
-        requirements,
+        timing,
         diagnostics,
         runtime,
         Some(incremental),
@@ -224,12 +330,12 @@ pub(crate) fn optimize_network_cached(
 
 pub(super) fn resynthesize(
     state: &mut TransformState,
-    requirements: &[Option<f64>],
+    timing: StructuralTiming<'_>,
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
     incremental: RewriteIncremental<'_>,
 ) -> Result<(), crate::SynthError> {
-    normalize(state, requirements, diagnostics, runtime, incremental)?;
+    normalize(state, timing, diagnostics, runtime, incremental)?;
     let census_started = std::time::Instant::now();
     let mut approved = census_divisors(&state.network, &state.roots, runtime)?;
     crate::api::diagnostics::trace!(
@@ -246,7 +352,7 @@ pub(super) fn resynthesize(
                 virtuals: &approved,
                 reuse: state.analyses.rewrite.as_ref(),
                 incremental_decisions: false,
-                requirements,
+                timing,
                 diagnostics,
                 runtime,
                 incremental,
@@ -258,7 +364,7 @@ pub(super) fn resynthesize(
             state,
             &mut approved,
             RewriteEnvironment {
-                requirements,
+                timing,
                 diagnostics,
                 runtime,
                 incremental,
@@ -270,7 +376,7 @@ pub(super) fn resynthesize(
 
 pub(super) fn normalize(
     state: &mut TransformState,
-    requirements: &[Option<f64>],
+    timing: StructuralTiming<'_>,
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &ExecutionContext,
     incremental: RewriteIncremental<'_>,
@@ -283,7 +389,7 @@ pub(super) fn normalize(
             virtuals: &empty,
             reuse: state.analyses.rewrite.as_ref(),
             incremental_decisions: false,
-            requirements,
+            timing,
             diagnostics,
             runtime,
             incremental,
@@ -294,7 +400,7 @@ pub(super) fn normalize(
         state,
         &mut empty,
         RewriteEnvironment {
-            requirements,
+            timing,
             diagnostics,
             runtime,
             incremental,
@@ -309,12 +415,12 @@ fn converge(
     environment: RewriteEnvironment<'_>,
 ) -> Result<(), crate::SynthError> {
     let RewriteEnvironment {
-        requirements,
+        timing,
         diagnostics,
         runtime,
         incremental,
     } = environment;
-    let mut cost = network_score(&state.network, &state.roots, requirements);
+    let mut cost = network_score(&state.network, &state.roots, timing)?;
     for _ in 1..MAX_PASSES {
         let next = rewrite_pass(
             &state.network,
@@ -323,22 +429,22 @@ fn converge(
                 virtuals,
                 reuse: state.analyses.rewrite.as_ref(),
                 incremental_decisions: true,
-                requirements,
+                timing,
                 diagnostics,
                 runtime,
                 incremental,
             },
         )?;
         let next_roots = super::pipeline::map_roots(&next.remap, &state.roots)?;
-        let next_cost = network_score(&next.network, &next_roots, requirements);
+        let next_cost = network_score(&next.network, &next_roots, timing)?;
         crate::api::diagnostics::trace!(
             crate::api::diagnostics::SynthTrace::timing(diagnostics),
             "logic.rewrite.score",
-            "depth={}->{} total_depth={}->{} weight={}->{} gates={}->{}",
-            cost.depth,
-            next_cost.depth,
-            cost.total_depth,
-            next_cost.total_depth,
+            "violation={}->{} total_violation={}->{} weight={}->{} gates={}->{}",
+            cost.violation,
+            next_cost.violation,
+            cost.total_violation,
+            next_cost.total_violation,
             cost.weight,
             next_cost.weight,
             cost.gates,
@@ -380,8 +486,8 @@ fn network_size(network: &LogicGraph) -> (u64, usize) {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct NetworkScore {
-    depth: u32,
-    total_depth: u64,
+    violation: u32,
+    total_violation: u64,
     weight: u64,
     gates: usize,
 }
@@ -389,31 +495,32 @@ struct NetworkScore {
 fn network_score(
     network: &LogicGraph,
     roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-) -> NetworkScore {
+    timing: StructuralTiming<'_>,
+) -> Result<NetworkScore, crate::SynthError> {
     let (weight, gates) = network_size(network);
-    let (depth, total_depth) = roots
-        .iter()
-        .zip(requirements)
-        .filter_map(|(&root, requirement)| requirement.map(|_| network.level(root)))
-        .fold((0, 0), |(maximum, total), depth| {
-            (maximum.max(depth), total + u64::from(depth))
-        });
-    NetworkScore {
-        depth,
-        total_depth,
+    let (violation, total_violation) = TimingBudget::for_roots(network, roots, timing)?
+        .map(|budget| {
+            roots.iter().fold((0, 0), |(maximum, total), &root| {
+                let violation = budget.violation(root);
+                (maximum.max(violation), total + u64::from(violation))
+            })
+        })
+        .unwrap_or_default();
+    Ok(NetworkScore {
+        violation,
+        total_violation,
         weight,
         gates,
-    }
+    })
 }
 
 pub(super) fn timing_profile(
     network: &LogicGraph,
     roots: &[LogicNodeId],
-    requirements: &[Option<f64>],
-) -> (u32, u64) {
-    let score = network_score(network, roots, requirements);
-    (score.depth, score.total_depth)
+    timing: StructuralTiming<'_>,
+) -> Result<(u32, u64), crate::SynthError> {
+    let score = network_score(network, roots, timing)?;
+    Ok((score.violation, score.total_violation))
 }
 
 fn node_weight(node: LogicNode) -> u32 {
@@ -430,7 +537,7 @@ struct RewritePass<'a> {
     virtuals: &'a ApprovedDivisors,
     reuse: Option<&'a CutReuse>,
     incremental_decisions: bool,
-    requirements: &'a [Option<f64>],
+    timing: StructuralTiming<'a>,
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &'a ExecutionContext,
     incremental: RewriteIncremental<'a>,
@@ -438,7 +545,7 @@ struct RewritePass<'a> {
 
 #[derive(Clone, Copy)]
 struct RewriteEnvironment<'a> {
-    requirements: &'a [Option<f64>],
+    timing: StructuralTiming<'a>,
     diagnostics: crate::SynthesisDiagnostics,
     runtime: &'a ExecutionContext,
     incremental: RewriteIncremental<'a>,
@@ -453,7 +560,7 @@ fn rewrite_pass(
         virtuals,
         reuse,
         incremental_decisions,
-        requirements,
+        timing: structural_timing,
         diagnostics,
         runtime,
         incremental,
@@ -462,7 +569,7 @@ fn rewrite_pass(
     let started = std::time::Instant::now();
     let node_count = network.node_count();
     let references = network.reference_counts(roots);
-    let timing_budget = TimingBudget::for_roots(network, roots, requirements);
+    let timing_budget = TimingBudget::for_roots(network, roots, structural_timing)?;
 
     let (cuts, active) = match reuse {
         Some(reuse) => {
