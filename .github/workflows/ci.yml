@@ -42,6 +42,21 @@ jobs:
       - name: Check test ownership and execution policy
         run: python3 tools/check_test_policy.py
 
+      - name: Test repository policy tools
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+
+      - name: Install workflow validator
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --location --retry 3 --output actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Validate GitHub Actions workflows
+        run: actionlint
+
       - name: Validate pinned real-world benchmark suite
         run: |
           python3 tools/check_real_benchmarks.py benchmarks/real/medium.toml
@@ -78,29 +93,23 @@ jobs:
         with:
           command: check
 
-  rust:
-    name: Rust quality gates (${{ matrix.name }})
+  rust-linux:
+    name: Linux ${{ matrix.lane }}
     needs: changes
-    if: ${{ !cancelled() && github.event_name != 'push' }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux
-            os: ubuntu-24.04
-          - name: macOS Intel
-            os: macos-15-intel
-          - name: macOS ARM
-            os: macos-15
-          - name: Windows MSVC
-            os: windows-2022
+        lane: [checks, tests, benchmarks]
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
       RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_GENERATOR: Ninja
     steps:
       - name: Accept documentation-only change
         if: needs.changes.outputs.docs-only == 'true'
@@ -117,7 +126,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal
 
       - name: Install Linux quality components
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'checks'
         run: rustup component add clippy rustfmt
 
       - name: Install compiler cache
@@ -128,58 +137,140 @@ jobs:
         if: needs.changes.outputs.docs-only != 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: quality-${{ matrix.name }}
+          shared-key: quality-Linux-${{ matrix.lane }}
+          cache-workspace-crates: true
 
       - name: Record toolchain
         if: needs.changes.outputs.docs-only != 'true'
         run: rustc --version --verbose
 
       - name: Check formatting
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'checks'
         run: |
           python3 tools/check_cpp_format.py
           cargo fmt --all --check
           cargo fmt --manifest-path fuzz/Cargo.toml --all --check
 
       - name: Check workspace architecture
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'checks'
         run: python3 tools/check_architecture.py
 
       - name: Check workspace
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'checks'
         run: cargo check --workspace --all-targets --all-features --locked
 
       - name: Build API documentation
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'checks'
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
         run: cargo doc --workspace --all-features --no-deps --locked --document-private-items
 
       - name: Run Clippy
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'checks'
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run domain and library tests
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'tests'
         run: cargo test --workspace --lib --bins --all-features --locked
 
       - name: Run product CLI tests
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'tests'
         run: cargo test -p opto --test cli --all-features --locked
 
       - name: Run presubmit qualification
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'tests'
         run: cargo test -p opto --test qualification --all-features --locked
 
+      - name: Build runtime benchmarks
+        if: needs.changes.outputs.docs-only != 'true' && matrix.lane == 'benchmarks'
+        run: cargo bench --workspace --benches --no-run --locked
+
+  rust-linux-gate:
+    # Keep the branch-protection context stable while independent lanes run in parallel.
+    name: Rust quality gates (Linux)
+    needs: rust-linux
+    # A skipped required job can allow merging. Evaluate cancelled dependencies too.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every Linux quality lane
+        env:
+          RESULT: ${{ needs.rust-linux.result }}
+        run: test "$RESULT" = success
+
+  rust-portable:
+    name: Rust quality gates (${{ matrix.name }})
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Intel
+            os: macos-15-intel
+          - name: macOS ARM
+            os: macos-15
+          - name: Windows MSVC
+            os: windows-2022
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Accept documentation-only change
+        if: needs.changes.outputs.docs-only == 'true'
+        run: echo "Rust quality gates are unaffected by documentation-only changes."
+
+      - name: Check out repository and pinned dependencies
+        if: needs.changes.outputs.docs-only != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install latest stable Rust
+        if: needs.changes.outputs.docs-only != 'true'
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Configure MSVC command line for Ninja
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        # The Visual Studio generator does not use CMAKE_CXX_COMPILER_LAUNCHER.
+        run: |
+          $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsInstall = & $vswherePath -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsInstall) { throw 'The MSVC C++ build tools are not installed.' }
+          & "$vsInstall\Common7\Tools\Launch-VsDevShell.ps1" -SkipAutomaticLocation -Arch amd64 -HostArch amd64
+          foreach ($name in 'PATH', 'INCLUDE', 'LIB', 'LIBPATH') {
+            "$name=$([Environment]::GetEnvironmentVariable($name))" >> $env:GITHUB_ENV
+          }
+          'CMAKE_GENERATOR=Ninja' >> $env:GITHUB_ENV
+
+      - name: Install compiler cache
+        if: needs.changes.outputs.docs-only != 'true'
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Cargo cache
+        if: needs.changes.outputs.docs-only != 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # The previous immutable cache excluded workspace build outputs.
+          shared-key: quality-${{ matrix.name }}-workspace
+          cache-workspace-crates: true
+
+      - name: Record toolchain
+        if: needs.changes.outputs.docs-only != 'true'
+        run: rustc --version --verbose
+
       - name: Verify portable build, embedded Tcl and CLI
-        if: needs.changes.outputs.docs-only != 'true' && runner.os != 'Linux'
+        if: needs.changes.outputs.docs-only != 'true'
         run: |
           cargo test -p opto-tcl-sys --locked
           cargo test -p opto --test cli --locked
-
-      - name: Build runtime benchmarks
-        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Linux'
-        run: cargo bench --workspace --benches --no-run --locked
 
   coverage:
     name: Rust coverage
@@ -191,6 +282,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
       RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Check out repository and pinned dependencies
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
