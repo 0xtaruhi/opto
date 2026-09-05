@@ -390,20 +390,19 @@ mod tests {
         let load = buffer_and_direct_receiver_load(&view, 2, view.direct_load);
         // Three physical branches carry 6 units of wire capacitance, despite
         // an abstract electrical fanout of 50. The direct branch is slower.
-        assert_eq!(load.receivers, 3.0);
-        assert_eq!(load.fanout, 50.0);
-        assert_eq!(load.capacitance, 12.0);
+        assert!((load.receivers - 3.0).abs() < 1.0e-12);
+        assert!((load.fanout - 50.0).abs() < 1.0e-12);
+        assert!((load.capacitance - 12.0).abs() < 1.0e-12);
         for (polarity, expected) in [
             (opto_timing::DelayType::Min, 9.0),
             (opto_timing::DelayType::Max, 18.0),
         ] {
-            assert_eq!(
-                receiver_wire_delay(&view, load, load.receiver_capacitance(polarity)),
-                Some(expected)
-            );
+            let delay =
+                receiver_wire_delay(&view, load, load.receiver_capacitance(polarity)).unwrap();
+            assert!((delay - expected).abs() < 1.0e-12);
         }
         let mut direct = ElectricalLoad::default();
         direct.add_receivers(view.direct_load);
-        assert_eq!(direct.min_sink_capacitance, 4.0);
+        assert!((direct.min_sink_capacitance - 4.0).abs() < 1.0e-12);
     }
 }
