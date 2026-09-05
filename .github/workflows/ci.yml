@@ -43,9 +43,13 @@ jobs:
         run: python3 tools/check_test_policy.py
 
       - name: Install workflow validator
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
-        with:
-          tool: actionlint@1.7.12
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --location --retry 3 --output actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: Validate GitHub Actions workflows
         run: actionlint
@@ -236,7 +240,8 @@ jobs:
         if: needs.changes.outputs.docs-only != 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: quality-${{ matrix.name }}
+          # The previous immutable cache excluded workspace build outputs.
+          shared-key: quality-${{ matrix.name }}-workspace
           cache-workspace-crates: true
 
       - name: Record toolchain
