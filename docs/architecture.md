@@ -1374,6 +1374,21 @@ unconstrained-path status. Interconnect steps retain fanout, load, resistance,
 wire delay, annotated parasitic delay, and derate, so a QoR failure can be
 assigned to a cell arc, wire model, or boundary model before optimization is
 changed. Unsupported report modes fail explicitly instead of changing meaning.
+Liberty `default_operating_conditions` resolves `tree_type` for wire-load
+estimation. `balanced_tree` divides total wire resistance and capacitance
+equally among physical receivers and uses each receiver's own edge-specific
+pin capacitance; `worst_case_tree` places all capacitance after the total
+resistance; `best_case_tree` retains wire capacitance with zero wire delay.
+An absent default condition or absent tree type selects a balanced tree.
+Unknown selected conditions and invalid tree types fail import. Abstract
+`fanout_load` weights apply to design rules, not wire length or branch count.
+STA and fanout-tree planning share this delay model and library unit conversion.
+Cell delay continues to use lumped total capacitance; this is not a distributed
+effective-capacitance or wire-slew solver. Explicit drive/net resistance remains
+lumped, and extracted sink delays replace wire-load estimates on annotated nets.
+Path resistance is receiver-equivalent: multiplying it by the reported total
+load gives the estimated wire plus explicit-resistance delay. This timing-model
+change increments the synthesis-cache ABI to invalidate prior checkpoints.
 Before synthesis, `report_qor` runs timing only for a structurally pre-mapped
 source with no remaining RTL operations, whose instance types resolve uniquely
 to selected library cells, and whose named connections resolve to cell pins.

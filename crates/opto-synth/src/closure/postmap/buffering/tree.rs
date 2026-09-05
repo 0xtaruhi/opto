@@ -184,7 +184,6 @@ pub(super) fn estimated_buffer_path_delay(
     }
     let mut worst = None::<f64>;
     for view in views {
-        let wire = view.wire_load?;
         let leaf_delay = leaf_groups
             .iter()
             .map(|group| receiver_group_load(view, group))
@@ -200,7 +199,7 @@ pub(super) fn estimated_buffer_path_delay(
         };
         let root_count = root_buffer_count(leaf_groups.len(), factor);
         let root_load = buffer_receiver_load(view, root_count);
-        let source_wire_delay = wire.resistance_at(root_load.fanout) * root_load.capacitance;
+        let source_wire_delay = estimated_wire_delay(view, root_load)?;
         let path_delay = source_wire_delay + internal_delay + leaf_delay;
         worst = Some(worst.map_or(path_delay, |current| current.max(path_delay)));
     }
@@ -216,10 +215,14 @@ pub(super) fn receiver_group_load(
         .fold(ElectricalLoad::default(), |mut total, &index| {
             total.capacitance += view.sink_loads[index].capacitance;
             total.fanout += view.sink_loads[index].fanout;
+            total.receivers += view.sink_loads[index].receivers;
+            total.max_sink_capacitance = total
+                .max_sink_capacitance
+                .max(view.sink_loads[index].max_sink_capacitance);
             total
         });
     if let Some(wire) = view.wire_load {
-        load.capacitance += wire.capacitance_at(load.fanout);
+        load.capacitance += wire.capacitance_at(load.receivers);
     }
     load
 }
@@ -237,8 +240,10 @@ pub(super) fn buffer_receiver_load(
         capacitance: view.input.design_input_capacitance() * count as f64
             + view
                 .wire_load
-                .map_or(0.0, |wire| wire.capacitance_at(fanout)),
+                .map_or(0.0, |wire| wire.capacitance_at(count as f64)),
         fanout,
+        receivers: count as f64,
+        max_sink_capacitance: view.input.design_input_capacitance(),
     }
 }
 
@@ -259,8 +264,21 @@ pub(super) fn buffered_stage_delay(
                 .filter_map(move |edge| arc.delay_at(edge, None, Some(load.capacitance)))
         })
         .max_by(f64::total_cmp)?;
+    Some(cell_delay + estimated_wire_delay(view, load)?)
+}
+
+fn estimated_wire_delay(view: &BufferTimingView<'_, '_, '_>, load: ElectricalLoad) -> Option<f64> {
     let wire = view.wire_load?;
-    Some(cell_delay + wire.resistance_at(load.fanout) * load.capacitance)
+    Some(
+        view.wire_tree.sink_delay(
+            view.units
+                .normalize_resistance(wire.resistance_at(load.receivers)),
+            wire.capacitance_at(load.receivers),
+            load.receivers,
+            load.capacitance,
+            load.max_sink_capacitance,
+        ),
+    )
 }
 
 pub(super) fn maximum_characterized_load(view: &BufferTimingView<'_, '_, '_>) -> Option<f64> {

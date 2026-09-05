@@ -23,6 +23,7 @@ pub struct LibraryImport {
     pub(crate) default_wire_load: Option<String>,
     pub(crate) default_wire_load_mode: Option<String>,
     pub(crate) wire_loads: BTreeMap<String, WireLoadModel>,
+    pub(crate) wire_load_tree: crate::WireLoadTree,
     pub(crate) units: TimingLibraryUnits,
     pub(crate) power_units: PowerLibraryUnits,
     pub(crate) target_cells: TargetCellSet,

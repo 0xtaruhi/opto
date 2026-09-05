@@ -691,6 +691,8 @@ fn small_critical_fanout_defers_to_driver_cloning() {
     };
     let timing_library = TimingLibrary {
         cells: cells.into(),
+        // This fixture requires a shared resistive trunk to make cloning beneficial.
+        wire_load_tree: opto_library::WireLoadTree::WorstCase,
         wire_load_model: Some(
             opto_library::WireLoadModel::new(
                 "test".to_string(),
@@ -832,6 +834,8 @@ fn independent_small_critical_fanouts_commit_as_one_clone_forest_transaction() {
     };
     let timing_library = TimingLibrary {
         cells: cells.into(),
+        // This fixture requires a shared resistive trunk to make cloning beneficial.
+        wire_load_tree: opto_library::WireLoadTree::WorstCase,
         wire_load_model: Some(
             opto_library::WireLoadModel::new(
                 "test".to_string(),
@@ -1006,6 +1010,71 @@ fn critical_fanout_does_not_widen_the_sta_net_frontier() {
 }
 
 #[test]
+fn fanout_tree_selection_respects_wire_topology_and_units() {
+    use opto_library::{TimingLibraryUnits, WireLoadTree};
+    let femtofarad_units = TimingLibraryUnits {
+        time_seconds: Some(1e-9),
+        capacitance_farads: Some(1e-15),
+        resistance_ohms: Some(1e3),
+    };
+    for (tree, units, beneficial) in [
+        (WireLoadTree::Balanced, TimingLibraryUnits::default(), false),
+        (WireLoadTree::WorstCase, TimingLibraryUnits::default(), true),
+        (WireLoadTree::WorstCase, femtofarad_units, false),
+    ] {
+        let mut cells = fanout_cells();
+        cells.push(unary_cell("BUF", "A", "Y", 1.0, 0.1, [0.1, 1.0]));
+        let options = SynthesisOptions {
+            target_cells: cells.clone().into(),
+        };
+        let library = TimingLibrary {
+            cells: cells.into(),
+            wire_load_tree: tree,
+            wire_load_model: Some(
+                opto_library::WireLoadModel::new("test".into(), 1.0, 1.0, 1.0, Vec::new()).unwrap(),
+            ),
+            units,
+            ..TimingLibrary::default()
+        };
+        let scenarios = scenario_set(&library);
+        let (mapped, _) = mapped_design(&fanout_module(), &options);
+        let net = mapped_net_by_name(&mapped, "n1");
+        let model =
+            TimingModel::from_mapped(&mapped, design_id(), &port_bindings(&mapped), library)
+                .unwrap();
+        let timing =
+            IncrementalTiming::new(TimingContext::new(), model, ReportTimingOptions::default())
+                .unwrap();
+        let state = timing.mapped_net_state(net).unwrap();
+        let net_states = scenarios
+            .analysis_views()
+            .map(|(view, _, _)| crate::closure::mmmc::MmmcNetState {
+                view,
+                state: Some(state.clone()),
+            })
+            .collect::<Vec<_>>();
+        let sinks = buffering::net_sink_pins(&mapped, &options.target_cells, net)
+            .unwrap()
+            .into_iter()
+            .map(|(pin, _)| pin)
+            .collect::<Vec<_>>();
+        let selection = buffering::select_fanout_tree_strategy(
+            &mapped,
+            &options.target_cells,
+            &scenarios,
+            &[2],
+            &sinks,
+            &net_states,
+        )
+        .unwrap();
+        // A linear balanced model already has independent equal-R branches;
+        // extra stages cannot reduce its wire delay. Small RC also cannot pay
+        // for a buffer's characterized cell delay, even with a shared trunk.
+        assert_eq!(selection.is_some(), beneficial, "{tree:?} {units:?}");
+    }
+}
+
+#[test]
 fn fanout_forest_is_one_atomic_balanced_edit() {
     let mut cells = fanout_cells();
     cells.push(unary_cell("BUF", "A", "Y", 1.0, 0.1, [0.1, 1.0]));
@@ -1014,6 +1083,7 @@ fn fanout_forest_is_one_atomic_balanced_edit() {
     };
     let timing_library = TimingLibrary {
         cells: cells.into(),
+        wire_load_tree: opto_library::WireLoadTree::WorstCase,
         wire_load_model: Some(
             opto_library::WireLoadModel::new(
                 "test".to_string(),

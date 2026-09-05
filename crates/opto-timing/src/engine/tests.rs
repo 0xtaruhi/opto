@@ -1447,14 +1447,20 @@ fn structural_fanout_tree_updates_every_endpoint_in_optimization_mode() {
     rebuilt_design
         .instances
         .push(buf_instance(6, "B1", "BUF", "n1", "t1"));
-    let reference = IncrementalTiming::new(
-        timing.clone(),
-        TimingModel::new(rebuilt_design, library.clone()).unwrap(),
-        ReportTimingOptions::default(),
-    )
-    .unwrap();
-
-    for max_threads in [1, 4] {
+    for (max_threads, tree) in [
+        (1, opto_library::WireLoadTree::Balanced),
+        (4, opto_library::WireLoadTree::Balanced),
+        (1, opto_library::WireLoadTree::WorstCase),
+        (4, opto_library::WireLoadTree::WorstCase),
+    ] {
+        let mut library = library.clone();
+        library.wire_load_tree = tree;
+        let reference = IncrementalTiming::new(
+            timing.clone(),
+            TimingModel::new(rebuilt_design.clone(), library.clone()).unwrap(),
+            ReportTimingOptions::default(),
+        )
+        .unwrap();
         let mut incremental = IncrementalTiming::new_for_optimization(
             timing.clone(),
             TimingModel::new(design.clone(), library.clone()).unwrap(),
@@ -1488,7 +1494,12 @@ fn structural_fanout_tree_updates_every_endpoint_in_optimization_mode() {
             incremental.quality_summary().unwrap(),
             reference.quality_summary().unwrap()
         );
-        assert!(incremental.quality_summary().unwrap().wns().unwrap() > before.wns().unwrap());
+        // The added cells pay off only with a shared resistive trunk. Both
+        // improvement and degradation must match a complete reconstruction.
+        assert_eq!(
+            incremental.quality_summary().unwrap().wns().unwrap() > before.wns().unwrap(),
+            tree == opto_library::WireLoadTree::WorstCase,
+        );
         incremental.rollback(edit).unwrap();
         assert_eq!(incremental.quality_summary().unwrap(), before);
     }

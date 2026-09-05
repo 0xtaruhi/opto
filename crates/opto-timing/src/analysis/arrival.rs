@@ -381,8 +381,8 @@ where
                         inputs.model,
                         inputs.graph,
                         from,
-                        input_edge,
-                        inputs.options.delay_type,
+                        Some((graph_arc.instance, arc.related_pin())),
+                        InterconnectDelayMode::data(input_edge, inputs.options.delay_type),
                     );
                     let load = timing_load(
                         inputs.timing,

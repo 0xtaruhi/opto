@@ -20,6 +20,8 @@ use crate::{
 use opto_core::ObjectUid;
 use opto_library::{BooleanFunction, TargetClockGateKind, TargetClockGateRole};
 
+mod wire_load;
+
 #[test]
 fn analyzes_register_to_register_setup_path() {
     let (timing, design, library) = sequential_fixture();
@@ -748,6 +750,7 @@ fn sequential_fixture_with_target_cells(
         wire_load: Some("ZeroWireload".to_string()),
         wire_load_mode: Some("segmented".to_string()),
         wire_load_model: None,
+        wire_load_tree: opto_library::WireLoadTree::Balanced,
         units: crate::TimingLibraryUnits::default(),
         power: opto_library::PowerLibrary::default(),
         cells: cells.into(),
@@ -821,6 +824,7 @@ fn latch_timing_library() -> TimingLibrary {
         wire_load: None,
         wire_load_mode: None,
         wire_load_model: None,
+        wire_load_tree: opto_library::WireLoadTree::Balanced,
         units: crate::TimingLibraryUnits::default(),
         power: opto_library::PowerLibrary::default(),
         cells: cells.into(),

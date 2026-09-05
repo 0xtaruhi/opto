@@ -143,6 +143,7 @@ struct LibraryRecord {
     default_wire_load: Option<String>,
     default_wire_load_mode: Option<String>,
     wire_loads: BTreeMap<String, WireLoadModel>,
+    wire_load_tree: WireLoadTree,
     units: TimingLibraryUnits,
     power_units: PowerLibraryUnits,
     target_cells: TargetCellSet,
@@ -156,6 +157,7 @@ struct FingerprintRecord<'a> {
     default_wire_load: &'a Option<String>,
     default_wire_load_mode: &'a Option<String>,
     wire_loads: &'a BTreeMap<String, WireLoadModel>,
+    wire_load_tree: WireLoadTree,
     units: TimingLibraryUnits,
     power_units: PowerLibraryUnits,
     target_cells: LibraryFingerprint,
@@ -222,6 +224,7 @@ impl LibraryRecord {
             default_wire_load,
             default_wire_load_mode,
             wire_loads,
+            wire_load_tree,
             units,
             power_units,
             target_cells,
@@ -237,6 +240,7 @@ impl LibraryRecord {
             default_wire_load,
             default_wire_load_mode,
             wire_loads,
+            wire_load_tree,
             units,
             power_units,
             target_cells,
@@ -358,6 +362,8 @@ impl LibraryRevision {
                     .cloned()
             }),
             units: metadata.map_or_else(TimingLibraryUnits::default, |record| record.units),
+            wire_load_tree: metadata
+                .map_or_else(WireLoadTree::default, |record| record.wire_load_tree),
             power: PowerLibrary {
                 units: metadata
                     .map_or_else(PowerLibraryUnits::default, |record| record.power_units),
@@ -479,6 +485,7 @@ impl LibraryRecord {
             default_wire_load: &self.default_wire_load,
             default_wire_load_mode: &self.default_wire_load_mode,
             wire_loads: &self.wire_loads,
+            wire_load_tree: self.wire_load_tree,
             units: self.units,
             power_units: self.power_units,
             target_cells: self.target_cells.content_fingerprint(),
@@ -696,6 +703,7 @@ impl LibraryStore {
                 default_wire_load: record.default_wire_load.clone(),
                 default_wire_load_mode: record.default_wire_load_mode.clone(),
                 wire_loads: record.wire_loads.clone(),
+                wire_load_tree: record.wire_load_tree,
                 units: record.units,
                 power_units: record.power_units,
                 target_cells: cells,

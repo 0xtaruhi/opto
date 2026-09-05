@@ -750,6 +750,15 @@ impl TimingGraph {
         self.wire_resistances.get(net).copied().unwrap_or(0.0)
     }
 
+    pub(super) fn wire_capacitance(&self, net: usize) -> f64 {
+        self.wire_capacitances.get(net).copied().unwrap_or(0.0)
+    }
+
+    /// Physical receiver count, independent of abstract design-rule fanout.
+    pub(super) fn wire_fanout(&self, net: usize) -> f64 {
+        self.wire_fanouts.get(net).copied().unwrap_or(0.0)
+    }
+
     pub(crate) fn endpoint_for_net(&self, net: usize) -> Option<crate::TimingEndpoint> {
         self.net_ports
             .get(net)?

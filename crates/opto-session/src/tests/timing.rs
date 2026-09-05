@@ -124,6 +124,7 @@ fn report_timing_analyzes_mapped_register_setup_and_hold() {
         r#"
 library (demo) {
   default_operating_conditions : typical;
+  operating_conditions(typical) { tree_type : balanced_tree; }
   cell (DFF) {
     area : 2.0;
     ff (IQ, IQN) { clocked_on : "CP"; next_state : "D"; }
@@ -240,6 +241,7 @@ fn report_timing_analyzes_mapped_latch_transparency_and_borrowing() {
         r#"
 library (demo) {
   default_operating_conditions : typical;
+  operating_conditions(typical) { tree_type : balanced_tree; }
   cell (DFF) {
     area : 2.0;
     ff (IQ, IQN) { clocked_on : "CP"; next_state : "D"; }
@@ -419,6 +421,7 @@ fn report_timing_uses_liberty_arcs_on_synthesized_design() {
         r#"
 library (demo) {
   default_operating_conditions : typical;
+  operating_conditions(typical) { tree_type : balanced_tree; }
   default_wire_load : "ZeroWireload";
   default_wire_load_mode : segmented;
   cell (AND2) {
