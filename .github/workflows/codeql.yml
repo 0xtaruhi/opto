@@ -71,9 +71,11 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_BUILD_JOBS: 4
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../opto-codeql-target
       # The extractor otherwise creates a fresh scratch target for every analysis.
-      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # Keep cached dependency-generated Rust outside the source tree so it is
+      # loaded through its manifest instead of scanned as first-party source.
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ github.workspace }}/../opto-codeql-target
       CMAKE_GENERATOR: Ninja
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
       RUSTC_WRAPPER: sccache
@@ -102,6 +104,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: codeql-rust
+          workspaces: . -> ../opto-codeql-target
           cache-workspace-crates: true
           cache-on-failure: true
 
@@ -112,6 +115,7 @@ jobs:
         run: cargo check -p opto-slang-sys -p opto-tcl-sys --all-features --locked
 
       - name: Initialize CodeQL
+        id: init-rust
         if: needs.changes.outputs.docs-only != 'true'
         uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         with:
@@ -122,8 +126,25 @@ jobs:
           threads: 4
 
       - name: Analyze
+        id: analyze-rust
         if: needs.changes.outputs.docs-only != 'true'
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+
+      - name: Require complete Rust extraction
+        if: needs.changes.outputs.docs-only != 'true'
+        env:
+          CODEQL_PATH: ${{ steps.init-rust.outputs.codeql-path }}
+          DATABASE: ${{ fromJSON(steps.analyze-rust.outputs.db-locations).rust }}
+        run: |
+          summary_dir="$DATABASE/results/codeql/rust-queries/queries/summary"
+          "$CODEQL_PATH" bqrs decode --format=json \
+            "$summary_dir/NumberOfSuccessfullyExtractedFiles.bqrs" \
+            --output="$RUNNER_TEMP/codeql-rust-success.json"
+          "$CODEQL_PATH" bqrs decode --format=json \
+            "$summary_dir/NumberOfFilesExtractedWithErrors.bqrs" \
+            --output="$RUNNER_TEMP/codeql-rust-errors.json"
+          python3 tools/check_codeql_extraction.py \
+            "$RUNNER_TEMP/codeql-rust-success.json" "$RUNNER_TEMP/codeql-rust-errors.json"
 
   analyze-native:
     name: Analyze (c-cpp)

@@ -239,15 +239,22 @@ isolated from sibling branches. Cargo caches retain workspace build outputs,
 and `SCCACHE_GHA_ENABLED` enables persistent compiler caching across runners.
 Linux quality and Rust CodeQL jobs use Ninja for the native frontend build to
 avoid Make's unlimited parallelism with an unnumbered `cmake --parallel`.
+Windows quality jobs initialize the installed MSVC developer shell and use Ninja
+so CMake actually invokes the compiler launcher; the Visual Studio generator
+does not use it. Embedded Tcl continues to use its existing MSVC/nmake build.
 
-Rust CodeQL uses a persistent Cargo target directory for both workspace and fuzz
-manifest extraction. A separate preparation step runs the real native build
-scripts before analysis so their compilation time is visible. Extraction still
-executes build scripts and procedural macros, enables the extractor's default
-all-feature coverage, and scans both manifests. The Linux analysis explicitly
-uses four workers and a 12 GiB CodeQL memory budget; it does not depend on the
-runner-specific default allowance. Cache misses must remain correct, and a
-missing or failed lane must never produce a successful required check.
+Rust CodeQL uses a persistent Cargo target directory outside the checkout for
+both workspace and fuzz manifest extraction. Cached dependency-generated Rust
+must be loaded through its manifest, not rediscovered as first-party source.
+A separate preparation step runs the real native build scripts before analysis
+so their compilation time is visible. Extraction still executes build scripts
+and procedural macros, enables the extractor's default all-feature coverage,
+and scans both manifests. The Linux analysis explicitly uses four workers and
+a 12 GiB CodeQL memory budget; it does not depend on the runner-specific default
+allowance. Decoded Rust summary queries must report a nonempty scan with no
+extraction errors or warnings, even when the analysis action returns success.
+Cache misses must remain correct, and a missing or failed lane must never
+produce a successful required check.
 
 The test profile retains line-level debugging while avoiding full debug-value
 information in every large test binary. Any further profile change requires a

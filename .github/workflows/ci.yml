@@ -42,6 +42,9 @@ jobs:
       - name: Check test ownership and execution policy
         run: python3 tools/check_test_policy.py
 
+      - name: Test repository policy tools
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+
       - name: Install workflow validator
         working-directory: ${{ runner.temp }}
         run: |
@@ -231,6 +234,20 @@ jobs:
       - name: Install latest stable Rust
         if: needs.changes.outputs.docs-only != 'true'
         run: rustup toolchain install stable --profile minimal
+
+      - name: Configure MSVC command line for Ninja
+        if: needs.changes.outputs.docs-only != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        # The Visual Studio generator does not use CMAKE_CXX_COMPILER_LAUNCHER.
+        run: |
+          $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsInstall = & $vswherePath -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsInstall) { throw 'The MSVC C++ build tools are not installed.' }
+          & "$vsInstall\Common7\Tools\Launch-VsDevShell.ps1" -SkipAutomaticLocation -Arch amd64 -HostArch amd64
+          foreach ($name in 'PATH', 'INCLUDE', 'LIB', 'LIBPATH') {
+            "$name=$([Environment]::GetEnvironmentVariable($name))" >> $env:GITHUB_ENV
+          }
+          'CMAKE_GENERATOR=Ninja' >> $env:GITHUB_ENV
 
       - name: Install compiler cache
         if: needs.changes.outputs.docs-only != 'true'
