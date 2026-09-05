@@ -96,6 +96,42 @@ complete timing triplets. Published runtime and QoR baselines must use
 `--release`; published inputs are redistributable or fetched from a
 checksum-pinned public source.
 
+## Ibex timing-area response
+
+`ibex-timing.tcl` exercises one unchanged synthesis flow at no clock requirement
+and at 100, 20, 10, and 8 ns. Use the pinned Ibex checkout and source manifest
+from `qualification/upstream/ibex-core/README.md` and the public Liberty fetched
+above. Build both the merge base and candidate with the same stable Rust
+version and `--release`, then run each binary with the same eight-worker limit:
+
+```sh
+for period in none 100 20 10 8; do
+  output="/tmp/ibex-candidate/$period"
+  mkdir -p "$output"
+  IBEX_ROOT=/path/to/pinned/ibex \
+  IBEX_LIBRARY=/tmp/sky130.lib \
+  IBEX_PERIOD="$period" \
+  IBEX_RESULT_ROOT="$output" \
+    /usr/bin/time -v -o "$output/resources.txt" \
+    /path/to/candidate/opto --no-init --threads 8 \
+      -f benchmarks/qor/ibex-timing.tcl > "$output/run.log" 2>&1
+done
+```
+
+Repeat with the baseline binary and a separate output directory. Remove
+inherited `OPTO_*` developer variables before either run. Retain `area.rpt`,
+`qor.rpt`, the ten-path `timing.rpt`, the mapped netlist and its cell histogram,
+and binary/input SHA-256 hashes with the Rust version and host information.
+Resource measurements from concurrent runs are diagnostics, not runtime
+comparisons. The unconstrained point has no timing tuple.
+
+A loose finite requirement should retain the unconstrained area's scale.
+Feasible choices spend available margin to recover area; extra positive WNS is
+not an independent optimization target. Tighter points must show a meaningful
+timing response, with cell composition and residual violations reported for
+every point. Equivalence and the real-design regression gate remain separate
+acceptance evidence; this sweep does not replace them.
+
 ## Target regional qualification
 
 The region-parallel architecture is qualified separately from the current

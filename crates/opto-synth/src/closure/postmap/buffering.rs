@@ -57,9 +57,91 @@ impl FanoutTreePlan {
     }
 }
 
+/// Disjoint sink sets for one tree trial. Protected critical sinks remain on
+/// the original source, so their load must be priced there before selecting
+/// the geometry and area of the buffered remainder.
+pub(super) struct FanoutSinks {
+    pub(super) buffered: Vec<PinId>,
+    pub(super) direct: Vec<PinId>,
+}
+
+impl FanoutSinks {
+    pub(super) fn new(sinks: Vec<PinId>, protected: &[PinId]) -> Self {
+        let mut protected = protected.to_vec();
+        protected.sort_unstable();
+        let (buffered, direct) = sinks
+            .into_iter()
+            .partition(|pin| protected.binary_search(pin).is_err());
+        Self { buffered, direct }
+    }
+}
+
 pub(super) struct FanoutTreeSelection {
     pub(super) strategy: FanoutTreeStrategy,
     pub(super) leaf_groups: Vec<Vec<PinId>>,
+}
+
+/// Residual scenario violations precede added physical cost. Once the local
+/// estimate closes the deficit, extra positive slack cannot buy more buffers.
+/// Exact all-view STA still owns admission of the materialized forest.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FanoutCandidateScore {
+    worst_violation: f64,
+    total_violation: f64,
+    area: f64,
+    buffers: usize,
+}
+
+impl FanoutCandidateScore {
+    fn compare(self, other: Self) -> std::cmp::Ordering {
+        self.worst_violation
+            .total_cmp(&other.worst_violation)
+            .then_with(|| self.total_violation.total_cmp(&other.total_violation))
+            .then_with(|| self.area.total_cmp(&other.area))
+            .then_with(|| self.buffers.cmp(&other.buffers))
+    }
+}
+
+fn fanout_candidate_score(
+    samples: impl IntoIterator<Item = (opto_timing::DelayType, f64, f64, f64)>,
+    area: f64,
+    buffers: usize,
+) -> Option<FanoutCandidateScore> {
+    if !area.is_finite() || area < 0.0 {
+        return None;
+    }
+    let mut saw_violation = false;
+    let mut improves_violation = false;
+    let mut worst_violation = 0.0f64;
+    let mut total_violation = 0.0f64;
+    for (delay_type, current_slack, unbuffered_delay, buffered_delay) in samples {
+        if !current_slack.is_finite()
+            || !unbuffered_delay.is_finite()
+            || !buffered_delay.is_finite()
+        {
+            return None;
+        }
+        let improvement = match delay_type {
+            opto_timing::DelayType::Max => unbuffered_delay - buffered_delay,
+            opto_timing::DelayType::Min => buffered_delay - unbuffered_delay,
+        };
+        let candidate_slack = current_slack + improvement;
+        // HFNS repairs setup-like deficits. Early views constrain those
+        // proposals, but do not nominate a separate hold-repair transform.
+        if delay_type == opto_timing::DelayType::Max && current_slack < 0.0 {
+            saw_violation = true;
+            improves_violation |= candidate_slack > current_slack;
+        }
+        let violation = (-candidate_slack).max(0.0);
+        worst_violation = worst_violation.max(violation);
+        total_violation += violation;
+    }
+    (saw_violation && improves_violation).then_some(FanoutCandidateScore {
+        worst_violation,
+        total_violation,
+        area,
+        buffers,
+    })
 }
 
 pub(super) fn critical_fanouts(
@@ -128,15 +210,16 @@ pub(super) fn select_fanout_tree_strategy(
     library: &TargetCellSet,
     scenarios: &opto_timing::ScenarioSet,
     buffer_candidates: &[usize],
-    sinks: &[PinId],
+    sink_set: &FanoutSinks,
     net_states: &[crate::closure::mmmc::MmmcNetState],
 ) -> Result<Option<FanoutTreeSelection>, crate::SynthError> {
+    let sinks = &sink_set.buffered;
     let sink_count = sinks.len();
     if sink_count < 3 {
         return Ok(None);
     }
-    let timing_views = fanout_timing_views(mapped, scenarios, sinks, net_states)?;
-    let mut best_score = None::<(f64, f64, usize, &str, usize)>;
+    let timing_views = fanout_timing_views(mapped, scenarios, sink_set, net_states)?;
+    let mut best_score = None::<(FanoutCandidateScore, &str, usize)>;
     let mut best = None;
     for &buffer_index in buffer_candidates {
         let buffer = library.get(buffer_index).ok_or_else(|| {
@@ -154,9 +237,6 @@ pub(super) fn select_fanout_tree_strategy(
         if views.is_empty() {
             continue;
         }
-        let Some(unbuffered_wire_delay) = estimated_unbuffered_wire_delay(&views) else {
-            continue;
-        };
         let characterized_factor = views
             .iter()
             .filter_map(|view| {
@@ -185,24 +265,41 @@ pub(super) fn select_fanout_tree_strategy(
         for branching_factor in branching_factor_candidates(sink_count, maximum_factor)? {
             let leaf_groups = balance_sink_groups(sinks, &views, branching_factor)?;
             let (levels, buffers) = tree_shape(sink_count, branching_factor)?;
-            let Some(path_delay) =
-                estimated_buffer_path_delay(&views, sinks, &leaf_groups, branching_factor, levels)
-            else {
-                continue;
-            };
             let area = normalized_cell_area(buffer.area()) * buffers as f64;
-            if !path_delay.is_finite() || !area.is_finite() || path_delay >= unbuffered_wire_delay {
+            if !area.is_finite() {
                 continue;
             }
-            let score = (path_delay, area, buffers, buffer.name(), branching_factor);
+            let samples = views
+                .iter()
+                .filter_map(|view| {
+                    view.net_state
+                        .and_then(|state| state.slack.map(|slack| (view, slack)))
+                })
+                .map(|(view, slack)| {
+                    let unbuffered = estimated_unbuffered_wire_delay(view)?;
+                    let buffered = estimated_buffer_path_delay(
+                        view,
+                        sinks,
+                        &leaf_groups,
+                        branching_factor,
+                        levels,
+                    )?;
+                    Some((view.delay_type, slack, unbuffered, buffered))
+                })
+                .collect::<Option<Vec<_>>>();
+            let Some(samples) = samples else {
+                continue;
+            };
+            let Some(candidate_score) = fanout_candidate_score(samples, area, buffers) else {
+                continue;
+            };
+            let score = (candidate_score, buffer.name(), branching_factor);
             if best_score.as_ref().is_none_or(|current| {
                 score
                     .0
-                    .total_cmp(&current.0)
-                    .then_with(|| score.1.total_cmp(&current.1))
+                    .compare(current.0)
+                    .then_with(|| score.1.cmp(current.1))
                     .then_with(|| score.2.cmp(&current.2))
-                    .then_with(|| score.3.cmp(current.3))
-                    .then_with(|| score.4.cmp(&current.4))
                     .is_lt()
             }) {
                 best_score = Some(score);
@@ -222,20 +319,10 @@ pub(super) fn select_fanout_tree_strategy(
     Ok(best)
 }
 
-fn estimated_unbuffered_wire_delay(views: &[BufferTimingView<'_, '_, '_>]) -> Option<f64> {
-    if views.is_empty() {
-        return None;
-    }
-    let mut worst = None::<f64>;
-    for view in views {
-        let Some(state) = view.net_state else {
-            continue;
-        };
-        let wire = view.wire_load?;
-        let delay = wire.resistance_at(state.fanout) * state.capacitance;
-        worst = Some(worst.map_or(delay, |current| current.max(delay)));
-    }
-    worst
+fn estimated_unbuffered_wire_delay(view: &BufferTimingView<'_, '_, '_>) -> Option<f64> {
+    let state = view.net_state?;
+    let wire = view.wire_load?;
+    Some(wire.resistance_at(state.fanout) * state.capacitance)
 }
 
 struct FanoutTimingView<'library, 'state> {
@@ -243,7 +330,9 @@ struct FanoutTimingView<'library, 'state> {
     cells_by_name: BTreeMap<&'library str, TargetCellRef<'library>>,
     wire_load: Option<&'library opto_library::WireLoadModel>,
     net_state: Option<&'state opto_timing::NetTimingState>,
+    delay_type: opto_timing::DelayType,
     sink_loads: Box<[ElectricalLoad]>,
+    direct_load: ElectricalLoad,
 }
 
 struct BufferTimingView<'library, 'loads, 'state> {
@@ -251,7 +340,9 @@ struct BufferTimingView<'library, 'loads, 'state> {
     output: TargetPinRef<'library>,
     wire_load: Option<&'library opto_library::WireLoadModel>,
     net_state: Option<&'state opto_timing::NetTimingState>,
+    delay_type: opto_timing::DelayType,
     sink_loads: &'loads [ElectricalLoad],
+    direct_load: ElectricalLoad,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -272,7 +363,7 @@ struct SinkPin<'a> {
 fn fanout_timing_views<'library, 'state>(
     mapped: &MappedNetlist,
     scenarios: &'library opto_timing::ScenarioSet,
-    sinks: &[PinId],
+    sinks: &FanoutSinks,
     net_states: &'state [crate::closure::mmmc::MmmcNetState],
 ) -> Result<Vec<FanoutTimingView<'library, 'state>>, crate::SynthError> {
     let expected_views = scenarios.analysis_views().len();
@@ -282,6 +373,12 @@ fn fanout_timing_views<'library, 'state>(
         ));
     }
     let resolved = sinks
+        .buffered
+        .iter()
+        .map(|&pin| resolve_sink_pin(mapped, pin))
+        .collect::<Result<Vec<_>, _>>()?;
+    let direct = sinks
+        .direct
         .iter()
         .map(|&pin| resolve_sink_pin(mapped, pin))
         .collect::<Result<Vec<_>, _>>()?;
@@ -313,12 +410,23 @@ fn fanout_timing_views<'library, 'state>(
             .iter()
             .map(|sink| sink_electrical_load(&cells_by_name, sink, scenario.name()))
             .collect::<Result<Vec<_>, _>>()?;
+        let direct_load =
+            direct
+                .iter()
+                .try_fold(ElectricalLoad::default(), |mut total, sink| {
+                    let load = sink_electrical_load(&cells_by_name, sink, scenario.name())?;
+                    total.capacitance += load.capacitance;
+                    total.fanout += load.fanout;
+                    Ok::<_, crate::SynthError>(total)
+                })?;
         views.push(FanoutTimingView {
             scenario: scenario.name(),
             cells_by_name,
             wire_load: library.wire_load_model.as_ref(),
             net_state: net_states[state].state.as_ref(),
+            delay_type,
             sink_loads: sink_loads.into_boxed_slice(),
+            direct_load,
         });
     }
     Ok(views)
@@ -350,7 +458,9 @@ fn buffer_timing_views<'library, 'loads, 'state>(
             output,
             wire_load: timing_view.wire_load,
             net_state: timing_view.net_state,
+            delay_type: timing_view.delay_type,
             sink_loads: &timing_view.sink_loads,
+            direct_load: timing_view.direct_load,
         });
     }
     Ok(views)
@@ -628,6 +738,42 @@ fn net_driver_cells(
     drivers.sort_unstable();
     drivers.dedup();
     Ok(Some(drivers.into_boxed_slice()))
+}
+
+#[cfg(test)]
+mod score_tests {
+    use super::{FanoutCandidateScore, fanout_candidate_score};
+    use opto_timing::DelayType;
+
+    fn score(samples: &[(DelayType, f64, f64, f64)], area: f64) -> FanoutCandidateScore {
+        fanout_candidate_score(samples.iter().copied(), area, 1).unwrap()
+    }
+
+    #[test]
+    fn feasible_fanout_repair_minimizes_area_instead_of_margin() {
+        let minimum = score(&[(DelayType::Max, -0.2, 1.0, 0.7)], 10.0);
+        let faster = score(&[(DelayType::Max, -0.2, 1.0, 0.5)], 20.0);
+        let insufficient = score(&[(DelayType::Max, -0.2, 1.0, 0.85)], 1.0);
+
+        assert!(minimum.compare(faster).is_lt());
+        assert!(minimum.compare(insufficient).is_lt());
+    }
+
+    #[test]
+    fn fanout_repair_prices_early_views_without_nominating_hold_repair() {
+        let setup = (DelayType::Max, -0.2, 1.0, 0.7);
+        let preserves_hold = score(&[setup, (DelayType::Min, 0.2, 0.4, 0.3)], 10.0);
+        let breaks_hold = score(&[setup, (DelayType::Min, 0.2, 0.4, 0.1)], 1.0);
+        assert!(preserves_hold.compare(breaks_hold).is_lt());
+        assert!(fanout_candidate_score([(DelayType::Min, -0.2, 0.1, 0.4)], 1.0, 1).is_none());
+        for samples in [
+            vec![],
+            vec![(DelayType::Max, 0.1, 1.0, 0.7)],
+            vec![(DelayType::Max, -0.2, 1.0, 1.1)],
+        ] {
+            assert!(fanout_candidate_score(samples, 1.0, 1).is_none());
+        }
+    }
 }
 
 pub(super) fn group_sink_pins_by_owner(

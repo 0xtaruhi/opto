@@ -811,11 +811,14 @@ fn fanout_tree_search_never_crosses_the_characterized_load_domain() {
         &options.target_cells,
         &scenarios,
         &[2],
-        &buffering::net_sink_pins(&mapped, &options.target_cells, shared)
-            .unwrap()
-            .into_iter()
-            .map(|(pin, _)| pin)
-            .collect::<Vec<_>>(),
+        &buffering::FanoutSinks::new(
+            buffering::net_sink_pins(&mapped, &options.target_cells, shared)
+                .unwrap()
+                .into_iter()
+                .map(|(pin, _)| pin)
+                .collect(),
+            &[],
+        ),
         &net_states,
     )
     .unwrap();
@@ -943,47 +946,53 @@ fn fanout_load_profile_is_complete_and_generation_stamped() {
 }
 
 #[test]
-fn fanout_tree_reserves_the_critical_branch_for_driver_cloning() {
+fn fanout_tree_reserves_the_critical_branch_before_planning() {
     let pins = (0..6)
         .map(|index| opto_ir::mapped::PinId::from_index(index).unwrap())
         .collect::<Vec<_>>();
-    let selection = buffering::FanoutTreeSelection {
-        strategy: buffering::FanoutTreeStrategy {
-            buffer_index: 0,
-            branching_factor: 2,
-        },
-        leaf_groups: vec![pins[..2].to_vec(), pins[2..4].to_vec(), pins[4..].to_vec()],
-    };
-
-    let reserved = fanout::reserve_critical_branch(selection, &[pins[0], pins[3]]).unwrap();
-
+    let sinks = buffering::FanoutSinks::new(pins.clone(), &[pins[3], pins[0]]);
+    assert_eq!(sinks.buffered, vec![pins[1], pins[2], pins[4], pins[5]]);
+    assert_eq!(sinks.direct, vec![pins[0], pins[3]]);
+    // Four buffered sinks require two leaves; removing protected pins from a
+    // preselected three-leaf tree would disagree with its priced buffer count.
     assert_eq!(
-        reserved.leaf_groups,
-        vec![vec![pins[1]], vec![pins[2]], vec![pins[4], pins[5]]]
-    );
-    assert!(
-        reserved
-            .leaf_groups
-            .iter()
-            .flatten()
-            .all(|pin| ![pins[0], pins[3]].contains(pin))
+        buffering::fanout_tree_buffer_count(
+            sinks.buffered.len(),
+            buffering::FanoutTreeStrategy {
+                buffer_index: 0,
+                branching_factor: 2
+            }
+        )
+        .unwrap(),
+        2
     );
 }
 
 #[test]
 fn fanout_tree_defers_a_small_critical_net_to_driver_cloning() {
-    let pins = (0..3)
-        .map(|index| opto_ir::mapped::PinId::from_index(index).unwrap())
-        .collect::<Vec<_>>();
-    let selection = buffering::FanoutTreeSelection {
-        strategy: buffering::FanoutTreeStrategy {
-            buffer_index: 0,
-            branching_factor: 2,
-        },
-        leaf_groups: vec![pins[..2].to_vec(), pins[2..].to_vec()],
+    let options = SynthesisOptions {
+        target_cells: fanout_cells().into(),
     };
-
-    assert!(fanout::reserve_critical_branch(selection, &[pins[0]]).is_none());
+    let (mapped, _) = mapped_design(&fanout_module(), &options);
+    let shared = mapped_net_by_name(&mapped, "n1");
+    let pins = buffering::net_sink_pins(&mapped, &options.target_cells, shared)
+        .unwrap()
+        .into_iter()
+        .map(|(pin, _)| pin)
+        .collect::<Vec<_>>();
+    let sinks = buffering::FanoutSinks::new(pins.clone(), &pins[..1]);
+    assert!(
+        buffering::select_fanout_tree_strategy(
+            &mapped,
+            &options.target_cells,
+            &scenario_set(&TimingLibrary::default()),
+            &[],
+            &sinks,
+            &[],
+        )
+        .unwrap()
+        .is_none()
+    );
 }
 
 #[test]
@@ -1007,91 +1016,113 @@ fn critical_fanout_does_not_widen_the_sta_net_frontier() {
 
 #[test]
 fn fanout_forest_is_one_atomic_balanced_edit() {
-    let mut cells = fanout_cells();
-    cells.push(unary_cell("BUF", "A", "Y", 1.0, 0.1, [0.1, 1.0]));
-    let options = SynthesisOptions {
-        target_cells: cells.clone().into(),
-    };
-    let timing_library = TimingLibrary {
-        cells: cells.into(),
-        wire_load_model: Some(
-            opto_library::WireLoadModel::new(
-                "test".to_string(),
+    for (sink_count, protected_count) in [(3, 0), (6, 2)] {
+        let mut cells = fanout_cells();
+        cells.push(unary_cell("BUF", "A", "Y", 1.0, 0.1, [0.1, 1.0]));
+        let options = SynthesisOptions {
+            target_cells: cells.clone().into(),
+        };
+        let timing_library = TimingLibrary {
+            cells: cells.into(),
+            wire_load_model: Some(
+                opto_library::WireLoadModel::new(
+                    "test".to_string(),
+                    1.0,
+                    1.0,
+                    1.0,
+                    vec![(1.0, 1.0), (2.0, 2.0)],
+                )
+                .unwrap(),
+            ),
+            ..TimingLibrary::default()
+        };
+        let (mut mapped, _) = mapped_design(&fanout_module_with_sinks(sink_count), &options);
+        let shared = mapped_net_by_name(&mapped, "n1");
+        let mut timing = TimingContext::new();
+        timing
+            .set_max_delay(
                 1.0,
-                1.0,
-                1.0,
-                vec![(1.0, 1.0), (2.0, 2.0)],
+                Vec::new(),
+                vec![opto_timing::TimingEndpoint::Port(named_port_id(
+                    &mapped, "y0",
+                ))],
             )
-            .unwrap(),
-        ),
-        ..TimingLibrary::default()
-    };
-    let scenarios = scenario_set(&timing_library);
-    let (mut mapped, _) = mapped_design(&fanout_module(), &options);
-    let shared = mapped_net_by_name(&mapped, "n1");
-    let model = TimingModel::from_mapped(
-        &mapped,
-        design_id(),
-        &port_bindings(&mapped),
-        timing_library,
-    )
-    .unwrap();
-    let incremental =
-        IncrementalTiming::new(TimingContext::new(), model, ReportTimingOptions::default())
             .unwrap();
-    let net_state = incremental.mapped_net_state(shared).unwrap();
-    let net_states = scenarios
-        .analysis_views()
-        .map(|(view, _, _)| crate::closure::mmmc::MmmcNetState {
-            view,
-            state: Some(net_state.clone()),
-        })
-        .collect::<Vec<_>>();
-    let sinks = buffering::net_sink_pins(&mapped, &options.target_cells, shared)
-        .unwrap()
-        .into_iter()
-        .map(|(pin, _)| pin)
-        .collect::<Vec<_>>();
-    let selection = buffering::select_fanout_tree_strategy(
-        &mapped,
-        &options.target_cells,
-        &scenarios,
-        &[2],
-        &sinks,
-        &net_states,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(selection.strategy.branching_factor, 2);
-    let implementations = crate::ImplementationDb::empty(mapped.cell_slot_count());
-    let candidate = buffering::fanout_forest_delta(
-        &mapped,
-        &implementations,
-        &options.target_cells,
-        &[buffering::FanoutTreePlan {
-            net: shared,
-            leaf_groups: selection.leaf_groups,
-            strategy: selection.strategy,
-            namespace: 0,
-            ordinal: 0,
-        }],
-    )
-    .unwrap()
-    .unwrap();
-    let applied = mapped.apply_region_delta(candidate.delta).unwrap();
-
-    assert_eq!(applied.added_cells().count(), 2);
-    assert_eq!(
-        buffering::net_sink_pins(&mapped, &options.target_cells, shared)
-            .unwrap()
-            .len(),
-        2
-    );
-    for &sink in &sinks {
-        assert_ne!(
-            mapped.connection(sink).unwrap().signal,
-            opto_ir::mapped::ConnectionSignal::Net(shared)
+        let scenarios = ScenarioSet::single(
+            Arc::new(timing.clone()),
+            Arc::new(timing_library.clone()),
+            opto_timing::Parasitics::default(),
         );
+        let model = TimingModel::from_mapped(
+            &mapped,
+            design_id(),
+            &port_bindings(&mapped),
+            timing_library,
+        )
+        .unwrap();
+        let incremental =
+            IncrementalTiming::new(timing, model, ReportTimingOptions::default()).unwrap();
+        let net_state = incremental.mapped_net_state(shared).unwrap();
+        let net_states = scenarios
+            .analysis_views()
+            .map(|(view, _, _)| crate::closure::mmmc::MmmcNetState {
+                view,
+                state: Some(net_state.clone()),
+            })
+            .collect::<Vec<_>>();
+        let sinks = buffering::net_sink_pins(&mapped, &options.target_cells, shared)
+            .unwrap()
+            .into_iter()
+            .map(|(pin, _)| pin)
+            .collect::<Vec<_>>();
+        let selection = buffering::select_fanout_tree_strategy(
+            &mapped,
+            &options.target_cells,
+            &scenarios,
+            &[2],
+            &buffering::FanoutSinks::new(sinks.clone(), &sinks[..protected_count]),
+            &net_states,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selection.leaf_groups.iter().map(Vec::len).sum::<usize>(),
+            sink_count - protected_count
+        );
+        let planned_buffers =
+            buffering::fanout_tree_buffer_count(sink_count - protected_count, selection.strategy)
+                .unwrap();
+        let implementations = crate::ImplementationDb::empty(mapped.cell_slot_count());
+        let candidate = buffering::fanout_forest_delta(
+            &mapped,
+            &implementations,
+            &options.target_cells,
+            &[buffering::FanoutTreePlan {
+                net: shared,
+                leaf_groups: selection.leaf_groups,
+                strategy: selection.strategy,
+                namespace: 0,
+                ordinal: 0,
+            }],
+        )
+        .unwrap()
+        .unwrap();
+        let applied = mapped.apply_region_delta(candidate.delta).unwrap();
+
+        assert_eq!(applied.added_cells().count(), planned_buffers);
+        assert_eq!(
+            buffering::net_sink_pins(&mapped, &options.target_cells, shared)
+                .unwrap()
+                .len(),
+            2 + protected_count
+        );
+        for (index, &sink) in sinks.iter().enumerate() {
+            assert_eq!(
+                mapped.connection(sink).unwrap().signal
+                    == opto_ir::mapped::ConnectionSignal::Net(shared),
+                index < protected_count,
+            );
+        }
     }
 }
 
@@ -2016,12 +2047,16 @@ fn and_cell(name: &str, area: f64, delays: [f64; 2]) -> TargetCell {
 }
 
 fn fanout_module() -> WordModule {
+    fanout_module_with_sinks(3)
+}
+
+fn fanout_module_with_sinks(sink_count: usize) -> WordModule {
     let mut module = WordModule::new("top");
     let ty = WordType::bits(1).unwrap();
     let a = module
         .add_port("a", PortDirection::Input, ty, test_span())
         .unwrap();
-    let outputs = (0..3)
+    let outputs = (0..sink_count)
         .map(|index| {
             module
                 .add_port(format!("y{index}"), PortDirection::Output, ty, test_span())

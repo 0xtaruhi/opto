@@ -199,7 +199,6 @@ impl CoverPlanner<'_> {
             for &removed_slot in &removed {
                 was_removed[removed_slot] = true;
             }
-            let timing_driven = self.required_arrivals[slot_id].is_finite();
             let mut best: Option<ExactChoice> = None;
             for candidate_index in 0..self.candidates[slot_id].len() {
                 if !slot_viability.candidates[candidate_index] {
@@ -217,10 +216,7 @@ impl CoverPlanner<'_> {
                     truth: candidate.truth(),
                     order: (candidate.cut, candidate.inversions, 0),
                 };
-                if best
-                    .as_ref()
-                    .is_none_or(|best| exact.prefers_over(best, timing_driven))
-                {
+                if best.as_ref().is_none_or(|best| exact.prefers_over(best)) {
                     best = Some(exact);
                 }
             }
@@ -238,10 +234,7 @@ impl CoverPlanner<'_> {
                         truth: inverter_truth(),
                         order: (u8::MAX, u8::MAX, 0),
                     };
-                    if best
-                        .as_ref()
-                        .is_none_or(|best| exact.prefers_over(best, timing_driven))
-                    {
+                    if best.as_ref().is_none_or(|best| exact.prefers_over(best)) {
                         best = Some(exact);
                     }
                 }
@@ -266,10 +259,7 @@ impl CoverPlanner<'_> {
                     truth: joint.truths[usize::from(side)],
                     order: (u8::MAX - 1, side, joint_id),
                 };
-                if best
-                    .as_ref()
-                    .is_none_or(|best| exact.prefers_over(best, timing_driven))
-                {
+                if best.as_ref().is_none_or(|best| exact.prefers_over(best)) {
                     best = Some(exact);
                 }
             }
@@ -430,7 +420,7 @@ impl CoverPlanner<'_> {
             {
                 continue;
             }
-            let (timing_driven, current_meets_timing, current_arrival) =
+            let (current_meets_timing, current_arrival) =
                 self.joint_current_arrival(first, first_current, second, second_current)?;
             let freed = self.choice_cell_area(first, first_current)
                 + self.choice_cell_area(second, second_current)
@@ -456,7 +446,6 @@ impl CoverPlanner<'_> {
                 None,
             )?;
             let take = super::super::joint_replacement_is_preferred(
-                timing_driven,
                 !current_meets_timing,
                 added,
                 joint_arrival,
@@ -529,7 +518,7 @@ impl CoverPlanner<'_> {
         {
             return Ok(None);
         }
-        let (timing_driven, current_meets_timing, current_arrival) =
+        let (current_meets_timing, current_arrival) =
             self.joint_current_arrival(first, first_current, second, second_current)?;
         let freed = self.choice_cell_area(first, first_current)
             + self.choice_cell_area(second, second_current)
@@ -562,7 +551,6 @@ impl CoverPlanner<'_> {
             None,
         )?;
         Ok(super::super::joint_replacement_is_preferred(
-            timing_driven,
             !current_meets_timing,
             added,
             joint_arrival,
@@ -578,17 +566,15 @@ impl CoverPlanner<'_> {
         first_choice: SlotChoice,
         second: usize,
         second_choice: SlotChoice,
-    ) -> Result<(bool, bool, f64), crate::SynthError> {
-        let mut timing_driven = false;
+    ) -> Result<(bool, f64), crate::SynthError> {
         let mut meets_timing = true;
         let mut arrival = 0.0f64;
         for (slot, choice) in [(first, first_choice), (second, second_choice)] {
             let selected_arrival = self.selected_choice_arrival(slot, choice)?;
-            timing_driven |= self.required_arrivals[slot].is_finite();
             meets_timing &= self.recovery_meets_required(slot, selected_arrival);
             arrival = arrival.max(selected_arrival);
         }
-        Ok((timing_driven, meets_timing, arrival))
+        Ok((meets_timing, arrival))
     }
 
     fn selected_choice_arrival(

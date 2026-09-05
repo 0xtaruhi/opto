@@ -197,12 +197,11 @@ fn exact_choice(area: f64, arrival: f64) -> ExactChoice {
 }
 
 #[test]
-fn exact_recovery_uses_area_delay_only_for_timing_driven_logic() {
+fn exact_recovery_uses_area_after_feasibility() {
     let smaller_slower = exact_choice(9.0, 1.2);
     let larger_faster = exact_choice(10.0, 1.0);
 
-    assert!(smaller_slower.prefers_over(&larger_faster, false));
-    assert!(larger_faster.prefers_over(&smaller_slower, true));
+    assert!(smaller_slower.prefers_over(&larger_faster));
 }
 
 #[test]
@@ -216,9 +215,9 @@ fn compiled_records_reselect_a_faster_cover_when_required_time_tightens() {
     let truths = CutTruthDatabase::build_parallel(&network, &cuts, crate::test_runtime()).unwrap();
     let catalog = matcher(vec![
         timed_and_cell("SMALL_AND", 1.0, 2.0),
-        timed_and_cell("FAST_AND", 2.0, 1.0),
+        timed_and_cell("FAST_AND", 2.0, 0.5),
     ]);
-    let select = |required_time| {
+    let select = |required_time, runtime: &ExecutionContext| {
         cover_logic_network_with_truths(
             &network,
             &cuts,
@@ -226,26 +225,41 @@ fn compiled_records_reselect_a_faster_cover_when_required_time_tightens() {
             &[output],
             &catalog,
             CoverTiming {
-                required_times: &[Some(required_time)],
+                required_times: &[required_time],
                 output_loads: &[Some(0.1)],
                 input_transitions: &[Some(0.1), Some(0.1)],
                 input_arrivals: &[Some(0.0), Some(0.0)],
             },
-            crate::test_runtime(),
+            runtime,
         )
         .unwrap()
         .unwrap()
     };
 
-    let loose = select(10.0);
-    let tight = select(1.5);
     let selected_name = |cover: &LibraryCover| match cover.cells[0].binding {
         LibraryCoverBinding::Single(binding) => catalog.binding_cell_name(binding),
         LibraryCoverBinding::Joint(_) => panic!("single-output AND must not select a joint cell"),
     };
 
-    assert_eq!(selected_name(&loose), "SMALL_AND");
-    assert_eq!(selected_name(&tight), "FAST_AND");
+    // The faster cell has the smaller area-delay product, but extra positive
+    // margin must not buy area. Both covers preserve the same truth function.
+    for workers in [1, 4] {
+        let runtime = ExecutionContext::new(&opto_runtime::ExecutionConfig {
+            max_threads: workers,
+        })
+        .unwrap();
+        for (requirement, expected) in [
+            (None, "SMALL_AND"),
+            (Some(10.0), "SMALL_AND"),
+            (Some(1.5), "FAST_AND"),
+        ] {
+            let cover = select(requirement, &runtime);
+            assert_eq!(selected_name(&cover), expected);
+            for assignment in 0..4 {
+                assert_eq!(evaluate(&cover, 0, assignment), assignment == 3);
+            }
+        }
+    }
 }
 
 #[test]
@@ -262,19 +276,13 @@ fn recovery_limit_rejects_a_changing_final_round() {
 
 #[test]
 fn joint_recovery_restores_timing_before_recovering_area() {
-    assert!(!joint_replacement_is_preferred(
-        false, false, 12.0, 0.8, 10.0, 1.2,
-    ));
-    assert!(joint_replacement_is_preferred(
-        true, false, 12.0, 0.8, 10.0, 1.2,
-    ));
-    assert!(joint_replacement_is_preferred(
-        true, true, 12.0, 0.8, 10.0, 1.2,
-    ));
+    assert!(!joint_replacement_is_preferred(false, 12.0, 0.8, 10.0, 1.2));
+    assert!(joint_replacement_is_preferred(true, 12.0, 0.8, 10.0, 1.2));
+    assert!(joint_replacement_is_preferred(false, 8.0, 1.2, 10.0, 0.8));
 }
 
 #[test]
-fn required_time_uses_area_delay_after_both_choices_meet_budget() {
+fn required_time_uses_area_after_both_choices_meet_budget() {
     assert_eq!(
         compare_mapping_cost_with_required_time(1.0, cost(4.0, 0.9), cost(1.0, 1.1)),
         std::cmp::Ordering::Less

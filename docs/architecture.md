@@ -982,8 +982,10 @@ into those structural coordinates. Rewrite compares normalized timing
 violation first: an implementation that misses its budget may make bounded
 monotone progress without closing the complete deficit in one window when the
 replacement does not grow local primitive weight or gate count, while an
-implementation that already beats its requirement retains its current
-structural arrival as the local budget instead of consuming positive margin.
+implementation that already meets its requirement may consume positive
+margin to recover area, but cannot introduce a structural timing violation.
+Each cut offers bounded area and depth recipes under that same ordering; a
+finite requirement alone does not select a depth-only recipe.
 This guide ranks equivalent AXM forms in the ordinary rewrite path; load-aware
 Liberty cover and global STA remain the electrical timing authorities. Missing
 or non-positive target characterization leaves the structural guide absent
@@ -1015,9 +1017,11 @@ Functional dependency is proved by bit-parallel separation before a projected
 truth table is constructed, so rejected feature sets do not repeat the exact
 projection work. No RTL operator or benchmark pattern is recognized. With
 finite required times, Liberty constraint violation is compared first;
-equivalent feasible implementations then minimize area-delay product, followed
-by area, delay, and cell count as deterministic ties. Without a finite required
-time, each bounded proposal receives exact reference recovery and the portfolio
+equivalent feasible implementations then minimize exact incremental area,
+followed by arrival and cell count as deterministic ties. Positive margin
+cannot purchase extra area merely because a finite requirement is present.
+Without a finite required time, each bounded proposal receives exact reference
+recovery and the portfolio
 minimizes mapped area before delay and cell count. Post-map MFS remains local
 cell/MFFC cleanup and incrementally refines care-set partitions while visiting
 larger input sets; it does not reconstruct a second global factoring engine.
@@ -1251,16 +1255,22 @@ Post-map is one large stage, but its internal topology order is mandatory:
 
 1. initial MMMC STA classifies path increments as cell arc, interconnect, or
    boundary contribution;
-2. whole-net HFNS takes the union of every negative-slack mapped net from every
-   enabled view and every mapped net with an explicit transition,
-   capacitance, or fanout violation, then consumes each net's complete sink
-   set and actual early/late mapped-pin loads;
+2. timing-only whole-net HFNS takes the union of negative-slack mapped nets
+   from enabled views and consumes their actual early/late mapped-pin loads;
+   electrical legalization retains its own explicit violation frontier;
 3. read-only workers plan balanced trees per net and stable reduction folds all
    eligible trees into one atomic fanout forest; every active view must provide
    complete cell-arc and wire evidence, leaf groups are load-balanced, and
    branching search follows distinct topology depths instead of scanning every
-   possible fanout. When enough noncritical sinks remain to require a tree, the
-   current worst-path branch stays on the source net so the following cloning
+   possible fanout. Candidate delay improvements are applied to the exact
+   propagated scenario slack; residual worst and total violations precede added
+   buffer area and count. Once the estimate meets the deficit, extra positive
+   slack does not buy a larger tree. Early/min views constrain setup repair,
+   and the materialized forest still passes the global MMMC transaction gate.
+   Protected sinks are separated before balancing and pricing the remaining
+   tree; their load stays on the source in every view's estimate. When enough
+   noncritical sinks remain to require a tree, the current worst-path branch
+   stays on the source net so the following cloning
    stage can still reach the original logic driver. Otherwise HFNS defers that
    net to driver cloning; a real electrical violation remains the sole
    responsibility of the following legalization stage;

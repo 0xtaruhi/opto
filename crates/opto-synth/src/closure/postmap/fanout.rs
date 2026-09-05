@@ -152,17 +152,11 @@ pub(super) fn synthesize(
     .into_iter()
     .map(|fanout| (fanout.net, fanout.clone_branch))
     .collect::<std::collections::BTreeMap<_, _>>();
-    let mut candidate_nets = session
+    let candidate_nets = session
         .timing
         .mapped_nets_with_slack_at_most_all(0.0)?
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
-    candidate_nets.extend(
-        session
-            .design_rules()
-            .iter()
-            .filter_map(|violation| violation.mapped_net),
-    );
     let tasks = candidate_nets
         .into_iter()
         .filter(|&net| {
@@ -189,6 +183,10 @@ pub(super) fn synthesize(
                 .map(|(pin, _)| pin)
                 .collect::<Vec<_>>();
             sinks.sort_unstable();
+            let sinks = buffering::FanoutSinks::new(
+                sinks,
+                protected_branches.get(&net).map_or(&[], Vec::as_slice),
+            );
             let selection = buffering::select_fanout_tree_strategy(
                 mapped,
                 target_cells,
@@ -197,18 +195,12 @@ pub(super) fn synthesize(
                 &sinks,
                 &net_states,
             )?;
-            Ok::<_, crate::SynthError>(selection.and_then(|selection| {
-                let selection = reserve_critical_branch(
-                    selection,
-                    protected_branches.get(&net).map_or(&[], Vec::as_slice),
-                )?;
-                Some(FanoutTreePlan {
-                    net,
-                    leaf_groups: selection.leaf_groups,
-                    strategy: selection.strategy,
-                    namespace,
-                    ordinal: 0,
-                })
+            Ok::<_, crate::SynthError>(selection.map(|selection| FanoutTreePlan {
+                net,
+                leaf_groups: selection.leaf_groups,
+                strategy: selection.strategy,
+                namespace,
+                ordinal: 0,
             }))
         })?
     };
@@ -233,25 +225,6 @@ pub(super) fn synthesize(
         },
     )?;
     Ok(())
-}
-
-pub(super) fn reserve_critical_branch(
-    mut selection: buffering::FanoutTreeSelection,
-    protected: &[opto_ir::mapped::PinId],
-) -> Option<buffering::FanoutTreeSelection> {
-    if protected.is_empty() {
-        return Some(selection);
-    }
-    let protected = protected
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    for group in &mut selection.leaf_groups {
-        group.retain(|pin| !protected.contains(pin));
-    }
-    selection.leaf_groups.retain(|group| !group.is_empty());
-    let buffered_sinks = selection.leaf_groups.iter().map(Vec::len).sum::<usize>();
-    (buffered_sinks > selection.strategy.branching_factor).then_some(selection)
 }
 
 fn report_plan(

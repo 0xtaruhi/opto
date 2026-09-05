@@ -193,9 +193,9 @@ impl TimingBudget {
             };
             constrained = true;
             let requirement = normalize_stage(*requirement, stage_delay, false)?;
-            required[root.index()] = required[root.index()]
-                .min(requirement)
-                .min(arrivals[root.index()]);
+            // Preserve usable slack: a finite requirement must not freeze the
+            // current topology when an equivalent smaller cone still fits.
+            required[root.index()] = required[root.index()].min(requirement);
         }
         if !constrained {
             return Ok(None);
@@ -221,10 +221,6 @@ impl TimingBudget {
 
     fn required(&self, node: LogicNodeId) -> Option<u32> {
         (self.required[node.index()] != u32::MAX).then_some(self.required[node.index()])
-    }
-
-    fn planning_level(&self, network: &LogicGraph, node: LogicNodeId) -> u32 {
-        self.required(node).unwrap_or_else(|| network.level(node))
     }
 
     fn current(&self, network: &LogicGraph, node: LogicNodeId) -> u32 {

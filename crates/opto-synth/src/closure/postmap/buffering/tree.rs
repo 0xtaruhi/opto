@@ -173,38 +173,38 @@ pub(super) fn balance_sink_groups(
     reason = "bounded tree levels scale an approximate physical delay estimate"
 )]
 pub(super) fn estimated_buffer_path_delay(
-    views: &[BufferTimingView<'_, '_, '_>],
+    view: &BufferTimingView<'_, '_, '_>,
     sinks: &[PinId],
     leaf_groups: &[Vec<usize>],
     factor: usize,
     cell_levels: usize,
 ) -> Option<f64> {
-    if views.is_empty() || sinks.is_empty() || leaf_groups.is_empty() || cell_levels == 0 {
+    if sinks.is_empty() || leaf_groups.is_empty() || cell_levels == 0 {
         return None;
     }
-    let mut worst = None::<f64>;
-    for view in views {
-        let wire = view.wire_load?;
-        let leaf_delay = leaf_groups
-            .iter()
-            .map(|group| receiver_group_load(view, group))
-            .map(|load| buffered_stage_delay(view, load))
-            .collect::<Option<Vec<_>>>()?
-            .into_iter()
-            .max_by(f64::total_cmp)?;
-        let internal_delay = if cell_levels > 1 {
-            buffered_stage_delay(view, buffer_receiver_load(view, factor))?
-                * (cell_levels - 1) as f64
+    let wire = view.wire_load?;
+    let leaf_delays = leaf_groups
+        .iter()
+        .map(|group| receiver_group_load(view, group))
+        .map(|load| buffered_stage_delay(view, load))
+        .collect::<Option<Vec<_>>>()?;
+    let leaf_delay = view_delay(view, leaf_delays.into_iter())?;
+    let internal_delay = if cell_levels > 1 {
+        buffered_stage_delay(view, buffer_receiver_load(view, factor))? * (cell_levels - 1) as f64
+    } else {
+        0.0
+    };
+    let root_count = root_buffer_count(leaf_groups.len(), factor);
+    let root_load = buffer_and_direct_receiver_load(view, root_count, view.direct_load);
+    let source_wire_delay = wire.resistance_at(root_load.fanout) * root_load.capacitance;
+    let buffered_delay = source_wire_delay + internal_delay + leaf_delay;
+    Some(
+        if view.delay_type == opto_timing::DelayType::Min && view.direct_load.fanout > 0.0 {
+            source_wire_delay.min(buffered_delay)
         } else {
-            0.0
-        };
-        let root_count = root_buffer_count(leaf_groups.len(), factor);
-        let root_load = buffer_receiver_load(view, root_count);
-        let source_wire_delay = wire.resistance_at(root_load.fanout) * root_load.capacitance;
-        let path_delay = source_wire_delay + internal_delay + leaf_delay;
-        worst = Some(worst.map_or(path_delay, |current| current.max(path_delay)));
-    }
-    worst
+            buffered_delay
+        },
+    )
 }
 
 pub(super) fn receiver_group_load(
@@ -224,17 +224,26 @@ pub(super) fn receiver_group_load(
     load
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "bounded receiver counts scale approximate library load values"
-)]
 pub(super) fn buffer_receiver_load(
     view: &BufferTimingView<'_, '_, '_>,
     count: usize,
 ) -> ElectricalLoad {
-    let fanout = view.input.design_fanout_load() * count as f64;
+    buffer_and_direct_receiver_load(view, count, ElectricalLoad::default())
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "bounded receiver counts scale approximate library load values"
+)]
+fn buffer_and_direct_receiver_load(
+    view: &BufferTimingView<'_, '_, '_>,
+    count: usize,
+    direct: ElectricalLoad,
+) -> ElectricalLoad {
+    let fanout = view.input.design_fanout_load() * count as f64 + direct.fanout;
     ElectricalLoad {
         capacitance: view.input.design_input_capacitance() * count as f64
+            + direct.capacitance
             + view
                 .wire_load
                 .map_or(0.0, |wire| wire.capacitance_at(fanout)),
@@ -249,7 +258,7 @@ pub(super) fn buffered_stage_delay(
     if maximum_characterized_load(view).is_some_and(|maximum| load.capacitance > maximum) {
         return None;
     }
-    let cell_delay = view
+    let cell_delays = view
         .output
         .timing_arcs()
         .filter(|arc| arc.timing_type() == TargetTimingType::Combinational)
@@ -257,10 +266,22 @@ pub(super) fn buffered_stage_delay(
             TimingEdge::ALL
                 .into_iter()
                 .filter_map(move |edge| arc.delay_at(edge, None, Some(load.capacitance)))
-        })
-        .max_by(f64::total_cmp)?;
+        });
+    let cell_delay = view_delay(view, cell_delays)?;
     let wire = view.wire_load?;
     Some(cell_delay + wire.resistance_at(load.fanout) * load.capacitance)
+}
+
+/// Use the analysis view's propagation polarity when bounding a stage or
+/// path. A late maximum would overstate the slack left in an early view.
+fn view_delay(
+    view: &BufferTimingView<'_, '_, '_>,
+    delays: impl Iterator<Item = f64>,
+) -> Option<f64> {
+    match view.delay_type {
+        opto_timing::DelayType::Max => delays.max_by(f64::total_cmp),
+        opto_timing::DelayType::Min => delays.min_by(f64::total_cmp),
+    }
 }
 
 pub(super) fn maximum_characterized_load(view: &BufferTimingView<'_, '_, '_>) -> Option<f64> {

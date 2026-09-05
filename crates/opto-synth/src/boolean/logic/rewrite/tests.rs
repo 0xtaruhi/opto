@@ -87,6 +87,7 @@ fn structural_budget_includes_absolute_input_arrival() {
     .unwrap()
     .unwrap();
 
+    assert_eq!(early.required(root), Some(2));
     assert_eq!(early.arrival(root), 1);
     assert_eq!(early.violation(root), 0);
     assert_eq!(late.arrival(root), 3);

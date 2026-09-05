@@ -439,9 +439,8 @@ struct ExactChoice {
 }
 
 impl ExactChoice {
-    fn prefers_over(&self, current: &Self, timing_driven: bool) -> bool {
-        crate::planning::mapping_policy::compare_area_arrival_objective(
-            timing_driven,
+    fn prefers_over(&self, current: &Self) -> bool {
+        crate::planning::mapping_policy::compare_feasible_area(
             self.area,
             self.arrival,
             current.area,
@@ -454,7 +453,6 @@ impl ExactChoice {
 }
 
 fn joint_replacement_is_preferred(
-    timing_driven: bool,
     restores_timing: bool,
     candidate_area: f64,
     candidate_arrival: f64,
@@ -462,8 +460,7 @@ fn joint_replacement_is_preferred(
     current_arrival: f64,
 ) -> bool {
     restores_timing
-        || crate::planning::mapping_policy::compare_area_arrival_objective(
-            timing_driven,
+        || crate::planning::mapping_policy::compare_feasible_area(
             candidate_area,
             candidate_arrival,
             current_area,
