@@ -189,7 +189,8 @@ jobs:
     # Keep the branch-protection context stable while independent lanes run in parallel.
     name: Rust quality gates (Linux)
     needs: rust-linux
-    if: ${{ !cancelled() }}
+    # A skipped required job can allow merging. Evaluate cancelled dependencies too.
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
