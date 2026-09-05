@@ -230,6 +230,25 @@ product and qualification targets. Nightly and weekly commands are listed in
 workflows. `cargo test --workspace --all-targets --all-features --locked`
 remains the complete local Rust gate when all pinned dependencies are present.
 
+CI runs Linux checking/documentation/linting, tests, and release benchmark
+compilation in three parallel lanes. The required `Rust quality gates (Linux)`
+check succeeds only when all three lanes succeed. macOS and Windows retain their
+portable Tcl and CLI checks. These jobs also run on `main` pushes so new pull
+requests can restore default-branch caches; pull-request caches are otherwise
+isolated from sibling branches. Cargo caches retain workspace build outputs,
+and `SCCACHE_GHA_ENABLED` enables persistent compiler caching across runners.
+Linux quality and Rust CodeQL jobs use Ninja for the native frontend build to
+avoid Make's unlimited parallelism with an unnumbered `cmake --parallel`.
+
+Rust CodeQL uses a persistent Cargo target directory for both workspace and fuzz
+manifest extraction. A separate preparation step runs the real native build
+scripts before analysis so their compilation time is visible. Extraction still
+executes build scripts and procedural macros, enables the extractor's default
+all-feature coverage, and scans both manifests. The Linux analysis explicitly
+uses four workers and a 12 GiB CodeQL memory budget; it does not depend on the
+runner-specific default allowance. Cache misses must remain correct, and a
+missing or failed lane must never produce a successful required check.
+
 The test profile retains line-level debugging while avoiding full debug-value
 information in every large test binary. Any further profile change requires a
 before-and-after measurement and a readable failure backtrace.

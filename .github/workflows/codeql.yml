@@ -40,10 +40,6 @@ jobs:
           - language: python
             build-mode: none
             os: ubuntu-24.04
-          - language: rust
-            build-mode: none
-            # Rust extraction uses the macOS runner's 13 GB CodeQL memory allowance.
-            os: macos-15-intel
     steps:
       - name: Accept documentation-only change
         if: needs.changes.outputs.docs-only == 'true'
@@ -61,6 +57,69 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+
+      - name: Analyze
+        if: needs.changes.outputs.docs-only != 'true'
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+
+  analyze-rust:
+    name: Analyze (rust)
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: 4
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # The extractor otherwise creates a fresh scratch target for every analysis.
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CMAKE_GENERATOR: Ninja
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Accept documentation-only change
+        if: needs.changes.outputs.docs-only == 'true'
+        run: echo "Rust CodeQL inputs are unaffected by documentation-only changes."
+
+      - name: Check out repository and pinned dependencies
+        if: needs.changes.outputs.docs-only != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Install latest stable Rust
+        if: needs.changes.outputs.docs-only != 'true'
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install compiler cache
+        if: needs.changes.outputs.docs-only != 'true'
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Restore Rust extraction cache
+        if: needs.changes.outputs.docs-only != 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: codeql-rust
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Prepare native build scripts
+        if: needs.changes.outputs.docs-only != 'true'
+        # Keep native compilation visible; extraction still runs the real build
+        # scripts and procedural macros for both the workspace and fuzz manifests.
+        run: cargo check -p opto-slang-sys -p opto-tcl-sys --all-features --locked
+
+      - name: Initialize CodeQL
+        if: needs.changes.outputs.docs-only != 'true'
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
+        with:
+          languages: rust
+          build-mode: none
+          # Public Linux runners have 16 GB; leave memory for the OS and build tools.
+          ram: 12288
+          threads: 4
 
       - name: Analyze
         if: needs.changes.outputs.docs-only != 'true'
