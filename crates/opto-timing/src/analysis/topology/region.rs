@@ -705,7 +705,7 @@ impl TimingGraph {
             }
             let fanout = pin.design_fanout_load();
             self.fanout_loads[net.index()] += direction * fanout;
-            self.wire_fanouts[net.index()] += direction * fanout;
+            self.wire_fanouts[net.index()] += direction;
         }
         Ok(())
     }

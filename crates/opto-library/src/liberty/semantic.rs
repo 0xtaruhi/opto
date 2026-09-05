@@ -61,6 +61,7 @@ struct LibraryIndex<'a> {
     name: String,
     default_fanout_load: f64,
     default_operating_conditions: Option<String>,
+    operating_conditions: BTreeMap<String, crate::WireLoadTree>,
     default_wire_load: Option<String>,
     default_wire_load_mode: Option<String>,
     wire_loads: BTreeMap<String, crate::WireLoadModel>,
@@ -137,6 +138,16 @@ pub(crate) fn parse_liberty(text: &str, source_name: &str) -> Result<LibraryImpo
         return Err(context.unexpected_group(text.len(), "end of file"));
     }
     let index = index_library(&library, &context)?;
+    let wire_load_tree = match &index.default_operating_conditions {
+        Some(name) => *index.operating_conditions.get(name).ok_or_else(|| {
+            LibraryError::UnsupportedConstruct {
+                construct: format!(
+                    "default_operating_conditions references unknown group '{name}'"
+                ),
+            }
+        })?,
+        None => crate::WireLoadTree::default(),
+    };
 
     let mut table_builder = crate::lookup_table::LookupTableBuilder::default();
     let mut target_cells = Vec::with_capacity(index.cells.len());
@@ -195,6 +206,7 @@ pub(crate) fn parse_liberty(text: &str, source_name: &str) -> Result<LibraryImpo
         default_wire_load: index.default_wire_load,
         default_wire_load_mode: index.default_wire_load_mode,
         wire_loads: index.wire_loads,
+        wire_load_tree,
         units,
         power_units,
         target_cells: crate::TargetCellSet::try_from_cells(target_cells)?,
@@ -218,6 +230,7 @@ fn index_library<'a>(
         name,
         default_fanout_load: 1.0,
         default_operating_conditions: None,
+        operating_conditions: BTreeMap::new(),
         default_wire_load: None,
         default_wire_load_mode: None,
         wire_loads: BTreeMap::new(),
@@ -238,6 +251,21 @@ fn index_library<'a>(
             }
             ("default_operating_conditions", StatementKind::Simple(values)) => {
                 index.default_operating_conditions = optional_value(&values);
+            }
+            ("operating_conditions", StatementKind::Group { arguments, body }) => {
+                let (name, tree) = wire_load::parse_operating_condition_tree(
+                    &GroupRef { arguments, body },
+                    context,
+                )?;
+                if index
+                    .operating_conditions
+                    .insert(name.clone(), tree)
+                    .is_some()
+                {
+                    return Err(LibraryError::UnsupportedConstruct {
+                        construct: format!("duplicate operating_conditions group '{name}'"),
+                    });
+                }
             }
             ("default_wire_load", StatementKind::Simple(values)) => {
                 index.default_wire_load = optional_value(&values);

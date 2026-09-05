@@ -94,6 +94,11 @@ pub struct NetTimingState {
     pub capacitance: f64,
     /// Total dimensionless abstract fanout load.
     pub fanout: f64,
+    /// Physical receiver count used by wire-load estimation.
+    pub wire_fanout: f64,
+    /// Estimated wire resistance in the library resistance unit; zero when
+    /// extracted parasitics replace the wire-load model.
+    pub wire_resistance: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -456,7 +461,9 @@ impl InterconnectPathContribution {
     }
 
     #[must_use]
-    /// Returns effective resistance.
+    /// Returns receiver-equivalent resistance against [`Self::load`].
+    /// Balanced wire branches are expressed against the total load so their
+    /// product is the actual receiver delay, including explicit lumped drive.
     pub const fn resistance(self) -> f64 {
         self.resistance
     }

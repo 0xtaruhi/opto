@@ -872,6 +872,8 @@ pub(crate) fn net_timing_state_by_index(
             .max_by(f64::total_cmp)
             .unwrap_or(0.0),
         fanout: model.graph.fanout_loads[net],
+        wire_fanout: model.graph.wire_fanout(net),
+        wire_resistance: model.graph.wire_resistance(net),
     })
 }
 

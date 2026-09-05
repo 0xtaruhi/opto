@@ -870,8 +870,8 @@ fn propagate_required_from_fanout(
                             inputs.model,
                             inputs.graph,
                             net,
-                            input_edge,
-                            inputs.options.delay_type,
+                            Some((graph_arc.instance, arc.related_pin())),
+                            InterconnectDelayMode::data(input_edge, inputs.options.delay_type),
                         ) * timing_load(
                             inputs.timing,
                             inputs.graph,

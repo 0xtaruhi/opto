@@ -232,7 +232,18 @@ fn estimated_unbuffered_wire_delay(views: &[BufferTimingView<'_, '_, '_>]) -> Op
             continue;
         };
         let wire = view.wire_load?;
-        let delay = wire.resistance_at(state.fanout) * state.capacitance;
+        let sink_capacitance = view
+            .sink_loads
+            .iter()
+            .map(|load| load.capacitance)
+            .max_by(f64::total_cmp)?;
+        let delay = view.wire_tree.sink_delay(
+            view.units.normalize_resistance(state.wire_resistance),
+            wire.capacitance_at(state.wire_fanout),
+            state.wire_fanout,
+            state.capacitance,
+            sink_capacitance,
+        );
         worst = Some(worst.map_or(delay, |current| current.max(delay)));
     }
     worst
@@ -242,6 +253,8 @@ struct FanoutTimingView<'library, 'state> {
     scenario: &'library str,
     cells_by_name: BTreeMap<&'library str, TargetCellRef<'library>>,
     wire_load: Option<&'library opto_library::WireLoadModel>,
+    wire_tree: opto_library::WireLoadTree,
+    units: opto_library::TimingLibraryUnits,
     net_state: Option<&'state opto_timing::NetTimingState>,
     sink_loads: Box<[ElectricalLoad]>,
 }
@@ -250,6 +263,8 @@ struct BufferTimingView<'library, 'loads, 'state> {
     input: TargetPinRef<'library>,
     output: TargetPinRef<'library>,
     wire_load: Option<&'library opto_library::WireLoadModel>,
+    wire_tree: opto_library::WireLoadTree,
+    units: opto_library::TimingLibraryUnits,
     net_state: Option<&'state opto_timing::NetTimingState>,
     sink_loads: &'loads [ElectricalLoad],
 }
@@ -258,6 +273,10 @@ struct BufferTimingView<'library, 'loads, 'state> {
 struct ElectricalLoad {
     capacitance: f64,
     fanout: f64,
+    /// Receiver count, independent of the abstract fanout load.
+    receivers: f64,
+    /// Largest individual receiver load for a worst-branch estimate.
+    max_sink_capacitance: f64,
 }
 
 /// One mapped sink pin resolved against the netlist that owns it.
@@ -317,6 +336,8 @@ fn fanout_timing_views<'library, 'state>(
             scenario: scenario.name(),
             cells_by_name,
             wire_load: library.wire_load_model.as_ref(),
+            wire_tree: library.wire_load_tree,
+            units: library.units,
             net_state: net_states[state].state.as_ref(),
             sink_loads: sink_loads.into_boxed_slice(),
         });
@@ -349,6 +370,8 @@ fn buffer_timing_views<'library, 'loads, 'state>(
             input,
             output,
             wire_load: timing_view.wire_load,
+            wire_tree: timing_view.wire_tree,
+            units: timing_view.units,
             net_state: timing_view.net_state,
             sink_loads: &timing_view.sink_loads,
         });
@@ -401,6 +424,8 @@ fn sink_electrical_load(
     Ok(ElectricalLoad {
         capacitance: target.design_input_capacitance(),
         fanout: target.design_fanout_load(),
+        receivers: 1.0,
+        max_sink_capacitance: target.design_input_capacitance(),
     })
 }
 

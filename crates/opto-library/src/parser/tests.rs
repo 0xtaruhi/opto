@@ -3,6 +3,60 @@
 
 use super::*;
 
+#[test]
+fn selects_wire_tree_from_the_default_operating_condition() {
+    for (tree, expected) in [
+        ("balanced_tree", crate::WireLoadTree::Balanced),
+        ("worst_case_tree", crate::WireLoadTree::WorstCase),
+        ("best_case_tree", crate::WireLoadTree::BestCase),
+    ] {
+        let source = format!(
+            r#"library(demo) {{
+            operating_conditions(unselected) {{ tree_type : worst_case_tree; }}
+            default_operating_conditions : selected;
+            operating_conditions(selected) {{ tree_type : "{tree}"; }}
+        }}"#
+        );
+        let imported = parse_liberty(&source, "tree.lib").unwrap();
+        assert_eq!(imported.wire_load_tree, expected);
+        let mut store = crate::LibraryStore::default();
+        store.append(vec![imported]).unwrap();
+        let revision = store.current();
+        let library = revision
+            .timing_library(&revision.all_libraries(false))
+            .unwrap();
+        assert_eq!(library.wire_load_tree, expected);
+    }
+    for body in [
+        "",
+        "operating_conditions(unselected) { tree_type : worst_case_tree; }",
+        "default_operating_conditions : selected; operating_conditions(selected) {}",
+    ] {
+        let source = format!("library(demo) {{ {body} }}");
+        assert_eq!(
+            parse_liberty(&source, "tree.lib").unwrap().wire_load_tree,
+            crate::WireLoadTree::Balanced
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_wire_tree_selection() {
+    for body in [
+        "default_operating_conditions : missing;",
+        "operating_conditions(op) { tree_type : unknown; }",
+        "operating_conditions(op) { tree_type : balanced_tree; tree_type : best_case_tree; }",
+        "operating_conditions(op) {} operating_conditions(op) {}",
+        "operating_conditions(op) { tree_type(balanced_tree); }",
+    ] {
+        let source = format!("library(demo) {{ {body} }}");
+        assert!(matches!(
+            parse_liberty(&source, "tree.lib"),
+            Err(LibraryError::UnsupportedConstruct { .. })
+        ));
+    }
+}
+
 const LIB: &str = r#"
 library(demo) {
   time_unit : "1ns";
@@ -10,6 +64,7 @@ library(demo) {
   pulling_resistance_unit : "1kohm";
   default_fanout_load : 2.0;
   default_operating_conditions : slow;
+  operating_conditions(slow) { tree_type : balanced_tree; }
   default_wire_load : wl;
   default_wire_load_mode : enclosed;
   wire_load(wl) {
