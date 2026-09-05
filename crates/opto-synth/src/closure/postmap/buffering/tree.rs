@@ -182,7 +182,6 @@ pub(super) fn estimated_buffer_path_delay(
     if sinks.is_empty() || leaf_groups.is_empty() || cell_levels == 0 {
         return None;
     }
-    let wire = view.wire_load?;
     let leaf_delays = leaf_groups
         .iter()
         .map(|group| receiver_group_load(view, group))
@@ -196,15 +195,19 @@ pub(super) fn estimated_buffer_path_delay(
     };
     let root_count = root_buffer_count(leaf_groups.len(), factor);
     let root_load = buffer_and_direct_receiver_load(view, root_count, view.direct_load);
-    let source_wire_delay = wire.resistance_at(root_load.fanout) * root_load.capacitance;
+    let source_wire_delay =
+        receiver_wire_delay(view, root_load, view.input.design_input_capacitance())?;
     let buffered_delay = source_wire_delay + internal_delay + leaf_delay;
-    Some(
-        if view.delay_type == opto_timing::DelayType::Min && view.direct_load.fanout > 0.0 {
-            source_wire_delay.min(buffered_delay)
-        } else {
-            buffered_delay
-        },
-    )
+    if view.direct_load.receivers > 0.0 {
+        let direct_delay = receiver_wire_delay(
+            view,
+            root_load,
+            view.direct_load.receiver_capacitance(view.delay_type),
+        )?;
+        view_delay(view, [buffered_delay, direct_delay].into_iter())
+    } else {
+        Some(buffered_delay)
+    }
 }
 
 pub(super) fn receiver_group_load(
@@ -214,12 +217,11 @@ pub(super) fn receiver_group_load(
     let mut load = group
         .iter()
         .fold(ElectricalLoad::default(), |mut total, &index| {
-            total.capacitance += view.sink_loads[index].capacitance;
-            total.fanout += view.sink_loads[index].fanout;
+            total.add_receivers(view.sink_loads[index]);
             total
         });
     if let Some(wire) = view.wire_load {
-        load.capacitance += wire.capacitance_at(load.fanout);
+        load.capacitance += wire.capacitance_at(load.receivers);
     }
     load
 }
@@ -240,15 +242,18 @@ fn buffer_and_direct_receiver_load(
     count: usize,
     direct: ElectricalLoad,
 ) -> ElectricalLoad {
-    let fanout = view.input.design_fanout_load() * count as f64 + direct.fanout;
-    ElectricalLoad {
-        capacitance: view.input.design_input_capacitance() * count as f64
-            + direct.capacitance
-            + view
-                .wire_load
-                .map_or(0.0, |wire| wire.capacitance_at(fanout)),
-        fanout,
+    let mut load = ElectricalLoad {
+        capacitance: view.input.design_input_capacitance() * count as f64,
+        fanout: view.input.design_fanout_load() * count as f64,
+        receivers: count as f64,
+        max_sink_capacitance: view.input.design_input_capacitance(),
+        min_sink_capacitance: view.input.design_input_capacitance(),
+    };
+    load.add_receivers(direct);
+    if let Some(wire) = view.wire_load {
+        load.capacitance += wire.capacitance_at(load.receivers);
     }
+    load
 }
 
 pub(super) fn buffered_stage_delay(
@@ -268,13 +273,32 @@ pub(super) fn buffered_stage_delay(
                 .filter_map(move |edge| arc.delay_at(edge, None, Some(load.capacitance)))
         });
     let cell_delay = view_delay(view, cell_delays)?;
+    Some(cell_delay + receiver_wire_delay(view, load, load.receiver_capacitance(view.delay_type))?)
+}
+
+/// Balanced trees have a distinct source-to-receiver delay. Root buffers and
+/// protected direct sinks share total load but retain their own branch load.
+fn receiver_wire_delay(
+    view: &BufferTimingView<'_, '_, '_>,
+    load: ElectricalLoad,
+    sink_capacitance: f64,
+) -> Option<f64> {
     let wire = view.wire_load?;
-    Some(cell_delay + wire.resistance_at(load.fanout) * load.capacitance)
+    Some(
+        view.wire_tree.sink_delay(
+            view.units
+                .normalize_resistance(wire.resistance_at(load.receivers)),
+            wire.capacitance_at(load.receivers),
+            load.receivers,
+            load.capacitance,
+            sink_capacitance,
+        ),
+    )
 }
 
 /// Use the analysis view's propagation polarity when bounding a stage or
 /// path. A late maximum would overstate the slack left in an early view.
-fn view_delay(
+pub(super) fn view_delay(
     view: &BufferTimingView<'_, '_, '_>,
     delays: impl Iterator<Item = f64>,
 ) -> Option<f64> {
@@ -324,4 +348,62 @@ pub(super) fn tree_shape(
             .ok_or_else(|| crate::SynthError::capacity("fanout-tree depth exceeds capacity"))?;
     }
     Ok((levels, buffers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protected_receivers_preserve_physical_fanout_and_branch_polarity() {
+        let mut buffer = crate::test_support::target_cell(
+            "BUF",
+            1.0,
+            &[
+                ("A", opto_library::TargetPinDirection::Input, None),
+                ("Y", opto_library::TargetPinDirection::Output, Some("A")),
+            ],
+        );
+        buffer.pins[0].capacitance = Some(1.0);
+        buffer.pins[0].fanout_load = Some(10.0);
+        let cells: opto_library::TargetCellSet = vec![buffer].into();
+        let cell = cells.get(0).unwrap();
+        let wire =
+            opto_library::WireLoadModel::new("test".into(), 2.0, 3.0, 1.0, Vec::new()).unwrap();
+        let view = BufferTimingView {
+            input: cell.pins().next().unwrap(),
+            output: cell.pins().nth(1).unwrap(),
+            wire_load: Some(&wire),
+            wire_tree: opto_library::WireLoadTree::Balanced,
+            units: opto_library::TimingLibraryUnits::default(),
+            net_state: None,
+            delay_type: opto_timing::DelayType::Max,
+            sink_loads: &[],
+            direct_load: ElectricalLoad {
+                capacitance: 4.0,
+                fanout: 30.0,
+                receivers: 1.0,
+                max_sink_capacitance: 4.0,
+                min_sink_capacitance: 4.0,
+            },
+        };
+        let load = buffer_and_direct_receiver_load(&view, 2, view.direct_load);
+        // Three physical branches carry 6 units of wire capacitance, despite
+        // an abstract electrical fanout of 50. The direct branch is slower.
+        assert_eq!(load.receivers, 3.0);
+        assert_eq!(load.fanout, 50.0);
+        assert_eq!(load.capacitance, 12.0);
+        for (polarity, expected) in [
+            (opto_timing::DelayType::Min, 9.0),
+            (opto_timing::DelayType::Max, 18.0),
+        ] {
+            assert_eq!(
+                receiver_wire_delay(&view, load, load.receiver_capacitance(polarity)),
+                Some(expected)
+            );
+        }
+        let mut direct = ElectricalLoad::default();
+        direct.add_receivers(view.direct_load);
+        assert_eq!(direct.min_sink_capacitance, 4.0);
+    }
 }

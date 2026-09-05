@@ -38,12 +38,58 @@ pub struct TimingLibrary {
     pub wire_load_mode: Option<String>,
     /// Resolved wire-load model.
     pub wire_load_model: Option<WireLoadModel>,
+    /// Interconnect topology selected by the default operating condition.
+    pub wire_load_tree: WireLoadTree,
     /// SI scale factors parsed from the selected library.
     pub units: TimingLibraryUnits,
     /// Power characterization aligned with the target cells.
     pub power: PowerLibrary,
     /// Canonical synthesis-facing target cells.
     pub cells: TargetCellSet,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Distribution of a wire-load model's total resistance and capacitance.
+///
+/// Libraries without a selected operating condition or without `tree_type`
+/// use a balanced tree. Cell delay still uses the total capacitive load;
+/// this topology determines only the delay from the driver to each receiver.
+pub enum WireLoadTree {
+    /// Equal independent branches, one per receiver.
+    #[default]
+    Balanced,
+    /// All resistance precedes all wire and receiver capacitance.
+    WorstCase,
+    /// Zero interconnect resistance, retaining the wire capacitance.
+    BestCase,
+}
+
+impl WireLoadTree {
+    /// Estimates one receiver's interconnect delay in the library time unit.
+    ///
+    /// `resistance` must be normalized to time per capacitance unit. All
+    /// capacitances use the library capacitance unit; `total_capacitance`
+    /// includes wire and receiver loads. `fanout` counts physical receivers,
+    /// independently of Liberty's abstract `fanout_load` used for design rules.
+    /// Inputs are finite and nonnegative. An unloaded net has zero delay.
+    #[must_use]
+    pub fn sink_delay(
+        self,
+        resistance: f64,
+        wire_capacitance: f64,
+        fanout: f64,
+        total_capacitance: f64,
+        sink_capacitance: f64,
+    ) -> f64 {
+        if fanout <= 0.0 {
+            return 0.0;
+        }
+        match self {
+            Self::Balanced => resistance / fanout * (wire_capacitance / fanout + sink_capacitance),
+            Self::WorstCase => resistance * total_capacitance,
+            Self::BestCase => 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,6 +238,7 @@ impl TimingLibrary {
             wire_load: &'a Option<String>,
             wire_load_mode: &'a Option<String>,
             wire_load_model: &'a Option<WireLoadModel>,
+            wire_load_tree: WireLoadTree,
             units: TimingLibraryUnits,
             cells: crate::LibraryFingerprint,
         }
@@ -202,6 +249,7 @@ impl TimingLibrary {
             wire_load: &self.wire_load,
             wire_load_mode: &self.wire_load_mode,
             wire_load_model: &self.wire_load_model,
+            wire_load_tree: self.wire_load_tree,
             units: self.units,
             cells: self.cells.content_fingerprint(),
         })
@@ -232,6 +280,36 @@ impl TimingLibrary {
 mod tests {
     use super::*;
     use crate::{PowerCell, PowerCellSet};
+
+    #[test]
+    fn wire_tree_uses_the_receivers_branch_load() {
+        // Total R=12, wire C=6, receiver C=[1, 3, 8]. Balanced branches
+        // each contain R=4 and wire C=2, including the unloaded end case.
+        for (tree, expected) in [
+            (WireLoadTree::Balanced, [12.0, 20.0, 40.0]),
+            (WireLoadTree::WorstCase, [216.0; 3]),
+            (WireLoadTree::BestCase, [0.0; 3]),
+        ] {
+            for (sink, delay) in [1.0, 3.0, 8.0].into_iter().zip(expected) {
+                assert!((tree.sink_delay(12.0, 6.0, 3.0, 18.0, sink) - delay).abs() < 1e-12);
+            }
+            assert!(tree.sink_delay(0.0, 0.0, 0.0, 0.0, 0.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn wire_tree_changes_numeric_identity_but_preserves_topology() {
+        let original = TimingLibrary::default();
+        let changed = TimingLibrary {
+            wire_load_tree: WireLoadTree::WorstCase,
+            ..original.clone()
+        };
+        assert_ne!(
+            original.content_fingerprint(),
+            changed.content_fingerprint()
+        );
+        assert_eq!(original.topology_schema(), changed.topology_schema());
+    }
 
     #[test]
     fn power_changes_only_the_analysis_fingerprint() {

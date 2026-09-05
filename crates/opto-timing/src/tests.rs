@@ -801,6 +801,7 @@ fn reports_max_combinational_timing_path() {
         wire_load: Some("ZeroWireload".to_string()),
         wire_load_mode: Some("segmented".to_string()),
         wire_load_model: None,
+        wire_load_tree: opto_library::WireLoadTree::Balanced,
         units: TimingLibraryUnits::default(),
         power: opto_library::PowerLibrary::default(),
         cells: test_cells(vec![TimingCell {

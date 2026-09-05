@@ -343,7 +343,10 @@ pub(super) fn sink_interconnect_delay(
     mode: InterconnectDelayMode,
 ) -> f64 {
     let parasitic = graph.parasitic_sink_delay(net, object, mode.edge);
-    let wire = effective_resistance(timing, model, graph, net, mode.edge, mode.delay_type)
+    let sink = object
+        .rsplit_once('/')
+        .and_then(|(instance, pin)| model.instance_id(instance).map(|id| (id, pin)));
+    let wire = effective_resistance(timing, model, graph, net, sink, mode)
         * timing_load(timing, graph, net, mode.edge, mode.delay_type).unwrap_or(0.0);
     (parasitic + wire)
         * timing.timing_derate(
@@ -364,7 +367,8 @@ pub(super) fn sink_interconnect_delay_parts(
     mode: InterconnectDelayMode,
 ) -> f64 {
     let parasitic = graph.parasitic_sink_delay_parts(net, instance, pin, mode.edge);
-    let wire = effective_resistance(timing, model, graph, net, mode.edge, mode.delay_type)
+    let sink = model.instance_id(instance).map(|id| (id, pin));
+    let wire = effective_resistance(timing, model, graph, net, sink, mode)
         * timing_load(timing, graph, net, mode.edge, mode.delay_type).unwrap_or(0.0);
     (parasitic + wire)
         * timing.timing_derate(
@@ -375,14 +379,20 @@ pub(super) fn sink_interconnect_delay_parts(
         )
 }
 
+/// Receiver-equivalent resistance against the total net load. Explicit drive
+/// and net resistance remain lumped; only the estimated wire is distributed.
+/// Extracted nets have zero estimated wire R/C and retain their sink delays.
 pub(super) fn effective_resistance(
     timing: &TimingContext,
     model: &TimingModel,
     graph: &TimingGraph,
     net: usize,
-    edge: TimingEdge,
-    delay_type: DelayType,
+    sink: Option<(crate::TimingInstanceId, &str)>,
+    mode: InterconnectDelayMode,
 ) -> f64 {
+    let InterconnectDelayMode {
+        edge, delay_type, ..
+    } = mode;
     let drive = graph
         .endpoint_for_net(net)
         .filter(|endpoint| matches!(endpoint, TimingEndpoint::Port(_)))
@@ -395,10 +405,29 @@ pub(super) fn effective_resistance(
         .map_or(0.0, |endpoint| {
             timing.resistance(endpoint, edge, delay_type)
         });
-    model
-        .library()
-        .units
-        .normalize_resistance(graph.wire_resistance(net) + drive + explicit_net)
+    let library = model.library();
+    let explicit = library.units.normalize_resistance(drive + explicit_net);
+    if graph.wire_resistance(net) == 0.0 {
+        return explicit;
+    }
+    let load = timing_load(timing, graph, net, edge, delay_type).unwrap_or(0.0);
+    let sink_capacitance = match sink {
+        Some((instance, pin)) => graph
+            .cell(library, instance)
+            .and_then(|cell| cell.pins().find(|candidate| candidate.name() == pin))
+            .map_or(0.0, |pin| pin.design_input_capacitance_at(edge)),
+        None => explicit_load_for(timing, graph, net, edge, delay_type).unwrap_or(0.0),
+    };
+    let wire_delay = library.wire_load_tree.sink_delay(
+        library
+            .units
+            .normalize_resistance(graph.wire_resistance(net)),
+        graph.wire_capacitance(net),
+        graph.wire_fanout(net),
+        load,
+        sink_capacitance,
+    );
+    explicit + if load > 0.0 { wire_delay / load } else { 0.0 }
 }
 
 pub(super) struct ArcTimingEvaluation {

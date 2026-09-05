@@ -2,7 +2,40 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::{GroupRef, ParseContext, Reader, required_value};
-use crate::{LibraryError, WireLoadModel};
+use crate::{LibraryError, WireLoadModel, WireLoadTree};
+
+/// Resolves only the interconnect topology; PVT characterization remains in
+/// the selected library's numeric cell tables.
+pub(super) fn parse_operating_condition_tree(
+    group: &GroupRef<'_>,
+    context: &ParseContext<'_>,
+) -> Result<(String, WireLoadTree), LibraryError> {
+    let name = required_value(&group.arguments, "operating_conditions")?.into_owned();
+    let mut tree = None;
+    let mut reader = Reader::new(group.body, context);
+    while let Some(statement) = reader.next()? {
+        if statement.name != "tree_type" {
+            continue;
+        }
+        let invalid = |detail: &str| LibraryError::UnsupportedConstruct {
+            construct: format!("operating_conditions '{name}' tree_type: {detail}"),
+        };
+        if tree.is_some() {
+            return Err(invalid("duplicate attribute"));
+        }
+        let super::super::syntax::StatementKind::Simple(values) = statement.kind else {
+            return Err(invalid("expected a simple attribute"));
+        };
+        let value = required_value(&values, "tree_type")?;
+        tree = Some(match value.as_ref() {
+            "balanced_tree" => WireLoadTree::Balanced,
+            "worst_case_tree" => WireLoadTree::WorstCase,
+            "best_case_tree" => WireLoadTree::BestCase,
+            _ => return Err(invalid(&format!("unknown value '{value}'"))),
+        });
+    }
+    Ok((name, tree.unwrap_or_default()))
+}
 
 pub(super) fn parse_wire_load(
     group: &GroupRef<'_>,
