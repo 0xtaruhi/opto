@@ -3,7 +3,7 @@
 
 format = 1
 suite = "opto-synth"
-expected_tests = 501
+expected_tests = 509
 
 [[owners]]
 path = "src/api"
@@ -38,7 +38,7 @@ contract = "Snapshot-confined Word optimization, recognition, resource choice, a
 [[owners]]
 path = "src/boolean"
 owner = "boolean"
-tests = 115
+tests = 117
 contract = "Bit lowering, canonical Boolean subject construction, rewriting, and graph analysis."
 
 [[owners]]
@@ -56,13 +56,13 @@ contract = "Fingerprints, recipe caches, source metrics, snapshots, and portable
 [[owners]]
 path = "src/mapping"
 owner = "mapping"
-tests = 105
+tests = 108
 contract = "Catalogs, cover, bindings, sequential mapping, clock gating, and materialization."
 
 [[owners]]
 path = "src/closure"
 owner = "closure"
-tests = 66
+tests = 69
 contract = "MMMC measurement, power objectives, mapped boundaries, and transactional post-map repair."
 
 [[owners]]
@@ -74,7 +74,7 @@ contract = "Durable implementation ownership, publication identity, and source p
 [[focused_contracts]]
 path = "src/closure/postmap/tests.rs"
 owner = "postmap"
-tests = 32
+tests = 35
 contract = "Transactional candidate evaluation, mapped edits, rollback, and deterministic closure ordering."
 
 [[focused_contracts]]

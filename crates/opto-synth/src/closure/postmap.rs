@@ -331,8 +331,17 @@ fn optimize_timing(
     if trace.is_enabled() {
         diagnostics::report_timing_paths(trace, "after_electrical_legalization", &session.timing)?;
     }
-    cloning::optimize(&mut session, policy.critical_fanout_cloning, cloned_drivers)?;
-    sizing::optimize(&mut session, catalog, runtime, &timing_policy)?;
+    // Topology work above is complete. Reserve one eighth of the fixed QoR
+    // budget for pin assignment and cap residual cloning at another eighth;
+    // unused cloning work is available to sizing in this same session.
+    let reserved = session.qor_remaining().div_ceil(8);
+    session.with_qor_allowance(reserved, |session| {
+        cloning::optimize(session, policy.critical_fanout_cloning, cloned_drivers)
+    })?;
+    let sizing_allowance = session.qor_remaining().saturating_sub(reserved);
+    session.with_qor_allowance(sizing_allowance, |session| {
+        sizing::optimize(session, catalog, runtime, &timing_policy)
+    })?;
     sizing::evaluate_pin_swaps(&mut session, catalog)?;
     session.report_completion(optimization_started.elapsed());
     Ok(session.finish())

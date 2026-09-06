@@ -27,6 +27,10 @@ use std::collections::BTreeMap;
 
 const REGIONAL_ARCHITECTURE_TASK_DOMAIN: u32 = 0x5245_4741;
 
+mod timing;
+
+use timing::PathSelection;
+
 struct RegionArchitectureMaterializer<'request, 'data> {
     request: &'request RegionalArchitectureRequest<'data>,
     semantics: &'request super::roots::FullDomainRootSemantics<'data>,
@@ -587,10 +591,16 @@ impl RegionArchitectureMaterializer<'_, '_> {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {
                 format!("logic_lowering.region[{row}].architecture_selection")
             });
-            local_decisions.select_for_budget(
-                self.request.target_model,
-                self.request.contracts.delay_budget(region.row()),
-            )?;
+            self.select_path_architecture(PathSelection {
+                module: &mut module,
+                decisions: &mut local_decisions,
+                region,
+                tracked_values: &tracked_values,
+                boundary_inputs: &boundary_inputs,
+                roots: &root_pairs,
+                operation_sources: &operation_sources,
+                source_to_local: &source_to_local,
+            })?;
         }
         let (architecture, operators) = {
             let _profile = crate::api::diagnostics::ProfileSpan::new(profiling, || {

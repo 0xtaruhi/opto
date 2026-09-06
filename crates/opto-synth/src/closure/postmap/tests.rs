@@ -335,6 +335,77 @@ fn sizing_frontier_expands_in_deterministic_order() {
 }
 
 #[test]
+fn nested_search_allowances_restore_unspent_budget_after_rejection_and_error() {
+    let cells = vec![
+        and_cell("AND_FAST", 1.0, [0.5, 0.5]),
+        and_cell("AND_SLOW", 2.0, [2.0, 2.0]),
+    ];
+    let options = SynthesisOptions {
+        target_cells: cells.clone().into(),
+    };
+    let (mut mapped, mut implementations) = mapped_design(&mapped_and_module("AND_FAST"), &options);
+    let scenarios = scenario_set(&TimingLibrary {
+        cells: cells.into(),
+        ..TimingLibrary::default()
+    });
+    let timing = MmmcTiming::new(
+        &mapped,
+        design_id(),
+        &port_bindings(&mapped),
+        &Arc::new(opto_timing::TimingObjectBindings::new()),
+        &scenarios,
+        &crate::ReferencePortMap::new(),
+        crate::test_runtime(),
+    )
+    .unwrap()
+    .unwrap();
+    let connectivity = crate::mapping::materialize::FrozenObservableConnectivity::capture(
+        &mapped,
+        &options.target_cells,
+        &crate::ReferencePortMap::new(),
+    )
+    .unwrap();
+    let mut observer = |_| {};
+    let mut session = TimingOptimizationSession::start(TimingOptimizationRequest {
+        mapped: &mut mapped,
+        implementations: &mut implementations,
+        timing,
+        options: &options,
+        scenarios: &scenarios,
+        runtime: crate::test_runtime(),
+        power_evaluator: test_power_evaluator(),
+        connectivity: &connectivity,
+        diagnostics: crate::SynthesisDiagnostics::default(),
+        observer: &mut observer,
+    })
+    .unwrap();
+    let total = session.qor_remaining();
+    let result: Result<(), crate::SynthError> = session.with_qor_allowance(3, |session| {
+        session.with_qor_allowance(1, |session| {
+            let candidate = sizing::sizing_forest_delta(
+                session.mapped,
+                &options.target_cells,
+                &[(CellId::from_index(0).unwrap(), 1)],
+            )?;
+            assert!(matches!(
+                session.evaluate_qor(candidate, OptimizationPhase::TradeoffSizing)?,
+                CandidateDisposition::Rejected
+            ));
+            assert!(session.qor_budget_exhausted());
+            Ok(())
+        })?;
+        assert_eq!(session.qor_remaining(), 2);
+        Err(crate::SynthError::invariant("test search interruption"))
+    });
+    assert!(result.is_err());
+    assert_eq!(session.qor_remaining(), total - 1);
+    assert_eq!(
+        session.mapped.cell_type(CellId::from_index(0).unwrap()),
+        Some("AND_FAST")
+    );
+}
+
+#[test]
 fn sizing_uses_incremental_sta_to_fix_load_dependent_slack() {
     let cells = vec![
         and_cell("AND_SMALL", 1.0, [1.0, 3.0]),
@@ -1818,6 +1889,124 @@ fn pin_swap_forest_rewires_multiple_cells_atomically() {
         assert_eq!(updated["A"], original["B"]);
         assert_eq!(updated["B"], original["A"]);
     }
+}
+
+#[test]
+fn pin_swap_reaches_a_later_pair_after_the_first_pair_is_rejected() {
+    let mut cell = and_cell("AND3", 1.0, [0.1, 0.1]);
+    cell.pins[0].capacitance = Some(10.0);
+    cell.pins[1].capacitance = Some(12.0);
+    let mut third = cell.pins[1].clone();
+    third.name = "C".to_string();
+    third.capacitance = Some(1.0);
+    cell.pins.insert(2, third);
+    cell.pins[3].function = Some(BooleanFunction::parse("A B C").unwrap());
+    let mut third_arc = cell.pins[3].timing_arcs[0].clone();
+    third_arc.related_pin = "C".to_string();
+    cell.pins[3].timing_arcs.push(third_arc);
+    let options = SynthesisOptions {
+        target_cells: vec![cell.clone()].into(),
+    };
+    let catalog = PostmapCellCatalog::new(&options);
+    assert_eq!(catalog.pin_swaps(0), [(0, 1), (0, 2), (1, 2)]);
+    let mut module = WordModule::new("later_pin_pair");
+    let ty = WordType::bits(1).unwrap();
+    let values = ["a", "b", "c", "y"].map(|name| {
+        let direction = if name == "y" {
+            PortDirection::Output
+        } else {
+            PortDirection::Input
+        };
+        let port = module.add_port(name, direction, ty, test_span()).unwrap();
+        module
+            .read_signal(module.port(port).unwrap().signal, test_span())
+            .unwrap()
+    });
+    module
+        .add_instance(
+            "U0",
+            "AND3",
+            ["A", "B", "C", "Y"]
+                .into_iter()
+                .zip(values)
+                .map(|(pin, value)| (pin.to_string(), value, test_span()))
+                .collect(),
+            test_span(),
+        )
+        .unwrap();
+    let (mut mapped, mut implementations) = mapped_design(&module, &options);
+    let cell_id = mapped_cell_by_name(&mapped, "U0");
+    let original = mapped_connections(&mapped, cell_id);
+    let mut timing = TimingContext::new();
+    timing
+        .set_max_capacitance(
+            5.0,
+            &[TimingObject::port(
+                named_port_id(&mapped, "a"),
+                design_id(),
+                TimingPortDirection::Input,
+            )],
+            opto_timing::DesignRuleScope::All,
+        )
+        .unwrap();
+    let outcome = run_postmap(PostmapRun {
+        mapped: &mut mapped,
+        implementations: &mut implementations,
+        options: &options,
+        scenarios: single_scenario(
+            &timing,
+            TimingLibrary {
+                cells: vec![cell].into(),
+                ..TimingLibrary::default()
+            },
+        ),
+    });
+    let updated = mapped_connections(&mapped, cell_id);
+    assert_eq!(outcome.replacements, 1);
+    assert_eq!(updated["A"], original["C"]);
+    assert_eq!(updated["B"], original["B"]);
+    assert_eq!(updated["C"], original["A"]);
+}
+
+#[test]
+fn sizing_reaches_a_feasible_area_candidate_after_rejecting_the_smallest_cell() {
+    let cells = vec![
+        and_cell("AND_TINY", 1.0, [4.0, 4.0]),
+        and_cell("AND_SMALL", 2.0, [1.0, 1.0]),
+        and_cell("AND_FAST", 4.0, [0.5, 0.5]),
+    ];
+    let options = SynthesisOptions {
+        target_cells: cells.clone().into(),
+    };
+    let (mut mapped, mut implementations) = mapped_design(&mapped_and_module("AND_FAST"), &options);
+    let mut timing = TimingContext::new();
+    timing
+        .set_max_delay(
+            1.5,
+            Vec::new(),
+            vec![opto_timing::TimingEndpoint::Port(named_port_id(
+                &mapped, "y",
+            ))],
+        )
+        .unwrap();
+    let outcome = run_postmap(PostmapRun {
+        mapped: &mut mapped,
+        implementations: &mut implementations,
+        options: &options,
+        scenarios: single_scenario(
+            &timing,
+            TimingLibrary {
+                cells: cells.into(),
+                ..TimingLibrary::default()
+            },
+        ),
+    });
+    assert_eq!(outcome.replacements, 1);
+    assert_eq!(
+        mapped.cell_type(CellId::from_index(0).unwrap()),
+        Some("AND_SMALL")
+    );
+    assert!(outcome.timing.unwrap().summary().unwrap().slack.unwrap() >= 0.0);
 }
 
 fn mapped_connections(

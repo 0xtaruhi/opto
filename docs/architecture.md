@@ -843,6 +843,23 @@ reduce region count. There is no global bin packing,
 resource-affinity proposer, cross-owner candidate analysis, or architecture
 candidate analysis before the final freeze.
 
+Within each frozen region, operator architecture selection starts with the
+minimum structural physical cost and probes at most four recipe vectors through
+the ordinary private AXM lowering. Forward arrival and backward required-time
+sweeps include intervening Boolean logic, reconvergence, boundary timing, and
+sequential launch/capture projections. Each operator receives its own available
+time: its current recipe delay estimate plus the tightest slack among actual
+result-bit paths. Keeping each bit's arrival paired with its requirement avoids
+combining unrelated late operands and tight outputs into a false critical path.
+Unconstrained operators retain the physical-cost objective. Zero
+and negative available times still order recipes by their remaining timing
+deficit. The best evaluated vector is retained by worst endpoint deficit, total
+endpoint deficit, and live gate count; an unevaluated next vector cannot win.
+Probes append temporary Word binding handles and roll them back before the next
+probe. Only compact recipe decisions survive, and no full-design clone is made.
+This structural guide does not implement the proposed operator-local nonlinear
+MMMC characterization solver; Liberty cover and mapped MMMC remain authoritative.
+
 Partition size does not depend on thread count. This preserves incremental
 identity and makes one-thread and many-thread output equivalent.
 
@@ -980,10 +997,14 @@ active combinational catalog supplies one deterministic reference-stage delay,
 and regional input arrivals and root requirements are conservatively rounded
 into those structural coordinates. Rewrite compares normalized timing
 violation first: an implementation that misses its budget may make bounded
-monotone progress without closing the complete deficit in one window when the
-replacement does not grow local primitive weight or gate count, while an
-implementation that already beats its requirement retains its current
-structural arrival as the local budget instead of consuming positive margin.
+monotone progress without closing the complete deficit in one window. On an
+arrival-critical path to a worst violating endpoint, a strictly smaller deficit
+may justify up to twice the removed local primitive weight and gate count.
+Other cones cannot buy timing with extra primitive cost. A feasible implementation
+may consume positive margin to reduce area while preserving its actual
+propagated requirement. Constrained
+windows offer both area and arrival-directed recipes under this one ordering;
+the recipe inputs carry measured structural arrivals, not required times.
 This guide ranks equivalent AXM forms in the ordinary rewrite path; load-aware
 Liberty cover and global STA remain the electrical timing authorities. Missing
 or non-positive target characterization leaves the structural guide absent
@@ -1015,8 +1036,8 @@ Functional dependency is proved by bit-parallel separation before a projected
 truth table is constructed, so rejected feature sets do not repeat the exact
 projection work. No RTL operator or benchmark pattern is recognized. With
 finite required times, Liberty constraint violation is compared first;
-equivalent feasible implementations then minimize area-delay product, followed
-by area, delay, and cell count as deterministic ties. Without a finite required
+equivalent feasible implementations then minimize area, followed
+by delay and cell count as deterministic ties. Without a finite required
 time, each bounded proposal receives exact reference recovery and the portfolio
 minimizes mapped area before delay and cell count. Post-map MFS remains local
 cell/MFFC cleanup and incrementally refines care-set partitions while visiting
@@ -1362,6 +1383,21 @@ Topology synthesis and electrical legalization finish their finite forests
 independently of the deterministic QoR-search evaluation budget. That budget
 applies only after electrical topology is established; effort cannot truncate
 legality work or change its ownership.
+
+After legalization, residual cloning may consume at most one eighth of the
+fixed QoR evaluation budget and another eighth is reserved for symmetric pin
+assignment. Sizing can use the remainder and unused cloning allowance. Within
+sizing, worst-path and all-violation frontiers reserve separate opportunities,
+as do monotonic and tradeoff choices within each frontier;
+candidate ranks are visited across the complete frontier before later ranks
+are discarded. A rejected first drive choice therefore does not hide every
+other compatible drive. Pin assignment similarly visits all catalogued
+electrically distinct symmetric pairs on violating paths, with a bounded share
+per rank. Each accepted sizing forest triggers fresh candidate discovery, and
+each pin rank is rebuilt from the current mapped revision. Nested allowances
+restore the enclosing limit on both success and error, without increasing the
+global cap. Exact MMMC acceptance and deterministic forest splitting still own
+every commit.
 
 ### 9. Seal Timing And Reports
 

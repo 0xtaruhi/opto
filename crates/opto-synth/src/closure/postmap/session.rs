@@ -78,6 +78,7 @@ impl<'a> TimingOptimizationSession<'a> {
                 qor_evaluations: 0,
                 candidates: 0,
                 qor_budget,
+                qor_limit: qor_budget,
                 rejected: 0,
                 stale: 0,
                 diagnostics,
@@ -88,7 +89,28 @@ impl<'a> TimingOptimizationSession<'a> {
     }
 
     pub(super) fn qor_budget_exhausted(&self) -> bool {
-        self.state.qor_evaluations >= self.state.qor_budget
+        self.qor_remaining() == 0
+    }
+
+    pub(super) fn qor_remaining(&self) -> usize {
+        self.state
+            .qor_limit
+            .saturating_sub(self.state.qor_evaluations)
+    }
+
+    /// Lends part of the remaining global budget to one search frontier.
+    /// Unspent evaluations return to the enclosing search even on an error;
+    /// nested frontiers cannot spend another phase's reserved evaluations.
+    pub(super) fn with_qor_allowance<T>(
+        &mut self,
+        allowance: usize,
+        search: impl FnOnce(&mut Self) -> Result<T, crate::SynthError>,
+    ) -> Result<T, crate::SynthError> {
+        let previous = self.state.qor_limit;
+        self.state.qor_limit = previous.min(self.state.qor_evaluations.saturating_add(allowance));
+        let result = search(self);
+        self.state.qor_limit = previous;
+        result
     }
 
     pub(super) fn timing_met(&self) -> bool {
@@ -302,6 +324,7 @@ struct TimingOptimizationState {
     qor_evaluations: usize,
     candidates: usize,
     qor_budget: usize,
+    qor_limit: usize,
     rejected: usize,
     stale: usize,
     diagnostics: crate::SynthesisDiagnostics,

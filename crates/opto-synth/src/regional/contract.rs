@@ -20,7 +20,6 @@ type PathBudget = (Option<f64>, Option<f64>);
 #[derive(Debug, Clone)]
 pub(crate) struct RegionContractSet {
     contracts: Box<[Box<[BoundaryContract]>]>,
-    delay_budgets: Box<[Option<f64>]>,
     timing_tags: TimingTagInterner,
 }
 
@@ -48,18 +47,6 @@ impl RegionContractSet {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let delay_budgets = (0..regions.regions().len())
-            .map(|row| {
-                budgets
-                    .iter()
-                    .filter_map(|scenario| {
-                        let (arrival, required) = scenario[row];
-                        Some((required? - arrival?).max(0.0))
-                    })
-                    .min_by(f64::total_cmp)
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         let clock_domains = scenarios
             .scenarios()
             .iter()
@@ -137,13 +124,8 @@ impl RegionContractSet {
         }
         Ok(Self {
             contracts: rows.into_boxed_slice(),
-            delay_budgets,
             timing_tags,
         })
-    }
-
-    pub(crate) fn delay_budget(&self, row: crate::RegionRowId) -> Option<f64> {
-        self.delay_budgets[row.index()]
     }
 
     pub(crate) fn contracts(&self, row: crate::RegionRowId) -> &[BoundaryContract] {

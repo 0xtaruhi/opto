@@ -52,17 +52,10 @@ pub(super) fn decide_node(
         return Ok(None);
     }
     let cares = window_cares(network, cuts, node);
-    let violating = timing.is_some_and(|timing| timing.violation(node) > 0);
     let level = |node| {
         timing.map_or_else(
             || network.level(node),
-            |timing| {
-                if violating {
-                    timing.arrival(node)
-                } else {
-                    timing.planning_level(network, node)
-                }
-            },
+            |timing| timing.current(network, node),
         )
     };
     let mut best_score = None;
@@ -80,61 +73,73 @@ pub(super) fn decide_node(
         for (slot, &leaf) in cut.leaves().iter().enumerate() {
             levels[slot] = level(leaf);
         }
-        let plain_key = match timing {
-            Some(_) => RewriteRecipeKey::timing(truth, &levels[..cut.len()]),
-            None => RewriteRecipeKey::area(truth),
-        };
-        let plain = if let Some(cached) = recipe_cache.lookup(plain_key, incremental_metrics)? {
-            if check_incremental {
-                let (cost, plan) = match timing {
-                    Some(_) => synthesizer.timing_plan(truth, &levels[..cut.len()]),
-                    None => synthesizer.plan(truth),
-                };
-                let cold = PlanRecipe::from_plan(&plan).map(|recipe| (cost, recipe));
-                if cold.as_ref() != Some(&cached) {
-                    return Err(crate::SynthError::invariant(
-                        "cached Boolean plain recipe differs from cold synthesis",
-                    ));
-                }
-            }
-            Some(cached)
+        // Offer both bounded decompositions under one feasibility/area
+        // ordering. Depth minimization alone would spend slack even when the
+        // area recipe already meets the propagated requirement.
+        let objectives = if timing.and_then(|budget| budget.required(node)).is_some() {
+            2
         } else {
-            let (cost, plan) = match timing {
-                Some(_) => synthesizer.timing_plan(truth, &levels[..cut.len()]),
-                None => synthesizer.plan(truth),
-            };
-            let recipe = PlanRecipe::from_plan(&plan);
-            if let Some(recipe) = &recipe {
-                recipe_cache.insert(plain_key, cost, recipe)?;
-            }
-            recipe.map(|recipe| (cost, recipe))
+            1
         };
-        if let Some((_, recipe)) = plain
-            && recipe.proves(truth, u64::MAX, &[])
-            && let Some(score) = proposal_score(
-                network,
-                timing,
-                node,
-                RegionCost::removed(network, timing, node, available, dying.len()),
-                RegionCost::replacement_recipe(
-                    added_cost(
+        for timing_directed in [false, true].into_iter().take(objectives) {
+            let plain_key = if timing_directed {
+                RewriteRecipeKey::timing(truth, &levels[..cut.len()])
+            } else {
+                RewriteRecipeKey::area(truth)
+            };
+            let plain = if let Some(cached) = recipe_cache.lookup(plain_key, incremental_metrics)? {
+                if check_incremental {
+                    let (cost, plan) = if timing_directed {
+                        synthesizer.timing_plan(truth, &levels[..cut.len()])
+                    } else {
+                        synthesizer.plan(truth)
+                    };
+                    let cold = PlanRecipe::from_plan(&plan).map(|recipe| (cost, recipe));
+                    if cold.as_ref() != Some(&cached) {
+                        return Err(crate::SynthError::invariant(
+                            "cached Boolean plain recipe differs from cold synthesis",
+                        ));
+                    }
+                }
+                Some(cached)
+            } else {
+                let (cost, plan) = if timing_directed {
+                    synthesizer.timing_plan(truth, &levels[..cut.len()])
+                } else {
+                    synthesizer.plan(truth)
+                };
+                let recipe = PlanRecipe::from_plan(&plan);
+                if let Some(recipe) = &recipe {
+                    recipe_cache.insert(plain_key, cost, recipe)?;
+                }
+                recipe.map(|recipe| (cost, recipe))
+            };
+            if let Some((_, recipe)) = plain
+                && recipe.proves(truth, u64::MAX, &[])
+                && let Some(score) = proposal_score(
+                    timing,
+                    node,
+                    RegionCost::removed(network, timing, node, available, dying.len()),
+                    RegionCost::replacement_recipe(
+                        added_cost(
+                            &recipe,
+                            cut.leaves(),
+                            dying,
+                            &mut LogicProbe::new(network.storage_network(), structural),
+                        ),
                         &recipe,
-                        cut.leaves(),
-                        dying,
-                        &mut LogicProbe::new(network.storage_network(), structural),
+                        &levels[..cut.len()],
                     ),
-                    &recipe,
-                    &levels[..cut.len()],
-                ),
-            )
-            && best_score.is_none_or(|best| score > best)
-        {
-            best_score = Some(score);
-            best = Some(CandidateDecision {
-                cut,
-                divisors: Box::default(),
-                plan: recipe,
-            });
+                )
+                && best_score.is_none_or(|best| score > best)
+            {
+                best_score = Some(score);
+                best = Some(CandidateDecision {
+                    cut,
+                    divisors: Box::default(),
+                    plan: recipe,
+                });
+            }
         }
         let divisors = collect_divisors(support_index, virtuals, index, cut, dying);
         let assignments = 1usize << cut.len();
@@ -181,7 +186,6 @@ pub(super) fn decide_node(
         if let Some((cost, recipe)) = divisor
             && recipe.proves(truth, care, &functions)
             && let Some(score) = proposal_score(
-                network,
                 timing,
                 node,
                 RegionCost::removed(network, timing, node, available, dying.len()),
@@ -396,7 +400,6 @@ fn recipe_ops(recipe: &PlanRecipe) -> u32 {
 }
 
 pub(super) fn proposal_score(
-    network: &LogicGraph,
     timing: Option<&TimingBudget>,
     node: LogicNodeId,
     removed: RegionCost,
@@ -404,12 +407,8 @@ pub(super) fn proposal_score(
 ) -> Option<ProposalScore> {
     let area_gain = i64::from(removed.weight) - i64::from(replacement.weight);
     let gate_gain = i64::from(removed.gates) - i64::from(replacement.gates);
-    let critical_depth_gain = if let Some(timing) = timing {
-        let removed_violation = timing.violation(node);
-        if removed_violation > 0 {
-            let required = timing
-                .required(node)
-                .expect("a timing violation has a finite structural requirement");
+    let critical_depth_gain =
+        if let Some(required) = timing.and_then(|timing| timing.required(node)) {
             let removed_violation = removed.depth.saturating_sub(required);
             let replacement_violation = replacement.depth.saturating_sub(required);
             if replacement_violation > removed_violation {
@@ -417,22 +416,17 @@ pub(super) fn proposal_score(
             }
             i64::from(removed_violation) - i64::from(replacement_violation)
         } else {
-            let current = timing.current(network, node);
-            if replacement.depth > current {
-                return None;
-            }
-            if timing.planning_level(network, node) == removed.depth {
-                i64::from(removed.depth) - i64::from(replacement.depth)
-            } else {
-                0
-            }
-        }
-    } else {
-        0
-    };
-    if timing.is_some_and(|timing| timing.violation(node) > 0)
-        && critical_depth_gain > 0
-        && (area_gain < 0 || gate_gain < 0)
+            0
+        };
+    // A strictly smaller timing deficit can justify extra parallel logic.
+    // Bound both primitive weight and gate count relative to the replaced
+    // cone; a merely feasible or equally slow proposal still has to save area.
+    let growth = replacement.weight > removed.weight || replacement.gates > removed.gates;
+    if critical_depth_gain > 0
+        && growth
+        && (!timing.is_some_and(|timing| timing.critical[node.index()])
+            || replacement.weight > removed.weight.saturating_mul(2)
+            || replacement.gates > removed.gates.saturating_mul(2))
     {
         return None;
     }
@@ -647,15 +641,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn area_recovery_can_replace_expensive_primitives_with_more_cheaper_gates() {
+        assert!(
+            proposal_score(
+                None,
+                LogicNodeId::from_index(1),
+                RegionCost {
+                    weight: 8,
+                    gates: 2,
+                    depth: 2
+                },
+                RegionCost {
+                    weight: 6,
+                    gates: 3,
+                    depth: 3
+                },
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
     fn rewrite_can_reduce_a_multi_stage_timing_deficit() {
         let node = LogicNodeId::from_index(1);
         let timing = TimingBudget {
             arrivals: Box::new([0, 5]),
             required: Box::new([u32::MAX, 1]),
+            critical: Box::new([false, true]),
         };
-        let network = LogicGraph::new();
         let score = proposal_score(
-            &network,
             Some(&timing),
             node,
             RegionCost {
@@ -675,17 +689,16 @@ mod tests {
     }
 
     #[test]
-    fn timing_progress_does_not_expand_a_local_region() {
+    fn timing_progress_admits_bounded_parallel_logic_only_for_a_smaller_deficit() {
         let node = LogicNodeId::from_index(1);
         let timing = TimingBudget {
             arrivals: Box::new([0, 5]),
             required: Box::new([u32::MAX, 1]),
+            critical: Box::new([false, true]),
         };
-        let network = LogicGraph::new();
 
-        assert!(
+        let score = |weight, gates, depth| {
             proposal_score(
-                &network,
                 Some(&timing),
                 node,
                 RegionCost {
@@ -694,17 +707,20 @@ mod tests {
                     depth: 5,
                 },
                 RegionCost {
-                    weight: 6,
-                    gates: 2,
-                    depth: 3,
+                    weight,
+                    gates,
+                    depth,
                 },
             )
-            .is_none()
-        );
+        };
+        assert!(score(6, 2, 3).is_some());
+        assert!(score(6, 2, 5).is_none());
+        assert!(score(9, 2, 3).is_none());
+        assert!(score(6, 3, 3).is_none());
     }
 
     #[test]
-    fn feasible_rewrite_does_not_consume_structural_margin() {
+    fn feasible_rewrite_recovers_area_within_the_actual_budget() {
         let mut network = LogicGraph::new();
         let left = network.variable(0).unwrap();
         let right = network.variable(1).unwrap();
@@ -717,13 +733,13 @@ mod tests {
         let timing = TimingBudget {
             arrivals: arrivals.into_boxed_slice(),
             required: required.into_boxed_slice(),
+            critical: vec![false; network.node_count()].into_boxed_slice(),
         };
         let removed = RegionCost::removed(&network, Some(&timing), node, 4, 2);
 
         assert_eq!(removed.depth, 2);
         assert!(
             proposal_score(
-                &network,
                 Some(&timing),
                 node,
                 removed,
@@ -731,6 +747,32 @@ mod tests {
                     weight: 2,
                     gates: 1,
                     depth: 3,
+                },
+            )
+            .is_some()
+        );
+        assert!(
+            proposal_score(
+                Some(&timing),
+                node,
+                removed,
+                RegionCost {
+                    weight: 2,
+                    gates: 1,
+                    depth: 6
+                },
+            )
+            .is_none()
+        );
+        assert!(
+            proposal_score(
+                Some(&timing),
+                node,
+                removed,
+                RegionCost {
+                    weight: 5,
+                    gates: 2,
+                    depth: 1
                 },
             )
             .is_none()

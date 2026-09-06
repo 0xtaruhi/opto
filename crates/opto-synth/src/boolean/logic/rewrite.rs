@@ -113,20 +113,25 @@ impl MffcScratch {
     }
 }
 
-struct TimingBudget {
+/// One immutable structural arrival/required projection shared by recipe
+/// selection and Boolean rewriting. It is a search guide, not electrical STA.
+pub(crate) struct TimingBudget {
     arrivals: Box<[u32]>,
     required: Box<[u32]>,
+    /// Nodes on an arrival-critical path to a worst violating endpoint.
+    /// Area growth is reserved for these paths; other cones may recover area.
+    critical: Box<[bool]>,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct StructuralTiming<'a> {
+pub(crate) struct StructuralTiming<'a> {
     requirements: &'a [Option<f64>],
     input_arrivals: &'a [Option<f64>],
     reference_stage_delay: Option<f64>,
 }
 
 impl<'a> StructuralTiming<'a> {
-    pub(super) const fn new(
+    pub(crate) const fn new(
         requirements: &'a [Option<f64>],
         input_arrivals: &'a [Option<f64>],
         reference_stage_delay: Option<f64>,
@@ -150,7 +155,7 @@ impl<'a> StructuralTiming<'a> {
 }
 
 impl TimingBudget {
-    fn for_roots(
+    pub(crate) fn for_roots(
         network: &LogicGraph,
         roots: &[LogicNodeId],
         timing: StructuralTiming<'_>,
@@ -193,9 +198,7 @@ impl TimingBudget {
             };
             constrained = true;
             let requirement = normalize_stage(*requirement, stage_delay, false)?;
-            required[root.index()] = required[root.index()]
-                .min(requirement)
-                .min(arrivals[root.index()]);
+            required[root.index()] = required[root.index()].min(requirement);
         }
         if !constrained {
             return Ok(None);
@@ -209,22 +212,42 @@ impl TimingBudget {
                 required[fanin.index()] = required[fanin.index()].min(limit.saturating_sub(1));
             }
         }
+        let worst = roots
+            .iter()
+            .filter(|root| required[root.index()] != u32::MAX)
+            .map(|root| arrivals[root.index()].saturating_sub(required[root.index()]))
+            .max()
+            .unwrap_or(0);
+        let mut critical = vec![false; network.node_count()];
+        if worst > 0 {
+            for &root in roots {
+                if arrivals[root.index()].saturating_sub(required[root.index()]) == worst {
+                    critical[root.index()] = true;
+                }
+            }
+            for index in (0..network.node_count()).rev() {
+                if critical[index] {
+                    for fanin in network.node(LogicNodeId::from_index(index)).fanins() {
+                        if arrivals[fanin.index()].saturating_add(1) == arrivals[index] {
+                            critical[fanin.index()] = true;
+                        }
+                    }
+                }
+            }
+        }
         Ok(Some(Self {
             arrivals: arrivals.into_boxed_slice(),
             required: required.into_boxed_slice(),
+            critical: critical.into_boxed_slice(),
         }))
     }
 
-    fn arrival(&self, node: LogicNodeId) -> u32 {
+    pub(crate) fn arrival(&self, node: LogicNodeId) -> u32 {
         self.arrivals[node.index()]
     }
 
-    fn required(&self, node: LogicNodeId) -> Option<u32> {
+    pub(crate) fn required(&self, node: LogicNodeId) -> Option<u32> {
         (self.required[node.index()] != u32::MAX).then_some(self.required[node.index()])
-    }
-
-    fn planning_level(&self, network: &LogicGraph, node: LogicNodeId) -> u32 {
-        self.required(node).unwrap_or_else(|| network.level(node))
     }
 
     fn current(&self, network: &LogicGraph, node: LogicNodeId) -> u32 {
@@ -232,7 +255,7 @@ impl TimingBudget {
             .map_or_else(|| network.level(node), |_| self.arrival(node))
     }
 
-    fn violation(&self, node: LogicNodeId) -> u32 {
+    pub(crate) fn violation(&self, node: LogicNodeId) -> u32 {
         self.required(node)
             .map_or(0, |required| self.arrival(node).saturating_sub(required))
     }

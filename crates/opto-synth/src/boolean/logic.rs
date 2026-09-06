@@ -17,8 +17,8 @@ mod sweep;
 mod proptests;
 
 pub(crate) use rewrite::{
-    CoverageCheck, RewriteIncremental, RewriteRecipeCache, projected_cuts, projected_leaves,
-    window_cares,
+    CoverageCheck, RewriteIncremental, RewriteRecipeCache, StructuralTiming, TimingBudget,
+    projected_cuts, projected_leaves, window_cares,
 };
 pub(crate) use subject::{
     CanonicalRegionLogic, RegionLogicGraph, RegionLogicOptions, RegionLogicTiming,

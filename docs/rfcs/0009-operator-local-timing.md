@@ -7,6 +7,13 @@
 - Author: Zhengyi Zhang
 - Date: 2026-08-04
 
+Implementation note: the current pipeline now probes a bounded set of private
+AXM recipe vectors and uses per-result-bit structural slack for contextual
+operator selection. The historical scalar selector described below has been
+removed. The complete provider-characterized, lane-preserving nonlinear solver
+in this RFC remains proposed; the current conformance contract is recorded in
+`docs/architecture.md`.
+
 ## Summary
 
 Opto already has a substantial implementation-candidate pool. The arithmetic

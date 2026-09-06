@@ -87,10 +87,42 @@ fn structural_budget_includes_absolute_input_arrival() {
     .unwrap()
     .unwrap();
 
+    assert_eq!(early.required(root), Some(2));
     assert_eq!(early.arrival(root), 1);
     assert_eq!(early.violation(root), 0);
     assert_eq!(late.arrival(root), 3);
     assert_eq!(late.violation(root), 1);
+}
+
+#[test]
+fn structural_critical_paths_exclude_early_fanins_and_less_violating_endpoints() {
+    let mut network = LogicGraph::new();
+    let early = network.variable(0).unwrap();
+    let late = network.variable(1).unwrap();
+    let other = network.variable(2).unwrap();
+    let first = network.and(late, early);
+    let worst = network.xor(first, other);
+    let secondary = network.and(late, other);
+    network.freeze();
+    let timing = TimingBudget::for_roots(
+        &network,
+        &[worst, secondary],
+        StructuralTiming::new(
+            &[Some(2.0), Some(2.0)],
+            &[Some(0.0), Some(3.0), Some(0.0)],
+            Some(1.0),
+        ),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(timing.violation(worst), 3);
+    assert_eq!(timing.violation(secondary), 2);
+    for node in [late, first, worst] {
+        assert!(timing.critical[node.index()]);
+    }
+    for node in [early, other, secondary] {
+        assert!(!timing.critical[node.index()]);
+    }
 }
 
 #[test]
