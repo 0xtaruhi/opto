@@ -306,7 +306,7 @@ fn multi_operand_fusion_exists_only_in_private_region_catalogs() {
             input_capacitance: 1.0,
         })
     });
-    private.select_for_budget(&target, None).unwrap();
+    private.select_for_budgets(&target, |_| None).unwrap();
     let selected = private.selected_candidate(operator.id()).unwrap();
     let selected_score = target
         .score_for_budget(private.candidate_estimate(selected).unwrap(), None)

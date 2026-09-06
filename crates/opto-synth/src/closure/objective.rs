@@ -169,18 +169,17 @@ fn mapped_cell_area(cell: &MappedCell, library: &TargetCellSet) -> Result<f64, c
     })
 }
 
-pub(crate) fn closure_improves(
+pub(crate) fn compare_closure(
     candidate: &TimingQualitySummary,
     candidate_rules: DesignRuleSummary,
     candidate_physical: PhysicalObjective,
     current: &TimingQualitySummary,
     current_rules: DesignRuleSummary,
     current_physical: PhysicalObjective,
-) -> bool {
+) -> std::cmp::Ordering {
     ClosureQuality::new(*candidate, candidate_rules)
         .compare(ClosureQuality::new(*current, current_rules))
         .then_with(|| compare_physical(candidate_physical, current_physical))
-        .is_lt()
 }
 
 fn compare_timing(
@@ -212,10 +211,6 @@ fn compare_design_rules(
         .total_cmp(&current.worst_ratio())
         .then_with(|| candidate.total_excess().total_cmp(&current.total_excess()))
         .then_with(|| candidate.violations().cmp(&current.violations()))
-}
-
-pub(crate) fn improves_physical(candidate: PhysicalObjective, current: PhysicalObjective) -> bool {
-    compare_physical(candidate, current).is_lt()
 }
 
 /// Returns the canonical implementation-cost ordering. Lower is better.
@@ -270,62 +265,80 @@ mod tests {
 
     #[test]
     fn violated_timing_is_repaired_before_physical_recovery() {
-        assert!(closure_improves(
-            &timing(Some(0.0), 0.0, 0),
-            rules(),
-            physical(20.0, 20),
-            &timing(Some(-0.1), -0.1, 1),
-            rules(),
-            physical(10.0, 10),
-        ));
-        assert!(!closure_improves(
-            &timing(Some(-0.01), -0.01, 1),
-            rules(),
-            physical(1.0, 1),
-            &timing(Some(0.0), 0.0, 0),
-            rules(),
-            physical(10.0, 10),
-        ));
+        assert!(
+            compare_closure(
+                &timing(Some(0.0), 0.0, 0),
+                rules(),
+                physical(20.0, 20),
+                &timing(Some(-0.1), -0.1, 1),
+                rules(),
+                physical(10.0, 10),
+            )
+            .is_lt()
+        );
+        assert!(
+            !compare_closure(
+                &timing(Some(-0.01), -0.01, 1),
+                rules(),
+                physical(1.0, 1),
+                &timing(Some(0.0), 0.0, 0),
+                rules(),
+                physical(10.0, 10),
+            )
+            .is_lt()
+        );
     }
 
     #[test]
     fn violated_timing_orders_wns_before_tns_and_path_count() {
-        assert!(closure_improves(
-            &timing(Some(-0.1), -100.0, 100),
-            rules(),
-            physical(20.0, 20),
-            &timing(Some(-1.0), -1.0, 1),
-            rules(),
-            physical(10.0, 10),
-        ));
+        assert!(
+            compare_closure(
+                &timing(Some(-0.1), -100.0, 100),
+                rules(),
+                physical(20.0, 20),
+                &timing(Some(-1.0), -1.0, 1),
+                rules(),
+                physical(10.0, 10),
+            )
+            .is_lt()
+        );
     }
 
     #[test]
     fn met_timing_recovers_area_then_cell_count_without_chasing_margin() {
-        assert!(closure_improves(
-            &timing(Some(0.1), 0.0, 0),
-            rules(),
-            physical(9.0, 20),
-            &timing(Some(1.0), 0.0, 0),
-            rules(),
-            physical(10.0, 10),
-        ));
-        assert!(closure_improves(
-            &timing(None, 0.0, 0),
-            rules(),
-            physical(10.0, 9),
-            &timing(None, 0.0, 0),
-            rules(),
-            physical(10.0, 10),
-        ));
-        assert!(!closure_improves(
-            &timing(Some(1.0), 0.0, 0),
-            rules(),
-            physical(11.0, 1),
-            &timing(Some(0.1), 0.0, 0),
-            rules(),
-            physical(10.0, 10),
-        ));
+        assert!(
+            compare_closure(
+                &timing(Some(0.1), 0.0, 0),
+                rules(),
+                physical(9.0, 20),
+                &timing(Some(1.0), 0.0, 0),
+                rules(),
+                physical(10.0, 10),
+            )
+            .is_lt()
+        );
+        assert!(
+            compare_closure(
+                &timing(None, 0.0, 0),
+                rules(),
+                physical(10.0, 9),
+                &timing(None, 0.0, 0),
+                rules(),
+                physical(10.0, 10),
+            )
+            .is_lt()
+        );
+        assert!(
+            !compare_closure(
+                &timing(Some(1.0), 0.0, 0),
+                rules(),
+                physical(11.0, 1),
+                &timing(Some(0.1), 0.0, 0),
+                rules(),
+                physical(10.0, 10),
+            )
+            .is_lt()
+        );
     }
 
     #[test]
@@ -342,8 +355,8 @@ mod tests {
             dynamic: Some(2.0),
             cells: 2,
         };
-        assert!(improves_physical(lower_leakage, current));
-        assert!(!improves_physical(current, lower_leakage));
+        assert!(compare_physical(lower_leakage, current).is_lt());
+        assert!(!compare_physical(current, lower_leakage).is_lt());
 
         let unmeasured = PhysicalObjective {
             area: 10.0,
@@ -351,7 +364,7 @@ mod tests {
             dynamic: None,
             cells: 1,
         };
-        assert!(!improves_physical(lower_leakage, unmeasured));
+        assert!(!compare_physical(lower_leakage, unmeasured).is_lt());
     }
 
     #[test]
@@ -368,8 +381,8 @@ mod tests {
             dynamic: Some(2.0),
             cells: 2,
         };
-        assert!(improves_physical(lower_dynamic, current));
-        assert!(!improves_physical(current, lower_dynamic));
+        assert!(compare_physical(lower_dynamic, current).is_lt());
+        assert!(!compare_physical(current, lower_dynamic).is_lt());
 
         let unmeasured = PhysicalObjective {
             area: 10.0,
@@ -377,7 +390,7 @@ mod tests {
             dynamic: None,
             cells: 1,
         };
-        assert!(!improves_physical(lower_dynamic, unmeasured));
+        assert!(!compare_physical(lower_dynamic, unmeasured).is_lt());
     }
 
     #[test]

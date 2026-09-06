@@ -30,6 +30,13 @@ OPTO_YOSYS=/path/to/yosys \
   -- --exact --ignored --nocapture
 ```
 
+The known-zero addition fixture keeps its 30-unit delay requirement and zero
+violation tolerance. Path-aware selection and feasible-area recovery reduce
+its synthetic-library area from 102.75 to 89.0 with the same 57 cells, using
+23 of the 30 available delay units. Its reviewed histogram records the cheaper
+carry chain; end-to-end CEC still checks all 32 output bits, including the
+proved-zero upper bits. This fixture update does not change real-corpus gates.
+
 `extended.toml` retains the slower self-contained multi-operand sum,
 multiply-accumulate, four-term dot-product, and scaled address-generation
 gates. They run in weekly CI rather than on every commit:

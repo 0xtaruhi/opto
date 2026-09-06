@@ -639,6 +639,21 @@ impl ClosureIndex {
         self.aggregate.summary()
     }
 
+    /// A deterministic linear reduction of retained endpoint paths. Clock
+    /// pulse-width checks are excluded; they do not measure data propagation.
+    pub(crate) fn data_arrivals(&self) -> (f64, f64) {
+        self.endpoints
+            .iter()
+            .zip(&self.values)
+            .filter(|(endpoint, _)| {
+                !matches!(endpoint.kind, ClosureEndpointKind::PulseWidth { .. })
+            })
+            .filter_map(|(_, value)| value.path)
+            .fold((0.0f64, 0.0), |(worst, total), path| {
+                (worst.max(path.arrival), total + path.arrival)
+            })
+    }
+
     fn replace_endpoint(
         &mut self,
         endpoint: usize,

@@ -28,6 +28,10 @@ pub(crate) trait BitBackend: Default + Send + Sync {
 
     fn constant(&self, module: &word::WordModule, bit: ScalarBit) -> Option<bool>;
 
+    /// Returns the retained AXM level when this backend owns a logic graph.
+    /// Word shell lowering has no structural timing graph.
+    fn structural_level(&self, bit: ScalarBit) -> Option<u32>;
+
     fn preserves_native_word_operations(&self) -> bool;
 
     fn follows_signal_drivers(&self) -> bool;
@@ -65,6 +69,10 @@ pub(crate) trait BitBackend: Default + Send + Sync {
 pub(crate) struct WordBackend;
 
 impl BitBackend for WordBackend {
+    fn structural_level(&self, _bit: ScalarBit) -> Option<u32> {
+        None
+    }
+
     fn import_word(&mut self, _module: &word::WordModule, value: word::ValueId) -> ScalarBit {
         ScalarBit::Word(value)
     }
@@ -259,6 +267,13 @@ impl AxmBackend {
 }
 
 impl BitBackend for AxmBackend {
+    fn structural_level(&self, bit: ScalarBit) -> Option<u32> {
+        let ScalarBit::Logic(node) = bit else {
+            return None;
+        };
+        Some(self.graph.construction_level(node))
+    }
+
     fn import_word(&mut self, module: &word::WordModule, value: word::ValueId) -> ScalarBit {
         let Some(stored) = module.value(value) else {
             return self.input(value, None);

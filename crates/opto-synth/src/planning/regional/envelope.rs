@@ -124,7 +124,13 @@ impl StructuralTargetModel {
         for scenario in &self.scenarios {
             let point = point_for_estimate(estimate, scenario)?;
             timing = timing.max(budget(scenario).map_or(0.0, |budget| {
-                ((point.late_delay - budget) / budget.max(f64::EPSILON)).max(0.0)
+                // Local path budgets can be zero or negative. Normalize by
+                // a characterized stage in that case, preserving the order
+                // of faster candidates instead of saturating every score.
+                let scale = budget
+                    .abs()
+                    .max(scenario.late.map_or(f64::EPSILON, |cost| cost.delay));
+                ((point.late_delay - budget) / scale.max(f64::EPSILON)).max(0.0)
             }));
             let power = point.leakage.unwrap_or(0.0) + point.dynamic.unwrap_or(0.0);
             physical = physical.max(point.area + point.wiring + power);

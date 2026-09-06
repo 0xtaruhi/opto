@@ -101,26 +101,24 @@ pub(crate) fn compare_cell_cost(left: CellCost, right: CellCost) -> Ordering {
     )
 }
 
-/// Compares the area-delay objective shared by constrained mapping passes.
-pub(crate) fn compare_area_arrival_objective(
-    timing_driven: bool,
+/// Compares implementations that already satisfy the same local requirement.
+///
+/// Feasibility consumes the requirement; positive margin cannot buy area.
+/// Arrival remains a deterministic tie-break so an exactly equal-area choice
+/// does not discard free timing margin.
+pub(crate) fn compare_feasible_area(
     candidate_area: f64,
     candidate_arrival: f64,
     current_area: f64,
     current_arrival: f64,
 ) -> Ordering {
-    let objective = if timing_driven {
-        (candidate_area * candidate_arrival).total_cmp(&(current_area * current_arrival))
-    } else {
-        candidate_area.total_cmp(&current_area)
-    };
-    objective
-        .then_with(|| candidate_area.total_cmp(&current_area))
+    candidate_area
+        .total_cmp(&current_area)
         .then_with(|| candidate_arrival.total_cmp(&current_arrival))
 }
 
-/// Constrained choices first become feasible, optimize area-delay once both
-/// meet the required time, and minimize delay while both still violate it.
+/// Constrained choices first become feasible, minimize area once both meet the
+/// required time, and minimize delay while both still violate it.
 pub(crate) fn compare_mapping_cost_with_required_time(
     required: f64,
     candidate: MappingCost,
@@ -135,8 +133,7 @@ pub(crate) fn compare_mapping_cost_with_required_time(
     ) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        (true, true) => compare_area_arrival_objective(
-            true,
+        (true, true) => compare_feasible_area(
             candidate.area,
             candidate.electrical_delay,
             current.area,
@@ -173,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn timing_closure_uses_area_delay_after_the_budget_is_met() {
+    fn timing_closure_recovers_area_after_the_budget_is_met() {
         let small_late = cost(1.0, 1.1);
         let large_met = cost(4.0, 0.9);
         assert!(compare_mapping_cost_with_required_time(1.0, large_met, small_late).is_lt());
@@ -185,7 +182,7 @@ mod tests {
         let smaller_slower = cost(9.0, 1.2);
         let larger_faster = cost(10.0, 1.0);
         assert!(
-            compare_mapping_cost_with_required_time(2.0, larger_faster, smaller_slower).is_lt()
+            compare_mapping_cost_with_required_time(2.0, smaller_slower, larger_faster).is_lt()
         );
     }
 

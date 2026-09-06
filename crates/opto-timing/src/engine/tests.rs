@@ -1215,6 +1215,7 @@ fn minimum_pulse_width_checks_both_clock_polarities() {
     assert_eq!(quality.wns(), Some(-1.0));
     assert_eq!(quality.tns(), -1.0);
     assert_eq!(quality.violating_paths(), 1);
+    assert_eq!(incremental.data_path_arrivals(), (0.0, 0.0));
     assert_summary_matches_quality(&incremental);
 }
 
@@ -1470,6 +1471,7 @@ fn structural_fanout_tree_updates_every_endpoint_in_optimization_mode() {
         )
         .unwrap();
         let before = incremental.quality_summary().unwrap();
+        let before_data = incremental.data_path_arrivals();
         let mut delta = TimingRegionDelta::new();
         for (index, (&output, input)) in outputs.iter().zip(replacement_inputs).enumerate() {
             delta
@@ -1494,6 +1496,10 @@ fn structural_fanout_tree_updates_every_endpoint_in_optimization_mode() {
             incremental.quality_summary().unwrap(),
             reference.quality_summary().unwrap()
         );
+        assert_eq!(
+            incremental.data_path_arrivals(),
+            reference.data_path_arrivals()
+        );
         // The added cells pay off only with a shared resistive trunk. Both
         // improvement and degradation must match a complete reconstruction.
         assert_eq!(
@@ -1502,6 +1508,7 @@ fn structural_fanout_tree_updates_every_endpoint_in_optimization_mode() {
         );
         incremental.rollback(edit).unwrap();
         assert_eq!(incremental.quality_summary().unwrap(), before);
+        assert_eq!(incremental.data_path_arrivals(), before_data);
     }
 }
 

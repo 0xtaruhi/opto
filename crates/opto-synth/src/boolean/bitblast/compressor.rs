@@ -33,6 +33,37 @@ impl BitMatrix {
         self.width
     }
 
+    /// Absorb an early one-bit row when that removes the whole compression
+    /// layer. Every remaining nonconstant operand bit must arrive no earlier
+    /// than carry-in; otherwise preserve the ordinary compression schedule.
+    /// Unknown Word-shell levels cannot establish this structural precondition.
+    pub(in crate::boolean::bitblast) fn take_carry_input(
+        &mut self,
+        is_zero: impl Fn(ScalarBit) -> bool,
+        level: impl Fn(ScalarBit) -> Option<u32>,
+    ) -> Option<ScalarBit> {
+        if self.rows.len() != 3 || self.correction.iter().any(|bit| *bit) {
+            return None;
+        }
+        let index = self.rows.iter().enumerate().position(|(index, row)| {
+            let Some(carry) = row.first().copied().flatten().filter(|&bit| !is_zero(bit)) else {
+                return false;
+            };
+            let Some(carry_level) = level(carry) else {
+                return false;
+            };
+            row.iter().skip(1).all(|bit| bit.is_none_or(&is_zero))
+                && self
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|&(other, _)| other != index)
+                    .flat_map(|(_, row)| row.iter().flatten().copied())
+                    .all(|bit| is_zero(bit) || level(bit).is_some_and(|level| level >= carry_level))
+        })?;
+        self.rows.remove(index)[0]
+    }
+
     pub(in crate::boolean::bitblast) fn push_row(&mut self, row: BitRow) {
         debug_assert_eq!(row.len(), self.width);
         if row.iter().any(Option::is_some) {

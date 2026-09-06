@@ -217,7 +217,7 @@ fn compatible_cells(
         .iter()
         .filter_map(|&index| {
             let candidate = options.target_cells.get(index)?;
-            ((!area_recovery || normalized_cell_area(candidate.area()) < current_area)
+            ((!area_recovery || normalized_cell_area(candidate.area()) <= current_area)
                 && (area_recovery
                     || timing.is_none_or(|timing| {
                         timing_instance.is_none_or(|instance| {

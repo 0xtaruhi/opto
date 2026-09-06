@@ -3,6 +3,10 @@
 
 # RFC 0010: Opto command surface
 
+- Status: accepted
+- Implementation: the current flat Tcl command and typed database interface;
+  individual supported commands and fields are recorded in `docs/architecture.md`
+
 ## Summary
 
 Opto uses a flat Tcl command surface with a coherent typed database model. The

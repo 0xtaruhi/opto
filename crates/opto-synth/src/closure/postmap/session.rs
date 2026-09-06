@@ -4,10 +4,11 @@
 use super::candidate::{CandidateDisposition, PostmapCandidate};
 use super::power::MmmcPower;
 use crate::closure::mapped_timing::MappedTimingTransaction;
-use crate::closure::mmmc::{MmmcMetrics, MmmcTiming, aggregate_timing_owners};
+use crate::closure::mmmc::{
+    MmmcMetrics, MmmcTiming, aggregate_data_arrivals, aggregate_timing_owners,
+};
 use crate::closure::objective::{
-    PhysicalObjective, closure_improves, improves_physical, mapped_physical_objective,
-    physical_objective_after_edit,
+    PhysicalObjective, compare_closure, mapped_physical_objective, physical_objective_after_edit,
 };
 use crate::{
     ImplementationDb, OptimizationPhase, SynthesisOptions, SynthesisProgress,
@@ -78,6 +79,7 @@ impl<'a> TimingOptimizationSession<'a> {
                 qor_evaluations: 0,
                 candidates: 0,
                 qor_budget,
+                qor_limit: qor_budget,
                 rejected: 0,
                 stale: 0,
                 diagnostics,
@@ -88,7 +90,28 @@ impl<'a> TimingOptimizationSession<'a> {
     }
 
     pub(super) fn qor_budget_exhausted(&self) -> bool {
-        self.state.qor_evaluations >= self.state.qor_budget
+        self.qor_remaining() == 0
+    }
+
+    pub(super) fn qor_remaining(&self) -> usize {
+        self.state
+            .qor_limit
+            .saturating_sub(self.state.qor_evaluations)
+    }
+
+    /// Lends part of the remaining global budget to one search frontier.
+    /// Unspent evaluations return to the enclosing search even on an error;
+    /// nested frontiers cannot spend another phase's reserved evaluations.
+    pub(super) fn with_qor_allowance<T>(
+        &mut self,
+        allowance: usize,
+        search: impl FnOnce(&mut Self) -> Result<T, crate::SynthError>,
+    ) -> Result<T, crate::SynthError> {
+        let previous = self.state.qor_limit;
+        self.state.qor_limit = previous.min(self.state.qor_evaluations.saturating_add(allowance));
+        let result = search(self);
+        self.state.qor_limit = previous;
+        result
     }
 
     pub(super) fn timing_met(&self) -> bool {
@@ -302,6 +325,7 @@ struct TimingOptimizationState {
     qor_evaluations: usize,
     candidates: usize,
     qor_budget: usize,
+    qor_limit: usize,
     rejected: usize,
     stale: usize,
     diagnostics: crate::SynthesisDiagnostics,
@@ -384,6 +408,7 @@ pub(super) fn evaluate_candidate(
         }
         None => (no_owners.as_mut_slice(), None),
     };
+    let baseline_arrivals = policies.map(|views| aggregate_data_arrivals(owners, views));
     let Some(mut transaction) = MappedTimingTransaction::begin_optimization(mapped, owners, delta)?
     else {
         return Ok(CandidateDisposition::Stale);
@@ -435,8 +460,8 @@ pub(super) fn evaluate_candidate(
         Err(error) => return transaction.abort(error, operation),
     };
     physical.dynamic = power_proposal.dynamic_watts();
-    let accepted = match (&closure, &timing_metrics) {
-        (Some(closure), Some(metrics)) => closure_improves(
+    let primary_order = match (&closure, &timing_metrics) {
+        (Some(closure), Some(metrics)) => compare_closure(
             &metrics.analysis,
             metrics.design_rule_summary,
             physical,
@@ -444,8 +469,20 @@ pub(super) fn evaluate_candidate(
             closure.design_rule_summary,
             baseline,
         ),
-        _ => improves_physical(physical, baseline),
+        _ => crate::closure::objective::compare_physical(physical, baseline),
     };
+    let accepted = primary_order
+        .then_with(|| match (baseline_arrivals, policies) {
+            (Some(before), Some(views)) => {
+                let after = aggregate_data_arrivals(transaction.timing_mut(), views);
+                after
+                    .0
+                    .total_cmp(&before.0)
+                    .then_with(|| after.1.total_cmp(&before.1))
+            }
+            _ => std::cmp::Ordering::Equal,
+        })
+        .is_lt();
     if !accepted {
         transaction.rollback()?;
         return Ok(CandidateDisposition::Rejected);

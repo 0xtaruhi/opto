@@ -52,13 +52,50 @@ pub(super) fn optimize(
     runtime: &ExecutionContext,
     policy: &TimingOptimizationPolicy,
 ) -> Result<(), crate::SynthError> {
+    let mut frontier = if session.timing_met() || session.has_design_rule_violations() {
+        SizingFrontier::AllViolations
+    } else {
+        SizingFrontier::WorstPath
+    };
+    loop {
+        let next = frontier.next();
+        let allowance = session
+            .qor_remaining()
+            .div_ceil(1 + usize::from(next.is_some()));
+        session.with_qor_allowance(allowance, |session| {
+            for (index, kind) in [
+                SizingCandidateKind::Monotonic,
+                SizingCandidateKind::Tradeoff,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let allowance = session.qor_remaining().div_ceil(2 - index);
+                session.with_qor_allowance(allowance, |session| {
+                    optimize_frontier(session, catalog, runtime, policy, frontier, kind)
+                })?;
+            }
+            Ok(())
+        })?;
+        let Some(next) = next else { break };
+        frontier = next;
+    }
+    Ok(())
+}
+
+/// Refresh estimates after each accepted forest without consuming the quota
+/// reserved for another candidate kind or the wider violating-path frontier.
+fn optimize_frontier(
+    session: &mut TimingOptimizationSession<'_>,
+    catalog: &PostmapCellCatalog,
+    runtime: &ExecutionContext,
+    policy: &TimingOptimizationPolicy,
+    frontier: SizingFrontier,
+    kind: SizingCandidateKind,
+) -> Result<(), crate::SynthError> {
     let mut passes = 0usize;
-    let mut frontier = SizingFrontier::WorstPath;
-    while policy.allows_pass(passes) {
+    while policy.allows_pass(passes) && !session.qor_budget_exhausted() {
         passes += 1;
-        if session.qor_budget_exhausted() {
-            break;
-        }
         let timing_met = session.timing_met();
         let area_recovery = timing_met && !session.has_design_rule_violations();
         let cells = if timing_met || session.has_design_rule_violations() {
@@ -84,25 +121,9 @@ pub(super) fn optimize(
             area_recovery,
             Some(&session.timing),
         )?;
-        let mut accepted = false;
-        for kind in [
-            SizingCandidateKind::Monotonic,
-            SizingCandidateKind::Tradeoff,
-        ] {
-            if evaluate_forest(&regions, kind, session)? {
-                accepted = true;
-                break;
-            }
+        if !evaluate_forest(&regions, kind, session)? {
+            break;
         }
-        if accepted {
-            frontier = SizingFrontier::WorstPath;
-            continue;
-        }
-        if !timing_met && let Some(next) = frontier.next() {
-            frontier = next;
-            continue;
-        }
-        break;
     }
     Ok(())
 }
@@ -125,15 +146,43 @@ pub(super) fn evaluate_pin_swaps(
     session: &mut TimingOptimizationSession<'_>,
     catalog: &PostmapCellCatalog,
 ) -> Result<(), crate::SynthError> {
+    let ranks = session
+        .mapped
+        .cell_ids()
+        .filter_map(|id| session.mapped.cell(id)?.library_cell)
+        .map(|index| catalog.pin_swaps(index as usize).len())
+        .max()
+        .unwrap_or(0);
+    for rank in 0..ranks {
+        if session.qor_budget_exhausted() {
+            break;
+        }
+        let allowance = session.qor_remaining().div_ceil(ranks - rank);
+        session.with_qor_allowance(allowance, |session| {
+            evaluate_pin_swap_rank(session, catalog, rank)
+        })?;
+    }
+    Ok(())
+}
+
+/// Rebuilds pin plans from the current revision after each symmetric pair.
+/// Search includes every violating path, so the worst path cannot hide a
+/// useful assignment on another endpoint or consume all candidate ranks.
+fn evaluate_pin_swap_rank(
+    session: &mut TimingOptimizationSession<'_>,
+    catalog: &PostmapCellCatalog,
+    rank: usize,
+) -> Result<(), crate::SynthError> {
     if session.qor_budget_exhausted() {
         return Ok(());
     }
-    let cells = if !session.timing_met() {
-        mapped_cells_for_timing_instances(session.timing.critical_instances()?, session.mapped)?
-    } else if session.has_design_rule_violations() {
+    let cells = if session.timing_met() {
         session.mapped.cell_ids().collect()
     } else {
-        Vec::new()
+        mapped_cells_for_timing_instances(
+            session.timing.instances_with_slack_at_most_all(0.0)?,
+            session.mapped,
+        )?
     };
     let mut plans = Vec::new();
     for cell_id in cells.into_iter().collect::<BTreeSet<_>>().into_iter().rev() {
@@ -154,7 +203,7 @@ pub(super) fn evaluate_pin_swaps(
                     "pin swap references unknown library index {cell_index}"
                 ))
             })?;
-        let Some(&(first, second)) = catalog.pin_swaps(cell_index).first() else {
+        let Some(&(first, second)) = catalog.pin_swaps(cell_index).get(rank) else {
             continue;
         };
         let first_pin = cell
@@ -208,28 +257,46 @@ fn evaluate_forest(
     kind: SizingCandidateKind,
     session: &mut TimingOptimizationSession<'_>,
 ) -> Result<bool, crate::SynthError> {
-    let choices = regions
-        .iter()
-        .filter_map(|region| {
-            let candidates = match kind {
-                SizingCandidateKind::Monotonic => &region.monotonic_candidates,
-                SizingCandidateKind::Tradeoff => &region.tradeoff_candidates,
-            };
-            candidates
-                .first()
-                .copied()
-                .map(|candidate| (region.cell, candidate))
-        })
-        .collect::<Vec<_>>();
-    forest::evaluate(
-        &choices,
-        kind.phase(),
-        EvaluationPolicy::QorBudgeted,
-        session,
-        |mapped, _, options, choices| {
-            sizing_forest_delta(mapped, &options.target_cells, choices).map(Some)
-        },
-    )
+    let candidates_for = |region: &candidates::SizingRegion| match kind {
+        SizingCandidateKind::Monotonic => region.monotonic_candidates.len(),
+        SizingCandidateKind::Tradeoff => region.tradeoff_candidates.len(),
+    };
+    let ranks = regions.iter().map(candidates_for).max().unwrap_or(0);
+    for rank in 0..ranks {
+        if session.qor_budget_exhausted() {
+            break;
+        }
+        let choices = regions
+            .iter()
+            .filter_map(|region| {
+                let candidates = match kind {
+                    SizingCandidateKind::Monotonic => &region.monotonic_candidates,
+                    SizingCandidateKind::Tradeoff => &region.tradeoff_candidates,
+                };
+                candidates
+                    .get(rank)
+                    .copied()
+                    .map(|candidate| (region.cell, candidate))
+            })
+            .collect::<Vec<_>>();
+        // A rejected first drive choice must leave work for the next one.
+        // After any accepted forest the caller rebuilds all load estimates.
+        let allowance = session.qor_remaining().div_ceil(ranks - rank);
+        if session.with_qor_allowance(allowance, |session| {
+            forest::evaluate(
+                &choices,
+                kind.phase(),
+                EvaluationPolicy::QorBudgeted,
+                session,
+                |mapped, _, options, choices| {
+                    sizing_forest_delta(mapped, &options.target_cells, choices).map(Some)
+                },
+            )
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

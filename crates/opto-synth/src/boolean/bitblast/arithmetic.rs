@@ -50,10 +50,22 @@ const WALLACE_ARRAY_BRENT_KUNG: ProviderRecipeId = ProviderRecipeId::from_raw(30
 const DADDA_ARRAY_RIPPLE: ProviderRecipeId = ProviderRecipeId::from_raw(31);
 const DADDA_ARRAY_BRENT_KUNG: ProviderRecipeId = ProviderRecipeId::from_raw(32);
 
+const SERIAL_CSA_KOGGE_STONE: ProviderRecipeId = ProviderRecipeId::from_raw(33);
+const BALANCED_CSA_KOGGE_STONE: ProviderRecipeId = ProviderRecipeId::from_raw(34);
+const WALLACE_CSA_KOGGE_STONE: ProviderRecipeId = ProviderRecipeId::from_raw(35);
+const DADDA_CSA_KOGGE_STONE: ProviderRecipeId = ProviderRecipeId::from_raw(36);
+
+#[derive(Debug, Clone, Copy)]
+enum CarryNetwork {
+    Ripple,
+    BrentKung,
+    KoggeStone,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RegionRecipe {
     schedule: CompressionSchedule,
-    prefix: bool,
+    prefix: CarryNetwork,
     encoding: ProductEncoding,
 }
 
@@ -110,6 +122,10 @@ impl ImplementationProvider for AddSubProvider {
                         WALLACE_CSA_BRENT_KUNG,
                         DADDA_CSA_RIPPLE,
                         DADDA_CSA_BRENT_KUNG,
+                        SERIAL_CSA_KOGGE_STONE,
+                        BALANCED_CSA_KOGGE_STONE,
+                        WALLACE_CSA_KOGGE_STONE,
+                        DADDA_CSA_KOGGE_STONE,
                     ][..]
                 } else {
                     &[
@@ -124,7 +140,7 @@ impl ImplementationProvider for AddSubProvider {
                     ][..]
                 };
                 for (index, &recipe) in recipes.iter().enumerate() {
-                    if index % 2 == 0 || operator.width() >= 2 {
+                    if (index < 8 && index % 2 == 0) || operator.width() >= 2 {
                         emit(recipe);
                     }
                 }
@@ -168,6 +184,10 @@ impl ImplementationProvider for AddSubProvider {
             DECREMENT => Some("decrement-ripple"),
             CONSTANT_RIPPLE => Some("constant-ripple"),
             CONSTANT_BRENT_KUNG => Some("constant-brent-kung"),
+            SERIAL_CSA_KOGGE_STONE => Some("serial-csa-kogge-stone"),
+            BALANCED_CSA_KOGGE_STONE => Some("balanced-csa-kogge-stone"),
+            WALLACE_CSA_KOGGE_STONE => Some("wallace-csa-kogge-stone"),
+            DADDA_CSA_KOGGE_STONE => Some("dadda-csa-kogge-stone"),
             SERIAL_CSA_RIPPLE => Some("serial-csa-ripple"),
             SERIAL_CSA_BRENT_KUNG => Some("serial-csa-brent-kung"),
             BALANCED_CSA_RIPPLE => Some("balanced-csa-ripple"),
@@ -228,11 +248,10 @@ impl ImplementationProvider for AddSubProvider {
             | HYBRID_BRENT_KUNG
             | AREA_HYBRID_BRENT_KUNG
             | CONSTANT_BRENT_KUNG => Some("cla"),
-            _ => region_recipe(recipe).map(
-                |region| {
-                    if region.prefix { "csa-cla" } else { "csa-rpl" }
-                },
-            ),
+            _ => region_recipe(recipe).map(|region| match region.prefix {
+                CarryNetwork::Ripple => "csa-rpl",
+                CarryNetwork::BrentKung | CarryNetwork::KoggeStone => "csa-cla",
+            }),
         }
     }
 
@@ -469,40 +488,106 @@ impl AddSubProvider {
 
 fn region_recipe(recipe: ProviderRecipeId) -> Option<RegionRecipe> {
     let (schedule, prefix, encoding) = match recipe {
-        SERIAL_CSA_RIPPLE | SERIAL_RADIX4_RIPPLE => {
-            (CompressionSchedule::Serial, false, ProductEncoding::Radix4)
-        }
-        SERIAL_CSA_BRENT_KUNG | SERIAL_RADIX4_BRENT_KUNG => {
-            (CompressionSchedule::Serial, true, ProductEncoding::Radix4)
-        }
-        BALANCED_CSA_RIPPLE | BALANCED_RADIX4_RIPPLE => (
-            CompressionSchedule::Balanced,
-            false,
+        SERIAL_CSA_RIPPLE | SERIAL_RADIX4_RIPPLE => (
+            CompressionSchedule::Serial,
+            CarryNetwork::Ripple,
             ProductEncoding::Radix4,
         ),
-        BALANCED_CSA_BRENT_KUNG | BALANCED_RADIX4_BRENT_KUNG => {
-            (CompressionSchedule::Balanced, true, ProductEncoding::Radix4)
-        }
-        WALLACE_CSA_RIPPLE | WALLACE_RADIX4_RIPPLE => {
-            (CompressionSchedule::Wallace, false, ProductEncoding::Radix4)
-        }
-        WALLACE_CSA_BRENT_KUNG | WALLACE_RADIX4_BRENT_KUNG => {
-            (CompressionSchedule::Wallace, true, ProductEncoding::Radix4)
-        }
-        DADDA_CSA_RIPPLE | DADDA_RADIX4_RIPPLE => {
-            (CompressionSchedule::Dadda, false, ProductEncoding::Radix4)
-        }
-        DADDA_CSA_BRENT_KUNG | DADDA_RADIX4_BRENT_KUNG => {
-            (CompressionSchedule::Dadda, true, ProductEncoding::Radix4)
-        }
-        SERIAL_ARRAY_RIPPLE => (CompressionSchedule::Serial, false, ProductEncoding::Array),
-        SERIAL_ARRAY_BRENT_KUNG => (CompressionSchedule::Serial, true, ProductEncoding::Array),
-        BALANCED_ARRAY_RIPPLE => (CompressionSchedule::Balanced, false, ProductEncoding::Array),
-        BALANCED_ARRAY_BRENT_KUNG => (CompressionSchedule::Balanced, true, ProductEncoding::Array),
-        WALLACE_ARRAY_RIPPLE => (CompressionSchedule::Wallace, false, ProductEncoding::Array),
-        WALLACE_ARRAY_BRENT_KUNG => (CompressionSchedule::Wallace, true, ProductEncoding::Array),
-        DADDA_ARRAY_RIPPLE => (CompressionSchedule::Dadda, false, ProductEncoding::Array),
-        DADDA_ARRAY_BRENT_KUNG => (CompressionSchedule::Dadda, true, ProductEncoding::Array),
+        SERIAL_CSA_BRENT_KUNG | SERIAL_RADIX4_BRENT_KUNG => (
+            CompressionSchedule::Serial,
+            CarryNetwork::BrentKung,
+            ProductEncoding::Radix4,
+        ),
+        BALANCED_CSA_RIPPLE | BALANCED_RADIX4_RIPPLE => (
+            CompressionSchedule::Balanced,
+            CarryNetwork::Ripple,
+            ProductEncoding::Radix4,
+        ),
+        BALANCED_CSA_BRENT_KUNG | BALANCED_RADIX4_BRENT_KUNG => (
+            CompressionSchedule::Balanced,
+            CarryNetwork::BrentKung,
+            ProductEncoding::Radix4,
+        ),
+        WALLACE_CSA_RIPPLE | WALLACE_RADIX4_RIPPLE => (
+            CompressionSchedule::Wallace,
+            CarryNetwork::Ripple,
+            ProductEncoding::Radix4,
+        ),
+        WALLACE_CSA_BRENT_KUNG | WALLACE_RADIX4_BRENT_KUNG => (
+            CompressionSchedule::Wallace,
+            CarryNetwork::BrentKung,
+            ProductEncoding::Radix4,
+        ),
+        DADDA_CSA_RIPPLE | DADDA_RADIX4_RIPPLE => (
+            CompressionSchedule::Dadda,
+            CarryNetwork::Ripple,
+            ProductEncoding::Radix4,
+        ),
+        DADDA_CSA_BRENT_KUNG | DADDA_RADIX4_BRENT_KUNG => (
+            CompressionSchedule::Dadda,
+            CarryNetwork::BrentKung,
+            ProductEncoding::Radix4,
+        ),
+        SERIAL_ARRAY_RIPPLE => (
+            CompressionSchedule::Serial,
+            CarryNetwork::Ripple,
+            ProductEncoding::Array,
+        ),
+        SERIAL_ARRAY_BRENT_KUNG => (
+            CompressionSchedule::Serial,
+            CarryNetwork::BrentKung,
+            ProductEncoding::Array,
+        ),
+        BALANCED_ARRAY_RIPPLE => (
+            CompressionSchedule::Balanced,
+            CarryNetwork::Ripple,
+            ProductEncoding::Array,
+        ),
+        BALANCED_ARRAY_BRENT_KUNG => (
+            CompressionSchedule::Balanced,
+            CarryNetwork::BrentKung,
+            ProductEncoding::Array,
+        ),
+        WALLACE_ARRAY_RIPPLE => (
+            CompressionSchedule::Wallace,
+            CarryNetwork::Ripple,
+            ProductEncoding::Array,
+        ),
+        WALLACE_ARRAY_BRENT_KUNG => (
+            CompressionSchedule::Wallace,
+            CarryNetwork::BrentKung,
+            ProductEncoding::Array,
+        ),
+        DADDA_ARRAY_RIPPLE => (
+            CompressionSchedule::Dadda,
+            CarryNetwork::Ripple,
+            ProductEncoding::Array,
+        ),
+        DADDA_ARRAY_BRENT_KUNG => (
+            CompressionSchedule::Dadda,
+            CarryNetwork::BrentKung,
+            ProductEncoding::Array,
+        ),
+        SERIAL_CSA_KOGGE_STONE => (
+            CompressionSchedule::Serial,
+            CarryNetwork::KoggeStone,
+            ProductEncoding::Radix4,
+        ),
+        BALANCED_CSA_KOGGE_STONE => (
+            CompressionSchedule::Balanced,
+            CarryNetwork::KoggeStone,
+            ProductEncoding::Radix4,
+        ),
+        WALLACE_CSA_KOGGE_STONE => (
+            CompressionSchedule::Wallace,
+            CarryNetwork::KoggeStone,
+            ProductEncoding::Radix4,
+        ),
+        DADDA_CSA_KOGGE_STONE => (
+            CompressionSchedule::Dadda,
+            CarryNetwork::KoggeStone,
+            ProductEncoding::Radix4,
+        ),
         _ => return None,
     };
     Some(RegionRecipe {
@@ -564,16 +649,16 @@ fn arithmetic_region_structural_estimate(
         CompressionSchedule::Dadda => balanced_levels.saturating_add(1),
     };
     let stages = operator.width().ilog2() + u32::from(!operator.width().is_power_of_two());
-    let final_depth = if recipe.prefix {
-        stages.checked_mul(2).and_then(|depth| depth.checked_add(2))
-    } else {
-        operator.width().checked_mul(2)
+    let final_depth = match recipe.prefix {
+        CarryNetwork::BrentKung => stages.checked_mul(2).and_then(|depth| depth.checked_add(2)),
+        CarryNetwork::KoggeStone => stages.checked_add(2),
+        CarryNetwork::Ripple => operator.width().checked_mul(2),
     }
     .ok_or_else(|| crate::SynthError::invariant("arithmetic final-adder depth overflow"))?;
-    let final_units = if recipe.prefix {
-        width.checked_mul(u64::from(stages) + 3)
-    } else {
-        width.checked_mul(5)
+    let final_units = match recipe.prefix {
+        CarryNetwork::BrentKung => width.checked_mul(u64::from(stages) + 3),
+        CarryNetwork::KoggeStone => width.checked_mul(u64::from(stages) * 2 + 3),
+        CarryNetwork::Ripple => width.checked_mul(5),
     }
     .ok_or_else(|| crate::SynthError::invariant("arithmetic final-adder estimate overflow"))?;
     let generation_units = match recipe.encoding {
@@ -724,11 +809,17 @@ impl<B: BitBackend> BitBlaster<'_, B> {
                 source,
             )?;
         }
+        let carry = matrix
+            .take_carry_input(
+                |bit| self.scalar_constant(bit) == Some(false),
+                |bit| self.backend.structural_level(bit),
+            )
+            .unwrap_or(zero);
         let (left, right) = self.reduce_matrix(matrix, recipe.schedule, zero, one, source)?;
-        if recipe.prefix {
-            self.brent_kung_add_vectors(&left, &right, zero, source)
-        } else {
-            self.add_vectors(&left, &right, zero, source)
+        match recipe.prefix {
+            CarryNetwork::BrentKung => self.brent_kung_add_vectors(&left, &right, carry, source),
+            CarryNetwork::KoggeStone => self.kogge_stone_add_vectors(&left, &right, carry, source),
+            CarryNetwork::Ripple => self.add_vectors(&left, &right, carry, source),
         }
     }
 

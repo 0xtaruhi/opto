@@ -11,6 +11,7 @@ top = "top"
 sources = ["top.v"]
 flow = "synth"
 library = "../../../../../qualification/libraries/opto_test.lib"
+equivalence = true
 report_timing = true
 clock_period = 30.0
 constraints = [
@@ -19,11 +20,13 @@ constraints = [
   "set_load 0.05 [get_ports sum]",
   "set_max_delay 30.0 -from $input_ports -to [get_ports sum]",
 ]
-expected_area = 102.75
+# The 30-unit budget permits a lower-area carry chain while the proved-zero
+# upper result bits remain wiring. The mapped result is independently CEC-proved.
+expected_area = 89.0
 area_tolerance = 0.0
 expected_cells = 57
 cell_count_tolerance = 0.0
-expected_worst_slack = 18.0
+expected_worst_slack = 7.0
 worst_slack_tolerance = 0.0
 expected_total_negative_slack = 0.0
 total_negative_slack_tolerance = 0.0
@@ -34,9 +37,8 @@ maximum_peak_rss_kib = 524288
 
 [expected_cell_histogram]
 AND2_X1 = 1
-MUX2_X1 = 11
-NAND2_X1 = 11
-NOR2_X1 = 10
+NAND2_X1 = 31
+NOR2_X1 = 1
 OR2_X1 = 1
-XNOR2_X1 = 11
-XOR2_X1 = 12
+XNOR2_X1 = 1
+XOR2_X1 = 22

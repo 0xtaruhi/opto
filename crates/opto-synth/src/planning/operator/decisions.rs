@@ -214,16 +214,20 @@ impl ArchitectureDecisions {
         Ok(())
     }
 
-    pub(crate) fn select_for_budget(
+    /// Selects equivalent recipes against each occurrence's contextual budget.
+    /// A negative budget remains meaningful: upstream or downstream logic
+    /// already consumes the path requirement, so faster candidates still rank.
+    pub(crate) fn select_for_budgets(
         &mut self,
         target: &crate::planning::regional::StructuralTargetModel,
-        budget: Option<f64>,
-    ) -> Result<(), crate::SynthError> {
+        budget: impl Fn(SemanticOperator) -> Option<f64>,
+    ) -> Result<bool, crate::SynthError> {
         let mut selections = Vec::with_capacity(self.operators().len());
         for operator in self.operators() {
             let mut best = None;
             for &candidate in self.candidates(operator.id()) {
-                let key = target.score_for_budget(self.candidate_estimate(candidate)?, budget)?;
+                let key = target
+                    .score_for_budget(self.candidate_estimate(candidate)?, budget(*operator))?;
                 let stable = self.candidate_recipe_name(candidate.id()).unwrap_or("");
                 if best.as_ref().is_none_or(|(_, best_key, best_stable)| {
                     (key, stable) < (*best_key, *best_stable)
@@ -235,10 +239,21 @@ impl ArchitectureDecisions {
                 selections.push(candidate);
             }
         }
+        let mut changed = false;
         for candidate in selections {
+            let operator = self
+                .catalog
+                .candidate(candidate)
+                .ok_or_else(|| {
+                    crate::SynthError::invariant("selected architecture candidate disappeared")
+                })?
+                .operator();
+            changed |= self
+                .selected_candidate(operator)
+                .is_none_or(|current| current.id() != candidate);
             self.select_candidate(candidate)?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub(crate) fn operator_for_source_operation(
