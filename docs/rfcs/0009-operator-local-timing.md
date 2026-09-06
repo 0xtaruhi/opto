@@ -56,9 +56,10 @@ area within the real requirement. Exact care-set equivalence remains required.
 
 Multi-operand sums can select ripple, Brent-Kung, or Kogge-Stone final carry
 networks. A row supported only at bit zero enters the final adder as carry-in
-instead of requiring a redundant compression layer. Prefix carry-in is folded
-into the first generate term when it arrives early enough; a late carry
-enters after the prefix scan.
+when exactly two rows remain, there is no correction row, and it arrives
+structurally no later than every other nonconstant operand bit. This removes a
+whole compression layer. That early carry enters the first prefix generate
+term; a late row retains its ordinary compression schedule.
 
 Mapped search shares one deterministic evaluation budget. Cloning, both
 sizing frontiers, candidate ranks, and symmetric pin assignments receive

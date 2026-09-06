@@ -236,26 +236,14 @@ fn arithmetic_regions_absorb_a_single_bit_carry_without_changing_sum_semantics()
 }
 
 #[test]
-fn a_late_carry_enters_after_the_prefix_scan() {
-    let mut module = word::WordModule::new("late_carry");
+fn an_early_carry_is_absorbed_without_an_extra_compression_layer() {
+    let mut module = word::WordModule::new("early_carry");
     let a = add_input(&mut module, "a", 16);
     let b = add_input(&mut module, "b", 16);
     let cin = add_input(&mut module, "cin", 1);
     let left = read_port(&mut module, a);
     let right = read_port(&mut module, b);
-    let mut carry = read_port(&mut module, cin);
-    for index in 0..24 {
-        let port = add_input(&mut module, &format!("late{index}"), 1);
-        let bit = read_port(&mut module, port);
-        carry = module
-            .binary(
-                word::BinaryOp::BitXor,
-                carry,
-                bit,
-                word::SourceSpan::default(),
-            )
-            .unwrap();
-    }
+    let carry = read_port(&mut module, cin);
     let carry = module
         .cast(
             word::CastKind::ZeroExtend,
@@ -327,9 +315,12 @@ fn a_late_carry_enters_after_the_prefix_scan() {
         })
         .max()
         .unwrap();
-    // AND, OR, XOR after the late carry; an early-seeded carry would traverse
-    // the full prefix scan and exceed this structural path bound.
-    assert!(depth <= 27, "late carry incurred prefix depth: {depth}");
+    // A 16-bit prefix adder with an early carry has at most eleven AXM
+    // stages. A redundant compression layer exceeds this bound.
+    assert!(
+        depth <= 11,
+        "early carry retained a compression layer: {depth}"
+    );
 }
 
 #[test]

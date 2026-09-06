@@ -221,13 +221,9 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             return self.add_vectors(left, right, carry, source);
         }
         let (propagate, mut prefix) = self.prefix_inputs_from_bits(left, right, source)?;
-        let seeded = self.seed_prefix_carry(&mut prefix, carry, source)?;
+        self.seed_prefix_carry(&mut prefix, carry, source)?;
         self.kogge_stone_prefix(&mut prefix, source)?;
-        if seeded {
-            self.seeded_prefix_sum(&propagate, &prefix, carry, source)
-        } else {
-            self.prefix_adder_sum_with_carry(&propagate, &prefix, carry, source)
-        }
+        self.seeded_prefix_sum(&propagate, &prefix, carry, source)
     }
 
     pub(super) fn brent_kung_add_sub_bits(
@@ -533,32 +529,21 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             return self.add_vectors(left, right, carry, source);
         }
         let (propagate, mut prefix) = self.prefix_inputs_from_bits(left, right, source)?;
-        let seeded = self.seed_prefix_carry(&mut prefix, carry, source)?;
+        self.seed_prefix_carry(&mut prefix, carry, source)?;
         self.brent_kung_prefix(&mut prefix, source)?;
-        if seeded {
-            self.seeded_prefix_sum(&propagate, &prefix, carry, source)
-        } else {
-            self.prefix_adder_sum_with_carry(&propagate, &prefix, carry, source)
-        }
+        self.seeded_prefix_sum(&propagate, &prefix, carry, source)
     }
 
     /// Fold carry-in into bit zero before the prefix scan. This keeps the
     /// carry input from directly driving a separate gate on every result bit.
-    /// A structurally late carry instead enters after the prefix scan, so its
-    /// arrival does not pay the complete prefix depth.
+    /// Matrix carry extraction establishes that this input is structurally
+    /// available before every remaining operand bit.
     fn seed_prefix_carry(
         &mut self,
         prefix: &mut PrefixNetwork,
         carry: ScalarBit,
         source: &word::SourceSpan,
-    ) -> Result<bool, crate::SynthError> {
-        if let (Some(carry_level), Some(propagate_level)) = (
-            self.backend.structural_level(carry),
-            self.backend.structural_level(prefix.propagate[0]),
-        ) && carry_level > propagate_level
-        {
-            return Ok(false);
-        }
+    ) -> Result<(), crate::SynthError> {
         let propagated =
             self.emit_binary(word::BinaryOp::BitAnd, prefix.propagate[0], carry, source)?;
         prefix.generate[0] = self.emit_binary(
@@ -567,7 +552,7 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             propagated,
             source,
         )?;
-        Ok(true)
+        Ok(())
     }
 
     /// The scanned generate terms already contain carry-in. Only the least

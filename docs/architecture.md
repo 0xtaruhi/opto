@@ -1018,10 +1018,11 @@ selects, not by what the optimizer could have produced.
 
 Multi-operand additive regions offer ripple, Brent-Kung, and Kogge-Stone
 final carry networks under the same provider selection. A matrix row supported
-only at bit zero becomes the final adder's carry input, removing a redundant
-compression layer. Prefix adders fold that input into the first generate term
-before the scan when it arrives no later than the first propagate term; a
-late carry enters after the scan to avoid paying the entire prefix depth. Both changes
+only at bit zero becomes the final adder's carry input when exactly two rows
+remain, no correction row remains, and carry arrives structurally no later than
+every other nonconstant operand bit. This removes a whole compression layer
+without moving a late control path into the prefix scan. Prefix adders fold
+that early input into the first generate term before the scan. Both changes
 preserve the modular arithmetic width and the existing correction-bit rules.
 
 Small-support multi-output logic adds one bounded functional normalization:

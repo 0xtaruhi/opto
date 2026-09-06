@@ -810,7 +810,10 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             )?;
         }
         let carry = matrix
-            .take_carry_input(|bit| self.scalar_constant(bit) == Some(false))
+            .take_carry_input(
+                |bit| self.scalar_constant(bit) == Some(false),
+                |bit| self.backend.structural_level(bit),
+            )
             .unwrap_or(zero);
         let (left, right) = self.reduce_matrix(matrix, recipe.schedule, zero, one, source)?;
         match recipe.prefix {
