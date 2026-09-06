@@ -1016,6 +1016,14 @@ alternative that mapping then discarded, and the retained subject arena carried
 both. One path is the architecture: alternatives are justified by what mapping
 selects, not by what the optimizer could have produced.
 
+Multi-operand additive regions offer ripple, Brent-Kung, and Kogge-Stone
+final carry networks under the same provider selection. A matrix row supported
+only at bit zero becomes the final adder's carry input, removing a redundant
+compression layer. Prefix adders fold that input into the first generate term
+before the scan when it arrives no later than the first propagate term; a
+late carry enters after the scan to avoid paying the entire prefix depth. Both changes
+preserve the modular arithmetic width and the existing correction-bit rules.
+
 Small-support multi-output logic adds one bounded functional normalization:
 complete truth evaluation, shared-cube factoring, root-to-root resubstitution,
 then local AXM normalization. Global sharing census remains part of the ordinary
@@ -1392,8 +1400,15 @@ as do monotonic and tradeoff choices within each frontier;
 candidate ranks are visited across the complete frontier before later ranks
 are discarded. A rejected first drive choice therefore does not hide every
 other compatible drive. Pin assignment similarly visits all catalogued
-electrically distinct symmetric pairs on violating paths, with a bounded share
-per rank. Each accepted sizing forest triggers fresh candidate discovery, and
+electrically distinct symmetric pairs on violating paths, or all live cells
+when timing is feasible, with a bounded share per rank. Feasible sizing includes
+equal-area compatible cells. When exact closure and physical cost tie, the
+maximum and sum of selected data-endpoint arrivals across enabled late views
+break the tie. Clock pulse-width checks are excluded from this secondary data
+metric; setup, hold, other timing checks, and electrical rules retain their
+primary acceptance order. The reduction scans retained endpoint records without
+allocating paths; it is linear in the number of retained endpoints and uses the
+same transactional updates and rollback as closure. Each accepted sizing forest triggers fresh candidate discovery, and
 each pin rank is rebuilt from the current mapped revision. Nested allowances
 restore the enclosing limit on both success and error, without increasing the
 global cap. Exact MMMC acceptance and deterministic forest splitting still own

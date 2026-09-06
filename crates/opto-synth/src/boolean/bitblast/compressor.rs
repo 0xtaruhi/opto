@@ -33,6 +33,23 @@ impl BitMatrix {
         self.width
     }
 
+    /// A row supported only at bit zero is the final adder's carry input.
+    /// Removing it before compression avoids a redundant carry-save layer.
+    /// Correction bits and negative rows retain their ordinary matrix meaning.
+    pub(in crate::boolean::bitblast) fn take_carry_input(
+        &mut self,
+        is_zero: impl Fn(ScalarBit) -> bool,
+    ) -> Option<ScalarBit> {
+        let index = self.rows.iter().position(|row| {
+            row.first()
+                .copied()
+                .flatten()
+                .is_some_and(|bit| !is_zero(bit))
+                && row.iter().skip(1).all(|bit| bit.is_none_or(&is_zero))
+        })?;
+        self.rows.remove(index)[0]
+    }
+
     pub(in crate::boolean::bitblast) fn push_row(&mut self, row: BitRow) {
         debug_assert_eq!(row.len(), self.width);
         if row.iter().any(Option::is_some) {

@@ -1860,6 +1860,48 @@ fn pin_swap_moves_a_constrained_net_to_the_lower_load_symmetric_pin() {
 }
 
 #[test]
+fn feasible_equal_area_sizing_preserves_free_timing_improvements() {
+    let cells = vec![
+        and_cell("AND_SLOW", 1.0, [1.0, 3.0]),
+        and_cell("AND_FAST", 1.0, [0.8, 1.0]),
+    ];
+    let options = SynthesisOptions {
+        target_cells: cells.clone().into(),
+    };
+    let (mut mapped, mut implementations) = mapped_design(&mapped_and_module("AND_SLOW"), &options);
+    let mut timing = TimingContext::new();
+    timing
+        .set_max_delay(
+            10.0,
+            Vec::new(),
+            vec![opto_timing::TimingEndpoint::Port(named_port_id(
+                &mapped, "y",
+            ))],
+        )
+        .unwrap();
+    timing
+        .set_load(10.0, &[named_port_id(&mapped, "y")])
+        .unwrap();
+    let outcome = run_postmap(PostmapRun {
+        mapped: &mut mapped,
+        implementations: &mut implementations,
+        options: &options,
+        scenarios: single_scenario(
+            &timing,
+            TimingLibrary {
+                cells: cells.into(),
+                ..TimingLibrary::default()
+            },
+        ),
+    });
+    assert_eq!(outcome.replacements, 1);
+    assert_eq!(
+        mapped.cell_type(CellId::from_index(0).unwrap()),
+        Some("AND_FAST")
+    );
+}
+
+#[test]
 fn pin_swap_forest_rewires_multiple_cells_atomically() {
     let mut cell = and_cell("AND2", 1.0, [0.1, 0.1]);
     cell.pins[0].capacitance = Some(10.0);

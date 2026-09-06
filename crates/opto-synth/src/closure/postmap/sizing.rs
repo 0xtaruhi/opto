@@ -176,15 +176,13 @@ fn evaluate_pin_swap_rank(
     if session.qor_budget_exhausted() {
         return Ok(());
     }
-    let cells = if !session.timing_met() {
+    let cells = if session.timing_met() {
+        session.mapped.cell_ids().collect()
+    } else {
         mapped_cells_for_timing_instances(
             session.timing.instances_with_slack_at_most_all(0.0)?,
             session.mapped,
         )?
-    } else if session.has_design_rule_violations() {
-        session.mapped.cell_ids().collect()
-    } else {
-        Vec::new()
     };
     let mut plans = Vec::new();
     for cell_id in cells.into_iter().collect::<BTreeSet<_>>().into_iter().rev() {

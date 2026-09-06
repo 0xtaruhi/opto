@@ -185,20 +185,49 @@ impl<B: BitBackend> BitBlaster<'_, B> {
     ) -> Result<Vec<ScalarBit>, crate::SynthError> {
         let (propagate, mut prefix) =
             self.prefix_adder_inputs(left, right, subtract, result_ty, source)?;
+        self.kogge_stone_prefix(&mut prefix, source)?;
+
+        self.prefix_adder_sum(&propagate, &prefix, subtract, source)
+    }
+
+    fn kogge_stone_prefix(
+        &mut self,
+        prefix: &mut PrefixNetwork,
+        source: &word::SourceSpan,
+    ) -> Result<(), crate::SynthError> {
         let mut next = prefix.clone();
         let mut distance = 1usize;
         while distance < prefix.generate.len() {
-            next.clone_from(&prefix);
+            next.clone_from(prefix);
             for index in distance..prefix.generate.len() {
-                self.combine_prefix(index, index - distance, &prefix, &mut next, source)?;
+                self.combine_prefix(index, index - distance, prefix, &mut next, source)?;
             }
-            std::mem::swap(&mut prefix, &mut next);
+            std::mem::swap(prefix, &mut next);
             distance = distance.checked_mul(2).ok_or_else(|| {
                 crate::SynthError::invariant("prefix-adder stage distance overflow")
             })?;
         }
+        Ok(())
+    }
 
-        self.prefix_adder_sum(&propagate, &prefix, subtract, source)
+    pub(in crate::boolean::bitblast) fn kogge_stone_add_vectors(
+        &mut self,
+        left: &[ScalarBit],
+        right: &[ScalarBit],
+        carry: ScalarBit,
+        source: &word::SourceSpan,
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
+        if left.len() < 2 {
+            return self.add_vectors(left, right, carry, source);
+        }
+        let (propagate, mut prefix) = self.prefix_inputs_from_bits(left, right, source)?;
+        let seeded = self.seed_prefix_carry(&mut prefix, carry, source)?;
+        self.kogge_stone_prefix(&mut prefix, source)?;
+        if seeded {
+            self.seeded_prefix_sum(&propagate, &prefix, carry, source)
+        } else {
+            self.prefix_adder_sum_with_carry(&propagate, &prefix, carry, source)
+        }
     }
 
     pub(super) fn brent_kung_add_sub_bits(
@@ -504,8 +533,64 @@ impl<B: BitBackend> BitBlaster<'_, B> {
             return self.add_vectors(left, right, carry, source);
         }
         let (propagate, mut prefix) = self.prefix_inputs_from_bits(left, right, source)?;
+        let seeded = self.seed_prefix_carry(&mut prefix, carry, source)?;
         self.brent_kung_prefix(&mut prefix, source)?;
-        self.prefix_adder_sum_with_carry(&propagate, &prefix, carry, source)
+        if seeded {
+            self.seeded_prefix_sum(&propagate, &prefix, carry, source)
+        } else {
+            self.prefix_adder_sum_with_carry(&propagate, &prefix, carry, source)
+        }
+    }
+
+    /// Fold carry-in into bit zero before the prefix scan. This keeps the
+    /// carry input from directly driving a separate gate on every result bit.
+    /// A structurally late carry instead enters after the prefix scan, so its
+    /// arrival does not pay the complete prefix depth.
+    fn seed_prefix_carry(
+        &mut self,
+        prefix: &mut PrefixNetwork,
+        carry: ScalarBit,
+        source: &word::SourceSpan,
+    ) -> Result<bool, crate::SynthError> {
+        if let (Some(carry_level), Some(propagate_level)) = (
+            self.backend.structural_level(carry),
+            self.backend.structural_level(prefix.propagate[0]),
+        ) && carry_level > propagate_level
+        {
+            return Ok(false);
+        }
+        let propagated =
+            self.emit_binary(word::BinaryOp::BitAnd, prefix.propagate[0], carry, source)?;
+        prefix.generate[0] = self.emit_binary(
+            word::BinaryOp::BitOr,
+            prefix.generate[0],
+            propagated,
+            source,
+        )?;
+        Ok(true)
+    }
+
+    /// The scanned generate terms already contain carry-in. Only the least
+    /// significant sum bit still consumes the external carry directly.
+    fn seeded_prefix_sum(
+        &mut self,
+        propagate: &[ScalarBit],
+        prefix: &PrefixNetwork,
+        carry: ScalarBit,
+        source: &word::SourceSpan,
+    ) -> Result<Vec<ScalarBit>, crate::SynthError> {
+        propagate
+            .iter()
+            .enumerate()
+            .map(|(index, &bit)| {
+                let carry = if index == 0 {
+                    carry
+                } else {
+                    prefix.generate[index - 1]
+                };
+                self.emit_binary(word::BinaryOp::BitXor, bit, carry, source)
+            })
+            .collect()
     }
 
     fn add_vectors_with_carry(

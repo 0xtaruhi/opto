@@ -444,6 +444,16 @@ impl LogicGraph {
         self.storage().level(node.node()).unwrap_or(0)
     }
 
+    /// Reads append-maintained metadata without starting frozen graph analysis.
+    /// Bit lowering can price an incoming path and continue constructing the
+    /// same graph; this lookup neither clones nor seals the builder.
+    pub(crate) fn construction_level(&self, node: LogicNodeId) -> u32 {
+        self.builder.as_ref().map_or_else(
+            || self.storage().level(node.node()).unwrap_or(0),
+            |builder| builder.level(node.node()).unwrap_or(0),
+        )
+    }
+
     pub(crate) fn max_level(&self) -> usize {
         (0..self.node_count())
             .map(|index| self.level(LogicNodeId::from_index(index)) as usize)

@@ -3,7 +3,7 @@
 
 use super::*;
 
-const ARITHMETIC_REGION_RECIPES: [&str; 8] = [
+const ARITHMETIC_REGION_RECIPES: [&str; 12] = [
     "serial-csa-ripple",
     "serial-csa-brent-kung",
     "balanced-csa-ripple",
@@ -12,6 +12,10 @@ const ARITHMETIC_REGION_RECIPES: [&str; 8] = [
     "wallace-csa-brent-kung",
     "dadda-csa-ripple",
     "dadda-csa-brent-kung",
+    "serial-csa-kogge-stone",
+    "balanced-csa-kogge-stone",
+    "wallace-csa-kogge-stone",
+    "dadda-csa-kogge-stone",
 ];
 const PRODUCT_REGION_RECIPES: [&str; 16] = [
     "serial-radix4-ripple",
@@ -168,6 +172,164 @@ fn dadda_reduces_dense_five_term_regions() {
             );
         }
     }
+}
+
+#[test]
+fn arithmetic_regions_absorb_a_single_bit_carry_without_changing_sum_semantics() {
+    for recipe in ARITHMETIC_REGION_RECIPES {
+        let mut module = word::WordModule::new("carry_input");
+        let ports = [
+            add_input(&mut module, "a", 4),
+            add_input(&mut module, "b", 4),
+            add_input(&mut module, "cin", 1),
+        ];
+        let values = ports.map(|port| read_port(&mut module, port));
+        let carry = module
+            .cast(
+                word::CastKind::ZeroExtend,
+                values[2],
+                word::WordType::bits(4).unwrap(),
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let pair = module
+            .binary(
+                word::BinaryOp::Add,
+                values[0],
+                values[1],
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let sum = module
+            .binary(
+                word::BinaryOp::Add,
+                pair,
+                carry,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+        let output = add_output(&mut module, "y", 4, sum);
+        let mut plan =
+            crate::planning::operator::ArchitectureDecisions::for_module(&module).unwrap();
+        assert_eq!(plan.operators().len(), 1);
+        select_recipe(&mut plan, recipe);
+        let mut provenance =
+            crate::artifact::provenance::ProvenanceBuilder::new(&module, &plan).unwrap();
+        bitblast_module_with_plan(&mut module, &plan, &mut provenance).unwrap();
+        let signals = ports.map(|port| module_signal(&module, port));
+        for a in 0..16 {
+            for b in 0..16 {
+                for carry in 0..2 {
+                    assert_eq!(
+                        evaluate_output(
+                            &module,
+                            output,
+                            &[(signals[0], a), (signals[1], b), (signals[2], carry)]
+                        ),
+                        (a + b + carry) & 15,
+                        "recipe={recipe}, a={a}, b={b}, carry={carry}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_late_carry_enters_after_the_prefix_scan() {
+    let mut module = word::WordModule::new("late_carry");
+    let a = add_input(&mut module, "a", 16);
+    let b = add_input(&mut module, "b", 16);
+    let cin = add_input(&mut module, "cin", 1);
+    let left = read_port(&mut module, a);
+    let right = read_port(&mut module, b);
+    let mut carry = read_port(&mut module, cin);
+    for index in 0..24 {
+        let port = add_input(&mut module, &format!("late{index}"), 1);
+        let bit = read_port(&mut module, port);
+        carry = module
+            .binary(
+                word::BinaryOp::BitXor,
+                carry,
+                bit,
+                word::SourceSpan::default(),
+            )
+            .unwrap();
+    }
+    let carry = module
+        .cast(
+            word::CastKind::ZeroExtend,
+            carry,
+            word::WordType::bits(16).unwrap(),
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let pair = module
+        .binary(
+            word::BinaryOp::Add,
+            left,
+            right,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    let sum = module
+        .binary(
+            word::BinaryOp::Add,
+            pair,
+            carry,
+            word::SourceSpan::default(),
+        )
+        .unwrap();
+    add_output(&mut module, "y", 16, sum);
+    let mut plan = crate::planning::operator::ArchitectureDecisions::for_module(&module).unwrap();
+    select_recipe(&mut plan, "serial-csa-kogge-stone");
+    let sources = plan
+        .operators()
+        .iter()
+        .map(|operator| plan.source_operations(operator.id()).into())
+        .collect::<Vec<Box<[word::OpId]>>>();
+    let operators = crate::DurableOperatorArena::capture(&module, &plan, &sources, |operation| {
+        let mut anchor = [0; 32];
+        anchor[..4].copy_from_slice(&operation.raw().to_le_bytes());
+        Ok(crate::OperationAnchorId::from_bytes_for_test(anchor))
+    })
+    .unwrap();
+    let mut provenance =
+        crate::artifact::provenance::ProvenanceBuilder::for_regional_candidate(&module);
+    let lowered = lower_local_region_boolean(
+        &mut module,
+        LocalRegionBooleanRequest {
+            plan: &plan,
+            operators: &operators,
+            provenance: &mut provenance,
+            owner: crate::RegionRowId::from_index(0).unwrap(),
+            boundary_inputs: &[],
+            roots: &[sum],
+            tracked_values: &[sum],
+        },
+    )
+    .unwrap();
+    let depth = lowered
+        .ownership
+        .lowered_bits(sum)
+        .unwrap()
+        .iter()
+        .map(|value| {
+            let index = lowered
+                .subject
+                .value_nodes
+                .binary_search_by_key(value, |&(value, _)| value)
+                .unwrap();
+            lowered
+                .subject
+                .network
+                .level(lowered.subject.value_nodes[index].1)
+        })
+        .max()
+        .unwrap();
+    // AND, OR, XOR after the late carry; an early-seeded carry would traverse
+    // the full prefix scan and exceed this structural path bound.
+    assert!(depth <= 27, "late carry incurred prefix depth: {depth}");
 }
 
 #[test]

@@ -335,6 +335,17 @@ impl IncrementalTiming {
         self.closure.summary()
     }
 
+    /// Returns the maximum and sum of selected data-endpoint path arrivals.
+    ///
+    /// This allocation-free, linear endpoint reduction excludes clock pulse
+    /// width checks. Each endpoint contributes its retained worst-slack path;
+    /// this is a tie-break for equal-cost optimization, not an alternative
+    /// feasibility metric or a maximum over every possible timing tag.
+    #[must_use]
+    pub fn data_path_arrivals(&self) -> (f64, f64) {
+        self.closure.data_arrivals()
+    }
+
     /// Reclaims predecessor nodes left unreachable by committed incremental
     /// edits. Rollback journals must not be live when this is called.
     ///

@@ -819,6 +819,22 @@ pub(crate) fn aggregate_timing_owners(
     })
 }
 
+/// Reduces data-path tie-breaks only from enabled late views. Hold and clock
+/// checks remain authoritative in the primary closure comparison.
+pub(crate) fn aggregate_data_arrivals(
+    owners: &[IncrementalTiming],
+    views: &[MmmcView],
+) -> (f64, f64) {
+    owners
+        .iter()
+        .zip(views)
+        .filter(|(_, view)| view.policy.timing && view.delay_type == DelayType::Max)
+        .map(|(owner, _)| owner.data_path_arrivals())
+        .fold((0.0f64, 0.0), |(worst, total), (arrival, sum)| {
+            (worst.max(arrival), total + sum)
+        })
+}
+
 fn design_rule_enabled(
     checks: opto_timing::ScenarioCheckSet,
     kind: opto_timing::DesignRuleKind,

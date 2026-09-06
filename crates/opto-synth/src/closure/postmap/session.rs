@@ -4,10 +4,11 @@
 use super::candidate::{CandidateDisposition, PostmapCandidate};
 use super::power::MmmcPower;
 use crate::closure::mapped_timing::MappedTimingTransaction;
-use crate::closure::mmmc::{MmmcMetrics, MmmcTiming, aggregate_timing_owners};
+use crate::closure::mmmc::{
+    MmmcMetrics, MmmcTiming, aggregate_data_arrivals, aggregate_timing_owners,
+};
 use crate::closure::objective::{
-    PhysicalObjective, closure_improves, improves_physical, mapped_physical_objective,
-    physical_objective_after_edit,
+    PhysicalObjective, compare_closure, mapped_physical_objective, physical_objective_after_edit,
 };
 use crate::{
     ImplementationDb, OptimizationPhase, SynthesisOptions, SynthesisProgress,
@@ -407,6 +408,7 @@ pub(super) fn evaluate_candidate(
         }
         None => (no_owners.as_mut_slice(), None),
     };
+    let baseline_arrivals = policies.map(|views| aggregate_data_arrivals(owners, views));
     let Some(mut transaction) = MappedTimingTransaction::begin_optimization(mapped, owners, delta)?
     else {
         return Ok(CandidateDisposition::Stale);
@@ -458,8 +460,8 @@ pub(super) fn evaluate_candidate(
         Err(error) => return transaction.abort(error, operation),
     };
     physical.dynamic = power_proposal.dynamic_watts();
-    let accepted = match (&closure, &timing_metrics) {
-        (Some(closure), Some(metrics)) => closure_improves(
+    let primary_order = match (&closure, &timing_metrics) {
+        (Some(closure), Some(metrics)) => compare_closure(
             &metrics.analysis,
             metrics.design_rule_summary,
             physical,
@@ -467,8 +469,20 @@ pub(super) fn evaluate_candidate(
             closure.design_rule_summary,
             baseline,
         ),
-        _ => improves_physical(physical, baseline),
+        _ => crate::closure::objective::compare_physical(physical, baseline),
     };
+    let accepted = primary_order
+        .then_with(|| match (baseline_arrivals, policies) {
+            (Some(before), Some(views)) => {
+                let after = aggregate_data_arrivals(transaction.timing_mut(), views);
+                after
+                    .0
+                    .total_cmp(&before.0)
+                    .then_with(|| after.1.total_cmp(&before.1))
+            }
+            _ => std::cmp::Ordering::Equal,
+        })
+        .is_lt();
     if !accepted {
         transaction.rollback()?;
         return Ok(CandidateDisposition::Rejected);
